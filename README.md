@@ -81,14 +81,12 @@ If Claude misses something important, just tell it: **"store that decision"** an
 
 ## The filter
 
-`update_context` does not store everything Claude sends — it applies four criteria and stores if **any one** passes:
+`update_context` does not store everything Claude sends. It applies one primary gate and silently discards failures:
 
-1. Does it describe a **decision** that affects how this repo should be worked on?
-2. Does it establish or change a **pattern**?
-3. Does it document a **constraint or tradeoff**?
-4. Is it **meaningfully different** from previously stored **decisions**? (>70% token overlap with any existing decision = duplicate, discarded)
+- **Novelty required:** if the content overlaps >70% with any existing stored decision (token overlap), it is discarded as a duplicate
+- **Novel content is stored:** `update_context` is only called for significant decisions — if it passes the novelty check, it is stored
 
-If none pass, the content is silently discarded. No noise, no logs.
+If filtered, the content is silently discarded. No noise, no logs.
 
 ## What happens if a decision is missed
 
