@@ -85,7 +85,7 @@ If Claude misses something important, just tell it: **"store that decision"** an
 1. Does it describe a **decision** that affects how this repo should be worked on?
 2. Does it establish or change a **pattern**?
 3. Does it document a **constraint or tradeoff**?
-4. Is it **meaningfully different** from what's already stored? (>70% token overlap = duplicate, discarded)
+4. Is it **meaningfully different** from previously stored **decisions**? (>70% token overlap with any existing decision = duplicate, discarded)
 
 If none pass, the content is silently discarded. No noise, no logs.
 
@@ -203,7 +203,7 @@ Restart Claude Code / Claude Desktop after editing either config.
 
 ## Storage
 
-Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo, capped at 50 entries. No cloud, no database, no external dependencies.
+Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo, capped at 50 entries. Only the latest task description is kept (previous ones are replaced on each session start) — all remaining slots go to decisions. No cloud, no database, no external dependencies.
 
 ## Verify it's working
 
