@@ -48,17 +48,19 @@ Context window fills up → compaction about to happen
     │
     ↓
 PreCompact hook fires
-    └─▶ "save any pending decisions before context is compacted"
-    └─▶ Claude calls update_context for anything not yet stored
+    └─▶ shows "Contexer: context compaction starting — call update_context" in the UI
+    └─▶ NOTE: PreCompact cannot inject into Claude's context window (Claude Code
+        limitation). The UI message is a visual cue only. Manually tell Claude
+        to call update_context if you see it.
     │
     ↓
 Compaction happens
     │
     ↓
 PostCompact hook fires
-    └─▶ re-injects stored context, same as SessionStart
-    └─▶ shows "Contexer: N decision(s) reloaded after compact"
-    └─▶ Claude continues fully informed
+    └─▶ shows "Contexer: N decision(s) available — run get_context to reload" in UI
+    └─▶ NOTE: PostCompact cannot inject context automatically. After compaction,
+        ask Claude to "call get_context" to reload stored decisions.
     │
     ↓
 Next session: repeat from the top — but now with history
@@ -143,14 +145,14 @@ Then add the session hooks to your repo's `.claude/settings.json`:
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PreCompact\", \"additionalContext\": \"Context is about to be compacted. Before this happens, call update_context for any significant decisions, patterns, or constraints made in this session that have not yet been stored.\"}}'",
+        "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'",
         "statusMessage": "Saving decisions before compact..."
       }]
     }],
     "PostCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; data=store._load('/your/repo/path'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; ctx=store.get_context('/your/repo/path'); msg=f'Contexer: {len(decisions)} decision(s) reloaded after compact' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg,'hookSpecificOutput':{'hookEventName':'PostCompact','additionalContext':ctx}}))\"",
+        "command": "uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; data=store._load('/your/repo/path'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {len(decisions)} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg}))\"",
         "statusMessage": "Reloading context after compact..."
       }]
     }],

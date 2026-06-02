@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PreCompact\", \"additionalContext\": \"Context is about to be compacted. Before this happens, call update_context for any significant decisions, patterns, or constraints made in this session that have not yet been stored.\"}}'",
+            "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'",
             "statusMessage": "Saving decisions before compact..."
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory /Users/bhargavamin/repos/personal/contexer python -c \"import sys,json; sys.path.insert(0,'/Users/bhargavamin/repos/personal/contexer'); import store; data=store._load('/Users/bhargavamin/repos/personal/contexer'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; ctx=store.get_context('/Users/bhargavamin/repos/personal/contexer'); msg=f'Contexer: {len(decisions)} decision(s) reloaded after compact' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg,'hookSpecificOutput':{'hookEventName':'PostCompact','additionalContext':ctx}}))\"",
+            "command": "uv run --directory /Users/bhargavamin/repos/personal/contexer python -c \"import sys,json; sys.path.insert(0,'/Users/bhargavamin/repos/personal/contexer'); import store; data=store._load('/Users/bhargavamin/repos/personal/contexer'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {len(decisions)} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg}))\"",
             "statusMessage": "Reloading context after compact..."
           }
         ]
