@@ -119,7 +119,7 @@ else:
     hooks["SessionStart"] = [{
         "hooks": [{
             "type": "command",
-            "command": f"uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; data=store._load('{repo}'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; ctx2=store.get_context('{repo}'); msg=f'Contexer: {{len(decisions)}} decision(s) loaded' if decisions else 'Contexer: no context stored yet'; print(json.dumps({{'systemMessage':msg,'hookSpecificOutput':{{'hookEventName':'SessionStart','additionalContext':ctx2}}}}))\"",
+            "command": f"uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; print(json.dumps(store.get_session_start_context('{repo}')))\"",
             "statusMessage": "Loading session context..."
         }]
     }]

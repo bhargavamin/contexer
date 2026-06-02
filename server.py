@@ -1,3 +1,4 @@
+import json
 import uuid
 from mcp.server.fastmcp import FastMCP
 import store
@@ -28,6 +29,14 @@ def update_context(repo_path: str, content: str) -> str:
 def get_context(repo_path: str) -> str:
     """Called at the start of every new session. Returns stored context for the current repository."""
     return store.get_context(repo_path)
+
+
+@mcp.tool()
+def bootstrap_context(repo_path: str) -> str:
+    """Scans a repo for inferable decisions and gap questions. Present inferred
+    items to the user for confirmation, store confirmed ones via update_context,
+    then ask the gap questions and store each answer."""
+    return json.dumps(store.bootstrap_scan(repo_path), indent=2)
 
 
 if __name__ == "__main__":

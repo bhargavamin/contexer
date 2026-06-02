@@ -77,6 +77,7 @@ If Claude misses something important, just tell it: **"store that decision"** an
 | `get_context` | `SessionStart` hook | Loads stored decisions into the session |
 | `capture_context` | `UserPromptSubmit` hook (first message only) | Saves the task description |
 | `update_context` | Claude Code, mid-task | Nominates a decision; server filters before storing |
+| `bootstrap_context` | Claude Code, on first session with no context | Scans the repo for inferable decisions and returns gap questions |
 
 ## The filter
 
@@ -138,7 +139,7 @@ Then add the session hooks to your repo's `.claude/settings.json`:
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; data=store._load('/your/repo/path'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; ctx=store.get_context('/your/repo/path'); msg=f'Contexer: {len(decisions)} decision(s) loaded' if decisions else 'Contexer: no context stored yet'; print(json.dumps({'systemMessage':msg,'hookSpecificOutput':{'hookEventName':'SessionStart','additionalContext':ctx}}))\"",
+        "command": "uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; print(json.dumps(store.get_session_start_context('/your/repo/path')))\"",
         "statusMessage": "Loading session context..."
       }]
     }],

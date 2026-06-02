@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory /Users/bhargavamin/repos/personal/contexer python -c \"import sys,json; sys.path.insert(0,'/Users/bhargavamin/repos/personal/contexer'); import store; data=store._load('/Users/bhargavamin/repos/personal/contexer'); entries=data.get('entries',[]); tasks=[e for e in entries if e['type']=='task']; decisions=[e for e in entries if e['type']=='decision']; ctx=store.get_context('/Users/bhargavamin/repos/personal/contexer'); msg=f'Contexer: {len(decisions)} decision(s) loaded' if decisions else 'Contexer: no context stored yet'; print(json.dumps({'systemMessage':msg,'hookSpecificOutput':{'hookEventName':'SessionStart','additionalContext':ctx}}))\"",
+            "command": "uv run --directory /Users/bhargavamin/repos/personal/contexer python -c \"import sys,json; sys.path.insert(0,'/Users/bhargavamin/repos/personal/contexer'); import store; print(json.dumps(store.get_session_start_context('/Users/bhargavamin/repos/personal/contexer')))\"",
             "statusMessage": "Loading session context..."
           }
         ]
