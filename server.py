@@ -10,6 +10,8 @@ mcp = FastMCP("contexer")
 def capture_context(repo_path: str, description: str) -> str:
     """Called at the start of every task. Captures the developer's task description for the given repo."""
     entry_id = store.capture_task(repo_path, description, SESSION_ID)
+    if entry_id is None:
+        return "Skipped — does not look like a task description."
     return f"Captured. id={entry_id}"
 
 

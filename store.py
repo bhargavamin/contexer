@@ -66,7 +66,26 @@ def _passes_filter(content: str, existing: list) -> bool:
     return c1 or c2 or c3 or c4
 
 
-def capture_task(repo_path: str, description: str, session_id: str) -> str:
+_QUESTION_STARTS = {
+    "what", "how", "why", "when", "where", "who", "which",
+    "is", "are", "can", "does", "do", "will", "would", "could", "should",
+}
+
+def _is_task(content: str) -> bool:
+    stripped = content.strip()
+    words = stripped.lower().split()
+    if len(words) < 5:
+        return False
+    if stripped.endswith("?") and len(words) < 20:
+        return False
+    if words[0] in _QUESTION_STARTS and len(words) < 12:
+        return False
+    return True
+
+
+def capture_task(repo_path: str, description: str, session_id: str) -> str | None:
+    if not _is_task(description):
+        return None
     data = _load(repo_path)
     entry = {
         "id": str(uuid.uuid4()),
