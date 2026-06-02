@@ -15,6 +15,17 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"Stop\", \"additionalContext\": \"If you made a significant decision, established a pattern, or documented a constraint this turn, call update_context now before the session ends.\"}}'",
+            "statusMessage": "Checking for decisions to store..."
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
