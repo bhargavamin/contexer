@@ -58,13 +58,10 @@ def _is_novel(content: str, existing: list) -> bool:
 
 
 def _passes_filter(content: str, existing: list) -> bool:
-    c = content.lower()
-    c1 = any(w in c for w in _DECISION_SIGNALS)
-    c2 = any(w in c for w in _PATTERN_SIGNALS)
-    c3 = any(w in c for w in _CONSTRAINT_SIGNALS)
+    # Novelty is a prerequisite veto — duplicates are rejected regardless of signal keywords.
+    # Novel content always passes: update_context is only called for significant decisions.
     decisions_only = [e for e in existing if e["type"] == "decision"]
-    c4 = _is_novel(content, decisions_only)
-    return c1 or c2 or c3 or c4
+    return _is_novel(content, decisions_only)
 
 
 _QUESTION_STARTS = {

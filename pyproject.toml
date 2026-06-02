@@ -6,3 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.9.4",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
