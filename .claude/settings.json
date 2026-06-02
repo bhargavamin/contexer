@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "contexer",
+            "tool": "get_context",
+            "input": {
+              "repo_path": "/Users/bhargavamin/repos/personal/contexer"
+            },
+            "statusMessage": "Loading session context..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "contexer",
+            "tool": "capture_context",
+            "input": {
+              "repo_path": "/Users/bhargavamin/repos/personal/contexer",
+              "description": "${prompt}"
+            },
+            "once": true,
+            "statusMessage": "Capturing task..."
+          }
+        ]
+      }
+    ]
+  }
+}
