@@ -168,13 +168,47 @@ def get_context(repo_path: str) -> str:
     return "\n".join(lines)
 
 
+def _infer_purpose(name: str, readme_summary: str) -> str:
+    """Derive a concrete purpose assumption from project name and README first line."""
+    if readme_summary:
+        return readme_summary
+    if not name:
+        return "Purpose not yet documented"
+    n = name.lower()
+    if any(w in n for w in ["api", "server", "service", "backend"]):
+        return f"Backend API or service (\"{name}\")"
+    if any(w in n for w in ["cli", "tool", "cmd"]):
+        return f"CLI tool (\"{name}\")"
+    if any(w in n for w in ["bot", "agent"]):
+        return f"Bot or agent (\"{name}\")"
+    if any(w in n for w in ["worker", "job", "queue", "task"]):
+        return f"Background worker or job processor (\"{name}\")"
+    if any(w in n for w in ["web", "app", "ui", "front", "dashboard"]):
+        return f"Web app or frontend (\"{name}\")"
+    if any(w in n for w in ["lib", "sdk", "package", "plugin"]):
+        return f"Library or SDK (\"{name}\")"
+    return f"\"{name}\" — type not obvious from name alone"
+
+
 def bootstrap_scan(repo_path: str) -> dict:
     root = Path(repo_path)
     data = _load(repo_path)
     existing = [e for e in data.get("entries", []) if e["type"] == "decision"]
     inferred: list[str] = []
     found_files: list[str] = []
-    all_deps: set[str] = set()  # normalized dep names across all detected ecosystems
+    all_deps: set[str] = set()
+
+    # signals used only for question generation — not stored as inferred facts
+    sig: dict = {
+        "project_name": "",
+        "readme_summary": "",
+        "has_tests": False,
+        "has_ci": False,
+        "has_container": False,
+        "has_infra": False,
+        "has_security_sensitive": False,  # auth or payment deps detected
+        "cloud_detected": "",             # "AWS" | "GCP" | "Azure" | ""
+    }
 
     def _add(fact: str) -> None:
         proxy = [{"content": f} for f in inferred]
@@ -185,7 +219,6 @@ def bootstrap_scan(repo_path: str) -> dict:
         return {"assumption": assumption, "question": question, "hint": hint}
 
     def _has_dep(*names: str) -> bool:
-        # substring match — catches scoped packages (@aws-sdk/client-s3) and extras (psycopg[binary])
         return any(n in dep for n in names for dep in all_deps)
 
     # --- Python ---
@@ -197,15 +230,17 @@ def bootstrap_scan(repo_path: str) -> dict:
                 pyp = tomllib.load(f)
             proj = pyp.get("project", {})
             name, py_req = proj.get("name", ""), proj.get("requires-python", "")
+            if name:
+                sig["project_name"] = name
             _add(f"Python project{f' \"{name}\"' if name else ''}{f', requires-python {py_req}' if py_req else ''}")
             tool = pyp.get("tool", {})
             if "pytest" in tool:
                 _add("Test framework: pytest")
+                sig["has_tests"] = True
             if "ruff" in tool:
                 _add("Linting/formatting: ruff")
             if "mypy" in tool:
                 _add("Type checking: mypy")
-            # collect all dep names for signal detection below
             raw: list[str] = list(proj.get("dependencies", []))
             for group in pyp.get("dependency-groups", {}).values():
                 raw.extend(d for d in group if isinstance(d, str))
@@ -228,6 +263,8 @@ def bootstrap_scan(repo_path: str) -> dict:
         try:
             pkg = json.loads(pkg_json_path.read_text())
             name = pkg.get("name", "")
+            if name and not sig["project_name"]:
+                sig["project_name"] = name
             node_ver = pkg.get("engines", {}).get("node", "")
             parts = [f"Node.js project \"{name}\"" if name else "Node.js project"]
             if node_ver:
@@ -249,8 +286,10 @@ def bootstrap_scan(repo_path: str) -> dict:
             test_cmd = pkg.get("scripts", {}).get("test", "")
             if "jest" in test_cmd or "jest" in node_deps:
                 _add("Test framework: Jest")
+                sig["has_tests"] = True
             elif "vitest" in test_cmd or "vitest" in node_deps:
                 _add("Test framework: Vitest")
+                sig["has_tests"] = True
         except Exception:
             pass
 
@@ -274,6 +313,8 @@ def bootstrap_scan(repo_path: str) -> dict:
             with open(root / "Cargo.toml", "rb") as f:
                 c = tomllib.load(f)
             p = c.get("package", {})
+            if p.get("name") and not sig["project_name"]:
+                sig["project_name"] = p["name"]
             rust_name = f' "{p["name"]}"' if p.get("name") else ""
             rust_edition = f', edition {p["edition"]}' if p.get("edition") else ""
             _add(f"Rust project{rust_name}{rust_edition}")
@@ -298,8 +339,8 @@ def bootstrap_scan(repo_path: str) -> dict:
         "Redis": {"redis", "aioredis", "ioredis"},
         "SQLite": {"aiosqlite", "better-sqlite3"},
     }
-    _ORM_DEPS = {"sqlalchemy", "tortoise-orm", "databases", "prisma", "drizzle-orm", "typeorm", "sequelize", "knex", "mikro-orm"}
-
+    _ORM_DEPS = {"sqlalchemy", "tortoise-orm", "databases", "prisma", "drizzle-orm",
+                 "typeorm", "sequelize", "knex", "mikro-orm"}
     detected_db = [label for label, names in _DB_MAP.items() if _has_dep(*names)]
     if detected_db:
         _add(f"Data store(s): {', '.join(detected_db)}")
@@ -307,41 +348,42 @@ def bootstrap_scan(repo_path: str) -> dict:
     if detected_orm:
         _add(f"ORM / query builder: {detected_orm}")
 
-    # --- Auth ---
+    # --- Auth / payments (security-sensitive signals) ---
     _AUTH_JWT = {"python-jose", "pyjwt", "jose"}
-    _AUTH_FRAMEWORK = {"passlib", "authlib", "passport", "next-auth", "@auth", "clerk", "supabase", "firebase-admin", "google-auth", "python-keycloak"}
+    _AUTH_FRAMEWORK = {"passlib", "authlib", "passport", "next-auth", "@auth", "clerk",
+                       "supabase", "firebase-admin", "google-auth", "python-keycloak"}
+    _PAYMENT_DEPS = {"stripe", "braintree"}
     if _has_dep(*_AUTH_JWT):
         _add("Auth: JWT-based (pyjwt / python-jose detected)")
+        sig["has_security_sensitive"] = True
     elif _has_dep(*_AUTH_FRAMEWORK):
         pkg_found = next((d for d in _AUTH_FRAMEWORK if _has_dep(d)), "unknown")
         _add(f"Auth: {pkg_found} detected")
+        sig["has_security_sensitive"] = True
+    if _has_dep(*_PAYMENT_DEPS):
+        sig["has_security_sensitive"] = True
 
     # --- Cloud SDKs ---
     if _has_dep("boto3", "botocore", "aws-cdk", "@aws-sdk", "aws-lambda"):
         _add("Cloud: AWS SDK present (boto3 / @aws-sdk)")
+        sig["cloud_detected"] = sig["cloud_detected"] or "AWS"
     if _has_dep("google-cloud", "@google-cloud", "google-auth"):
         _add("Cloud: GCP SDK present")
+        sig["cloud_detected"] = sig["cloud_detected"] or "GCP"
     if _has_dep("azure-", "@azure"):
         _add("Cloud: Azure SDK present")
+        sig["cloud_detected"] = sig["cloud_detected"] or "Azure"
 
     # --- External integrations ---
     _INTEGRATIONS = {
-        "stripe": "Payments: Stripe",
-        "braintree": "Payments: Braintree",
-        "sendgrid": "Email: SendGrid",
-        "resend": "Email: Resend",
+        "stripe": "Payments: Stripe", "braintree": "Payments: Braintree",
+        "sendgrid": "Email: SendGrid", "resend": "Email: Resend",
         "twilio": "Messaging: Twilio",
-        "openai": "AI: OpenAI SDK",
-        "anthropic": "AI: Anthropic SDK",
-        "langchain": "AI: LangChain",
-        "celery": "Task queue: Celery",
-        "dramatiq": "Task queue: Dramatiq",
-        "kafka-python": "Messaging: Kafka",
-        "confluent-kafka": "Messaging: Kafka (Confluent)",
-        "pika": "Messaging: RabbitMQ",
-        "aio-pika": "Messaging: RabbitMQ (async)",
-        "elasticsearch-py": "Search: Elasticsearch",
-        "typesense": "Search: Typesense",
+        "openai": "AI: OpenAI SDK", "anthropic": "AI: Anthropic SDK", "langchain": "AI: LangChain",
+        "celery": "Task queue: Celery", "dramatiq": "Task queue: Dramatiq",
+        "kafka-python": "Messaging: Kafka", "confluent-kafka": "Messaging: Kafka (Confluent)",
+        "pika": "Messaging: RabbitMQ", "aio-pika": "Messaging: RabbitMQ (async)",
+        "elasticsearch-py": "Search: Elasticsearch", "typesense": "Search: Typesense",
     }
     for dep, label in _INTEGRATIONS.items():
         if _has_dep(dep):
@@ -354,9 +396,11 @@ def bootstrap_scan(repo_path: str) -> dict:
         if wfs:
             found_files.append(".github/workflows/")
             _add(f"CI/CD: GitHub Actions ({len(wfs)} workflow file(s))")
+            sig["has_ci"] = True
     if (root / ".gitlab-ci.yml").exists():
         found_files.append(".gitlab-ci.yml")
         _add("CI/CD: GitLab CI")
+        sig["has_ci"] = True
 
     # --- Docker ---
     if (root / "Dockerfile").exists():
@@ -368,6 +412,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             _add(f"Containerized — Dockerfile present{f' (base: {first_from})' if first_from else ''}")
         except Exception:
             _add("Containerized — Dockerfile present")
+        sig["has_container"] = True
     for compose in ["docker-compose.yml", "docker-compose.yaml"]:
         if (root / compose).exists():
             found_files.append(compose)
@@ -380,7 +425,8 @@ def bootstrap_scan(repo_path: str) -> dict:
     if any((root / f).exists() for f in eslint_files):
         found_files.append(".eslintrc*")
         _add("Linting: ESLint")
-    prettier_files = [".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs", "prettier.config.js"]
+    prettier_files = [".prettierrc", ".prettierrc.json", ".prettierrc.js",
+                      ".prettierrc.cjs", "prettier.config.js"]
     if any((root / f).exists() for f in prettier_files):
         found_files.append(".prettierrc*")
         _add("Formatting: Prettier")
@@ -390,12 +436,15 @@ def bootstrap_scan(repo_path: str) -> dict:
     if (root / "pytest.ini").exists():
         found_files.append("pytest.ini")
         _add("Test framework: pytest (pytest.ini)")
+        sig["has_tests"] = True
 
     # --- Infrastructure ---
     if list(root.glob("*.tf")) or (root / "terraform").is_dir():
         _add("Infrastructure as code: Terraform")
+        sig["has_infra"] = True
     if any((root / d).is_dir() for d in ["k8s", "kubernetes", "helm"]):
         _add("Deployment: Kubernetes (manifests or Helm charts present)")
+        sig["has_infra"] = True
 
     # --- Architecture signals ---
     src = root / "src"
@@ -406,64 +455,97 @@ def bootstrap_scan(repo_path: str) -> dict:
             layer_str = ", ".join(layers[:3]) + ("..." if len(layers) > 3 else "")
             _add(f"Architecture: layered structure detected (src/{layer_str})")
 
-    # --- Existing AI/doc context ---
-    for cf in ["CLAUDE.md", "README.md", ".cursorrules"]:
+    # --- README summary (for purpose inference) ---
+    readme = root / "README.md"
+    if readme.exists():
+        found_files.append("README.md")
+        try:
+            lines = [l.strip() for l in readme.read_text().splitlines()
+                     if l.strip() and not l.startswith("#")]
+            if lines:
+                sig["readme_summary"] = lines[0][:120]
+        except Exception:
+            pass
+    for cf in ["CLAUDE.md", ".cursorrules"]:
         if (root / cf).exists():
             found_files.append(cf)
 
-    # --- Gap questions as assumptions (confirm / amend) ---
+    # --- Intent questions: assumption → confirm / deny / append (max 10) ---
     gaps: list[dict] = []
 
+    # 1. Purpose + audience — most important, always asked
     gaps.append(_gap(
-        assumption="Purpose not yet documented",
-        question="What is this repo's primary purpose?",
-        hint="e.g. 'REST API for X', 'CLI tool that does Y', 'data pipeline for Z'",
+        assumption=_infer_purpose(sig["project_name"], sig["readme_summary"]),
+        question="What does this repo do and who uses it?",
+        hint="Confirm the assumption above, correct it, or add: what problem it solves and who the users are",
     ))
 
-    has_deploy = any(f in found_files for f in ["Dockerfile", "docker-compose.yml", "docker-compose.yaml"]) \
-        or any(kw in i for i in inferred for kw in ["Kubernetes", "Terraform"])
-    if not has_deploy:
-        has_cloud = any("Cloud:" in i for i in inferred)
-        cloud_label = next((i for i in inferred if "Cloud:" in i), "")
-        gaps.append(_gap(
-            assumption=f"Cloud deployment ({cloud_label}), no container config found" if has_cloud
-                       else "Deployment target not yet decided",
-            question=f"Assuming {cloud_label.lower()} deployment — correct?" if has_cloud
-                     else "Assuming no deployment target decided yet — correct?",
-            hint="Container, serverless, VPS, bare metal, or still TBD?",
-        ))
-
-    if not any("test" in i.lower() or "Test" in i for i in inferred):
-        gaps.append(_gap(
-            assumption="No automated tests yet",
-            question="Assuming no automated tests yet — correct?",
-            hint="If tests exist: framework, coverage expectations, any test patterns",
-        ))
-
-    if not detected_db:
-        gaps.append(_gap(
-            assumption="No database or persistent storage",
-            question="Assuming no database yet — correct?",
-            hint="If using one: which (Postgres, MySQL, MongoDB, Redis, SQLite) and ORM/query builder if any",
-        ))
-
-    if not any("Auth:" in i for i in inferred):
-        gaps.append(_gap(
-            assumption="No authentication layer yet",
-            question="Assuming no auth layer yet — correct?",
-            hint="If auth exists: mechanism (JWT, sessions, OAuth, API keys) and library",
-        ))
-
-    # Always ask — highest-value signal that can't be inferred
+    # 2. Runtime environment — inferred from container/infra/cloud signals
+    if sig["has_container"]:
+        env_assumption = "Containerized service (Dockerfile present)"
+    elif sig["has_infra"]:
+        env_assumption = "Cloud-deployed via Kubernetes or Terraform"
+    elif sig["cloud_detected"]:
+        env_assumption = f"Uses {sig['cloud_detected']} — likely cloud-hosted or cloud-dependent"
+    else:
+        env_assumption = "No deployment config found — possibly local tool or early stage"
     gaps.append(_gap(
-        assumption="No known intentional exclusions",
-        question="Are there intentional technology exclusions or patterns to always follow?",
-        hint="e.g. 'we avoid ORMs — raw SQL only', 'always async handlers', 'never store secrets in code'",
+        assumption=env_assumption,
+        question="Where does this run in production?",
+        hint="e.g. containerized API, serverless function, VPS, internal CLI, local-only tool, not deployed yet",
     ))
+
+    # 3. Team context — always asked, can't be inferred
     gaps.append(_gap(
-        assumption="No known performance or compliance constraints",
-        question="Any performance, scale, or compliance constraints that shape decisions?",
-        hint="e.g. latency targets, user scale, GDPR/SOC2, regulated data",
+        assumption="Solo or small team — conventions live in config files and code",
+        question="Solo or team? Any conventions that aren't captured in the config files?",
+        hint="e.g. PR review process, branching model, unwritten norms, who owns what area",
+    ))
+
+    # 4. Gap: no tests
+    if not sig["has_tests"]:
+        gaps.append(_gap(
+            assumption="No automated tests detected — may be intentional for this stage",
+            question="No test framework found — is automated testing in scope?",
+            hint="If yes: framework and coverage expectations. If no: why not (speed, early stage, manual QA)?",
+        ))
+
+    # 5. Gap: no CI
+    if not sig["has_ci"]:
+        gaps.append(_gap(
+            assumption="No CI config in this repo — may exist elsewhere or not yet set up",
+            question="No CI config detected — is there a build or deploy pipeline?",
+            hint="e.g. GitHub Actions in another branch, external CI, manual deploys, or not needed yet",
+        ))
+
+    # 6. Gap: security-sensitive deps without compliance context
+    if sig["has_security_sensitive"]:
+        gaps.append(_gap(
+            assumption="Auth or payment handling detected — likely has compliance requirements",
+            question="Auth or payments detected — any compliance or security requirements?",
+            hint="e.g. GDPR, PCI-DSS, SOC2, HIPAA, internal security policies, data residency requirements",
+        ))
+
+    # 7. Gap: cloud SDK without deploy config
+    if sig["cloud_detected"] and not sig["has_container"] and not sig["has_infra"]:
+        gaps.append(_gap(
+            assumption=f"{sig['cloud_detected']} SDK present but no container or infra config found",
+            question=f"Assuming {sig['cloud_detected']} deploy config lives elsewhere — correct?",
+            hint="e.g. separate infra repo, serverless framework config, or just using APIs without hosting there",
+        ))
+
+    # 8. Intentional exclusions and patterns — always, highest-value signal
+    gaps.append(_gap(
+        assumption="No known intentional exclusions — standard choices for the detected stack",
+        question="Any intentional technology exclusions or patterns that must always be followed?",
+        hint="e.g. 'no ORM — raw SQL only', 'always async', 'never commit secrets', 'avoid X because Y'",
+    ))
+
+    # 9. Constraints — always, second-highest value
+    gaps.append(_gap(
+        assumption="No known performance, scale, or compliance constraints",
+        question="Any constraints that shape technical decisions?",
+        hint="e.g. <100ms p99 latency, 1M+ concurrent users, GDPR data residency, cost ceiling",
     ))
 
     return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files}

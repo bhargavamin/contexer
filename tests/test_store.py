@@ -234,7 +234,12 @@ class TestBootstrapScan:
     def test_always_asks_primary_purpose(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.bootstrap_scan(tmp_repo)
-        assert any("purpose" in q.lower() for q in _gap_questions(result))
+        assert any("what does this repo do" in q.lower() for q in _gap_questions(result))
+
+    def test_always_asks_team_context(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("team" in q.lower() or "solo" in q.lower() for q in _gap_questions(result))
 
     def test_always_asks_exclusions_and_constraints(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -242,6 +247,29 @@ class TestBootstrapScan:
         questions = " ".join(_gap_questions(result))
         assert "exclusion" in questions.lower() or "pattern" in questions.lower()
         assert "constraint" in questions.lower() or "compliance" in questions.lower()
+
+    def test_purpose_assumption_derived_from_readme(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "README.md").write_text("# MyApp\nA payment processing service for e-commerce.\n")
+        result = store.bootstrap_scan(tmp_repo)
+        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
+        assert "payment" in purpose_gap["assumption"].lower()
+
+    def test_purpose_assumption_inferred_from_name(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "my-api-service"\nrequires-python = ">=3.12"\n')
+        result = store.bootstrap_scan(tmp_repo)
+        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
+        assert "api" in purpose_gap["assumption"].lower() or "service" in purpose_gap["assumption"].lower()
+
+    def test_max_10_questions(self, tmp_repo):
+        # Even with all gaps triggered, total questions must not exceed 10
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "app"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0","stripe>=2.0"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert len(result["gaps"]) <= 10
 
     # ── language / tooling detection ──────────────────────────────────────────
 
@@ -283,18 +311,20 @@ class TestBootstrapScan:
 
     # ── deployment detection ───────────────────────────────────────────────────
 
-    def test_detects_dockerfile_suppresses_deployment_gap(self, tmp_repo):
+    def test_detects_dockerfile_sets_container_assumption(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
 
         result = store.bootstrap_scan(tmp_repo)
         assert any("dockerfile" in i.lower() or "container" in i.lower() for i in result["inferred"])
-        assert not any("deployment" in q.lower() for q in _gap_questions(result))
+        env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
+        assert "container" in env_gap["assumption"].lower()
 
-    def test_no_dockerfile_adds_deployment_gap(self, tmp_repo):
+    def test_no_dockerfile_assumption_reflects_no_config(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.bootstrap_scan(tmp_repo)
-        assert any("deployment" in q.lower() for q in _gap_questions(result))
+        env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
+        assert "no deployment config" in env_gap["assumption"].lower() or "early stage" in env_gap["assumption"].lower()
 
     # ── data layer detection ───────────────────────────────────────────────────
 
@@ -305,7 +335,6 @@ class TestBootstrapScan:
         )
         result = store.bootstrap_scan(tmp_repo)
         assert any("postgresql" in i.lower() for i in result["inferred"])
-        assert not any("database" in q.lower() for q in _gap_questions(result))
 
     def test_detects_redis_dep(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -323,26 +352,24 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo)
         assert any("sqlalchemy" in i.lower() for i in result["inferred"])
 
-    def test_no_db_adds_database_gap(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo)
-        assert any("database" in q.lower() for q in _gap_questions(result))
+    # ── auth and security-sensitive detection ──────────────────────────────────
 
-    # ── auth detection ─────────────────────────────────────────────────────────
-
-    def test_detects_jwt_dep(self, tmp_repo):
+    def test_detects_jwt_dep_in_inferred(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["python-jose[cryptography]>=3.3"]\n'
         )
         result = store.bootstrap_scan(tmp_repo)
         assert any("jwt" in i.lower() or "auth" in i.lower() for i in result["inferred"])
-        assert not any("auth" in q.lower() for q in _gap_questions(result))
 
-    def test_no_auth_adds_auth_gap(self, tmp_repo):
+    def test_security_sensitive_deps_add_compliance_gap(self, tmp_repo):
+        # Auth or payment deps trigger a compliance question
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["stripe>=2.0"]\n'
+        )
         result = store.bootstrap_scan(tmp_repo)
-        assert any("auth" in q.lower() for q in _gap_questions(result))
+        assert any("compliance" in q.lower() or "security" in q.lower() for q in _gap_questions(result))
 
     # ── cloud and integration detection ───────────────────────────────────────
 
