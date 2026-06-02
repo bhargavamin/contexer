@@ -62,7 +62,8 @@ def _passes_filter(content: str, existing: list) -> bool:
     c1 = any(w in c for w in _DECISION_SIGNALS)
     c2 = any(w in c for w in _PATTERN_SIGNALS)
     c3 = any(w in c for w in _CONSTRAINT_SIGNALS)
-    c4 = _is_novel(content, existing)
+    decisions_only = [e for e in existing if e["type"] == "decision"]
+    c4 = _is_novel(content, decisions_only)
     return c1 or c2 or c3 or c4
 
 
@@ -87,6 +88,8 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
     if not _is_task(description):
         return None
     data = _load(repo_path)
+    # keep only decisions — one task slot is enough for "last task" context
+    data["entries"] = [e for e in data["entries"] if e["type"] != "task"]
     entry = {
         "id": str(uuid.uuid4()),
         "type": "task",
