@@ -1,5 +1,6 @@
 import json
 import re
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,18 +169,24 @@ def get_context(repo_path: str) -> str:
 
 
 def bootstrap_scan(repo_path: str) -> dict:
-    import tomllib
-
     root = Path(repo_path)
     data = _load(repo_path)
     existing = [e for e in data.get("entries", []) if e["type"] == "decision"]
     inferred: list[str] = []
     found_files: list[str] = []
+    all_deps: set[str] = set()  # normalized dep names across all detected ecosystems
 
     def _add(fact: str) -> None:
         proxy = [{"content": f} for f in inferred]
         if _is_novel(fact, existing + proxy):
             inferred.append(fact)
+
+    def _gap(assumption: str, question: str, hint: str) -> dict:
+        return {"assumption": assumption, "question": question, "hint": hint}
+
+    def _has_dep(*names: str) -> bool:
+        # substring match — catches scoped packages (@aws-sdk/client-s3) and extras (psycopg[binary])
+        return any(n in dep for n in names for dep in all_deps)
 
     # --- Python ---
     pyproject_path = root / "pyproject.toml"
@@ -198,6 +205,15 @@ def bootstrap_scan(repo_path: str) -> dict:
                 _add("Linting/formatting: ruff")
             if "mypy" in tool:
                 _add("Type checking: mypy")
+            # collect all dep names for signal detection below
+            raw: list[str] = list(proj.get("dependencies", []))
+            for group in pyp.get("dependency-groups", {}).values():
+                raw.extend(d for d in group if isinstance(d, str))
+            for extra in proj.get("optional-dependencies", {}).values():
+                raw.extend(extra)
+            for dep in raw:
+                normalized = re.split(r"[>=<!~\[\s;]", dep.strip())[0].lower().replace("_", "-")
+                all_deps.add(normalized)
         except Exception:
             pass
 
@@ -206,11 +222,11 @@ def bootstrap_scan(repo_path: str) -> dict:
         _add("Package manager: uv")
 
     # --- Node / JS ---
-    pkg_json = root / "package.json"
-    if pkg_json.exists():
+    pkg_json_path = root / "package.json"
+    if pkg_json_path.exists():
         found_files.append("package.json")
         try:
-            pkg = json.loads(pkg_json.read_text())
+            pkg = json.loads(pkg_json_path.read_text())
             name = pkg.get("name", "")
             node_ver = pkg.get("engines", {}).get("node", "")
             parts = [f"Node.js project \"{name}\"" if name else "Node.js project"]
@@ -220,17 +236,20 @@ def bootstrap_scan(repo_path: str) -> dict:
             mgr = pkg.get("packageManager", "")
             if mgr:
                 _add(f"Package manager: {mgr.split('@')[0]}")
-            all_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-            if "typescript" in all_deps:
+            node_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            all_deps.update(k.lower() for k in node_deps)
+            if pkg.get("workspaces"):
+                _add("Monorepo: npm/yarn workspaces")
+            if "typescript" in node_deps:
                 _add("Language: TypeScript")
-            for fw in ["next", "nuxt", "remix", "svelte", "react", "vue", "express", "fastify"]:
-                if fw in all_deps:
+            for fw in ["next", "nuxt", "remix", "svelte", "react", "vue", "express", "fastify", "hono", "elysia"]:
+                if fw in node_deps:
                     _add(f"Framework: {fw}")
                     break
             test_cmd = pkg.get("scripts", {}).get("test", "")
-            if "jest" in test_cmd or "jest" in all_deps:
+            if "jest" in test_cmd or "jest" in node_deps:
                 _add("Test framework: Jest")
-            elif "vitest" in test_cmd or "vitest" in all_deps:
+            elif "vitest" in test_cmd or "vitest" in node_deps:
                 _add("Test framework: Vitest")
         except Exception:
             pass
@@ -261,6 +280,73 @@ def bootstrap_scan(repo_path: str) -> dict:
         except Exception:
             pass
 
+    # --- Monorepo ---
+    for mf in ["nx.json", "turbo.json", "lerna.json", "pnpm-workspace.yaml"]:
+        if (root / mf).exists():
+            found_files.append(mf)
+            _add(f"Monorepo: {mf.split('.')[0]} workspace")
+            break
+    if not any("Monorepo" in i for i in inferred):
+        if (root / "packages").is_dir() or (root / "apps").is_dir():
+            _add("Monorepo: packages/ or apps/ directory structure")
+
+    # --- Data layer ---
+    _DB_MAP = {
+        "PostgreSQL": {"psycopg", "psycopg2", "asyncpg", "pg", "postgres", "neon"},
+        "MySQL/MariaDB": {"pymysql", "aiomysql", "mysql2", "mysql"},
+        "MongoDB": {"pymongo", "motor", "mongodb", "mongoose"},
+        "Redis": {"redis", "aioredis", "ioredis"},
+        "SQLite": {"aiosqlite", "better-sqlite3"},
+    }
+    _ORM_DEPS = {"sqlalchemy", "tortoise-orm", "databases", "prisma", "drizzle-orm", "typeorm", "sequelize", "knex", "mikro-orm"}
+
+    detected_db = [label for label, names in _DB_MAP.items() if _has_dep(*names)]
+    if detected_db:
+        _add(f"Data store(s): {', '.join(detected_db)}")
+    detected_orm = next((d for d in _ORM_DEPS if _has_dep(d)), None)
+    if detected_orm:
+        _add(f"ORM / query builder: {detected_orm}")
+
+    # --- Auth ---
+    _AUTH_JWT = {"python-jose", "pyjwt", "jose"}
+    _AUTH_FRAMEWORK = {"passlib", "authlib", "passport", "next-auth", "@auth", "clerk", "supabase", "firebase-admin", "google-auth", "python-keycloak"}
+    if _has_dep(*_AUTH_JWT):
+        _add("Auth: JWT-based (pyjwt / python-jose detected)")
+    elif _has_dep(*_AUTH_FRAMEWORK):
+        pkg_found = next((d for d in _AUTH_FRAMEWORK if _has_dep(d)), "unknown")
+        _add(f"Auth: {pkg_found} detected")
+
+    # --- Cloud SDKs ---
+    if _has_dep("boto3", "botocore", "aws-cdk", "@aws-sdk", "aws-lambda"):
+        _add("Cloud: AWS SDK present (boto3 / @aws-sdk)")
+    if _has_dep("google-cloud", "@google-cloud", "google-auth"):
+        _add("Cloud: GCP SDK present")
+    if _has_dep("azure-", "@azure"):
+        _add("Cloud: Azure SDK present")
+
+    # --- External integrations ---
+    _INTEGRATIONS = {
+        "stripe": "Payments: Stripe",
+        "braintree": "Payments: Braintree",
+        "sendgrid": "Email: SendGrid",
+        "resend": "Email: Resend",
+        "twilio": "Messaging: Twilio",
+        "openai": "AI: OpenAI SDK",
+        "anthropic": "AI: Anthropic SDK",
+        "langchain": "AI: LangChain",
+        "celery": "Task queue: Celery",
+        "dramatiq": "Task queue: Dramatiq",
+        "kafka-python": "Messaging: Kafka",
+        "confluent-kafka": "Messaging: Kafka (Confluent)",
+        "pika": "Messaging: RabbitMQ",
+        "aio-pika": "Messaging: RabbitMQ (async)",
+        "elasticsearch-py": "Search: Elasticsearch",
+        "typesense": "Search: Typesense",
+    }
+    for dep, label in _INTEGRATIONS.items():
+        if _has_dep(dep):
+            _add(label)
+
     # --- CI/CD ---
     gh_wf = root / ".github" / "workflows"
     if gh_wf.is_dir():
@@ -268,7 +354,6 @@ def bootstrap_scan(repo_path: str) -> dict:
         if wfs:
             found_files.append(".github/workflows/")
             _add(f"CI/CD: GitHub Actions ({len(wfs)} workflow file(s))")
-
     if (root / ".gitlab-ci.yml").exists():
         found_files.append(".gitlab-ci.yml")
         _add("CI/CD: GitLab CI")
@@ -283,7 +368,6 @@ def bootstrap_scan(repo_path: str) -> dict:
             _add(f"Containerized — Dockerfile present{f' (base: {first_from})' if first_from else ''}")
         except Exception:
             _add("Containerized — Dockerfile present")
-
     for compose in ["docker-compose.yml", "docker-compose.yaml"]:
         if (root / compose).exists():
             found_files.append(compose)
@@ -291,21 +375,18 @@ def bootstrap_scan(repo_path: str) -> dict:
             break
 
     # --- Linting / formatting ---
-    eslint = [".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintrc.cjs",
-              "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs"]
-    if any((root / f).exists() for f in eslint):
+    eslint_files = [".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintrc.cjs",
+                    "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs"]
+    if any((root / f).exists() for f in eslint_files):
         found_files.append(".eslintrc*")
         _add("Linting: ESLint")
-
-    prettier = [".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs", "prettier.config.js"]
-    if any((root / f).exists() for f in prettier):
+    prettier_files = [".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs", "prettier.config.js"]
+    if any((root / f).exists() for f in prettier_files):
         found_files.append(".prettierrc*")
         _add("Formatting: Prettier")
-
     if (root / "ruff.toml").exists():
         found_files.append("ruff.toml")
         _add("Linting/formatting: ruff (ruff.toml)")
-
     if (root / "pytest.ini").exists():
         found_files.append("pytest.ini")
         _add("Test framework: pytest (pytest.ini)")
@@ -313,27 +394,76 @@ def bootstrap_scan(repo_path: str) -> dict:
     # --- Infrastructure ---
     if list(root.glob("*.tf")) or (root / "terraform").is_dir():
         _add("Infrastructure as code: Terraform")
-
     if any((root / d).is_dir() for d in ["k8s", "kubernetes", "helm"]):
         _add("Deployment: Kubernetes (manifests or Helm charts present)")
+
+    # --- Architecture signals ---
+    src = root / "src"
+    if src.is_dir():
+        layers = [d for d in ["api", "services", "models", "controllers", "middleware", "handlers", "repositories"]
+                  if (src / d).is_dir()]
+        if layers:
+            layer_str = ", ".join(layers[:3]) + ("..." if len(layers) > 3 else "")
+            _add(f"Architecture: layered structure detected (src/{layer_str})")
 
     # --- Existing AI/doc context ---
     for cf in ["CLAUDE.md", "README.md", ".cursorrules"]:
         if (root / cf).exists():
             found_files.append(cf)
 
-    # --- Gap questions (pattern / use case / constraints) ---
-    gaps: list[str] = ["What is this repo's primary purpose? (1-2 sentences)"]
+    # --- Gap questions as assumptions (confirm / amend) ---
+    gaps: list[dict] = []
+
+    gaps.append(_gap(
+        assumption="Purpose not yet documented",
+        question="What is this repo's primary purpose?",
+        hint="e.g. 'REST API for X', 'CLI tool that does Y', 'data pipeline for Z'",
+    ))
 
     has_deploy = any(f in found_files for f in ["Dockerfile", "docker-compose.yml", "docker-compose.yaml"]) \
-        or any("Kubernetes" in i or "Terraform" in i for i in inferred)
+        or any(kw in i for i in inferred for kw in ["Kubernetes", "Terraform"])
     if not has_deploy:
-        gaps.append("What is the deployment target? (container, serverless, VPS, not yet decided...)")
+        has_cloud = any("Cloud:" in i for i in inferred)
+        cloud_label = next((i for i in inferred if "Cloud:" in i), "")
+        gaps.append(_gap(
+            assumption=f"Cloud deployment ({cloud_label}), no container config found" if has_cloud
+                       else "Deployment target not yet decided",
+            question=f"Assuming {cloud_label.lower()} deployment — correct?" if has_cloud
+                     else "Assuming no deployment target decided yet — correct?",
+            hint="Container, serverless, VPS, bare metal, or still TBD?",
+        ))
 
-    if not any("test" in i.lower() for i in inferred):
-        gaps.append("What is the testing approach? (framework, coverage expectations, or 'none yet')")
+    if not any("test" in i.lower() or "Test" in i for i in inferred):
+        gaps.append(_gap(
+            assumption="No automated tests yet",
+            question="Assuming no automated tests yet — correct?",
+            hint="If tests exist: framework, coverage expectations, any test patterns",
+        ))
 
-    gaps.append("Are there intentional technology exclusions or patterns to always follow? (e.g. 'we avoid X because...' or 'always use Y for Z')")
-    gaps.append("Are there performance, scale, or compliance constraints that shape technical decisions?")
+    if not detected_db:
+        gaps.append(_gap(
+            assumption="No database or persistent storage",
+            question="Assuming no database yet — correct?",
+            hint="If using one: which (Postgres, MySQL, MongoDB, Redis, SQLite) and ORM/query builder if any",
+        ))
+
+    if not any("Auth:" in i for i in inferred):
+        gaps.append(_gap(
+            assumption="No authentication layer yet",
+            question="Assuming no auth layer yet — correct?",
+            hint="If auth exists: mechanism (JWT, sessions, OAuth, API keys) and library",
+        ))
+
+    # Always ask — highest-value signal that can't be inferred
+    gaps.append(_gap(
+        assumption="No known intentional exclusions",
+        question="Are there intentional technology exclusions or patterns to always follow?",
+        hint="e.g. 'we avoid ORMs — raw SQL only', 'always async handlers', 'never store secrets in code'",
+    ))
+    gaps.append(_gap(
+        assumption="No known performance or compliance constraints",
+        question="Any performance, scale, or compliance constraints that shape decisions?",
+        hint="e.g. latency targets, user scale, GDPR/SOC2, regulated data",
+    ))
 
     return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files}

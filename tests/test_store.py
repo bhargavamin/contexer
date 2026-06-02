@@ -211,59 +211,53 @@ class TestGetSessionStartContext:
 
 # ── bootstrap_scan ────────────────────────────────────────────────────────────
 
+def _gap_questions(result: dict) -> list[str]:
+    """Flatten gap question text for assertion convenience."""
+    return [g["question"] for g in result["gaps"]]
+
+
+def _gap_assumptions(result: dict) -> list[str]:
+    return [g["assumption"] for g in result["gaps"]]
+
+
 class TestBootstrapScan:
-    def test_empty_repo_returns_gaps(self, tmp_repo):
+    # ── gap structure ──────────────────────────────────────────────────────────
+
+    def test_gaps_are_dicts_with_required_keys(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.bootstrap_scan(tmp_repo)
-        assert isinstance(result["inferred"], list)
-        assert isinstance(result["gaps"], list)
-        assert len(result["gaps"]) >= 1
-        # Always asks primary purpose
-        assert any("purpose" in q.lower() for q in result["gaps"])
+        for gap in result["gaps"]:
+            assert "assumption" in gap
+            assert "question" in gap
+            assert "hint" in gap
+
+    def test_always_asks_primary_purpose(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("purpose" in q.lower() for q in _gap_questions(result))
+
+    def test_always_asks_exclusions_and_constraints(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        questions = " ".join(_gap_questions(result))
+        assert "exclusion" in questions.lower() or "pattern" in questions.lower()
+        assert "constraint" in questions.lower() or "compliance" in questions.lower()
+
+    # ── language / tooling detection ──────────────────────────────────────────
 
     def test_detects_python_uv(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        pyproject = Path(tmp_repo) / "pyproject.toml"
-        pyproject.write_text('[project]\nname = "myapp"\nrequires-python = ">=3.12"\n')
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "myapp"\nrequires-python = ">=3.12"\n'
+        )
         (Path(tmp_repo) / "uv.lock").write_text("")
 
         result = store.bootstrap_scan(tmp_repo)
-        inferred_text = " ".join(result["inferred"]).lower()
-        assert "python" in inferred_text
-        assert "uv" in inferred_text
+        inferred = " ".join(result["inferred"]).lower()
+        assert "python" in inferred
+        assert "uv" in inferred
 
-    def test_detects_github_actions(self, tmp_repo):
-        wf_dir = Path(tmp_repo) / ".github" / "workflows"
-        wf_dir.mkdir(parents=True)
-        (wf_dir / "ci.yml").write_text("on: [push]")
-
-        result = store.bootstrap_scan(tmp_repo)
-        assert any("github actions" in i.lower() for i in result["inferred"])
-
-    def test_detects_dockerfile(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
-
-        result = store.bootstrap_scan(tmp_repo)
-        assert any("dockerfile" in i.lower() or "container" in i.lower() for i in result["inferred"])
-        # Deployment gap should not appear when Dockerfile found
-        assert not any("deployment target" in q.lower() for q in result["gaps"])
-
-    def test_skips_duplicate_inferred_against_existing(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "uv.lock").write_text("")
-        # Seed exact-match text so token-overlap (>70%) triggers the novelty veto
-        data = store._load(tmp_repo)
-        data["entries"].append({
-            "id": "seed", "type": "decision", "content": "Package manager: uv",
-            "session_id": "seed", "timestamp": "2026-01-01T00:00:00+00:00",
-        })
-        store._save(tmp_repo, data)
-
-        result = store.bootstrap_scan(tmp_repo)
-        assert not any("uv" in i.lower() for i in result["inferred"])
-
-    def test_node_project_detection(self, tmp_repo):
+    def test_detects_node_typescript_react(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         pkg = {
             "name": "my-app",
@@ -274,7 +268,128 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
 
         result = store.bootstrap_scan(tmp_repo)
-        inferred_text = " ".join(result["inferred"]).lower()
-        assert "node" in inferred_text
-        assert "typescript" in inferred_text
-        assert "react" in inferred_text
+        inferred = " ".join(result["inferred"]).lower()
+        assert "node" in inferred
+        assert "typescript" in inferred
+        assert "react" in inferred
+
+    def test_detects_github_actions(self, tmp_repo):
+        wf_dir = Path(tmp_repo) / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "ci.yml").write_text("on: [push]")
+
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("github actions" in i.lower() for i in result["inferred"])
+
+    # ── deployment detection ───────────────────────────────────────────────────
+
+    def test_detects_dockerfile_suppresses_deployment_gap(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
+
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("dockerfile" in i.lower() or "container" in i.lower() for i in result["inferred"])
+        assert not any("deployment" in q.lower() for q in _gap_questions(result))
+
+    def test_no_dockerfile_adds_deployment_gap(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("deployment" in q.lower() for q in _gap_questions(result))
+
+    # ── data layer detection ───────────────────────────────────────────────────
+
+    def test_detects_postgres_dep(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["psycopg[binary]>=3.0"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("postgresql" in i.lower() for i in result["inferred"])
+        assert not any("database" in q.lower() for q in _gap_questions(result))
+
+    def test_detects_redis_dep(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        pkg = {"name": "app", "dependencies": {"redis": "^4.0.0"}}
+        (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
+
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("redis" in i.lower() for i in result["inferred"])
+
+    def test_detects_orm_dep(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["sqlalchemy>=2.0"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("sqlalchemy" in i.lower() for i in result["inferred"])
+
+    def test_no_db_adds_database_gap(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("database" in q.lower() for q in _gap_questions(result))
+
+    # ── auth detection ─────────────────────────────────────────────────────────
+
+    def test_detects_jwt_dep(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["python-jose[cryptography]>=3.3"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("jwt" in i.lower() or "auth" in i.lower() for i in result["inferred"])
+        assert not any("auth" in q.lower() for q in _gap_questions(result))
+
+    def test_no_auth_adds_auth_gap(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("auth" in q.lower() for q in _gap_questions(result))
+
+    # ── cloud and integration detection ───────────────────────────────────────
+
+    def test_detects_aws_sdk(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("aws" in i.lower() for i in result["inferred"])
+
+    def test_detects_stripe_integration(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        pkg = {"name": "app", "dependencies": {"stripe": "^14.0.0"}}
+        (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
+
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("stripe" in i.lower() for i in result["inferred"])
+
+    def test_detects_openai_integration(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["openai>=1.0"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("openai" in i.lower() for i in result["inferred"])
+
+    # ── monorepo detection ─────────────────────────────────────────────────────
+
+    def test_detects_nx_monorepo(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "nx.json").write_text("{}")
+
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("monorepo" in i.lower() for i in result["inferred"])
+
+    # ── novelty veto ───────────────────────────────────────────────────────────
+
+    def test_skips_inferred_already_in_decisions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "uv.lock").write_text("")
+        data = store._load(tmp_repo)
+        data["entries"].append({
+            "id": "seed", "type": "decision", "content": "Package manager: uv",
+            "session_id": "seed", "timestamp": "2026-01-01T00:00:00+00:00",
+        })
+        store._save(tmp_repo, data)
+
+        result = store.bootstrap_scan(tmp_repo)
+        assert not any("uv" in i.lower() for i in result["inferred"])
