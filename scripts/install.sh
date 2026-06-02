@@ -128,7 +128,7 @@ if "PreCompact" not in hooks:
     hooks["PreCompact"] = [{
         "hooks": [{
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PreCompact\", \"additionalContext\": \"Context is about to be compacted. Before this happens, call update_context for any significant decisions, patterns, or constraints made in this session that have not yet been stored.\"}}' ",
+            "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'",
             "statusMessage": "Saving decisions before compact..."
         }]
     }]
@@ -137,7 +137,7 @@ if "PostCompact" not in hooks:
     hooks["PostCompact"] = [{
         "hooks": [{
             "type": "command",
-            "command": f"uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; data=store._load('{repo}'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; ctx2=store.get_context('{repo}'); msg=f'Contexer: {{len(decisions)}} decision(s) reloaded after compact' if decisions else 'Contexer: no context stored'; print(json.dumps({{'systemMessage':msg,'hookSpecificOutput':{{'hookEventName':'PostCompact','additionalContext':ctx2}}}}))\"",
+            "command": f"uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; data=store._load('{repo}'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {{len(decisions)}} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({{'systemMessage':msg}}))\"",
             "statusMessage": "Reloading context after compact..."
         }]
     }]
