@@ -4,12 +4,8 @@
       {
         "hooks": [
           {
-            "type": "mcp_tool",
-            "server": "contexer",
-            "tool": "get_context",
-            "input": {
-              "repo_path": "/Users/bhargavamin/repos/personal/contexer"
-            },
+            "type": "command",
+            "command": "uv run --directory /Users/bhargavamin/repos/personal/contexer python -c \"import sys,json; sys.path.insert(0,'/Users/bhargavamin/repos/personal/contexer'); import store; ctx=store.get_context('/Users/bhargavamin/repos/personal/contexer'); print(json.dumps({'hookSpecificOutput':{'hookEventName':'SessionStart','additionalContext':ctx}}))\"",
             "statusMessage": "Loading session context..."
           }
         ]
