@@ -47,7 +47,9 @@ Server filters the content — stores only if it:
 Next session: repeat from the top — but now with history
 ```
 
-Nothing is manual. You write code, Claude captures context. The next session starts informed.
+**It is Claude — not you — who calls `update_context`.** You work normally. Claude watches what it's doing and invokes the tool when it judges something is worth storing. The reminder injected before every turn keeps that instruction fresh so Claude doesn't forget mid-task.
+
+If Claude misses something important, just tell it: **"store that decision"** and it will call `update_context` immediately.
 
 ## The three tools
 
@@ -67,6 +69,21 @@ Nothing is manual. You write code, Claude captures context. The next session sta
 4. Is it **meaningfully different** from what's already stored? (>70% token overlap = duplicate, discarded)
 
 If none pass, the content is silently discarded. No noise, no logs.
+
+## What happens if a decision is missed
+
+Nothing breaks — you just lose that piece of context for future sessions. The next session starts without it, and Claude might ask about something that was already decided, or make a conflicting choice without realising it.
+
+Two things can cause a miss:
+
+1. **Claude doesn't call `update_context`** — it judged something as not significant enough. The decision is never nominated.
+2. **Claude calls it but the server filters it** — the content didn't match any of the four criteria. Silently dropped.
+
+**What you can do:**
+
+- Say **"store that decision"** and Claude will call `update_context` immediately
+- Ask Claude to call `get_context` mid-session to see what's been captured so far
+- Inspect the file directly: `cat ~/.contexer/<repo_slug>.json`
 
 ## Installation
 
