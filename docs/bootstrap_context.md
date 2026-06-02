@@ -22,118 +22,139 @@ Generic questions miss project-specific gaps. A question like "do you use Docker
 **Why Option B?**
 - Server does cheap static work (no LLM cost)
 - Claude is already in the loop — it handles synthesis and questioning
-- Questions are targeted to gaps in what was inferred, not generic
-- Fits the existing three-tool architecture: one new tool, no new files
+- Questions are targeted to actual gaps, not generic
+- Fits the existing architecture: one new tool, no new files
+
+## Resolved design decisions
+
+| Question | Decision |
+|---|---|
+| Auto-trigger or explicit? | Auto-trigger on SessionStart when no context exists, but ask for user confirmation before scanning |
+| How to ask gap questions? | Short and quick — presented as a batch, focused on patterns, use case, and constraints |
+| Store inferred decisions automatically? | Show to user for confirmation first, then store confirmed ones via `update_context` |
 
 ## Design
 
 ### New tool: `bootstrap_context(repo_path)`
 
-Added to `server.py`. Returns JSON with two sections:
+Added to `server.py`. Returns JSON:
 
 ```json
 {
   "inferred": [
     "Python 3.12, uv as package manager (pyproject.toml)",
     "pytest for testing (pyproject.toml dev deps)",
-    "GitHub Actions CI on push to main (.github/workflows/ci.yml)",
-    "ruff for linting (ruff.toml)"
+    "GitHub Actions CI on push to main (.github/workflows/ci.yml)"
   ],
   "gaps": [
-    "No deployment config found — what is the deployment target?",
-    "No database/ORM dependency found — is persistence out of scope?",
-    "No explicit error handling pattern found — what is the approach?",
-    "CLAUDE.md exists but no architectural decisions documented"
+    "What is this repo's primary purpose? (1-2 sentences)",
+    "What is the deployment target? (container, serverless, VPS, not yet decided...)",
+    "Are there intentional technology exclusions or patterns to always follow?",
+    "Are there performance, scale, or compliance constraints that shape technical decisions?"
   ],
-  "existing_context_files": ["CLAUDE.md", "README.md"]
+  "existing_context_files": ["CLAUDE.md", "README.md", "pyproject.toml"]
 }
 ```
 
 Claude's job after receiving this:
-1. Call `update_context` for each item in `inferred`
-2. Present `gaps` as questions to the user (3-4 at a time, not all at once)
-3. Store each answer via `update_context`
+1. Show `inferred` list to user and ask for confirmation
+2. Store confirmed items via `update_context`
+3. Present `gaps` as a quick-fire batch (not one at a time)
+4. Store each answer via `update_context`
+
+### Auto-trigger via SessionStart hook
+
+`get_session_start_context` (in `store.py`) handles both cases:
+
+- **Context exists:** inject decisions into session as before
+- **No context:** inject a prompt telling Claude to offer bootstrapping
+
+The hook detects empty context and tells Claude:
+> "No context stored for this repo yet. Ask the user: 'No stored context found. I can scan this repo to build an initial baseline of decisions and constraints — should I?' Wait for their confirmation before calling bootstrap_context."
 
 ### What the scanner reads
 
-**Tier 1 — high confidence, infer directly:**
+**Tier 1 — infer directly:**
 - `pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod` → runtime, package manager, key deps
-- `.nvmrc` / `.python-version` → pinned versions
-- `.github/workflows/` / `.gitlab-ci.yml` / `Jenkinsfile` → CI/CD system
-- `ruff.toml` / `.eslintrc*` / `mypy.ini` / `.prettierrc` → linting and style enforcement
-- `Dockerfile` / `docker-compose.yml` → containerization intent
+- `.github/workflows/` / `.gitlab-ci.yml` → CI/CD system
+- `ruff.toml` / `.eslintrc*` / `mypy.ini` / `.prettierrc*` → linting and style enforcement
+- `Dockerfile` / `docker-compose.yml` → containerization
 - `pytest.ini` / `jest.config.*` / `vitest.config.*` → test framework
-- `CLAUDE.md` / `README.md` → existing documented decisions (note: present but may be stale)
+- `*.tf` / `terraform/` / `k8s/` / `helm/` → infra and deployment
 
-**Tier 2 — absence signals a gap question:**
-- No test files or test config → "What is the testing approach?"
-- No CI config → "Is there a CI/CD pipeline planned?"
-- No Dockerfile but cloud SDK deps present → "What is the deployment target?"
-- No linting config → "Is code style enforced by tooling?"
+**Tier 2 — absence becomes a gap question:**
+- No test config → "What is the testing approach?"
+- No Dockerfile/k8s/terraform → "What is the deployment target?"
 
-**Tier 3 — always ask (cannot be inferred from files):**
-- Why certain architectural choices were made
-- Intentional exclusions ("we deliberately do not use X because...")
-- Performance or scale constraints
-- Security or compliance requirements
+**Always ask (cannot be inferred):**
+- Primary purpose
+- Intentional technology exclusions / patterns
+- Performance, scale, compliance constraints
+
+### Gap question principles
+
+Questions must be short and answerable in 1-2 sentences. Focus on:
+- **Use case:** what is this for?
+- **Patterns:** what should always/never be done?
+- **Constraints:** what shapes technical decisions?
+
+Present all gap questions at once as a quick-fire batch, not an extended interview.
 
 ### Implementation
 
-`store.py` — new function `bootstrap_scan(repo_path) -> dict`:
-- Walks only known config file paths (not all files — O(1) not O(n))
-- Returns `{"inferred": [...], "gaps": [...], "existing_context_files": [...]}`
-- Reuses `_is_novel` to skip inferred items that would duplicate existing decisions
-- Pure static analysis, no subprocess, no LLM call
+`store.py` — two new functions:
+- `bootstrap_scan(repo_path) -> dict` — static file scanner, returns `inferred`, `gaps`, `existing_context_files`
+- `get_session_start_context(repo_path) -> dict` — used by SessionStart hook; returns the full hook JSON output including bootstrap prompt when no context exists
 
 `server.py` — new tool:
 ```python
 @mcp.tool()
 def bootstrap_context(repo_path: str) -> str:
-    """Scans a repo for inferable decisions and gaps. Call update_context for
-    each inferred item, then ask the user the gap questions and store answers."""
-    return json.dumps(store.bootstrap_scan(repo_path))
+    """Scans a repo for inferable decisions and gap questions. Present inferred
+    items to the user for confirmation, store confirmed ones via update_context,
+    then ask the gap questions and store each answer."""
+    return json.dumps(store.bootstrap_scan(repo_path), indent=2)
 ```
 
 ### Usage flow
 
 ```
-Developer installs Contexer on an existing project
+New session — no context stored for this repo
     │
     ↓
-Calls bootstrap_context("/path/to/repo")
+SessionStart hook fires → get_session_start_context detects empty context
+    └─▶ injects prompt: "No context found. Should I bootstrap?"
     │
     ↓
-Server returns inferred facts + gap questions
+Claude asks user for confirmation
     │
     ↓
-Claude stores inferred decisions via update_context (one call per item)
+User confirms → Claude calls bootstrap_context("/path/to/repo")
     │
     ↓
-Claude presents gap questions to user (3-4 at a time)
+Server returns: inferred decisions + gap questions
     │
     ↓
-User answers → Claude stores via update_context
+Claude shows inferred list → user confirms → Claude calls update_context for each
     │
     ↓
-Repo starts next session with a rich decision baseline
+Claude presents gap questions as a quick batch
+    │
+    ↓
+User answers → Claude calls update_context for each answer
+    │
+    ↓
+Repo now has a rich decision baseline for all future sessions
 ```
 
 ### Edge cases
 
-- **Repo already has Contexer context:** `bootstrap_scan` checks existing decisions via `_is_novel` and skips duplicates — safe to run again
-- **Large repos:** scanner reads only known config file paths, never walks the full tree
-- **Monorepos:** scan at root by default; caller can pass a subdirectory path for per-service context
-- **Missing files:** scanner skips gracefully — absence becomes a gap question, not an error
+- **Repo already has context:** `bootstrap_scan` uses `_is_novel` against existing decisions — safe to run again, duplicates are skipped
+- **Large repos:** scanner only reads known config file paths by name — O(1), never walks the full tree
+- **Monorepos:** scan at root by default; pass a subdirectory path for per-service context
 
 ## Constraints preserved
 
-- No new files — `bootstrap_scan` goes in `store.py`, new tool in `server.py`
+- No new files — `bootstrap_scan` and `get_session_start_context` are in `store.py`; new tool is in `server.py`
 - No LLM calls in the server — all reasoning stays in Claude
-- Silent operation unchanged — `bootstrap_context` is explicit and opt-in, not automatic
-- This adds a fourth tool; the three-tool constraint was for the initial MVP
-
-## Open questions
-
-1. Should `bootstrap_context` be triggered automatically when a repo has no stored context, or always explicit?
-2. Should gap questions be batched (all at once) or asked one category at a time?
-3. Should inferred decisions be stored automatically or shown to the user for confirmation first?
+- Silent operation unchanged — bootstrap is always explicit (requires user confirmation)
