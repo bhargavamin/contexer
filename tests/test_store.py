@@ -190,6 +190,29 @@ class TestGetContext:
         assert result.count("- [") == 10
 
 
+# ── _resolve_repo ─────────────────────────────────────────────────────────────
+
+class TestResolveRepo:
+    def test_explicit_path_returned_unchanged(self, tmp_repo):
+        assert store._resolve_repo(tmp_repo) == tmp_repo
+
+    def test_empty_string_falls_back_to_current_repo_file(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer")
+        store.STORE_DIR.mkdir(exist_ok=True)
+        (store.STORE_DIR / ".current_repo").write_text(tmp_repo)
+        assert store._resolve_repo("") == tmp_repo
+
+    def test_empty_string_with_no_file_returns_empty(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer_empty")
+        assert store._resolve_repo("") == ""
+
+    def test_nonempty_path_bypasses_file(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer")
+        store.STORE_DIR.mkdir(exist_ok=True)
+        (store.STORE_DIR / ".current_repo").write_text("/some/other/repo")
+        assert store._resolve_repo(tmp_repo) == tmp_repo
+
+
 # ── get_session_start_context ─────────────────────────────────────────────────
 
 class TestGetSessionStartContext:
@@ -197,6 +220,16 @@ class TestGetSessionStartContext:
         result = store.get_session_start_context(tmp_repo)
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert "no context stored" in result["systemMessage"].lower()
+
+    def test_empty_repo_message_includes_repo_path(self, tmp_repo):
+        result = store.get_session_start_context(tmp_repo)
+        assert tmp_repo in result["hookSpecificOutput"]["additionalContext"]
+
+    def test_empty_repo_message_includes_call_instruction(self, tmp_repo):
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "bootstrap_context" in ctx
+        assert tmp_repo in ctx
 
     def test_populated_repo_loads_decisions(self, populated_repo):
         result = store.get_session_start_context(populated_repo)

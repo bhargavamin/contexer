@@ -82,33 +82,22 @@ else:
 PYEOF
 ok "Claude Desktop MCP registration done"
 
-# ── Per-repo hooks ────────────────────────────────────────────────────────────
+# ── Global session hooks (~/.claude/settings.json) ────────────────────────────
 
 echo ""
-echo "Set up session hooks for a repo?"
-echo "Hooks enable automatic context loading and task capture per session."
-read -r -p "Enter repo path (or press Enter to skip): " REPO_PATH
+echo "Installing global session hooks (fire for every Claude Code session)..."
 
-if [ -n "$REPO_PATH" ]; then
-    REPO_PATH="${REPO_PATH/#\~/$HOME}"  # expand ~
-    if [ ! -d "$REPO_PATH/.git" ]; then
-        warn "$REPO_PATH is not a git repo — skipping hooks"
-    else
-        SETTINGS_DIR="$REPO_PATH/.claude"
-        SETTINGS_FILE="$SETTINGS_DIR/settings.json"
-        mkdir -p "$SETTINGS_DIR"
+python3 - <<PYEOF
+import json
+from pathlib import Path
 
-        python3 - <<PYEOF
-import json, os
-
-path = "$SETTINGS_FILE"
-repo = "$REPO_PATH"
 ctx = "$CONTEXER_DIR"
+settings_path = Path.home() / ".claude" / "settings.json"
+settings_path.parent.mkdir(exist_ok=True)
 
 try:
-    with open(path) as f:
-        config = json.load(f)
-except FileNotFoundError:
+    config = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+except Exception:
     config = {}
 
 hooks = config.setdefault("hooks", {})
@@ -119,7 +108,7 @@ else:
     hooks["SessionStart"] = [{
         "hooks": [{
             "type": "command",
-            "command": f"uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; print(json.dumps(store.get_session_start_context('{repo}')))\"",
+            "command": f"REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; store.STORE_DIR.mkdir(exist_ok=True); (store.STORE_DIR/'.current_repo').write_text(sys.argv[1]); print(json.dumps(store.get_session_start_context(sys.argv[1])))\" \"$REPO\"",
             "statusMessage": "Loading session context..."
         }]
     }]
@@ -137,21 +126,19 @@ if "PostCompact" not in hooks:
     hooks["PostCompact"] = [{
         "hooks": [{
             "type": "command",
-            "command": f"uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; data=store._load('{repo}'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {{len(decisions)}} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({{'systemMessage':msg}}))\"",
+            "command": f"REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && uv run --directory {ctx} python -c \"import sys,json; sys.path.insert(0,'{ctx}'); import store; data=store._load(sys.argv[1]); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {{len(decisions)}} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({{'systemMessage':msg}}))\" \"$REPO\"",
             "statusMessage": "Reloading context after compact..."
         }]
     }]
 
-if "UserPromptSubmit" in hooks:
-    print("  UserPromptSubmit hooks already exist — skipping")
-else:
+if "UserPromptSubmit" not in hooks:
     hooks["UserPromptSubmit"] = [
         {
             "hooks": [{
                 "type": "mcp_tool",
                 "server": "contexer",
                 "tool": "capture_context",
-                "input": {"repo_path": repo, "description": "\${prompt}"},
+                "input": {"repo_path": "", "description": "\${prompt}"},
                 "once": True,
                 "statusMessage": "Capturing task..."
             }]
@@ -165,23 +152,10 @@ else:
         }
     ]
 
-with open(path, "w") as f:
-    json.dump(config, f, indent=2)
-print(f"  hooks written to {path}")
+settings_path.write_text(json.dumps(config, indent=2))
+print(f"  global hooks written to {settings_path}")
 PYEOF
-        ok "Session hooks configured for $REPO_PATH"
-
-        # Add settings.json to .gitignore if not already there
-        GITIGNORE="$REPO_PATH/.gitignore"
-        if [ -f "$GITIGNORE" ] && grep -q "settings.json" "$GITIGNORE"; then
-            true
-        elif [ -f "$SETTINGS_DIR/settings.local.json" ]; then
-            true  # project uses local.json pattern already
-        else
-            warn "Consider adding .claude/settings.json to .gitignore if it contains absolute paths"
-        fi
-    fi
-fi
+ok "Global session hooks configured"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 

@@ -129,7 +129,7 @@ Add to `~/.claude.json` under `mcpServers`:
 }
 ```
 
-Then add the session hooks to your repo's `.claude/settings.json`:
+Then add the session hooks to `~/.claude/settings.json` (global — fires for every Claude Code session, all repos):
 
 ```json
 {
@@ -137,7 +137,7 @@ Then add the session hooks to your repo's `.claude/settings.json`:
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; print(json.dumps(store.get_session_start_context('/your/repo/path')))\"",
+        "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; store.STORE_DIR.mkdir(exist_ok=True); (store.STORE_DIR/'.current_repo').write_text(sys.argv[1]); print(json.dumps(store.get_session_start_context(sys.argv[1])))\" \"$REPO\"",
         "statusMessage": "Loading session context..."
       }]
     }],
@@ -151,7 +151,7 @@ Then add the session hooks to your repo's `.claude/settings.json`:
     "PostCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; data=store._load('/your/repo/path'); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {len(decisions)} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg}))\"",
+        "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && uv run --directory /path/to/contexer python -c \"import sys,json; sys.path.insert(0,'/path/to/contexer'); import store; data=store._load(sys.argv[1]); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {len(decisions)} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg}))\" \"$REPO\"",
         "statusMessage": "Reloading context after compact..."
       }]
     }],
@@ -162,7 +162,7 @@ Then add the session hooks to your repo's `.claude/settings.json`:
           "server": "contexer",
           "tool": "capture_context",
           "input": {
-            "repo_path": "/your/repo/path",
+            "repo_path": "",
             "description": "${prompt}"
           },
           "once": true,
@@ -181,7 +181,7 @@ Then add the session hooks to your repo's `.claude/settings.json`:
 }
 ```
 
-Replace `/path/to/contexer` and `/your/repo/path` with your actual paths.
+Replace `/path/to/contexer` with your actual Contexer installation path. The hooks detect the current repo automatically — no per-repo configuration needed.
 
 ## Register with Claude Desktop
 
