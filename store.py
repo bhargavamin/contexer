@@ -8,6 +8,20 @@ from pathlib import Path
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 50
 
+
+def _current_repo_path() -> str:
+    path = STORE_DIR / ".current_repo"
+    if path.exists():
+        return path.read_text().strip()
+    return ""
+
+
+def _resolve_repo(repo_path: str) -> str:
+    """Return repo_path if provided; fall back to the path written by the SessionStart hook."""
+    if repo_path:
+        return repo_path
+    return _current_repo_path()
+
 _DECISION_SIGNALS = [
     "decided", "decision", "chose", "approach", "instead of",
     "rather than", "went with", "will use", "should use", "opted",
@@ -134,10 +148,10 @@ def get_session_start_context(repo_path: str) -> dict:
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": (
-                "No context stored for this repo yet. "
+                f"No context stored for repo '{repo_path}'. "
                 "Ask the user: 'No stored context found. I can scan this repo to build an initial "
                 "baseline of decisions and constraints — should I?' "
-                "Wait for their confirmation before calling bootstrap_context."
+                f"If confirmed, call bootstrap_context with repo_path='{repo_path}'."
             ),
         },
     }

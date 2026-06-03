@@ -67,10 +67,12 @@ Claude's job after receiving this:
 `get_session_start_context` (in `store.py`) handles both cases:
 
 - **Context exists:** inject decisions into session as before
-- **No context:** inject a prompt telling Claude to offer bootstrapping
+- **No context:** inject a prompt telling Claude to offer bootstrapping, including the detected repo_path so Claude knows exactly what to pass to `bootstrap_context`
 
 The hook detects empty context and tells Claude:
-> "No context stored for this repo yet. Ask the user: 'No stored context found. I can scan this repo to build an initial baseline of decisions and constraints — should I?' Wait for their confirmation before calling bootstrap_context."
+> "No context stored for repo '/path/to/repo'. Ask the user: 'No stored context found. I can scan this repo to build an initial baseline of decisions and constraints — should I?' If confirmed, call bootstrap_context with repo_path='/path/to/repo'."
+
+The SessionStart hook also writes the detected repo path to `~/.contexer/.current_repo`. All four MCP tools accept `repo_path=""` and auto-detect from this file — so `capture_context` (called from the UserPromptSubmit hook) requires no hardcoded path.
 
 ### What the scanner reads
 
