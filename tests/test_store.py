@@ -242,6 +242,46 @@ class TestGetSessionStartContext:
         assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
+# ── get_bootstrap_context_prompt ─────────────────────────────────────────────
+
+class TestGetBootstrapContextPrompt:
+    def test_empty_repo_returns_hook_output(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.get_bootstrap_context_prompt(tmp_repo)
+        assert "hookSpecificOutput" in result
+        assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+
+    def test_empty_repo_context_contains_instruction(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.get_bootstrap_context_prompt(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "no stored context" in ctx.lower()
+        assert "update_context" in ctx
+
+    def test_populated_repo_returns_empty_dict(self, populated_repo):
+        result = store.get_bootstrap_context_prompt(populated_repo)
+        assert result == {}
+
+    def test_inferred_facts_included_in_context(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "uv.lock").write_text("")
+        result = store.get_bootstrap_context_prompt(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "uv" in ctx.lower()
+
+    def test_gap_questions_included_in_context(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.get_bootstrap_context_prompt(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "what does this repo do" in ctx.lower()
+
+    def test_empty_repo_no_inferred_still_returns_questions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.get_bootstrap_context_prompt(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "gap questions" in ctx.lower() or "question" in ctx.lower()
+
+
 # ── bootstrap_scan ────────────────────────────────────────────────────────────
 
 def _gap_questions(result: dict) -> list[str]:
