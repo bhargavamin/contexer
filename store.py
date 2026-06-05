@@ -132,6 +132,38 @@ def update_decision(repo_path: str, content: str, session_id: str) -> tuple[bool
     return True, entry["id"]
 
 
+def _build_bootstrap_context(repo_path: str, hook_event: str) -> list[str]:
+    """Build the yes/no bootstrap prompt lines for injection into a hook's additionalContext."""
+    scan = bootstrap_scan(repo_path)
+    inferred = scan.get("inferred", [])
+    gaps = scan.get("gaps", [])
+
+    questions: list[str] = []
+    for f in inferred:
+        questions.append(f"Detected: {f}")
+    for g in gaps:
+        q = f"Assuming: {g['assumption']}"
+        if g.get("hint"):
+            q += f"  (if no: {g['hint']})"
+        questions.append(q)
+
+    lines = [
+        "IMPORTANT — this repo has no stored context.",
+        "Run an interactive bootstrap BEFORE addressing the user's request.",
+        "Rules:",
+        "  - Ask questions ONE AT A TIME. Do not list them all upfront.",
+        "  - After the user replies, call update_context to store the fact, then ask the next question.",
+        "  - Format: state the detected/assumed value, then ask 'Correct? yes / no'.",
+        "  - User may reply yes, no, or yes + extra detail. Accept all forms.",
+        "  - Once all questions are answered, address the original request.",
+        "",
+        "Start NOW with question 1 of {}:".format(len(questions)),
+    ]
+    for i, q in enumerate(questions, 1):
+        lines.append(f"  Q{i}. {q}")
+    return lines
+
+
 def get_session_start_context(repo_path: str) -> dict:
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
@@ -143,52 +175,24 @@ def get_session_start_context(repo_path: str) -> dict:
                 "additionalContext": get_context(repo_path),
             },
         }
+    lines = _build_bootstrap_context(repo_path, "SessionStart")
     return {
-        "systemMessage": "Contexer: no context stored yet — offer to bootstrap",
+        "systemMessage": "Contexer: no context yet — bootstrapping now",
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": (
-                f"No context stored for repo '{repo_path}'. "
-                "Ask the user: 'No stored context found. I can scan this repo to build an initial "
-                "baseline of decisions and constraints — should I?' "
-                f"If confirmed, call bootstrap_context with repo_path='{repo_path}'."
-            ),
+            "additionalContext": "\n".join(lines),
         },
     }
 
 
 def get_bootstrap_context_prompt(repo_path: str) -> dict:
-    """Called from UserPromptSubmit once-hook for repos with no stored context.
-    Runs bootstrap_scan and returns results as additionalContext.
-    Returns empty dict when context already exists so the hook outputs nothing."""
+    """Fallback for UserPromptSubmit: catches the case where SessionStart bootstrap
+    was skipped (e.g. non-interactive session). Returns empty dict when context exists."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
         return {}
-
-    scan = bootstrap_scan(repo_path)
-    inferred = scan.get("inferred", [])
-    gaps = scan.get("gaps", [])
-
-    lines = [
-        "IMPORTANT — this repo has no stored context. Before responding to the user's "
-        "request, address the following bootstrap in your reply:\n",
-    ]
-    if inferred:
-        lines.append("Inferred facts (confirm each with the user, then store confirmed ones via update_context):")
-        lines.extend(f"  - {f}" for f in inferred)
-    else:
-        lines.append("No inferable facts found (empty or minimal repo).")
-    lines.append("")
-    lines.append("Gap questions to ask the user:")
-    for i, g in enumerate(gaps, 1):
-        lines.append(f"  {i}. {g['question']}")
-        lines.append(f"     Assumption: {g['assumption']}")
-    lines.append("")
-    lines.append(
-        "For each confirmed fact or answered question, call update_context to store it. "
-        "Then address the user's original request."
-    )
+    lines = _build_bootstrap_context(repo_path, "UserPromptSubmit")
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
