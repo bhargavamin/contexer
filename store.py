@@ -157,6 +157,46 @@ def get_session_start_context(repo_path: str) -> dict:
     }
 
 
+def get_bootstrap_context_prompt(repo_path: str) -> dict:
+    """Called from UserPromptSubmit once-hook for repos with no stored context.
+    Runs bootstrap_scan and returns results as additionalContext.
+    Returns empty dict when context already exists so the hook outputs nothing."""
+    data = _load(repo_path)
+    decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    if decisions:
+        return {}
+
+    scan = bootstrap_scan(repo_path)
+    inferred = scan.get("inferred", [])
+    gaps = scan.get("gaps", [])
+
+    lines = [
+        "IMPORTANT — this repo has no stored context. Before responding to the user's "
+        "request, address the following bootstrap in your reply:\n",
+    ]
+    if inferred:
+        lines.append("Inferred facts (confirm each with the user, then store confirmed ones via update_context):")
+        lines.extend(f"  - {f}" for f in inferred)
+    else:
+        lines.append("No inferable facts found (empty or minimal repo).")
+    lines.append("")
+    lines.append("Gap questions to ask the user:")
+    for i, g in enumerate(gaps, 1):
+        lines.append(f"  {i}. {g['question']}")
+        lines.append(f"     Assumption: {g['assumption']}")
+    lines.append("")
+    lines.append(
+        "For each confirmed fact or answered question, call update_context to store it. "
+        "Then address the user's original request."
+    )
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "\n".join(lines),
+        }
+    }
+
+
 def get_context(repo_path: str) -> str:
     data = _load(repo_path)
     entries = data.get("entries", [])
