@@ -67,18 +67,18 @@ get_context()                          → latest 10 decisions (overview)
 
 → See **[docs/install.md](docs/install.md)** for full install steps, verification, and uninstall.
 
-**Quick start (plugin — recommended):**
+**Plugin (recommended):**
 
 ```
+/plugin marketplace add bhargavamin/contexer
 /plugin install contexer@contexer
+/reload-plugins
 ```
-
-Restart Claude Code, then `/mcp` — `contexer` should appear as connected.
 
 **Manual fallback:**
 
 ```bash
-git clone https://github.com/bhargavamin/contexer.git ~/tools/contexer
+git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
 bash ~/tools/contexer/install.sh
 ```
 
