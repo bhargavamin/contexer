@@ -449,12 +449,7 @@ class TestGetBootstrapContextPrompt:
 # ── bootstrap_scan ────────────────────────────────────────────────────────────
 
 def _gap_questions(result: dict) -> list[str]:
-    """Flatten gap question text for assertion convenience."""
     return [g["question"] for g in result["gaps"]]
-
-
-def _gap_assumptions(result: dict) -> list[str]:
-    return [g["assumption"] for g in result["gaps"]]
 
 
 class TestBootstrapScan:
