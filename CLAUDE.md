@@ -20,7 +20,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 Three files, no more:
 
 - **`server.py`** — MCP server entry point. Defines four tools (`capture_context`, `update_context`, `get_context`, `bootstrap_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
-- **`store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 50` per repo.
+- **`store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 500` per repo. Display is separately capped: `_UNFILTERED_DISPLAY = 10` for overview calls, `_FILTERED_DISPLAY = 25` for query/type-filtered calls.
 - **`requirements.txt`** — Kept for reference; `pyproject.toml` is the authoritative dependency spec managed by `uv`.
 
 ## Storage
@@ -54,7 +54,7 @@ The server is registered in `~/.claude.json` under `mcpServers`:
 
 **During a session**, call `update_context` whenever you make a significant decision, establish a pattern, or document a constraint. Pass the full reasoning, not just the conclusion. Optionally pass `subtype` (`architecture` | `constraint` | `pattern` | `convention`) to enable filtered retrieval later. The server filters — if content doesn't meet the novelty criteria it will be silently discarded, so err on the side of calling it.
 
-**Retrieving context JIT**: call `get_context` when the task requires project knowledge. Use `query` for keyword search or `entry_type` to retrieve a specific subtype: `get_context(entry_type="constraint")` returns only constraints.
+**Retrieving context JIT**: call `get_context` when the task requires project knowledge. Use `query` for keyword search or `entry_type` to retrieve a specific subtype: `get_context(entry_type="constraint")` returns only constraints (up to 25). Use `limit` to override the display cap. When results are truncated, the output includes a `"showing N of M"` note so you know more exist.
 
 ## Design constraints
 
