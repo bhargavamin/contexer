@@ -8,3 +8,18 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Test / tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDEs / editors
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
+
+# Claude Code local overrides (project .claude/settings.json is tracked on purpose)
+.claude/settings.local.json
