@@ -35,16 +35,17 @@ def update_context(content: str, repo_path: str = "", subtype: str = "") -> str:
 
 
 @mcp.tool()
-def get_context(repo_path: str = "", query: str = "", entry_type: str = "") -> str:
+def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limit: int = 0) -> str:
     """Returns stored context for the current repository. Call this when the task requires project context.
 
     query: optional keyword filter (case-insensitive substring match against decision content).
     entry_type: optional subtype filter — architecture | constraint | pattern | convention
+    limit: max decisions to return (0 = auto: 25 for filtered queries, 10 for unfiltered overview).
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
-    return store.get_context(resolved, query, entry_type)
+    return store.get_context(resolved, query, entry_type, limit)
 
 
 @mcp.tool()

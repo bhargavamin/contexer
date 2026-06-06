@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 STORE_DIR = Path.home() / ".contexer"
-MAX_ENTRIES = 50
+MAX_ENTRIES = 500
+_UNFILTERED_DISPLAY = 10   # entries shown when no query/type filter applied
+_FILTERED_DISPLAY = 25     # entries shown when a filter is active (caller asked for something specific)
 
 
 def _current_repo_path() -> str:
@@ -190,11 +192,12 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
     }
 
 
-def get_context(repo_path: str, query: str = "", entry_type: str = "") -> str:
+def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0) -> str:
     """Return stored context, optionally filtered by keyword query and/or entry subtype.
 
     query: case-insensitive substring match against decision content.
     entry_type: subtype filter — architecture | constraint | pattern | convention.
+    limit: max decisions to return. 0 = auto (25 for filtered queries, 10 for unfiltered overview).
     """
     data = _load(repo_path)
     entries = data.get("entries", [])
@@ -213,6 +216,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "") -> str:
 
     decisions = [e for e in entries if e["type"] == "decision"]
 
+    is_filtered = bool(query or entry_type)
     if entry_type:
         decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
 
@@ -220,21 +224,27 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "") -> str:
         q_lower = query.lower()
         decisions = [d for d in decisions if q_lower in d.get("content", "").lower()]
 
+    display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
+
     if decisions:
         filter_note = ""
-        if query or entry_type:
+        if is_filtered:
             parts = []
             if query:
                 parts.append(f"query='{query}'")
             if entry_type:
                 parts.append(f"type='{entry_type}'")
             filter_note = f" (filtered: {', '.join(parts)})"
+        total = len(decisions)
+        shown = decisions[-display_limit:]
+        if total > display_limit:
+            filter_note += f" — showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
-        for d in decisions[-10:]:
+        for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
         lines.append("")
-    elif query or entry_type:
+    elif is_filtered:
         parts = []
         if query:
             parts.append(f"query='{query}'")
