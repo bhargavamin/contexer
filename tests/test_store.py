@@ -142,6 +142,18 @@ class TestUpdateDecision:
         )
         assert stored is False
 
+    def test_subtype_stored_in_entry(self, tmp_repo):
+        store.update_decision(tmp_repo, "constraint: never store plaintext passwords in any log", "s1", subtype="constraint")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "constraint"
+
+    def test_subtype_defaults_to_empty_string(self, tmp_repo):
+        store.update_decision(tmp_repo, "decided to use postgres for primary storage layer", "s1")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == ""
+
     def test_cap_enforced(self, tmp_repo):
         for i in range(store.MAX_ENTRIES + 5):
             store.update_decision(tmp_repo, f"unique decision number {i} about the system architecture approach", f"sess-{i}")
@@ -164,6 +176,31 @@ class TestGetContext:
         result = store.get_context(populated_repo)
         assert "JWT" in result
         assert "bcrypt" in result
+
+    def test_query_filter_returns_matching_decisions(self, populated_repo):
+        result = store.get_context(populated_repo, query="JWT")
+        assert "JWT" in result
+        assert "bcrypt" not in result
+
+    def test_query_filter_case_insensitive(self, populated_repo):
+        result = store.get_context(populated_repo, query="jwt")
+        assert "JWT" in result
+
+    def test_query_filter_no_match_returns_message(self, populated_repo):
+        result = store.get_context(populated_repo, query="nonexistent_xyz_keyword")
+        assert "No matching" in result
+
+    def test_entry_type_filter_returns_matching_subtype(self, tmp_repo):
+        store.update_decision(tmp_repo, "constraint: always use bcrypt for passwords", "s1", subtype="constraint")
+        store.update_decision(tmp_repo, "architecture: layered domain model with services", "s1", subtype="architecture")
+        result = store.get_context(tmp_repo, entry_type="constraint")
+        assert "bcrypt" in result
+        assert "layered" not in result
+
+    def test_entry_type_filter_no_match_returns_message(self, populated_repo):
+        # populated_repo entries have no subtype — filter should return no match
+        result = store.get_context(populated_repo, entry_type="architecture")
+        assert "No matching" in result
 
     def test_shows_only_last_10_decisions(self, tmp_repo):
         topics = [
@@ -221,20 +258,24 @@ class TestGetSessionStartContext:
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert "no context stored" in result["systemMessage"].lower()
 
-    def test_empty_repo_message_includes_repo_path(self, tmp_repo):
+    def test_empty_repo_directive_includes_repo_path(self, tmp_repo):
+        # Directive includes repo path so Claude knows which repo is being bootstrapped
         result = store.get_session_start_context(tmp_repo)
         assert tmp_repo in result["hookSpecificOutput"]["additionalContext"]
 
-    def test_empty_repo_message_includes_call_instruction(self, tmp_repo):
+    def test_empty_repo_directive_includes_bootstrap_instruction(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "bootstrap_context" in ctx
-        assert tmp_repo in ctx
+        assert "STOP" in ctx
 
-    def test_populated_repo_loads_decisions(self, populated_repo):
+    def test_populated_repo_injects_pointer_not_full_dump(self, populated_repo):
+        # JIT: SessionStart injects a count pointer, not the full context
         result = store.get_session_start_context(populated_repo)
-        assert "decision(s) loaded" in result["systemMessage"]
-        assert "JWT" in result["hookSpecificOutput"]["additionalContext"]
+        assert "stored" in result["systemMessage"]
+        assert "get_context" in result["hookSpecificOutput"]["additionalContext"]
+        # Must NOT contain the decision content — Claude fetches that on demand
+        assert "JWT" not in result["hookSpecificOutput"]["additionalContext"]
 
     def test_output_is_valid_hook_json(self, populated_repo):
         result = store.get_session_start_context(populated_repo)
@@ -262,24 +303,26 @@ class TestGetBootstrapContextPrompt:
         result = store.get_bootstrap_context_prompt(populated_repo)
         assert result == {}
 
-    def test_inferred_facts_included_in_context(self, tmp_repo):
+    def test_directive_tells_claude_to_call_bootstrap_tool(self, tmp_repo):
+        # The hook emits a STOP directive — inferred facts are fetched via the MCP tool, not inline
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "uv.lock").write_text("")
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "uv" in ctx.lower()
+        assert "bootstrap_context" in ctx
+        assert "STOP" in ctx
 
-    def test_gap_questions_included_in_context(self, tmp_repo):
+    def test_directive_includes_repo_path(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "what does this repo do" in ctx.lower()
+        assert tmp_repo in ctx
 
-    def test_empty_repo_no_inferred_still_returns_questions(self, tmp_repo):
+    def test_directive_includes_update_context_instruction(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "gap questions" in ctx.lower() or "question" in ctx.lower()
+        assert "update_context" in ctx
 
 
 # ── bootstrap_scan ────────────────────────────────────────────────────────────
@@ -309,17 +352,34 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo)
         assert any("what does this repo do" in q.lower() for q in _gap_questions(result))
 
-    def test_always_asks_team_context(self, tmp_repo):
+    def test_team_context_asked_when_architecture_signals_present(self, tmp_repo):
+        # Team conventions gap is conditional — only when architecture signals suggest collaboration
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        src = Path(tmp_repo) / "src"
+        (src / "api").mkdir(parents=True)
+        (src / "services").mkdir(parents=True)
+        (src / "models").mkdir(parents=True)
         result = store.bootstrap_scan(tmp_repo)
-        assert any("team" in q.lower() or "solo" in q.lower() for q in _gap_questions(result))
+        assert any("branch" in q.lower() or "team" in q.lower() or "pr" in q.lower() for q in _gap_questions(result))
 
-    def test_always_asks_exclusions_and_constraints(self, tmp_repo):
+    def test_exclusions_asked_when_dep_choices_exist(self, tmp_repo):
+        # Exclusions gap only fires when dep tree has meaningful choices (>5 deps or ORM detected)
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\n'
+            'dependencies = ["sqlalchemy>=2.0","httpx","pydantic","redis","celery","stripe"]\n'
+        )
         result = store.bootstrap_scan(tmp_repo)
-        questions = " ".join(_gap_questions(result))
-        assert "exclusion" in questions.lower() or "pattern" in questions.lower()
-        assert "constraint" in questions.lower() or "compliance" in questions.lower()
+        assert any("exclusion" in q.lower() or "intentionally" in q.lower() for q in _gap_questions(result))
+
+    def test_constraints_asked_when_production_signals_present(self, tmp_repo):
+        # Constraints gap only fires when production signals exist (auth, cloud, infra, container)
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        assert any("constraint" in q.lower() for q in _gap_questions(result))
 
     def test_purpose_assumption_derived_from_readme(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -384,20 +444,20 @@ class TestBootstrapScan:
 
     # ── deployment detection ───────────────────────────────────────────────────
 
-    def test_detects_dockerfile_sets_container_assumption(self, tmp_repo):
+    def test_detects_dockerfile_suppresses_deployment_gap(self, tmp_repo):
+        # When Dockerfile present, deployment target is known — no need to ask
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
 
         result = store.bootstrap_scan(tmp_repo)
         assert any("dockerfile" in i.lower() or "container" in i.lower() for i in result["inferred"])
-        env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
-        assert "container" in env_gap["assumption"].lower()
+        assert not any("where does this run" in g["question"].lower() for g in result["gaps"])
 
-    def test_no_dockerfile_assumption_reflects_no_config(self, tmp_repo):
+    def test_no_dockerfile_adds_deployment_gap(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.bootstrap_scan(tmp_repo)
         env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
-        assert "no deployment config" in env_gap["assumption"].lower() or "early stage" in env_gap["assumption"].lower()
+        assert "no container" in env_gap["assumption"].lower() or "deployment target" in env_gap["assumption"].lower()
 
     # ── data layer detection ───────────────────────────────────────────────────
 

@@ -115,13 +115,14 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
     return entry["id"]
 
 
-def update_decision(repo_path: str, content: str, session_id: str) -> tuple[bool, str | None]:
+def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
     data = _load(repo_path)
     if not _passes_filter(content, data["entries"]):
         return False, None
     entry = {
         "id": str(uuid.uuid4()),
         "type": "decision",
+        "subtype": subtype,
         "content": content,
         "session_id": session_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -136,7 +137,7 @@ def _build_bootstrap_context(repo_path: str, hook_event: str) -> list[str]:
     """Build a bootstrap directive for injection into a hook's additionalContext."""
     return [
         "STOP — do not answer the user's request yet.",
-        "This repo has no stored context. You must complete a quick bootstrap first.",
+        f"Repo: {repo_path}. No stored context — complete a quick bootstrap first.",
         "Do this now, before anything else:",
         "  1. Call the bootstrap_context MCP tool with repo_path='' to get items to confirm.",
         "  2. Take the first item. State it to the user, ask 'Correct? yes / no / [correction]'. Wait for reply.",
@@ -150,16 +151,22 @@ def get_session_start_context(repo_path: str) -> dict:
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
+        last_date = decisions[-1]["timestamp"][:10]
+        count = len(decisions)
+        # JIT: inject a pointer only — Claude calls get_context when it actually needs context
         return {
-            "systemMessage": f"Contexer: {len(decisions)} decision(s) loaded",
+            "systemMessage": f"Contexer: {count} decision(s) stored (last: {last_date}) — call get_context when relevant",
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": get_context(repo_path),
+                "additionalContext": (
+                    f"Contexer: {count} stored decision(s) for this repo (last updated {last_date}). "
+                    "Call get_context to load relevant context — only when the task requires it, not speculatively."
+                ),
             },
         }
     lines = _build_bootstrap_context(repo_path, "SessionStart")
     return {
-        "systemMessage": "Contexer: no context yet — bootstrapping now",
+        "systemMessage": "Contexer: no context stored — bootstrapping now",
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": "\n".join(lines),
@@ -183,7 +190,12 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
     }
 
 
-def get_context(repo_path: str) -> str:
+def get_context(repo_path: str, query: str = "", entry_type: str = "") -> str:
+    """Return stored context, optionally filtered by keyword query and/or entry subtype.
+
+    query: case-insensitive substring match against decision content.
+    entry_type: subtype filter — architecture | constraint | pattern | convention.
+    """
     data = _load(repo_path)
     entries = data.get("entries", [])
     if not entries:
@@ -191,19 +203,44 @@ def get_context(repo_path: str) -> str:
 
     lines = [f"# Context for {repo_path}\n"]
 
-    tasks = [e for e in entries if e["type"] == "task"]
-    if tasks:
-        last = tasks[-1]
-        lines.append(f"## Last task ({last['timestamp'][:10]})")
-        lines.append(last["content"])
-        lines.append("")
+    if not entry_type:
+        tasks = [e for e in entries if e["type"] == "task"]
+        if tasks:
+            last = tasks[-1]
+            lines.append(f"## Last task ({last['timestamp'][:10]})")
+            lines.append(last["content"])
+            lines.append("")
 
     decisions = [e for e in entries if e["type"] == "decision"]
+
+    if entry_type:
+        decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
+
+    if query:
+        q_lower = query.lower()
+        decisions = [d for d in decisions if q_lower in d.get("content", "").lower()]
+
     if decisions:
-        lines.append("## Decisions and context")
+        filter_note = ""
+        if query or entry_type:
+            parts = []
+            if query:
+                parts.append(f"query='{query}'")
+            if entry_type:
+                parts.append(f"type='{entry_type}'")
+            filter_note = f" (filtered: {', '.join(parts)})"
+        lines.append(f"## Decisions and context{filter_note}")
         for d in decisions[-10:]:
-            lines.append(f"- [{d['timestamp'][:10]}] {d['content']}")
+            subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
         lines.append("")
+    elif query or entry_type:
+        parts = []
+        if query:
+            parts.append(f"query='{query}'")
+        if entry_type:
+            parts.append(f"type='{entry_type}'")
+        lines.append(f"No matching decisions found ({', '.join(parts)}).")
 
     return "\n".join(lines)
 
