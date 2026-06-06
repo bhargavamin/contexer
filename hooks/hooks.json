@@ -27,13 +27,32 @@
         "hooks": [
           {
             "type": "command",
-            "command": "UV_PROJECT_ENVIRONMENT=\"${CLAUDE_PLUGIN_DATA}/venv\" REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo \"${CLAUDE_PROJECT_DIR}\") && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"import sys,json; sys.path.insert(0,sys.argv[2]); import store; data=store._load(sys.argv[1]); entries=data.get('entries',[]); decisions=[e for e in entries if e['type']=='decision']; msg=f'Contexer: {len(decisions)} decision(s) available — run get_context to reload' if decisions else 'Contexer: no context stored'; print(json.dumps({'systemMessage':msg}))\" \"$REPO\" \"${CLAUDE_PLUGIN_ROOT}\"",
+            "command": "UV_PROJECT_ENVIRONMENT=\"${CLAUDE_PLUGIN_DATA}/venv\" REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo \"${CLAUDE_PROJECT_DIR}\") && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"import sys,json; sys.path.insert(0,sys.argv[2]); import store; ctx=store.get_context(sys.argv[1]); print(json.dumps({'systemMessage': 'Contexer: context reloaded after compaction\\n' + ctx}))\" \"$REPO\" \"${CLAUDE_PLUGIN_ROOT}\"",
             "statusMessage": "Reloading context after compact..."
           }
         ]
       }
     ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo \"${CLAUDE_PROJECT_DIR}\") && printf '%s' \"$REPO\" > ~/.contexer/.current_repo && echo '{}'",
+            "statusMessage": "Anchoring repo context..."
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "once": true,
+            "command": "UV_PROJECT_ENVIRONMENT=\"${CLAUDE_PLUGIN_DATA}/venv\" REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo \"${CLAUDE_PROJECT_DIR}\") && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"import sys,json; sys.path.insert(0,sys.argv[2]); import store; result=store.get_bootstrap_context_prompt(sys.argv[1]); print(json.dumps(result))\" \"$REPO\" \"${CLAUDE_PLUGIN_ROOT}\"",
+            "statusMessage": "Checking bootstrap context..."
+          }
+        ]
+      },
       {
         "hooks": [
           {
@@ -46,15 +65,6 @@
             },
             "once": true,
             "statusMessage": "Capturing task..."
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"Reminder: if you make a significant decision, establish a pattern, or document a constraint this turn, call update_context.\"}}'",
-            "statusMessage": "Loading context reminder..."
           }
         ]
       }
