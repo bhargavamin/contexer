@@ -19,24 +19,9 @@ def _current_repo_path() -> str:
 
 
 def _resolve_repo(repo_path: str) -> str:
-    """Return repo_path if provided; fall back to the path written by the SessionStart hook."""
     if repo_path:
         return repo_path
     return _current_repo_path()
-
-_DECISION_SIGNALS = [
-    "decided", "decision", "chose", "approach", "instead of",
-    "rather than", "went with", "will use", "should use", "opted",
-]
-_PATTERN_SIGNALS = [
-    "pattern", "convention", "always", "never", "standard",
-    "consistent", "going forward", "from now on", "practice",
-]
-_CONSTRAINT_SIGNALS = [
-    "constraint", "tradeoff", "trade-off", "limitation", "cannot",
-    "avoid", "requirement", "must not", "intentionally", "by design",
-]
-
 
 def _slug(repo_path: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", repo_path.strip("/"))
@@ -135,8 +120,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     return True, entry["id"]
 
 
-def _build_bootstrap_context(repo_path: str, hook_event: str) -> list[str]:
-    """Build a bootstrap directive for injection into a hook's additionalContext."""
+def _build_bootstrap_context(repo_path: str) -> list[str]:
     return [
         "STOP — do not answer the user's request yet.",
         f"Repo: {repo_path}. No stored context — complete a quick bootstrap first.",
@@ -166,7 +150,7 @@ def get_session_start_context(repo_path: str) -> dict:
                 ),
             },
         }
-    lines = _build_bootstrap_context(repo_path, "SessionStart")
+    lines = _build_bootstrap_context(repo_path)
     return {
         "systemMessage": "Contexer: no context stored — bootstrapping now",
         "hookSpecificOutput": {
@@ -183,7 +167,7 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
         return {}
-    lines = _build_bootstrap_context(repo_path, "UserPromptSubmit")
+    lines = _build_bootstrap_context(repo_path)
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -193,12 +177,6 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0) -> str:
-    """Return stored context, optionally filtered by keyword query and/or entry subtype.
-
-    query: case-insensitive substring match against decision content.
-    entry_type: subtype filter — architecture | constraint | pattern | convention.
-    limit: max decisions to return. 0 = auto (25 for filtered queries, 10 for unfiltered overview).
-    """
     data = _load(repo_path)
     entries = data.get("entries", [])
     if not entries:
