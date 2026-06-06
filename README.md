@@ -79,7 +79,7 @@ get_context()                          → latest 10 decisions (overview)
 
 ```bash
 git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/install.sh
+bash ~/tools/contexer/scripts/install.sh
 ```
 
 ## What happens if a decision is missed

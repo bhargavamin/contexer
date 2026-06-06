@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Contexer installer — wires up MCP server and global hooks for Claude Code.
-# Run from any location: bash /path/to/contexer/install.sh
+# Run from any location: bash /path/to/contexer/scripts/install.sh
 # Requires: uv (https://docs.astral.sh/uv/getting-started/installation/)
 # Note: install path must not contain spaces.
 set -euo pipefail
 
-CONTEXER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTEXER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "Installing Contexer from: $CONTEXER_DIR"
 echo ""
 
@@ -134,4 +134,4 @@ echo "  Next: restart Claude Code (or start a new session) in any git repo."
 echo "  First session: bootstrap runs automatically."
 echo "  Subsequent sessions: call get_context when you need project context."
 echo ""
-echo "To uninstall: bash $CONTEXER_DIR/uninstall.sh"
+echo "To uninstall: bash $CONTEXER_DIR/scripts/uninstall.sh"
