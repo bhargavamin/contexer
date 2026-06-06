@@ -60,5 +60,5 @@ The server is registered in `~/.claude.json` under `mcpServers`:
 
 - **Silent operation is essential.** Tools must not produce noise — `update_context` silently discards filtered content without logging.
 - **No abstraction beyond what exists.** The three-file structure is intentional. Do not add classes, config files, or layers unless the spec changes.
-- **`update_context` is called by Claude Code, not the developer.** Claude Code nominates content; the server filters. The filtering criteria are heuristic keyword signals, not an LLM call.
+- **`update_context` is called by Claude Code, not the developer.** Claude Code nominates content; the server filters. The filtering criterion is novelty — >70% token overlap with any existing decision is rejected as a duplicate, not an LLM call.
 - **Git hooks and CLI commits are out of scope.** The MCP tool call path is the only capture mechanism.

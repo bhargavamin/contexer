@@ -1,7 +1,7 @@
 [project]
 name = "contexer"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server that captures and retrieves architectural decisions and context for Claude Code sessions"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.9.4",
