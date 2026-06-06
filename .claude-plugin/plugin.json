@@ -1,0 +1,10 @@
+{
+  "name": "contexer",
+  "version": "0.1.0",
+  "description": "MCP context engine — persists decisions and constraints across Claude Code sessions",
+  "author": { "name": "bhargavamin" },
+  "homepage": "https://github.com/bhargavamin/contexer",
+  "repository": "https://github.com/bhargavamin/contexer",
+  "license": "MIT",
+  "keywords": ["mcp", "context", "memory", "claude-code"]
+}

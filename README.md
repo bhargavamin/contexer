@@ -103,7 +103,43 @@ Two things can cause a miss:
 - Ask Claude to call `get_context` mid-session to see what's been captured so far
 - Inspect the file directly: `cat ~/.contexer/<repo_slug>.json`
 
-## Installation
+## Install as a plugin (recommended)
+
+Contexer ships as a Claude Code plugin — one install registers the MCP server **and** all four
+session hooks together. No hand-editing of `~/.claude.json` or `~/.claude/settings.json`.
+
+**Requires:** [uv](https://github.com/astral-sh/uv) on your `PATH`.
+
+```bash
+/plugin marketplace add bhargavamin/contexer
+/plugin install contexer@contexer
+```
+
+Restart Claude Code, then run `/mcp` — `contexer` should appear as connected. On the first
+connection `uv` builds an isolated environment for the server (one-time, needs network); later
+sessions reuse it. Update later with `/plugin update contexer@contexer`.
+
+### Private repo / auth
+
+`/plugin marketplace add bhargavamin/contexer` clones the repo over your existing git
+credentials. If `git clone https://github.com/bhargavamin/contexer` works in your shell, the
+add works (check with `gh auth status`). Each user needs read access to the repo and their own
+GitHub auth.
+
+- **HTTPS:** `gh auth login`, macOS Keychain, or `git-credential-store`.
+- **SSH:** add via the full URL — `/plugin marketplace add git@github.com:bhargavamin/contexer.git`
+  (needs the host in `known_hosts` and your key in `ssh-agent`).
+- **Background auto-updates** run at startup without interactive credential prompts, so for a
+  private repo set a token in your environment or updates silently fail:
+  ```bash
+  export GITHUB_TOKEN=ghp_xxxx   # or GH_TOKEN — needs repo read scope
+  ```
+
+> Plugins are Claude Code only. For **Claude Desktop**, or to install without the plugin system,
+> use the manual steps below (or run `scripts/install.sh`, which automates them and also
+> registers Claude Desktop).
+
+## Manual install (fallback)
 
 **Requires:** Python 3.12+, [uv](https://github.com/astral-sh/uv)
 
@@ -113,7 +149,7 @@ cd contexer
 uv sync
 ```
 
-## Register with Claude Code
+### Register with Claude Code
 
 Add to `~/.claude.json` under `mcpServers`:
 
@@ -183,7 +219,7 @@ Then add the session hooks to `~/.claude/settings.json` (global — fires for ev
 
 Replace `/path/to/contexer` with your actual Contexer installation path. The hooks detect the current repo automatically — no per-repo configuration needed.
 
-## Register with Claude Desktop
+### Register with Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
