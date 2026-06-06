@@ -146,7 +146,9 @@ def get_session_start_context(repo_path: str) -> dict:
                 "hookEventName": "SessionStart",
                 "additionalContext": (
                     f"Contexer: {count} stored decision(s) for this repo (last updated {last_date}). "
-                    "Call get_context to load relevant context — only when the task requires it, not speculatively."
+                    "Call get_context BEFORE reading files for any question about architecture, design decisions, "
+                    "rationale, constraints, patterns, or conventions. "
+                    "Fall back to reading files only when context is missing or the question is about current code state."
                 ),
             },
         }
