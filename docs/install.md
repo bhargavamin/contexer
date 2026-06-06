@@ -102,7 +102,7 @@ If you prefer not to use the plugin system:
 
 ```bash
 git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/install.sh
+bash ~/tools/contexer/scripts/install.sh
 ```
 
 The script writes the MCP server entry and all 6 hooks into `~/.claude.json` and `~/.claude/settings.json` directly. It is idempotent — safe to re-run after updates or if you move the repo.
@@ -110,7 +110,7 @@ The script writes the MCP server entry and all 6 hooks into `~/.claude.json` and
 To uninstall:
 
 ```bash
-bash ~/tools/contexer/uninstall.sh
+bash ~/tools/contexer/scripts/uninstall.sh
 ```
 
 ---

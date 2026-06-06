@@ -3,7 +3,7 @@
 # Context store (~/.contexer/) is preserved. Remove manually if desired.
 set -euo pipefail
 
-CONTEXER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTEXER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "Uninstalling Contexer..."
 echo ""
 
