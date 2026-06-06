@@ -20,24 +20,31 @@ def capture_context(description: str, repo_path: str = "") -> str:
 
 
 @mcp.tool()
-def update_context(content: str, repo_path: str = "") -> str:
-    """Called when Claude Code makes a significant decision mid-task. The server filters before storing."""
+def update_context(content: str, repo_path: str = "", subtype: str = "") -> str:
+    """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
+
+    subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
+    """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    stored, entry_id = store.update_decision(resolved, content, SESSION_ID)
+    stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype)
     if stored:
         return f"Stored. id={entry_id}"
     return "Filtered — did not meet storage criteria."
 
 
 @mcp.tool()
-def get_context(repo_path: str = "") -> str:
-    """Called at the start of every new session. Returns stored context for the current repository."""
+def get_context(repo_path: str = "", query: str = "", entry_type: str = "") -> str:
+    """Returns stored context for the current repository. Call this when the task requires project context.
+
+    query: optional keyword filter (case-insensitive substring match against decision content).
+    entry_type: optional subtype filter — architecture | constraint | pattern | convention
+    """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
-    return store.get_context(resolved)
+    return store.get_context(resolved, query, entry_type)
 
 
 @mcp.tool()
