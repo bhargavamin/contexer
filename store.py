@@ -133,35 +133,17 @@ def update_decision(repo_path: str, content: str, session_id: str) -> tuple[bool
 
 
 def _build_bootstrap_context(repo_path: str, hook_event: str) -> list[str]:
-    """Build the yes/no bootstrap prompt lines for injection into a hook's additionalContext."""
-    scan = bootstrap_scan(repo_path)
-    inferred = scan.get("inferred", [])
-    gaps = scan.get("gaps", [])
-
-    questions: list[str] = []
-    for f in inferred:
-        questions.append(f"Detected: {f}")
-    for g in gaps:
-        q = f"Assuming: {g['assumption']}"
-        if g.get("hint"):
-            q += f"  (if no: {g['hint']})"
-        questions.append(q)
-
-    lines = [
-        "IMPORTANT — this repo has no stored context.",
-        "Run an interactive bootstrap BEFORE addressing the user's request.",
-        "Rules:",
-        "  - Ask questions ONE AT A TIME. Do not list them all upfront.",
-        "  - After the user replies, call update_context to store the fact, then ask the next question.",
-        "  - Format: state the detected/assumed value, then ask 'Correct? yes / no'.",
-        "  - User may reply yes, no, or yes + extra detail. Accept all forms.",
-        "  - Once all questions are answered, address the original request.",
-        "",
-        "Start NOW with question 1 of {}:".format(len(questions)),
+    """Build a bootstrap directive for injection into a hook's additionalContext."""
+    return [
+        "STOP — do not answer the user's request yet.",
+        "This repo has no stored context. You must complete a quick bootstrap first.",
+        "Do this now, before anything else:",
+        "  1. Call the bootstrap_context MCP tool with repo_path='' to get items to confirm.",
+        "  2. Take the first item. State it to the user, ask 'Correct? yes / no / [correction]'. Wait for reply.",
+        "  3. Call update_context to store the confirmed fact. Then move to item 2.",
+        "  4. Repeat until all items are done. Then — and only then — address the user's original request.",
+        "Start by calling bootstrap_context now.",
     ]
-    for i, q in enumerate(questions, 1):
-        lines.append(f"  Q{i}. {q}")
-    return lines
 
 
 def get_session_start_context(repo_path: str) -> dict:
@@ -528,82 +510,132 @@ def bootstrap_scan(repo_path: str) -> dict:
         if (root / cf).exists():
             found_files.append(cf)
 
-    # --- Intent questions: assumption → confirm / deny / append (max 10) ---
+    # --- Primary stack detection for stack-aware hints ---
+    primary_stack = (
+        "python" if any("Python" in i for i in inferred) else
+        "node"   if any("Node.js" in i or "TypeScript" in i for i in inferred) else
+        "go"     if any("Go module" in i or "Go version" in i for i in inferred) else
+        "rust"   if any("Rust" in i for i in inferred) else
+        "generic"
+    )
+
+    def _test_hint() -> str:
+        if primary_stack == "python":
+            return "e.g. pytest with fixtures and coverage threshold; no mocking external calls in unit tests"
+        if primary_stack == "node":
+            return "e.g. Jest or Vitest; 80% coverage threshold; no real HTTP calls in unit tests"
+        if primary_stack == "go":
+            return "e.g. go test, table-driven tests; benchmarks for hot paths"
+        if primary_stack == "rust":
+            return "e.g. cargo test; #[cfg(test)] modules; integration tests in tests/"
+        return "e.g. unit tests, integration tests, coverage threshold"
+
+    def _exclusions_hint() -> str:
+        if primary_stack == "python":
+            return "e.g. 'no requests, use httpx'; 'no Flask, FastAPI only'; 'always type-annotate public APIs'"
+        if primary_stack == "node":
+            return "e.g. 'no CommonJS, ESM only'; 'no lodash, use native'; 'no class-based components'"
+        if primary_stack == "go":
+            return "e.g. 'no global state'; 'always wrap errors with fmt.Errorf'; 'no init() functions'"
+        if primary_stack == "rust":
+            return "e.g. 'no unwrap() in production code'; 'async with tokio only'; 'no unsafe blocks'"
+        return "e.g. specific libraries to avoid, patterns to always follow, things that must never happen"
+
+    def _constraints_hint() -> str:
+        if sig["has_security_sensitive"] and sig["cloud_detected"]:
+            return f"e.g. GDPR / PCI-DSS compliance; {sig['cloud_detected']} cost ceiling; latency SLA"
+        if sig["has_security_sensitive"]:
+            return "e.g. GDPR, PCI-DSS, SOC2, HIPAA; audit logging requirements; data residency"
+        if sig["cloud_detected"]:
+            return f"e.g. {sig['cloud_detected']} cost ceiling; latency SLA; multi-region requirements"
+        return "e.g. <100ms p99 latency; 1M+ concurrent users; GDPR; monthly cost ceiling"
+
+    # --- Intent gaps: all conditional on signals ---
     gaps: list[dict] = []
 
-    # 1. Purpose + audience — most important, always asked
+    # Purpose — always: can never be inferred from code
+    name = sig["project_name"]
     gaps.append(_gap(
-        assumption=_infer_purpose(sig["project_name"], sig["readme_summary"]),
+        assumption=_infer_purpose(name, sig["readme_summary"]),
         question="What does this repo do and who uses it?",
-        hint="Confirm the assumption above, correct it, or add: what problem it solves and who the users are",
+        hint=(
+            f"e.g. what {name} is for and who uses it"
+            if name else
+            "e.g. 'REST API for internal task management, used by 3 frontend apps'"
+        ),
     ))
 
-    # 2. Runtime environment — inferred from container/infra/cloud signals
-    if sig["has_container"]:
-        env_assumption = "Containerized service (Dockerfile present)"
-    elif sig["has_infra"]:
-        env_assumption = "Cloud-deployed via Kubernetes or Terraform"
-    elif sig["cloud_detected"]:
-        env_assumption = f"Uses {sig['cloud_detected']} — likely cloud-hosted or cloud-dependent"
-    else:
-        env_assumption = "No deployment config found — possibly local tool or early stage"
-    gaps.append(_gap(
-        assumption=env_assumption,
-        question="Where does this run in production?",
-        hint="e.g. containerized API, serverless function, VPS, internal CLI, local-only tool, not deployed yet",
-    ))
-
-    # 3. Team context — always asked, can't be inferred
-    gaps.append(_gap(
-        assumption="Solo or small team — conventions live in config files and code",
-        question="Solo or team? Any conventions that aren't captured in the config files?",
-        hint="e.g. PR review process, branching model, unwritten norms, who owns what area",
-    ))
-
-    # 4. Gap: no tests
+    # Tests — only if no test framework detected
     if not sig["has_tests"]:
         gaps.append(_gap(
-            assumption="No automated tests detected — may be intentional for this stage",
-            question="No test framework found — is automated testing in scope?",
-            hint="If yes: framework and coverage expectations. If no: why not (speed, early stage, manual QA)?",
+            assumption="No automated test framework detected",
+            question="Is automated testing in scope?",
+            hint=_test_hint(),
         ))
 
-    # 5. Gap: no CI
+    # CI — only if no CI config found
     if not sig["has_ci"]:
         gaps.append(_gap(
-            assumption="No CI config in this repo — may exist elsewhere or not yet set up",
-            question="No CI config detected — is there a build or deploy pipeline?",
-            hint="e.g. GitHub Actions in another branch, external CI, manual deploys, or not needed yet",
+            assumption="No CI/CD config found in this repo",
+            question="Is there a build or deploy pipeline, or is one planned?",
+            hint="e.g. GitHub Actions, GitLab CI, CircleCI; or: manual deploys, not needed yet",
         ))
 
-    # 6. Gap: security-sensitive deps without compliance context
-    if sig["has_security_sensitive"]:
+    # Deployment — only if no container or infra config
+    if not sig["has_container"] and not sig["has_infra"]:
         gaps.append(_gap(
-            assumption="Auth or payment handling detected — likely has compliance requirements",
-            question="Auth or payments detected — any compliance or security requirements?",
-            hint="e.g. GDPR, PCI-DSS, SOC2, HIPAA, internal security policies, data residency requirements",
+            assumption="No container or infra config found — deployment target unclear",
+            question="Where does this run, or is it local-only?",
+            hint="e.g. containerized VPS, serverless function, internal CLI, local-only tool, not deployed yet",
         ))
 
-    # 7. Gap: cloud SDK without deploy config
+    # Cloud SDK but no deploy config — probably in a separate repo
     if sig["cloud_detected"] and not sig["has_container"] and not sig["has_infra"]:
         gaps.append(_gap(
-            assumption=f"{sig['cloud_detected']} SDK present but no container or infra config found",
-            question=f"Assuming {sig['cloud_detected']} deploy config lives elsewhere — correct?",
-            hint="e.g. separate infra repo, serverless framework config, or just using APIs without hosting there",
+            assumption=f"{sig['cloud_detected']} SDK detected but no deploy config found here",
+            question=f"Is the {sig['cloud_detected']} deploy config in a separate repo?",
+            hint="e.g. separate infra repo, serverless framework config, or not yet set up",
         ))
 
-    # 8. Intentional exclusions and patterns — always, highest-value signal
-    gaps.append(_gap(
-        assumption="No known intentional exclusions — standard choices for the detected stack",
-        question="Any intentional technology exclusions or patterns that must always be followed?",
-        hint="e.g. 'no ORM — raw SQL only', 'always async', 'never commit secrets', 'avoid X because Y'",
-    ))
+    # Compliance — only if auth or payment deps detected
+    if sig["has_security_sensitive"]:
+        gaps.append(_gap(
+            assumption="Auth or payment handling detected — compliance requirements unknown",
+            question="Any compliance or security requirements given the auth/payment handling?",
+            hint="e.g. GDPR, PCI-DSS, SOC2, HIPAA; internal security policy; audit logging; data residency",
+        ))
 
-    # 9. Constraints — always, second-highest value
-    gaps.append(_gap(
-        assumption="No known performance, scale, or compliance constraints",
-        question="Any constraints that shape technical decisions?",
-        hint="e.g. <100ms p99 latency, 1M+ concurrent users, GDPR data residency, cost ceiling",
-    ))
+    # Team conventions — only if architecture signals suggest a team wrote this
+    has_team_signals = (
+        any("Architecture" in i or "layered" in i for i in inferred) or
+        len(inferred) > 5
+    )
+    if has_team_signals:
+        gaps.append(_gap(
+            assumption="Team conventions not captured in config files",
+            question="Any branching model, PR process, or unwritten norms beyond what's in config files?",
+            hint="e.g. trunk-based vs feature branches; PR review requirements; who owns which area",
+        ))
+
+    # Exclusions — only if dep tree suggests architectural choices were made
+    has_dep_choices = len(all_deps) > 5 or bool(detected_orm) or len(detected_db) > 0
+    if has_dep_choices:
+        gaps.append(_gap(
+            assumption="No known intentional library exclusions or architectural mandates",
+            question="Any libraries or patterns that are intentionally excluded or always required?",
+            hint=_exclusions_hint(),
+        ))
+
+    # Constraints — only if production signals exist
+    has_production_signals = (
+        sig["has_security_sensitive"] or sig["cloud_detected"] or
+        sig["has_infra"] or sig["has_container"]
+    )
+    if has_production_signals:
+        gaps.append(_gap(
+            assumption="No known performance, scale, or compliance constraints",
+            question="Any constraints that shape technical decisions?",
+            hint=_constraints_hint(),
+        ))
 
     return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files}

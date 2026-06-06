@@ -1,162 +1,145 @@
-# bootstrap_context — Feature Design
+# Bootstrap Context
 
-## Problem
+Bootstrap initialises a context store for a repo that has no stored decisions. It scans the repo statically, produces a list of detected facts and assumptions, and guides Claude through confirming each one — storing every answer in the context store so future sessions start with a rich baseline.
 
-Contexer builds knowledge incrementally during sessions. For existing projects with established patterns, conventions, and historical decisions, there is no initial seed of context. The first sessions start blind even though the codebase already encodes a lot of implicit decisions.
+---
 
-## Goal
+## How it triggers
 
-Allow Contexer to initialize context for an existing repo by:
-1. Statically scanning the repo for inferable facts (runtime, tooling, CI, etc.)
-2. Returning inferred decisions + a targeted question list for what could not be determined
-3. Claude stores the inferred decisions and works through the questions with the user
+Bootstrap runs automatically when a session starts in a repo with no stored context. There are two trigger points, in order:
 
-## Approach: Option B — Static scan + LLM-driven interview
+### 1. SessionStart hook
 
-**Why not static only (Option A)?**
-Captures *what* (runtime version, package manager) but misses *why* (architectural intent, intentional exclusions, deployment constraints). The why is exactly what Contexer is designed to preserve.
+When Claude Code starts a session, the `SessionStart` hook calls `get_session_start_context`. If no decisions exist for the repo, it injects a bootstrap directive into `additionalContext` before Claude responds to anything.
 
-**Why not predefined questionnaire (Option C)?**
-Generic questions miss project-specific gaps. A question like "do you use Docker?" is useless if the repo already has a Dockerfile.
+```
+Session starts
+  └─▶ SessionStart hook fires
+      └─▶ No context found → injects bootstrap directive
+          └─▶ Claude confirms items one at a time on the user's first message
+```
 
-**Why Option B?**
-- Server does cheap static work (no LLM cost)
-- Claude is already in the loop — it handles synthesis and questioning
-- Questions are targeted to actual gaps, not generic
-- Fits the existing architecture: one new tool, no new files
+### 2. UserPromptSubmit once-hook (fallback)
 
-## Resolved design decisions
+If the `SessionStart` hook was skipped (non-interactive session, hook failure), the `UserPromptSubmit` hook fires on the user's first message. It calls `get_bootstrap_context_prompt` — same logic, same output, same effect.
 
-| Question | Decision |
+Once either hook stores at least one decision, both return no-op on every subsequent call (empty dict).
+
+---
+
+## What Claude receives
+
+Both hooks inject an 8-line imperative directive into `additionalContext`:
+
+```
+STOP — do not answer the user's request yet.
+This repo has no stored context. You must complete a quick bootstrap first.
+Do this now, before anything else:
+  1. Call the bootstrap_context MCP tool with repo_path='' to get items to confirm.
+  2. Take the first item. State it to the user, ask 'Correct? yes / no / [correction]'. Wait for reply.
+  3. Call update_context to store the confirmed fact. Then move to item 2.
+  4. Repeat until all items are done. Then — and only then — address the user's original request.
+Start by calling bootstrap_context now.
+```
+
+The directive does **not** embed the item list. Claude calls `bootstrap_context` to get structured JSON, which it can reliably iterate. Embedding items as a pipe-separated inline string caused Claude to skip bootstrap — it had nothing concrete to act on and treated `additionalContext` as a soft hint rather than a hard stop.
+
+---
+
+## What gets scanned
+
+`bootstrap_scan` reads known config file paths only — it never walks the full tree.
+
+| Source | What it infers |
 |---|---|
-| Auto-trigger or explicit? | Auto-trigger on SessionStart when no context exists, but ask for user confirmation before scanning |
-| How to ask gap questions? | Short and quick — presented as a batch, focused on patterns, use case, and constraints |
-| Store inferred decisions automatically? | Show to user for confirmation first, then store confirmed ones via `update_context` |
+| `pyproject.toml` | Python runtime, package manager, test framework, key deps |
+| `package.json` | Node.js project name, framework (express, next, react...), test framework |
+| `Cargo.toml` | Rust project |
+| `go.mod` | Go module |
+| `.github/workflows/` | CI present |
+| `Dockerfile` / `docker-compose.yml` | Containerised |
+| `ruff.toml`, `.eslintrc*`, `mypy.ini`, `.prettierrc*` | Linting / style enforcement |
+| `terraform/`, `k8s/`, `helm/` | Infrastructure / deployment |
 
-## Design
+**Detected facts** are stated directly (e.g. `Framework: express`).
 
-### New tool: `bootstrap_context(repo_path)`
+**Gap questions** are generated only when a signal is missing or ambiguous. Every question is conditional — nothing is hardcoded or asked unconditionally (except purpose, which can never be inferred from code).
 
-Added to `server.py`. Returns JSON:
+| Gap | Asked when |
+|---|---|
+| Purpose | Always — code can't tell you *why* a repo exists |
+| Tests | No test framework detected |
+| CI/CD | No CI config found |
+| Deployment | No Dockerfile or infra config found |
+| Cloud deploy | Cloud SDK present but no deploy config |
+| Compliance | Auth or payment deps detected |
+| Team conventions | Architecture signals suggest collaboration |
+| Exclusions | Dep tree has enough choices to warrant it (>5 deps or ORM present) |
+| Constraints | Production signals present (auth, cloud, infra, container) |
 
-```json
-{
-  "inferred": [
-    "Python 3.12, uv as package manager (pyproject.toml)",
-    "pytest for testing (pyproject.toml dev deps)",
-    "GitHub Actions CI on push to main (.github/workflows/ci.yml)"
-  ],
-  "gaps": [
-    "What is this repo's primary purpose? (1-2 sentences)",
-    "What is the deployment target? (container, serverless, VPS, not yet decided...)",
-    "Are there intentional technology exclusions or patterns to always follow?",
-    "Are there performance, scale, or compliance constraints that shape technical decisions?"
-  ],
-  "existing_context_files": ["CLAUDE.md", "README.md", "pyproject.toml"]
-}
-```
+**Hints are stack-aware.** A Python repo gets pytest examples; a Node repo gets Jest/Vitest examples; a Rust repo gets cargo test examples. No cross-stack noise.
 
-Claude's job after receiving this:
-1. Show `inferred` list to user and ask for confirmation
-2. Store confirmed items via `update_context`
-3. Present `gaps` as a quick-fire batch (not one at a time)
-4. Store each answer via `update_context`
+---
 
-### Auto-trigger via SessionStart hook
+## Manual invocation: `/bootstrap`
 
-`get_session_start_context` (in `store.py`) handles both cases:
-
-- **Context exists:** inject decisions into session as before
-- **No context:** inject a prompt telling Claude to offer bootstrapping, including the detected repo_path so Claude knows exactly what to pass to `bootstrap_context`
-
-The hook detects empty context and tells Claude:
-> "No context stored for repo '/path/to/repo'. Ask the user: 'No stored context found. I can scan this repo to build an initial baseline of decisions and constraints — should I?' If confirmed, call bootstrap_context with repo_path='/path/to/repo'."
-
-The SessionStart hook also writes the detected repo path to `~/.contexer/.current_repo`. All four MCP tools accept `repo_path=""` and auto-detect from this file — so `capture_context` (called from the UserPromptSubmit hook) requires no hardcoded path.
-
-### What the scanner reads
-
-**Tier 1 — infer directly:**
-- `pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod` → runtime, package manager, key deps
-- `.github/workflows/` / `.gitlab-ci.yml` → CI/CD system
-- `ruff.toml` / `.eslintrc*` / `mypy.ini` / `.prettierrc*` → linting and style enforcement
-- `Dockerfile` / `docker-compose.yml` → containerization
-- `pytest.ini` / `jest.config.*` / `vitest.config.*` → test framework
-- `*.tf` / `terraform/` / `k8s/` / `helm/` → infra and deployment
-
-**Tier 2 — absence becomes a gap question:**
-- No test config → "What is the testing approach?"
-- No Dockerfile/k8s/terraform → "What is the deployment target?"
-
-**Always ask (cannot be inferred):**
-- Primary purpose
-- Intentional technology exclusions / patterns
-- Performance, scale, compliance constraints
-
-### Gap question principles
-
-Questions must be short and answerable in 1-2 sentences. Focus on:
-- **Use case:** what is this for?
-- **Patterns:** what should always/never be done?
-- **Constraints:** what shapes technical decisions?
-
-Present all gap questions at once as a quick-fire batch, not an extended interview.
-
-### Implementation
-
-`store.py` — two new functions:
-- `bootstrap_scan(repo_path) -> dict` — static file scanner, returns `inferred`, `gaps`, `existing_context_files`
-- `get_session_start_context(repo_path) -> dict` — used by SessionStart hook; returns the full hook JSON output including bootstrap prompt when no context exists
-
-`server.py` — new tool:
-```python
-@mcp.tool()
-def bootstrap_context(repo_path: str) -> str:
-    """Scans a repo for inferable decisions and gap questions. Present inferred
-    items to the user for confirmation, store confirmed ones via update_context,
-    then ask the gap questions and store each answer."""
-    return json.dumps(store.bootstrap_scan(repo_path), indent=2)
-```
-
-### Usage flow
+Type `/bootstrap` at any time to trigger a guided setup on demand — even if context already exists.
 
 ```
-New session — no context stored for this repo
-    │
-    ↓
-SessionStart hook fires → get_session_start_context detects empty context
-    └─▶ injects prompt: "No context found. Should I bootstrap?"
-    │
-    ↓
-Claude asks user for confirmation
-    │
-    ↓
-User confirms → Claude calls bootstrap_context("/path/to/repo")
-    │
-    ↓
-Server returns: inferred decisions + gap questions
-    │
-    ↓
-Claude shows inferred list → user confirms → Claude calls update_context for each
-    │
-    ↓
-Claude presents gap questions as a quick batch
-    │
-    ↓
-User answers → Claude calls update_context for each answer
-    │
-    ↓
-Repo now has a rich decision baseline for all future sessions
+/bootstrap
 ```
 
-### Edge cases
+Claude will:
+1. Call `bootstrap_context` MCP tool with `repo_path=""`
+2. Present each detected and assumed item one at a time
+3. Ask `Correct? yes / no / [your correction]` — wait for reply before moving on
+4. Call `update_context` after each answer to store the confirmed fact
+5. Report how many items were stored when done
 
-- **Repo already has context:** `bootstrap_scan` uses `_is_novel` against existing decisions — safe to run again, duplicates are skipped
-- **Large repos:** scanner only reads known config file paths by name — O(1), never walks the full tree
-- **Monorepos:** scan at root by default; pass a subdirectory path for per-service context
+Use this when:
+- You want to seed context for a repo that already has some entries (safe — `update_context` deduplicates)
+- The automatic bootstrap was interrupted mid-way
+- You want to re-confirm assumptions after major changes to the stack
 
-## Constraints preserved
+---
 
-- No new files — `bootstrap_scan` and `get_session_start_context` are in `store.py`; new tool is in `server.py`
-- No LLM calls in the server — all reasoning stays in Claude
-- Silent operation unchanged — bootstrap is always explicit (requires user confirmation)
+## Resetting bootstrap
+
+To trigger automatic bootstrap again for a repo, clear its context store:
+
+```bash
+# find the store file
+ls ~/.contexer/
+
+# clear it (slug = repo path with non-alphanumeric chars replaced by _)
+echo '{"entries":[]}' > ~/.contexer/<repo_slug>.json
+```
+
+The next session start will detect no decisions and re-run bootstrap automatically.
+
+---
+
+## Hook chain (technical)
+
+```
+UserPromptSubmit hooks fire in order:
+  1. command (every prompt) — writes git root to ~/.contexer/.current_repo
+  2. command (once)         — get_bootstrap_context_prompt → injects directive if no context
+  3. mcp_tool (once)        — capture_context stores the user's first prompt as a task entry
+  4. command (every prompt) — injects update_context reminder
+```
+
+The anchor hook (step 1) ensures `.current_repo` always points to the current session's repo before any MCP tool resolves `repo_path=""`. This prevents cross-repo contamination when multiple sessions run concurrently.
+
+---
+
+## Implementation
+
+| File | Function | Role |
+|---|---|---|
+| `store.py` | `bootstrap_scan(repo_path)` | Static scanner — returns `inferred` list and `gaps` list |
+| `store.py` | `_build_bootstrap_context(repo_path, hook_event)` | Formats scan output into 3-line directive |
+| `store.py` | `get_session_start_context(repo_path)` | SessionStart hook handler — bootstrap or load context |
+| `store.py` | `get_bootstrap_context_prompt(repo_path)` | UserPromptSubmit hook handler — bootstrap fallback |
+| `server.py` | `bootstrap_context(repo_path)` | MCP tool — exposes raw scan JSON for `/bootstrap` command |
+| `.claude/commands/bootstrap.md` | — | Slash command definition for manual invocation |
