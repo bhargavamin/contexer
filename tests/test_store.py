@@ -155,10 +155,28 @@ class TestUpdateDecision:
         assert entry["subtype"] == ""
 
     def test_cap_enforced(self, tmp_repo):
-        for i in range(store.MAX_ENTRIES + 5):
-            store.update_decision(tmp_repo, f"unique decision number {i} about the system architecture approach", f"sess-{i}")
+        distinct = [
+            "decided to use postgresql for primary relational data storage layer",
+            "chose redis for session caching and distributed rate limit tracking",
+            "selected graphql for the client-facing api query interface",
+            "picked typescript strict mode for all frontend component definitions",
+            "went with docker compose for reproducible local development environments",
+            "decided on github actions for continuous integration and deployment pipeline",
+            "chose fastapi over flask for the async python backend service",
+            "selected terraform for infrastructure provisioning and state management",
+            "went with elasticsearch for full text search and log aggregation",
+            "decided to use celery with rabbitmq for async background task processing",
+            "chose prisma orm for type-safe database access in nodejs services",
+            "selected nextjs app router for the customer-facing web application",
+            "decided to use stripe webhooks for payment event processing integration",
+            "went with datadog apm for application performance monitoring and tracing",
+            "chose sentry for error tracking and on-call alerting in production",
+        ]
+        for i, content in enumerate(distinct):
+            store.update_decision(tmp_repo, content, f"sess-{i}")
         data = store._load(tmp_repo)
         assert len(data["entries"]) <= store.MAX_ENTRIES
+        assert len(data["entries"]) == 15  # well under cap, all stored
 
 
 # ── get_context ───────────────────────────────────────────────────────────────
@@ -202,7 +220,7 @@ class TestGetContext:
         result = store.get_context(populated_repo, entry_type="architecture")
         assert "No matching" in result
 
-    def test_shows_only_last_10_decisions(self, tmp_repo):
+    def test_unfiltered_shows_last_10_by_default(self, tmp_repo):
         topics = [
             "decided to use postgres for primary storage instead of sqlite",
             "chose jwt over sessions because stateless auth scales horizontally",
@@ -223,8 +241,111 @@ class TestGetContext:
         for i, content in enumerate(topics):
             store.update_decision(tmp_repo, content, f"s{i}")
         result = store.get_context(tmp_repo)
-        # get_context surfaces only the last 10
-        assert result.count("- [") == 10
+        assert result.count("- [") == store._UNFILTERED_DISPLAY
+
+    def test_filtered_shows_up_to_25_by_default(self, tmp_repo):
+        constraints = [
+            "constraint: bcrypt for password hashing, never md5 or sha1",
+            "constraint: api responses must be typed using pydantic models",
+            "constraint: database migrations run manually in production only",
+            "constraint: all secrets stored in environment variables",
+            "constraint: input validation at every api boundary before service layer",
+            "constraint: no direct database access from route handlers",
+            "constraint: logging must not include personally identifiable information",
+            "constraint: external api calls wrapped in retry logic with backoff",
+            "constraint: test coverage required for all repository and service functions",
+            "constraint: feature flags for all new functionality in production",
+            "constraint: database connection pooling configured per environment",
+            "constraint: authentication tokens expire after 24 hours maximum",
+            "constraint: rate limiting applied to all public endpoints at gateway",
+            "constraint: background jobs must be idempotent for safe re-execution",
+            "constraint: no business logic in database migration scripts",
+            "constraint: ssl certificates renewed automatically via scheduled job",
+            "constraint: docker images built from minimal base images for security",
+            "constraint: all configuration loaded at startup not at request time",
+            "constraint: json responses include api version header on all routes",
+            "constraint: database indexes reviewed for every new query pattern",
+            "constraint: error messages never expose internal stack traces to clients",
+            "constraint: health check endpoints excluded from authentication",
+            "constraint: all file uploads scanned for malware before processing",
+            "constraint: pagination required for all list endpoints returning collections",
+            "constraint: cache invalidation strategy documented per cached resource",
+            "constraint: database transactions wrap all multi-step write operations",
+            "constraint: api deprecation notices sent 90 days before removal",
+            "constraint: audit log written for all writes on sensitive user data",
+            "constraint: memory limits set on all containerized service deployments",
+            "constraint: zero trust networking enforced between internal microservices",
+        ]
+        for i, content in enumerate(constraints):
+            store.update_decision(tmp_repo, content, f"s{i}", subtype="constraint")
+        result = store.get_context(tmp_repo, entry_type="constraint")
+        assert result.count("- [") == store._FILTERED_DISPLAY
+
+    def test_limit_param_overrides_auto(self, tmp_repo):
+        distinct = [
+            "decided to use postgresql for primary relational data storage",
+            "chose redis for distributed session caching and rate limits",
+            "selected graphql for the client-facing api query layer",
+            "picked typescript strict mode for all frontend components",
+            "went with docker compose for local development environments",
+            "decided on github actions for continuous integration pipeline",
+            "chose fastapi for the async python backend service layer",
+            "selected terraform for infrastructure provisioning management",
+            "went with elasticsearch for full text search functionality",
+            "decided celery with rabbitmq for async background processing",
+            "chose prisma for type-safe database access in node services",
+            "selected nextjs app router for customer-facing web application",
+            "decided to use stripe webhooks for payment event processing",
+            "went with datadog for application performance monitoring",
+            "chose sentry for error tracking and production alerting",
+            "decided to use s3 for file storage and static asset serving",
+            "selected cloudfront as cdn for static asset delivery globally",
+            "went with route53 for dns management and health checks",
+            "chose aurora rds for the managed relational database service",
+            "decided to use ecr for container image storage and deployment",
+        ]
+        for i, content in enumerate(distinct):
+            store.update_decision(tmp_repo, content, f"s{i}")
+        result = store.get_context(tmp_repo, limit=5)
+        assert result.count("- [") == 5
+
+    def test_overflow_note_shown_when_results_truncated(self, tmp_repo):
+        constraints = [
+            "constraint: bcrypt for password hashing, never md5 or sha1",
+            "constraint: api responses must be typed using pydantic models",
+            "constraint: database migrations run manually in production only",
+            "constraint: all secrets stored in environment variables",
+            "constraint: input validation at every api boundary before service layer",
+            "constraint: no direct database access from route handlers",
+            "constraint: logging must not include personally identifiable information",
+            "constraint: external api calls wrapped in retry logic with backoff",
+            "constraint: test coverage required for all repository and service functions",
+            "constraint: feature flags for all new functionality in production",
+            "constraint: database connection pooling configured per environment",
+            "constraint: authentication tokens expire after 24 hours maximum",
+            "constraint: rate limiting applied to all public endpoints at gateway",
+            "constraint: background jobs must be idempotent for safe re-execution",
+            "constraint: no business logic in database migration scripts",
+            "constraint: ssl certificates renewed automatically via scheduled job",
+            "constraint: docker images built from minimal base images for security",
+            "constraint: all configuration loaded at startup not at request time",
+            "constraint: json responses include api version header on all routes",
+            "constraint: database indexes reviewed for every new query pattern",
+            "constraint: error messages never expose internal stack traces to clients",
+            "constraint: health check endpoints excluded from authentication",
+            "constraint: all file uploads scanned for malware before processing",
+            "constraint: pagination required for all list endpoints returning collections",
+            "constraint: cache invalidation strategy documented per cached resource",
+            "constraint: database transactions wrap all multi-step write operations",
+            "constraint: api deprecation notices sent 90 days before removal",
+            "constraint: audit log written for all writes on sensitive user data",
+            "constraint: memory limits set on all containerized service deployments",
+            "constraint: zero trust networking enforced between internal microservices",
+        ]
+        for i, content in enumerate(constraints):
+            store.update_decision(tmp_repo, content, f"s{i}", subtype="constraint")
+        result = store.get_context(tmp_repo, entry_type="constraint")
+        assert "showing" in result and "of 30" in result
 
 
 # ── _resolve_repo ─────────────────────────────────────────────────────────────
