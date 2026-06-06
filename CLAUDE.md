@@ -19,13 +19,13 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 Three files, no more:
 
-- **`server.py`** — MCP server entry point. Defines the three tools (`capture_context`, `update_context`, `get_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
-- **`store.py`** — All read/write and filtering logic. The filtering in `_passes_filter` is the core intelligence: content passes if it matches any one of four criteria (decision signal, pattern signal, constraint signal, or novelty). Novelty is a token-overlap check against existing entries (>70% overlap = duplicate). Storage is capped at `MAX_ENTRIES = 50` per repo.
+- **`server.py`** — MCP server entry point. Defines four tools (`capture_context`, `update_context`, `get_context`, `bootstrap_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
+- **`store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 50` per repo.
 - **`requirements.txt`** — Kept for reference; `pyproject.toml` is the authoritative dependency spec managed by `uv`.
 
 ## Storage
 
-Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo. The slug is the repo path with non-alphanumeric characters replaced by underscores. Each file holds a flat list of entries, each with `id`, `type` (`task` | `decision`), `content`, `session_id`, and `timestamp`.
+Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo. The slug is the repo path with non-alphanumeric characters replaced by underscores. Each file holds a flat list of entries, each with `id`, `type` (`task` | `decision`), `subtype` (`architecture` | `constraint` | `pattern` | `convention` — decisions only), `content`, `session_id`, and `timestamp`.
 
 ## MCP integration
 
@@ -43,12 +43,18 @@ The server is registered in `~/.claude.json` under `mcpServers`:
 
 ## Session behaviour (hooks)
 
-`.claude/settings.json` wires up two hooks automatically:
+`~/.claude/settings.json` wires up hooks globally (applies to every repo):
 
-- **`SessionStart`** — calls `get_context` to load stored decisions into the session before the first message
-- **`UserPromptSubmit` (once)** — calls `capture_context` with the first user prompt as the task description
+- **`SessionStart`** — injects a count pointer (`"N decisions stored — call get_context when relevant"`) if context exists; injects the bootstrap STOP directive if no context exists. Does **not** pre-load decisions — Claude fetches them JIT via `get_context`.
+- **`UserPromptSubmit` (anchor, every prompt)** — writes the git root to `~/.contexer/.current_repo` so MCP tools can resolve `repo_path=""` correctly even across concurrent sessions.
+- **`UserPromptSubmit` (once)** — fires `get_bootstrap_context_prompt` on the first prompt; injects the bootstrap directive if no context exists (fallback for when SessionStart is skipped).
+- **`UserPromptSubmit` (once, mcp_tool)** — calls `capture_context` with the first user prompt as the task description.
+- **`PreCompact`** — injects a systemMessage reminding Claude to call `update_context` for any unsaved decisions before the context window is compacted.
+- **`PostCompact`** — re-injects the full context via systemMessage so Claude resumes with full awareness after compaction.
 
-**During a session**, call `update_context` whenever you make a significant decision, establish a pattern, or document a constraint. Pass the full reasoning, not just the conclusion. The server filters — if it doesn't meet the criteria it will be silently discarded, so err on the side of calling it.
+**During a session**, call `update_context` whenever you make a significant decision, establish a pattern, or document a constraint. Pass the full reasoning, not just the conclusion. Optionally pass `subtype` (`architecture` | `constraint` | `pattern` | `convention`) to enable filtered retrieval later. The server filters — if content doesn't meet the novelty criteria it will be silently discarded, so err on the side of calling it.
+
+**Retrieving context JIT**: call `get_context` when the task requires project knowledge. Use `query` for keyword search or `entry_type` to retrieve a specific subtype: `get_context(entry_type="constraint")` returns only constraints.
 
 ## Design constraints
 
