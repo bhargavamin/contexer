@@ -33,7 +33,7 @@ Both hooks inject an 8-line imperative directive into `additionalContext`:
 
 ```
 STOP — do not answer the user's request yet.
-This repo has no stored context. You must complete a quick bootstrap first.
+Repo: <repo_path>. No stored context — complete a quick bootstrap first.
 Do this now, before anything else:
   1. Call the bootstrap_context MCP tool with repo_path='' to get items to confirm.
   2. Take the first item. State it to the user, ask 'Correct? yes / no / [correction]'. Wait for reply.
@@ -41,6 +41,8 @@ Do this now, before anything else:
   4. Repeat until all items are done. Then — and only then — address the user's original request.
 Start by calling bootstrap_context now.
 ```
+
+The repo path is embedded in line 2 so Claude can confirm which repo is being bootstrapped. It still passes `repo_path=''` to the MCP tool — auto-detect via `.current_repo` handles resolution.
 
 The directive does **not** embed the item list. Claude calls `bootstrap_context` to get structured JSON, which it can reliably iterate. Embedding items as a pipe-separated inline string caused Claude to skip bootstrap — it had nothing concrete to act on and treated `additionalContext` as a soft hint rather than a hard stop.
 
@@ -126,10 +128,11 @@ UserPromptSubmit hooks fire in order:
   1. command (every prompt) — writes git root to ~/.contexer/.current_repo
   2. command (once)         — get_bootstrap_context_prompt → injects directive if no context
   3. mcp_tool (once)        — capture_context stores the user's first prompt as a task entry
-  4. command (every prompt) — injects update_context reminder
 ```
 
 The anchor hook (step 1) ensures `.current_repo` always points to the current session's repo before any MCP tool resolves `repo_path=""`. This prevents cross-repo contamination when multiple sessions run concurrently.
+
+The every-prompt update_context reminder was removed — it added tokens on every turn regardless of whether a decision was possible. Claude is briefed once (via SessionStart or the STOP directive) and calls `update_context` based on that standing instruction.
 
 ---
 
