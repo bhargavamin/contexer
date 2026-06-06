@@ -23,3 +23,6 @@ wheels/
 
 # Claude Code local overrides (project .claude/settings.json is tracked on purpose)
 .claude/settings.local.json
+
+# Dev-only MCP override — plugin handles global registration
+.mcp.json

@@ -1,6 +1,6 @@
 # Installing Contexer
 
-Contexer is a Claude Code plugin. Install it once; it activates automatically in every git repo you open.
+Install once; it activates automatically in every git repo you open.
 
 **Prerequisite:** [uv](https://docs.astral.sh/uv/getting-started/installation/) must be on your `PATH`.
 
@@ -12,27 +12,28 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Install (plugin — recommended)
 
-Open any Claude Code session and run:
+Run these three commands in any Claude Code session:
 
 ```
+/plugin marketplace add bhargavamin/contexer
 /plugin install contexer@contexer
+/reload-plugins
 ```
 
-Then restart Claude Code completely (quit and reopen). Verify the server is connected:
+Verify the server is connected:
 
 ```
 /mcp
 ```
 
-`contexer` should appear as **connected**. On first connect, `uv` builds an isolated environment — this takes ~10 seconds and needs network. Subsequent sessions use the cached environment.
+`contexer` should appear as **connected**.
 
 **What this installs:**
 
-| Config file | What changes |
+| Config | What changes |
 |---|---|
 | MCP server | Registered globally via the plugin system |
 | 6 hooks | SessionStart, PreCompact, PostCompact, 3× UserPromptSubmit |
-| 4 permissions | `capture_context`, `update_context`, `get_context`, `bootstrap_context` |
 
 No files in `~/.claude.json` or `~/.claude/settings.json` are hand-edited.
 
@@ -76,6 +77,7 @@ The slug is your repo path with non-alphanumeric characters replaced by undersco
 
 ```
 /plugin update contexer@contexer
+/reload-plugins
 ```
 
 ---
@@ -96,22 +98,20 @@ rm -rf ~/.contexer/
 
 ## Manual install (fallback)
 
-If the plugin system is unavailable, use the shell script instead:
+If you prefer not to use the plugin system:
 
 ```bash
 git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
 bash ~/tools/contexer/install.sh
 ```
 
-The script writes the MCP server entry and all 6 hooks into `~/.claude.json` and `~/.claude/settings.json` directly. It is idempotent — safe to run again after updates or if you move the repo (re-running updates the paths).
+The script writes the MCP server entry and all 6 hooks into `~/.claude.json` and `~/.claude/settings.json` directly. It is idempotent — safe to re-run after updates or if you move the repo.
 
-To uninstall the manual install:
+To uninstall:
 
 ```bash
 bash ~/tools/contexer/uninstall.sh
 ```
-
-**Limitation:** The manual install embeds the repo path at install time. If you move the cloned directory, re-run `install.sh` to update the paths.
 
 ---
 
@@ -139,3 +139,9 @@ Next session: repeat from top, but with history
 ```
 
 **You do not need to do anything during a session.** Claude captures decisions automatically. If Claude misses something important, say: *"store that decision"*.
+
+---
+
+## Something not working?
+
+→ See **[docs/troubleshooting.md](troubleshooting.md)** for the four most common failure modes with exact fix steps.
