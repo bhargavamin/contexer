@@ -54,7 +54,7 @@ The server is registered in `~/.claude.json` under `mcpServers`:
 
 **During a session**, call `update_context` whenever you make a significant decision, establish a pattern, or document a constraint. Pass the full reasoning, not just the conclusion. Optionally pass `subtype` (`architecture` | `constraint` | `pattern` | `convention`) to enable filtered retrieval later. The server filters — if content doesn't meet the novelty criteria it will be silently discarded, so err on the side of calling it.
 
-**Retrieving context JIT**: call `get_context` when the task requires project knowledge. Use `query` for keyword search or `entry_type` to retrieve a specific subtype: `get_context(entry_type="constraint")` returns only constraints (up to 25). Use `limit` to override the display cap. When results are truncated, the output includes a `"showing N of M"` note so you know more exist.
+**Retrieving context JIT**: call `get_context` **before reading files** for any question about architecture, design decisions, rationale, constraints, patterns, or conventions. Fall back to reading files only when context is missing or the question is about current code state (exact syntax, current values). Use `query` for keyword search or `entry_type` to retrieve a specific subtype: `get_context(entry_type="constraint")` returns only constraints (up to 25). Use `limit` to override the display cap. When results are truncated, the output includes a `"showing N of M"` note so you know more exist.
 
 ## Design constraints
 
