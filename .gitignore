@@ -26,3 +26,8 @@ wheels/
 
 # Dev-only MCP override — plugin handles global registration
 .mcp.json
+
+# Stray Node.js artifacts (not a Node project)
+package.json
+package-lock.json
+node_modules/

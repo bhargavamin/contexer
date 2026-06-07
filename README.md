@@ -1,5 +1,12 @@
 # Contexer
 
+[![PyPI version](https://img.shields.io/pypi/v/contexer)](https://pypi.org/project/contexer/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
+[![Discord](https://img.shields.io/discord/Fk6JSaW4p?label=Discord&logo=discord&logoColor=white)](https://discord.gg/Fk6JSaW4p)
+
+**[contexer.ai](https://contexer.ai)** · [Discord](https://discord.gg/Fk6JSaW4p) · [Docs](docs/install.md)
+
 Contexer is a lightweight MCP server for Claude Code that automatically captures decisions made during coding sessions and surfaces them at the start of every future session — so Claude never starts blind.
 
 ## The problem
@@ -167,6 +174,14 @@ If the content is too close to an existing decision, it is silently skipped. Rep
 
 **No context appeared at session start.**
 This happens the first time you open a repo — bootstrap will run to capture your initial decisions. Complete it once and all future sessions will have context.
+
+---
+
+## Contributing
+
+Bug reports, fixes, and documentation improvements are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for development setup, code style, commit format, and the PR process.
+
+Questions or ideas? Join the community on [Discord](https://discord.gg/Fk6JSaW4p).
 
 ---
 
