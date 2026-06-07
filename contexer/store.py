@@ -7,8 +7,9 @@ from pathlib import Path
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
-_UNFILTERED_DISPLAY = 10   # entries shown when no query/type filter applied
-_FILTERED_DISPLAY = 25     # entries shown when a filter is active (caller asked for something specific)
+GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
+_UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
+_FILTERED_DISPLAY = 25            # entries shown when a filter is active
 
 
 def _current_repo_path() -> str:
@@ -41,6 +42,91 @@ def _load(repo_path: str) -> dict:
 
 def _save(repo_path: str, data: dict) -> None:
     _store_path(repo_path).write_text(json.dumps(data, indent=2))
+
+
+# ── Global store ───────────────────────────────────────────────────────────────
+
+def _global_path() -> Path:
+    STORE_DIR.mkdir(exist_ok=True)
+    return STORE_DIR / f"{GLOBAL_SLUG}.json"
+
+
+def _load_global() -> dict:
+    path = _global_path()
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"repo_path": GLOBAL_SLUG, "entries": []}
+
+
+def _save_global(data: dict) -> None:
+    _global_path().write_text(json.dumps(data, indent=2))
+
+
+def update_global_decision(content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+    """Store a cross-cutting decision in the global store.
+    Only constraint and convention subtypes are accepted — architecture and pattern
+    decisions are always repo-specific.
+    """
+    if subtype and subtype not in ("constraint", "convention"):
+        return False, None
+    subtype = subtype or "convention"
+    data = _load_global()
+    if not _passes_filter(content, data["entries"]):
+        return False, None
+    entry = {
+        "id": str(uuid.uuid4()),
+        "type": "decision",
+        "subtype": subtype,
+        "content": content,
+        "session_id": session_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    data["entries"].append(entry)
+    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    _save_global(data)
+    return True, entry["id"]
+
+
+def get_global_decisions(entry_type: str = "") -> list:
+    """Returns all decisions from the global store, optionally filtered by subtype."""
+    data = _load_global()
+    decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    if entry_type:
+        decisions = [d for d in decisions if d.get("subtype") == entry_type]
+    return decisions
+
+
+def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) -> str:
+    """Formatted output of global store decisions."""
+    data = _load_global()
+    entries = data.get("entries", [])
+    if not entries:
+        return "No global context stored. Use update_global_context to add cross-cutting conventions and constraints."
+
+    decisions = [e for e in entries if e["type"] == "decision"]
+    is_filtered = bool(query or entry_type)
+
+    if entry_type:
+        decisions = [d for d in decisions if d.get("subtype") == entry_type]
+    if query:
+        q_lower = query.lower()
+        decisions = [d for d in decisions if q_lower in d.get("content", "").lower()]
+
+    display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
+    lines = ["# Global context (applies to all repos)\n"]
+
+    if decisions:
+        total = len(decisions)
+        shown = decisions[-display_limit:]
+        filter_note = f" — showing {len(shown)} of {total}" if total > display_limit else ""
+        lines.append(f"## Global decisions{filter_note}")
+        for d in shown:
+            subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
+    elif is_filtered:
+        lines.append("No matching global decisions found.")
+
+    return "\n".join(lines)
 
 
 def _is_novel(content: str, existing: list) -> bool:
@@ -133,28 +219,44 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
     ]
 
 
+def _pl(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
 def get_session_start_context(repo_path: str) -> dict:
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    global_rules = get_global_decisions()  # always constraint or convention
+
     if not decisions:
+        # No repo context — bootstrap. Inject global rules above the STOP directive
+        # so Claude follows them even during the bootstrap conversation.
         lines = _build_bootstrap_context(repo_path)
+        sys_parts: list[str] = []
+        if global_rules:
+            sys_parts.append("## Global rules (apply to ALL repos):")
+            for d in global_rules:
+                sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+            sys_parts.append("")
+        sys_parts.extend(lines)
+        global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "systemMessage": "Contexer: no context stored — bootstrapping now",
+            "systemMessage": f"Contexer: no context stored{global_note} — bootstrapping now",
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(lines),
+                "additionalContext": "\n".join(sys_parts),
             },
         }
 
     count = len(decisions)
-
-    # Always embed conventions + constraints — these are always-apply rules Claude must
-    # follow from the first task, not discover JIT. Architecture/patterns stay deferred.
     pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint")]
     deferred_count = count - len(pre_loaded)
 
-    # systemMessage: full detail for Claude — rules content + JIT retrieval instruction
     sys_parts = []
+    if global_rules:
+        sys_parts.append("## Global rules (apply to ALL repos):")
+        for d in global_rules:
+            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
@@ -166,16 +268,15 @@ def get_session_start_context(repo_path: str) -> dict:
             "design decisions, rationale, or patterns."
         )
 
-    # additionalContext: single clean status line shown to the user at session start
-    def _pl(n: int, word: str) -> str:
-        return f"{n} {word}" if n == 1 else f"{n} {word}s"
+    parts: list[str] = []
+    if global_rules:
+        parts.append(_pl(len(global_rules), "global rule"))
+    if pre_loaded:
+        parts.append(_pl(len(pre_loaded), "project rule"))
+    if deferred_count > 0:
+        parts.append(f"{_pl(deferred_count, 'decision')} on demand")
 
-    if pre_loaded and deferred_count > 0:
-        user_line = f"Contexer: loaded {_pl(len(pre_loaded), 'decision')} related to constraint and convention. Remaining {_pl(deferred_count, 'decision')} will be loaded as needed."
-    elif pre_loaded:
-        user_line = f"Contexer: loaded {_pl(len(pre_loaded), 'decision')} related to constraint and convention."
-    else:
-        user_line = f"Contexer: {_pl(count, 'decision')} will be loaded as needed."
+    user_line = f"Contexer: {', '.join(parts)} loaded." if parts else "Contexer: active."
 
     return {
         "systemMessage": user_line,
@@ -223,11 +324,8 @@ _QUERY_STOP_WORDS = frozenset({
 
 def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
-    the prompt is a rationale/decision question. Silent no-op for all other prompts."""
-    data = _load(repo_path)
-    if not data.get("entries"):
-        return ""
-
+    the prompt is a rationale/decision question. Silent no-op for all other prompts.
+    Searches repo decisions first; falls back to global decisions."""
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
 
@@ -239,12 +337,21 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
         w for w in words_raw
         if len(w) > 3 and w not in _QUERY_STOP_WORDS and w.isalpha()
     ]
+    ordered_kws = sorted(set(keywords), key=len, reverse=True)[:3]
 
-    # Try keywords longest-first (most specific match wins)
-    for kw in sorted(set(keywords), key=len, reverse=True)[:3]:
-        result = get_context(repo_path, query=kw)
-        if "No matching decisions" not in result and "No context stored" not in result:
-            return f"[Contexer: auto-fetched for this question]\n{result}"
+    # Search repo decisions first (longest keyword = most specific match)
+    data = _load(repo_path)
+    if data.get("entries"):
+        for kw in ordered_kws:
+            result = get_context(repo_path, query=kw)
+            if "No matching decisions" not in result and "No context stored" not in result:
+                return f"[Contexer: auto-fetched for this question]\n{result}"
+
+    # Fall back to global decisions when repo search yields nothing
+    for kw in ordered_kws:
+        result = get_global_context(query=kw)
+        if "No matching" not in result and "No global context" not in result:
+            return f"[Contexer: auto-fetched from global context]\n{result}"
 
     return ""
 
