@@ -40,6 +40,20 @@ The script detects that the `contexer` binary is not available from a PyPI insta
 
 ---
 
+## Token cost at a glance
+
+Contexer injects stored decisions before Claude responds — not during. Cost is paid once per session.
+
+| Pre-loaded rules | Tokens injected | % of a typical session |
+|---|---|---|
+| 5 rules | ~125 | ~0.2% |
+| 10 rules | ~250 | ~0.3% |
+| 25 rules | ~625 | ~0.8% |
+
+Only `constraint` and `convention` decisions are pre-loaded. `architecture` and `pattern` decisions cost 0 tokens at session start and are fetched on demand. Store lookups take 0.03–0.27ms regardless of store size — imperceptible. See the [Benchmark & Token Cost](https://app.notion.com/p/378223d61ba281ccb680f5405afa9f96) page for full numbers.
+
+---
+
 ## First session
 
 Open Claude Code in any git repo. On your first message, Contexer will:

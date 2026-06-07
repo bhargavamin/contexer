@@ -29,37 +29,48 @@ def _slug(repo_path: str) -> str:
 
 
 def _store_path(repo_path: str) -> Path:
-    STORE_DIR.mkdir(exist_ok=True)
+    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     return STORE_DIR / f"{_slug(repo_path)}.json"
 
 
 def _load(repo_path: str) -> dict:
     path = _store_path(repo_path)
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            # Treat a corrupted or unreadable file as empty — recovers from concurrent-write races.
+            return {"repo_path": repo_path, "entries": []}
     return {"repo_path": repo_path, "entries": []}
 
 
 def _save(repo_path: str, data: dict) -> None:
-    _store_path(repo_path).write_text(json.dumps(data, indent=2))
+    path = _store_path(repo_path)
+    path.write_text(json.dumps(data, indent=2))
+    path.chmod(0o600)
 
 
 # ── Global store ───────────────────────────────────────────────────────────────
 
 def _global_path() -> Path:
-    STORE_DIR.mkdir(exist_ok=True)
+    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     return STORE_DIR / f"{GLOBAL_SLUG}.json"
 
 
 def _load_global() -> dict:
     path = _global_path()
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {"repo_path": GLOBAL_SLUG, "entries": []}
     return {"repo_path": GLOBAL_SLUG, "entries": []}
 
 
 def _save_global(data: dict) -> None:
-    _global_path().write_text(json.dumps(data, indent=2))
+    path = _global_path()
+    path.write_text(json.dumps(data, indent=2))
+    path.chmod(0o600)
 
 
 def update_global_decision(content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
@@ -109,8 +120,8 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
     if entry_type:
         decisions = [d for d in decisions if d.get("subtype") == entry_type]
     if query:
-        q_lower = query.lower()
-        decisions = [d for d in decisions if q_lower in d.get("content", "").lower()]
+        pat = re.compile(r"\b" + re.escape(query.lower()), re.IGNORECASE)
+        decisions = [d for d in decisions if pat.search(d.get("content", ""))]
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
     lines = ["# Global context (applies to all repos)\n"]
@@ -129,14 +140,21 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
     return "\n".join(lines)
 
 
+_PUNCT_RE = re.compile(r"[^\w\s]")
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase, strip punctuation, split on whitespace. Fixes comma-attached tokens."""
+    return set(_PUNCT_RE.sub("", text.lower()).split())
+
+
 def _is_novel(content: str, existing: list) -> bool:
     if not existing:
         return True
-    tokens = set(content.lower().split())
+    tokens = _tokenize(content)
     if not tokens:
         return False
     for entry in existing:
-        other = set(entry.get("content", "").lower().split())
+        other = _tokenize(entry.get("content", ""))
         if not other:
             continue
         overlap = len(tokens & other) / max(len(tokens), len(other))
@@ -332,10 +350,11 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     if not (word_set & _RATIONALE_WORDS):
         return ""
 
-    # Extract content keywords: alpha-only, length > 3, not stop words
+    # Extract content keywords: alpha-only, length >= 3, not stop words.
+    # >= 3 (not > 3) captures short tech terms: jwt, api, sdk, k8s, sql, gcp, aws.
     keywords = [
         w for w in words_raw
-        if len(w) > 3 and w not in _QUERY_STOP_WORDS and w.isalpha()
+        if len(w) >= 3 and w not in _QUERY_STOP_WORDS and w.isalpha()
     ]
     ordered_kws = sorted(set(keywords), key=len, reverse=True)[:3]
 
@@ -379,8 +398,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
 
     if query:
-        q_lower = query.lower()
-        decisions = [d for d in decisions if q_lower in d.get("content", "").lower()]
+        pat = re.compile(r"\b" + re.escape(query.lower()), re.IGNORECASE)
+        decisions = [d for d in decisions if pat.search(d.get("content", ""))]
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
 
