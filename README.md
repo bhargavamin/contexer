@@ -1,75 +1,19 @@
 # Contexer
 
-A lightweight MCP server that captures developer decisions during Claude Code sessions and surfaces them in future sessions — so context is never lost between restarts.
+Contexer is a lightweight MCP server for Claude Code that automatically captures decisions made during coding sessions and surfaces them at the start of every future session — so Claude never starts blind.
 
 ## The problem
 
-AI coding sessions start blind. CLAUDE.md files decay. When Claude Code works autonomously, the reasoning behind decisions isn't captured anywhere. The next session has no idea what changed or why, and you waste the first few minutes re-explaining context before doing real work.
+Every Claude Code session starts with no memory of the previous one. CLAUDE.md files require manual maintenance and go stale. When Claude works autonomously, the reasoning behind decisions disappears when the session ends. Teams end up re-explaining the same constraints, conventions, and architecture choices every time.
 
-## How it works
+Contexer solves this by capturing decisions as they happen — silently, automatically, in the background — and replaying them as project rules at session start.
 
-Every session follows the same automatic flow:
+---
 
-```
-You open Claude Code
-  └─▶ SessionStart hook: injects project rules (all conventions + constraints) directly
-      PLUS a count pointer for architecture/pattern decisions (JIT)
-      OR: injects STOP directive if no context exists (triggers bootstrap)
+## Quick start
 
-You type your message
-  └─▶ Anchor hook: writes git root to ~/.contexer/.current_repo (every prompt)
-  └─▶ Bootstrap hook (once): if no context, injects directive to run bootstrap first
-  └─▶ Capture hook (once): stores your first message as the task description
-  └─▶ Rationale hook (every prompt): if the prompt asks "why / reason / rationale /
-      decided", auto-fetches keyword-matching decisions and injects them as context
-
-Claude works on your task
-  └─▶ Claude calls get_context when it needs architecture/pattern context (JIT)
-  └─▶ Claude calls update_context when it makes a significant decision
-
-Context window nears limit
-  └─▶ PreCompact hook: reminds Claude to call update_context before compaction
-
-Compaction happens
-  └─▶ PostCompact hook: reloads full stored context into Claude's working memory
-
-Next session: repeat from the top — but now with history
-```
-
-**It is Claude — not you — who calls `update_context`.** You work normally. Claude nominates decisions; the server filters before storing. If Claude misses something important, say: **"store that decision"**.
-
-## The five tools
-
-| Tool | Triggered by | What it does |
-|---|---|---|
-| `capture_context` | `UserPromptSubmit` hook (once per session) | Stores the task description |
-| `update_context` | Claude Code, mid-task | Nominates a decision; server filters before storing |
-| `get_context` | Claude Code, JIT when task requires it | Loads stored decisions — optionally filtered by keyword or subtype |
-| `get_context_for_prompt` | `UserPromptSubmit` hook (every prompt) | Detects "why/reason/rationale/decision" questions; auto-injects matching decisions as context; silent no-op for all other prompts |
-| `bootstrap_context` | Claude Code, first session with no context | Scans the repo stack and returns inferred facts + gap questions |
-
-## The filter
-
-`update_context` does not store everything Claude sends. It applies one gate and silently discards failures:
-
-**Novelty:** content that overlaps >70% with any existing stored decision (token overlap) is rejected as a duplicate. Novel content is always stored — `update_context` is only called for significant decisions, so if it passes the novelty check, it is worth keeping.
-
-If filtered, the content is silently discarded. No noise, no logs.
-
-## Storage
-
-Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo, capped at 500 entries. Each entry has `id`, `type` (`task` | `decision`), `subtype` (`architecture` | `constraint` | `pattern` | `convention`), `content`, `session_id`, and `timestamp`. No cloud, no database, no external dependencies.
-
-Use `entry_type` when calling `get_context` to retrieve filtered views:
-```
-get_context(entry_type="constraint")   → up to 25 constraints
-get_context(query="postgres")          → up to 25 decisions matching "postgres"
-get_context()                          → latest 10 decisions (overview)
-```
-
-## Install
-
-→ See **[docs/install.md](docs/install.md)** for full install steps, verification, and uninstall.
+Install takes under two minutes. See **[docs/install.md](docs/install.md)** for full steps, verification, and uninstall.
+For hooks, tool internals, filter logic, and storage layout see **[docs/architecture.md](docs/architecture.md)**.
 
 **Plugin (recommended):**
 
@@ -79,42 +23,163 @@ get_context()                          → latest 10 decisions (overview)
 /reload-plugins
 ```
 
-**Manual fallback:**
+**Manual:**
 
 ```bash
 git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
 bash ~/tools/contexer/scripts/install.sh
 ```
 
-## Storing constraints from user instructions
+After install, **open a new Claude Code session in any repo.** If no context exists, Claude will automatically run a bootstrap to capture your first decisions. If context exists, all constraints and conventions are injected at session start.
 
-**`capture_context` only stores tasks — it never creates decisions or constraints.**
+---
 
-The `UserPromptSubmit` hook calls `capture_context` with your first prompt and stores it as `type=task`. Even if your prompt is an imperative instruction ("always update the README before committing"), it is stored as a task, not a constraint. The novelty filter is not even applied to tasks.
+## How it works
 
-For an instruction to become a stored constraint or convention, Claude must explicitly call `update_context` with `subtype=constraint` (or `convention`). This happens automatically when Claude recognises a significant decision during a task — but it requires Claude to complete a turn without interruption.
+You work normally. Contexer runs in the background via Claude Code hooks.
 
-**If you type an instruction and it isn't stored as a constraint:**
+```
+Session opens
+  └─▶ All conventions + constraints injected as project rules
+      Architecture/pattern decisions available on demand (JIT)
+      First session with no context → bootstrap runs automatically
 
-- Say **"store that as a constraint"** — Claude will call `update_context` with the right subtype immediately
-- Or let the full turn complete before interrupting — Claude calls `update_context` at the end of a turn
+You type a prompt
+  └─▶ Your first message is stored as the current task description
+  └─▶ "Why/reason/rationale/decided" questions auto-fetch matching decisions
 
-**Subtypes and when they are stored:**
+Claude works
+  └─▶ Calls get_context when it needs architecture or pattern context
+  └─▶ Calls update_context when it makes a significant decision
 
-| Subtype | Examples | When Claude stores it |
+Context window nears limit
+  └─▶ Claude is reminded to save any unsaved decisions before compaction
+  └─▶ After compaction, full context is reloaded automatically
+```
+
+**You never call any tool directly.** Claude handles all tool calls. If Claude misses something, say *"store that decision"* and it will call `update_context` immediately.
+
+---
+
+## Decision types
+
+Every stored decision has a `subtype` that controls when and how it is surfaced.
+
+| Subtype | What it captures | Injected at session start? |
 |---|---|---|
-| `constraint` | "never commit untested code", "always update docs before committing" | Rule that must always apply |
-| `convention` | "use uv not pip", "conventional commit format" | Agreed team/project standard |
-| `architecture` | "chose FastMCP over low-level API" | Structural or framework decision |
-| `pattern` | "use plain dicts as function boundaries" | Recurring implementation approach |
+| `constraint` | Rules that must always apply — "never commit untested code" | Yes — always |
+| `convention` | Team or project standards — "use uv not pip", "conventional commits" | Yes — always |
+| `architecture` | Structural decisions — "chose FastMCP over low-level mcp.Server" | No — fetched on demand |
+| `pattern` | Recurring implementation approaches — "plain dicts as function boundaries" | No — fetched on demand |
 
-## What happens if a decision is missed
+Constraints and conventions are injected directly at every session start because they apply to every task. Architecture and pattern decisions are large and task-specific — Claude fetches them just-in-time when the task requires them.
 
-Nothing breaks — you just lose that piece of context for future sessions.
+---
 
-- Say **"store that decision"** and Claude will call `update_context` immediately
-- Call `get_context` mid-session to see what's been captured so far
-- Inspect the file directly: `cat ~/.contexer/<repo_slug>.json`
+## Managing decisions
+
+All operations use natural language. Claude translates them into the right tool call.
+
+### Store a decision
+
+```
+"store that as a constraint"
+"save this as a convention: always use uv not pip"
+"remember this architecture decision"
+```
+
+Claude calls `update_context` with the content and the appropriate subtype. The server applies a novelty filter before storing — content with more than 70% token overlap with an existing decision is silently discarded as a duplicate.
+
+> **Note:** Your first prompt each session is automatically stored as the *task description* — not as a decision or constraint. If you open a session with an instruction like *"always update docs before committing"*, it is captured as the task, not stored as a constraint. To store it as a constraint, either complete the turn (Claude will call `update_context` at the end) or explicitly say *"store that as a constraint"*.
+
+### Query decisions
+
+```
+"show me all constraints"
+"what decisions did we make about postgres?"
+"show everything stored for this repo"
+```
+
+| Example call | What it returns |
+|---|---|
+| `get_context()` | Latest 10 decisions — overview |
+| `get_context(entry_type="constraint")` | Up to 25 constraints |
+| `get_context(query="postgres")` | Up to 25 decisions matching "postgres" |
+| `get_context(limit=50)` | Up to 50 decisions |
+
+### Update a decision
+
+```
+"update the uv decision — we switched back to pip"
+"correct the constraint about commit format"
+```
+
+Claude calls `update_context` with the revised content. The old entry is not removed — a new entry is added alongside it. If the revised content is too similar to the original (>70% token overlap), it will be filtered as a duplicate. Rephrase it to include what changed.
+
+### Remove a decision
+
+```
+"delete the postgres decision"
+"remove all outdated constraints"
+```
+
+Claude reads `~/.contexer/<repo_slug>.json` and removes the matching entry directly. The file is plain JSON — you can also edit or prune it manually at any time.
+
+---
+
+## Tools reference
+
+| Tool | Triggered by | What it does |
+|---|---|---|
+| `capture_context` | `UserPromptSubmit` hook — once per session | Stores the first prompt as the task description |
+| `update_context` | Claude, mid-task | Nominates a decision; server filters before storing |
+| `get_context` | Claude, on demand | Returns stored decisions — filtered by keyword or subtype |
+| `get_context_for_prompt` | `UserPromptSubmit` hook — every prompt | Detects rationale questions and auto-injects matching decisions |
+| `bootstrap_context` | Claude, first session with no context | Scans repo stack for inferable decisions; surfaces gap questions |
+
+---
+
+## Storage
+
+Decisions are stored locally at `~/.contexer/<repo_slug>.json` — one file per repo, capped at 500 entries. No cloud, no database, no accounts.
+
+Each entry contains:
+
+| Field | Values |
+|---|---|
+| `id` | UUID |
+| `type` | `task` or `decision` |
+| `subtype` | `architecture` \| `constraint` \| `pattern` \| `convention` |
+| `content` | The full decision text |
+| `session_id` | UUID for the session that created it |
+| `timestamp` | ISO 8601 UTC |
+
+Inspect the store at any time:
+
+```bash
+cat ~/.contexer/<repo_slug>.json
+```
+
+---
+
+## Troubleshooting
+
+**Claude isn't storing decisions automatically.**
+Claude calls `update_context` at the end of significant decisions, not continuously. If something specific was missed, say *"store that decision"* and Claude will call it immediately.
+
+**A decision was stored but later ignored.**
+Constraints and conventions are injected at session start. If you added a new constraint mid-session, it will appear from the next session onward.
+
+**A decision is outdated or wrong.**
+Say *"delete the X decision"* or edit `~/.contexer/<repo_slug>.json` directly and remove the entry.
+
+**The novelty filter rejected a new decision.**
+If the content is too similar to an existing one (>70% token overlap), it is silently discarded. Rephrase it to be more specific, or remove the old entry first.
+
+**No context was injected at session start.**
+If no decisions are stored for the repo, the bootstrap flow runs instead. Complete bootstrap once and all future sessions will have context.
+
+---
 
 ## License
 
