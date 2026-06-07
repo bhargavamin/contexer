@@ -14,22 +14,19 @@ Contexer solves this by capturing decisions as they happen — silently, automat
 
 Install takes under two minutes. See **[docs/install.md](docs/install.md)** for full steps, verification, and uninstall.
 
-**Plugin (recommended):**
-
-```
-/plugin marketplace add bhargavamin/contexer
-/plugin install contexer@contexer
-/reload-plugins
-```
-
-**Manual:**
+**Step 1 — install the package:**
 
 ```bash
-git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/scripts/install.sh
+uv tool install contexer
 ```
 
-After install, open a new Claude Code session in any repo. If no context exists, Claude will run a short bootstrap to capture your first decisions. From that point on, your project rules are injected automatically at every session start.
+**Step 2 — wire it into Claude Code:**
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/bhargavamin/contexer/main/scripts/install.sh)
+```
+
+**Step 3 — restart Claude Code** and open any git repo. Bootstrap runs automatically on the first session.
 
 ---
 
