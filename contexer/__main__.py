@@ -1,3 +1,3 @@
-from contexer.server import main
+from contexer.cli import main
 
 main()

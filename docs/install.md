@@ -14,19 +14,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 uv tool install contexer
+contexer install
 ```
 
-Then wire it into Claude Code (registers the MCP server and all hooks):
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/bhargavamin/contexer/main/scripts/install.sh)
-```
-
-Or if you have the repo cloned already:
-
-```bash
-bash scripts/install.sh
-```
+That's it. The second command registers the MCP server and all hooks with Claude Code automatically.
 
 Verify the server is connected — open any Claude Code session and run:
 
@@ -94,7 +85,7 @@ No reinstall needed — the existing MCP registration and hooks continue to work
 ## Uninstall
 
 ```bash
-bash scripts/uninstall.sh
+contexer uninstall
 uv tool uninstall contexer
 ```
 
