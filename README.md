@@ -86,6 +86,28 @@ git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
 bash ~/tools/contexer/scripts/install.sh
 ```
 
+## Storing constraints from user instructions
+
+**`capture_context` only stores tasks — it never creates decisions or constraints.**
+
+The `UserPromptSubmit` hook calls `capture_context` with your first prompt and stores it as `type=task`. Even if your prompt is an imperative instruction ("always update the README before committing"), it is stored as a task, not a constraint. The novelty filter is not even applied to tasks.
+
+For an instruction to become a stored constraint or convention, Claude must explicitly call `update_context` with `subtype=constraint` (or `convention`). This happens automatically when Claude recognises a significant decision during a task — but it requires Claude to complete a turn without interruption.
+
+**If you type an instruction and it isn't stored as a constraint:**
+
+- Say **"store that as a constraint"** — Claude will call `update_context` with the right subtype immediately
+- Or let the full turn complete before interrupting — Claude calls `update_context` at the end of a turn
+
+**Subtypes and when they are stored:**
+
+| Subtype | Examples | When Claude stores it |
+|---|---|---|
+| `constraint` | "never commit untested code", "always update docs before committing" | Rule that must always apply |
+| `convention` | "use uv not pip", "conventional commit format" | Agreed team/project standard |
+| `architecture` | "chose FastMCP over low-level API" | Structural or framework decision |
+| `pattern` | "use plain dicts as function boundaries" | Recurring implementation approach |
+
 ## What happens if a decision is missed
 
 Nothing breaks — you just lose that piece of context for future sessions.
