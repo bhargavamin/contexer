@@ -167,12 +167,15 @@ def get_session_start_context(repo_path: str) -> dict:
         )
 
     # additionalContext: single clean status line shown to the user at session start
+    def _pl(n: int, word: str) -> str:
+        return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
     if pre_loaded and deferred_count > 0:
-        user_line = f"Contexer: loaded {len(pre_loaded)} decisions related to constraint and convention. Remaining {deferred_count} decisions will be loaded as needed."
+        user_line = f"Contexer: loaded {_pl(len(pre_loaded), 'decision')} related to constraint and convention. Remaining {_pl(deferred_count, 'decision')} will be loaded as needed."
     elif pre_loaded:
-        user_line = f"Contexer: loaded {len(pre_loaded)} decisions related to constraint and convention."
+        user_line = f"Contexer: loaded {_pl(len(pre_loaded), 'decision')} related to constraint and convention."
     else:
-        user_line = f"Contexer: {count} decisions will be loaded as needed."
+        user_line = f"Contexer: {_pl(count, 'decision')} will be loaded as needed."
 
     return {
         "systemMessage": user_line,
