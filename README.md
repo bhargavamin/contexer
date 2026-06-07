@@ -13,7 +13,6 @@ Contexer solves this by capturing decisions as they happen — silently, automat
 ## Quick start
 
 Install takes under two minutes. See **[docs/install.md](docs/install.md)** for full steps, verification, and uninstall.
-For hooks, tool internals, filter logic, and storage layout see **[docs/architecture.md](docs/architecture.md)**.
 
 **Plugin (recommended):**
 
