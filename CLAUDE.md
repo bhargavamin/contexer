@@ -19,7 +19,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 Three files, no more:
 
-- **`server.py`** — MCP server entry point. Defines four tools (`capture_context`, `update_context`, `get_context`, `bootstrap_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
+- **`server.py`** — MCP server entry point. Defines five tools (`capture_context`, `update_context`, `get_context`, `get_context_for_prompt`, `bootstrap_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
 - **`store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 500` per repo. Display is separately capped: `_UNFILTERED_DISPLAY = 10` for overview calls, `_FILTERED_DISPLAY = 25` for query/type-filtered calls.
 - **`requirements.txt`** — Kept for reference; `pyproject.toml` is the authoritative dependency spec managed by `uv`.
 
@@ -45,10 +45,11 @@ The server is registered in `~/.claude.json` under `mcpServers`:
 
 `~/.claude/settings.json` wires up hooks globally (applies to every repo):
 
-- **`SessionStart`** — injects a count pointer (`"N decisions stored — call get_context when relevant"`) if context exists; injects the bootstrap STOP directive if no context exists. Does **not** pre-load decisions — Claude fetches them JIT via `get_context`.
-- **`UserPromptSubmit` (anchor, every prompt)** — writes the git root to `~/.contexer/.current_repo` so MCP tools can resolve `repo_path=""` correctly even across concurrent sessions.
-- **`UserPromptSubmit` (once)** — fires `get_bootstrap_context_prompt` on the first prompt; injects the bootstrap directive if no context exists (fallback for when SessionStart is skipped).
-- **`UserPromptSubmit` (once, mcp_tool)** — calls `capture_context` with the first user prompt as the task description.
+- **`SessionStart`** — injects all conventions and constraints directly as project rules; injects a count pointer for deferred architecture/pattern decisions (fetched JIT via `get_context`); injects the bootstrap STOP directive if no context exists.
+- **`UserPromptSubmit` (anchor, command, every prompt)** — writes the git root to `~/.contexer/.current_repo` so MCP tools can resolve `repo_path=""` correctly even across concurrent sessions. Runs before all mcp_tool hooks.
+- **`UserPromptSubmit` (bootstrap, mcp_tool, once)** — calls `get_bootstrap_context_prompt` on the first prompt; injects the bootstrap directive if no context exists (fallback for when SessionStart is skipped).
+- **`UserPromptSubmit` (capture, mcp_tool, once)** — calls `capture_context` with the first user prompt as the task description. Stores as `type=task` only — never as a decision or constraint.
+- **`UserPromptSubmit` (rationale, mcp_tool, every prompt)** — calls `get_context_for_prompt` with the prompt text; auto-injects matching decisions when the prompt contains rationale keywords (why, reason, rationale, decided, etc.). Silent no-op for all other prompts.
 - **`PreCompact`** — injects a systemMessage reminding Claude to call `update_context` for any unsaved decisions before the context window is compacted.
 - **`PostCompact`** — re-injects the full context via systemMessage so Claude resumes with full awareness after compaction.
 
