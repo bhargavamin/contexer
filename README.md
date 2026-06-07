@@ -191,4 +191,6 @@ Questions or ideas? Join the community on [Discord](https://discord.gg/Fk6JSaW4p
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for full terms.
+
+The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
