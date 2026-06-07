@@ -113,10 +113,20 @@ if not any(
         "input": {"repo_path": "", "description": "${prompt}"},
         "once": True, "statusMessage": "Capturing task..."}]})
 
+if not any(
+    any(h.get("type") == "mcp_tool" and h.get("server") == "contexer" and h.get("tool") == "get_context_for_prompt"
+        for h in grp.get("hooks", []))
+    for grp in ups
+):
+    ups.append({"hooks": [{"type": "mcp_tool", "server": "contexer", "tool": "get_context_for_prompt",
+        "input": {"repo_path": "", "prompt": "${prompt}"},
+        "statusMessage": "Checking for relevant decisions..."}]})
+
 # ── Permissions ───────────────────────────────────────────────────────────────
 allow = settings.setdefault("permissions", {}).setdefault("allow", [])
 for p in ["mcp__contexer__capture_context", "mcp__contexer__update_context",
-          "mcp__contexer__get_context", "mcp__contexer__bootstrap_context"]:
+          "mcp__contexer__get_context", "mcp__contexer__bootstrap_context",
+          "mcp__contexer__get_context_for_prompt"]:
     if p not in allow:
         allow.append(p)
 
