@@ -175,10 +175,10 @@ def get_session_start_context(repo_path: str) -> dict:
         user_line = f"Contexer: {count} decisions will be loaded as needed."
 
     return {
-        "systemMessage": "\n".join(sys_parts),
+        "systemMessage": user_line,
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": user_line,
+            "additionalContext": "\n".join(sys_parts),
         },
     }
 
