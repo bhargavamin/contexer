@@ -118,6 +118,39 @@ You can also edit the store file directly — it is plain JSON at `~/.contexer/`
 
 ---
 
+## Token cost
+
+Contexer is front-loaded by design. Cost is paid once at session start; everything after is near-zero.
+
+**What gets injected at session start:**
+
+Only `constraint` and `convention` decisions are pre-loaded. `architecture` and `pattern` decisions cost **0 tokens** at session start — they are fetched on demand when relevant.
+
+| Decisions stored | Pre-loaded rules | Tokens at session start |
+|---|---|---|
+| 10 | 5 | ~125 |
+| 20 | 10 | ~250 |
+| 50 | 25 | ~625 |
+
+Cost is flat at **~25 tokens per pre-loaded rule**, regardless of store size.
+
+**What that compares to:**
+
+~250 tokens (20 decisions) is 0.3–2.5% of a typical Claude Code session. Without Contexer, Claude spends 200–500 tokens re-establishing each rule through back-and-forth — every session. A single corrected mistake costs 500–2,000 tokens. The tool pays for itself after one avoided repetition.
+
+**Rationale injection — only fires on "why" questions:**
+
+| Event | Tokens added | Latency |
+|---|---|---|
+| Hit — relevant decision found | ~45–80 | ~0.06ms store lookup |
+| Miss — no rationale keyword | 0 | 0.000ms |
+
+**Latency:** Contexer's store operations take 0.03–0.27ms. The perceived delay is the MCP hook call round-trip (~50–200ms), which runs before Claude responds — not added on top of it. Sessions with 500 stored decisions have the same sub-millisecond retrieval as sessions with 10.
+
+> These numbers were measured on Claude Sonnet 4.6. Haiku will process injected tokens faster; Opus will take slightly longer but produce higher-quality responses with the same context. The store lookup times are model-independent — they are pure Python/disk operations.
+
+---
+
 ## Troubleshooting
 
 **Claude isn't storing decisions automatically.**
