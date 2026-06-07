@@ -33,7 +33,7 @@ Verify the server is connected:
 | Config | What changes |
 |---|---|
 | MCP server | Registered globally via the plugin system |
-| 6 hooks | SessionStart, PreCompact, PostCompact, 3× UserPromptSubmit |
+| 7 hooks | SessionStart, PreCompact, PostCompact, 4× UserPromptSubmit |
 
 No files in `~/.claude.json` or `~/.claude/settings.json` are hand-edited.
 
@@ -119,14 +119,19 @@ bash ~/tools/contexer/scripts/uninstall.sh
 
 ```
 Session opens
-  └─▶ SessionStart hook: injects count pointer (N decisions stored) or STOP directive (0 stored)
+  └─▶ SessionStart hook: injects project rules (conventions + constraints) directly
+      PLUS a count pointer for architecture/pattern decisions
+      OR: STOP directive if no context exists (triggers bootstrap)
 
-You send first message
+You send a message (every prompt)
   └─▶ Anchor hook: writes git root to ~/.contexer/.current_repo
   └─▶ Bootstrap hook (once): checks if context exists; if not, injects bootstrap directive
   └─▶ Capture hook (once): calls capture_context with your first message as task description
+  └─▶ Rationale hook: if prompt contains "why/reason/rationale/decided", auto-fetches
+      keyword-matching decisions and injects them before Claude responds
 
 Claude works on your task
+  └─▶ Claude calls get_context JIT for architecture/pattern questions
   └─▶ Claude calls update_context when it makes significant decisions (you say nothing)
 
 Context window nears limit
