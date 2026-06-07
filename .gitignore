@@ -26,3 +26,6 @@ wheels/
 
 # Dev-only MCP override — plugin handles global registration
 .mcp.json
+
+# Benchmark outputs (raw run data, transcripts, generated configs, CSV/MD reports)
+bench/results/
