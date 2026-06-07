@@ -10,23 +10,42 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ---
 
-## Install (plugin — recommended)
+## Install from PyPI (recommended)
 
-Run these three commands in any Claude Code session:
-
-```
-/plugin marketplace add bhargavamin/contexer
-/plugin install contexer@contexer
-/reload-plugins
+```bash
+uv tool install contexer
 ```
 
-Verify the server is connected:
+Then wire it into Claude Code (registers the MCP server and all hooks):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/bhargavamin/contexer/main/scripts/install.sh)
+```
+
+Or if you have the repo cloned already:
+
+```bash
+bash scripts/install.sh
+```
+
+Verify the server is connected — open any Claude Code session and run:
 
 ```
 /mcp
 ```
 
 `contexer` should appear as **connected**.
+
+---
+
+## Install from source (development)
+
+```bash
+git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
+bash ~/tools/contexer/scripts/install.sh
+```
+
+The script detects that the `contexer` binary is not available from a PyPI install and wires Claude Code to run the server directly from the cloned directory using `uv run`. This is the right choice when you want to edit the source.
 
 ---
 
@@ -64,42 +83,25 @@ You should see a `.json` file named after your repo. Each file holds the decisio
 
 ## Update
 
+```bash
+uv tool upgrade contexer
 ```
-/plugin update contexer@contexer
-/reload-plugins
-```
+
+No reinstall needed — the existing MCP registration and hooks continue to work.
 
 ---
 
 ## Uninstall
 
-```
-/plugin uninstall contexer
+```bash
+bash scripts/uninstall.sh
+uv tool uninstall contexer
 ```
 
-This removes the MCP server registration and all hooks. Your stored decisions are not deleted. To also remove them:
+Removes the MCP server registration and all hooks. Your context store (`~/.contexer/`) is not deleted. To also remove stored context:
 
 ```bash
 rm -rf ~/.contexer/
-```
-
----
-
-## Manual install (fallback)
-
-If you prefer not to use the plugin system:
-
-```bash
-git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/scripts/install.sh
-```
-
-The script is idempotent — safe to re-run after updates or if you move the repo.
-
-To uninstall:
-
-```bash
-bash ~/tools/contexer/scripts/uninstall.sh
 ```
 
 ---
