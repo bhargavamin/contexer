@@ -168,11 +168,11 @@ def get_session_start_context(repo_path: str) -> dict:
 
     # additionalContext: single clean status line shown to the user at session start
     if pre_loaded and deferred_count > 0:
-        user_line = f"Contexer: loaded {len(pre_loaded)} constraint and convention decisions out of {count} — remaining {deferred_count} loaded on demand"
+        user_line = f"Contexer: loaded {len(pre_loaded)} decisions related to constraint and convention. Remaining {deferred_count} decisions will be loaded as needed."
     elif pre_loaded:
-        user_line = f"Contexer: loaded {len(pre_loaded)} constraint and convention decisions"
+        user_line = f"Contexer: loaded {len(pre_loaded)} decisions related to constraint and convention."
     else:
-        user_line = f"Contexer: {count} decisions available — loaded on demand"
+        user_line = f"Contexer: {count} decisions will be loaded as needed."
 
     return {
         "systemMessage": "\n".join(sys_parts),
