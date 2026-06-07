@@ -10,23 +10,50 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ---
 
-## Install (plugin — recommended)
+## Install from PyPI (recommended)
 
-Run these three commands in any Claude Code session:
-
-```
-/plugin marketplace add bhargavamin/contexer
-/plugin install contexer@contexer
-/reload-plugins
+```bash
+uv tool install contexer
 ```
 
-Verify the server is connected:
+Then wire it into Claude Code (registers the MCP server and all hooks):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/bhargavamin/contexer/main/scripts/install.sh)
+```
+
+Or if you have the repo cloned already:
+
+```bash
+bash scripts/install.sh
+```
+
+Verify the server is connected — open any Claude Code session and run:
 
 ```
 /mcp
 ```
 
 `contexer` should appear as **connected**.
+
+**What gets configured:**
+
+| Config | What changes |
+|---|---|
+| `~/.claude.json` | MCP server entry: `{"command": "contexer"}` |
+| `~/.claude/settings.json` | 7 hooks: SessionStart, PreCompact, PostCompact, 4× UserPromptSubmit |
+| `~/.claude/settings.json` | Tool permissions for all 5 Contexer tools |
+
+---
+
+## Install from source (development)
+
+```bash
+git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
+bash ~/tools/contexer/scripts/install.sh
+```
+
+The script detects that the `contexer` binary is not available from a PyPI install and wires Claude Code to run the server directly from the cloned directory using `uv run`. This is the right choice when you want to edit the source.
 
 ---
 
@@ -64,20 +91,22 @@ You should see a `.json` file named after your repo. Each file holds the decisio
 
 ## Update
 
+```bash
+uv tool upgrade contexer
 ```
-/plugin update contexer@contexer
-/reload-plugins
-```
+
+No reinstall needed — the existing MCP registration and hooks continue to work.
 
 ---
 
 ## Uninstall
 
-```
-/plugin uninstall contexer
+```bash
+bash scripts/uninstall.sh
+uv tool uninstall contexer
 ```
 
-This removes the MCP server registration and all hooks. Your stored decisions are not deleted. To also remove them:
+The uninstall script removes the MCP server entry and all hooks from `~/.claude.json` and `~/.claude/settings.json`. Your context store (`~/.contexer/`) is not deleted. To also remove stored context:
 
 ```bash
 rm -rf ~/.contexer/
@@ -85,22 +114,35 @@ rm -rf ~/.contexer/
 
 ---
 
-## Manual install (fallback)
+## How sessions work after install
 
-If you prefer not to use the plugin system:
+```
+Session opens
+  └─▶ SessionStart hook: injects project rules (conventions + constraints) directly
+      PLUS a count pointer for architecture/pattern decisions
+      OR: STOP directive if no context exists (triggers bootstrap)
 
-```bash
-git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/scripts/install.sh
+You send a message (every prompt)
+  └─▶ Anchor hook: writes git root to ~/.contexer/.current_repo
+  └─▶ Bootstrap hook (once): checks if context exists; if not, injects bootstrap directive
+  └─▶ Capture hook (once): calls capture_context with your first message as task description
+  └─▶ Rationale hook: if prompt contains "why/reason/rationale/decided", auto-fetches
+      keyword-matching decisions and injects them before Claude responds
+
+Claude works on your task
+  └─▶ Claude calls get_context JIT for architecture/pattern questions
+  └─▶ Claude calls update_context when it makes significant decisions (you say nothing)
+
+Context window nears limit
+  └─▶ PreCompact hook: injects reminder to call update_context before compaction
+
+Compaction happens
+  └─▶ PostCompact hook: reloads full stored context into Claude's working memory
+
+Next session: repeat from top, but with history
 ```
 
-The script is idempotent — safe to re-run after updates or if you move the repo.
-
-To uninstall:
-
-```bash
-bash ~/tools/contexer/scripts/uninstall.sh
-```
+**You do not need to do anything during a session.** Claude captures decisions automatically. If Claude misses something important, say: *"store that decision"*.
 
 ---
 
