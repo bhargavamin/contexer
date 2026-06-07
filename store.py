@@ -153,30 +153,32 @@ def get_session_start_context(repo_path: str) -> dict:
     pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint")]
     deferred_count = count - len(pre_loaded)
 
-    msg_parts = [f"Contexer: {count} stored decision(s) for this repo."]
-
+    # systemMessage: full detail for Claude — rules content + JIT retrieval instruction
+    sys_parts = []
     if pre_loaded:
-        msg_parts.append("")
-        msg_parts.append("## Project rules — apply to ALL tasks in this repo:")
+        sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
-            tag = d.get("subtype", "")
-            msg_parts.append(f"- [{tag}] {d['content']}")
-
+            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
     if deferred_count > 0:
-        msg_parts.append("")
-        msg_parts.append(
-            f"{deferred_count} additional decisions (architecture/patterns) stored. "
+        sys_parts.append(
+            f"{deferred_count} decision(s) stored (architecture/patterns). "
             "Call get_context BEFORE reading files for any question about architecture, "
-            "design decisions, rationale, or patterns. "
-            "Fall back to reading files only when context is missing or the question is about current code state."
+            "design decisions, rationale, or patterns."
         )
 
-    msg = "\n".join(msg_parts)
+    # additionalContext: single clean status line shown to the user at session start
+    if pre_loaded and deferred_count > 0:
+        user_line = f"Contexer: {len(pre_loaded)} rule(s) pre-loaded, {deferred_count} decision(s) available"
+    elif pre_loaded:
+        user_line = f"Contexer: {len(pre_loaded)} rule(s) pre-loaded"
+    else:
+        user_line = f"Contexer: {count} decision(s) available"
+
     return {
-        "systemMessage": msg,
+        "systemMessage": "\n".join(sys_parts),
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": msg,
+            "additionalContext": user_line,
         },
     }
 
