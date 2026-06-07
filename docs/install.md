@@ -36,14 +36,6 @@ Verify the server is connected — open any Claude Code session and run:
 
 `contexer` should appear as **connected**.
 
-**What gets configured:**
-
-| Config | What changes |
-|---|---|
-| `~/.claude.json` | MCP server entry: `{"command": "contexer"}` |
-| `~/.claude/settings.json` | 7 hooks: SessionStart, PreCompact, PostCompact, 4× UserPromptSubmit |
-| `~/.claude/settings.json` | Tool permissions for all 5 Contexer tools |
-
 ---
 
 ## Install from source (development)
@@ -106,43 +98,11 @@ bash scripts/uninstall.sh
 uv tool uninstall contexer
 ```
 
-The uninstall script removes the MCP server entry and all hooks from `~/.claude.json` and `~/.claude/settings.json`. Your context store (`~/.contexer/`) is not deleted. To also remove stored context:
+Removes the MCP server registration and all hooks. Your context store (`~/.contexer/`) is not deleted. To also remove stored context:
 
 ```bash
 rm -rf ~/.contexer/
 ```
-
----
-
-## How sessions work after install
-
-```
-Session opens
-  └─▶ SessionStart hook: injects project rules (conventions + constraints) directly
-      PLUS a count pointer for architecture/pattern decisions
-      OR: STOP directive if no context exists (triggers bootstrap)
-
-You send a message (every prompt)
-  └─▶ Anchor hook: writes git root to ~/.contexer/.current_repo
-  └─▶ Bootstrap hook (once): checks if context exists; if not, injects bootstrap directive
-  └─▶ Capture hook (once): calls capture_context with your first message as task description
-  └─▶ Rationale hook: if prompt contains "why/reason/rationale/decided", auto-fetches
-      keyword-matching decisions and injects them before Claude responds
-
-Claude works on your task
-  └─▶ Claude calls get_context JIT for architecture/pattern questions
-  └─▶ Claude calls update_context when it makes significant decisions (you say nothing)
-
-Context window nears limit
-  └─▶ PreCompact hook: injects reminder to call update_context before compaction
-
-Compaction happens
-  └─▶ PostCompact hook: reloads full stored context into Claude's working memory
-
-Next session: repeat from top, but with history
-```
-
-**You do not need to do anything during a session.** Claude captures decisions automatically. If Claude misses something important, say: *"store that decision"*.
 
 ---
 
