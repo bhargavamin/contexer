@@ -72,6 +72,24 @@ All operations use natural language.
 
 > **Note:** Your first prompt each session is captured as the current task description, not as a constraint. If you open a session with an instruction like *"always update docs before committing"*, say *"store that as a constraint"* to make sure it is saved correctly.
 
+### Store a global decision
+
+Some conventions apply across every repo — commit style, branch naming, code review process. Store these once and they appear in every session automatically:
+
+```
+"store that globally as a convention"
+"save this as a global constraint: always use conventional commits"
+```
+
+Only `constraint` and `convention` subtypes can be stored globally. Architecture and pattern decisions are always repo-specific.
+
+To see what is stored globally:
+
+```
+"show all global conventions"
+"show global constraints"
+```
+
 ### Query decisions
 
 ```
