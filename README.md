@@ -12,16 +12,19 @@ Every session follows the same automatic flow:
 
 ```
 You open Claude Code
-  └─▶ SessionStart hook: injects count pointer ("N decisions stored — call get_context")
+  └─▶ SessionStart hook: injects project rules (all conventions + constraints) directly
+      PLUS a count pointer for architecture/pattern decisions (JIT)
       OR: injects STOP directive if no context exists (triggers bootstrap)
 
-You type your first message
+You type your message
   └─▶ Anchor hook: writes git root to ~/.contexer/.current_repo (every prompt)
   └─▶ Bootstrap hook (once): if no context, injects directive to run bootstrap first
   └─▶ Capture hook (once): stores your first message as the task description
+  └─▶ Rationale hook (every prompt): if the prompt asks "why / reason / rationale /
+      decided", auto-fetches keyword-matching decisions and injects them as context
 
 Claude works on your task
-  └─▶ Claude calls get_context when it needs project context (JIT — not pre-loaded)
+  └─▶ Claude calls get_context when it needs architecture/pattern context (JIT)
   └─▶ Claude calls update_context when it makes a significant decision
 
 Context window nears limit
@@ -35,13 +38,14 @@ Next session: repeat from the top — but now with history
 
 **It is Claude — not you — who calls `update_context`.** You work normally. Claude nominates decisions; the server filters before storing. If Claude misses something important, say: **"store that decision"**.
 
-## The four tools
+## The five tools
 
 | Tool | Triggered by | What it does |
 |---|---|---|
 | `capture_context` | `UserPromptSubmit` hook (once per session) | Stores the task description |
 | `update_context` | Claude Code, mid-task | Nominates a decision; server filters before storing |
 | `get_context` | Claude Code, JIT when task requires it | Loads stored decisions — optionally filtered by keyword or subtype |
+| `get_context_for_prompt` | `UserPromptSubmit` hook (every prompt) | Detects "why/reason/rationale/decision" questions; auto-injects matching decisions as context; silent no-op for all other prompts |
 | `bootstrap_context` | Claude Code, first session with no context | Scans the repo stack and returns inferred facts + gap questions |
 
 ## The filter

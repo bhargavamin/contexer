@@ -59,5 +59,16 @@ def bootstrap_context(repo_path: str = "") -> str:
     return json.dumps(store.bootstrap_scan(resolved), indent=2)
 
 
+@mcp.tool()
+def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
+    """Auto-called by UserPromptSubmit hook on every prompt. Detects rationale/decision
+    questions (why, reason, rationale, decided...) and injects matching stored decisions
+    as additionalContext. Returns empty string for non-rationale prompts — silent no-op."""
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return ""
+    return store.get_context_for_prompt(resolved, prompt)
+
+
 if __name__ == "__main__":
     mcp.run()

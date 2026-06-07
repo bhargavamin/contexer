@@ -136,28 +136,49 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
 def get_session_start_context(repo_path: str) -> dict:
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
-    if decisions:
-        last_date = decisions[-1]["timestamp"][:10]
-        count = len(decisions)
-        # JIT: inject a pointer only — Claude calls get_context when it actually needs context
+    if not decisions:
+        lines = _build_bootstrap_context(repo_path)
         return {
-            "systemMessage": f"Contexer: {count} decision(s) stored (last: {last_date}) — call get_context when relevant",
+            "systemMessage": "Contexer: no context stored — bootstrapping now",
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": (
-                    f"Contexer: {count} stored decision(s) for this repo (last updated {last_date}). "
-                    "Call get_context BEFORE reading files for any question about architecture, design decisions, "
-                    "rationale, constraints, patterns, or conventions. "
-                    "Fall back to reading files only when context is missing or the question is about current code state."
-                ),
+                "additionalContext": "\n".join(lines),
             },
         }
-    lines = _build_bootstrap_context(repo_path)
+
+    count = len(decisions)
+
+    # Always embed conventions + constraints — these are always-apply rules Claude must
+    # follow from the first task, not discover JIT. Architecture/patterns stay deferred.
+    pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint")]
+    deferred_count = count - len(pre_loaded)
+
+    # systemMessage: full detail for Claude — rules content + JIT retrieval instruction
+    sys_parts = []
+    if pre_loaded:
+        sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
+        for d in pre_loaded:
+            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+    if deferred_count > 0:
+        sys_parts.append(
+            f"{deferred_count} decision(s) stored (architecture/patterns). "
+            "Call get_context BEFORE reading files for any question about architecture, "
+            "design decisions, rationale, or patterns."
+        )
+
+    # additionalContext: single clean status line shown to the user at session start
+    if pre_loaded and deferred_count > 0:
+        user_line = f"Contexer: loaded {len(pre_loaded)} decisions related to constraint and convention. Remaining {deferred_count} decisions will be loaded as needed."
+    elif pre_loaded:
+        user_line = f"Contexer: loaded {len(pre_loaded)} decisions related to constraint and convention."
+    else:
+        user_line = f"Contexer: {count} decisions will be loaded as needed."
+
     return {
-        "systemMessage": "Contexer: no context stored — bootstrapping now",
+        "systemMessage": "\n".join(sys_parts),
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": "\n".join(lines),
+            "additionalContext": user_line,
         },
     }
 
@@ -176,6 +197,53 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
             "additionalContext": "\n".join(lines),
         }
     }
+
+
+_RATIONALE_WORDS = frozenset({
+    "why", "reason", "rationale", "decision", "decided", "chose", "choice",
+    "motivation", "intent", "reasoning", "background", "justif",
+})
+
+_QUERY_STOP_WORDS = frozenset({
+    "why", "was", "the", "did", "we", "for", "what", "how", "is", "are",
+    "can", "does", "this", "that", "it", "to", "of", "in", "a", "an",
+    "and", "or", "but", "not", "with", "at", "by", "from", "reason",
+    "rationale", "decision", "decided", "chose", "choice", "about", "have",
+    "has", "been", "would", "could", "should", "will", "tell", "explain",
+    "know", "me", "you", "do", "our", "my", "your", "them", "they",
+    "implement", "implemented", "implementation", "use", "using", "used",
+    "build", "built", "create", "created", "add", "added", "make", "made",
+    "just", "here", "there", "when", "then", "than", "also", "get",
+    "into", "which", "who", "where", "what", "that", "its", "been",
+})
+
+
+def get_context_for_prompt(repo_path: str, prompt: str) -> str:
+    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
+    the prompt is a rationale/decision question. Silent no-op for all other prompts."""
+    data = _load(repo_path)
+    if not data.get("entries"):
+        return ""
+
+    words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
+    word_set = set(words_raw)
+
+    if not (word_set & _RATIONALE_WORDS):
+        return ""
+
+    # Extract content keywords: alpha-only, length > 3, not stop words
+    keywords = [
+        w for w in words_raw
+        if len(w) > 3 and w not in _QUERY_STOP_WORDS and w.isalpha()
+    ]
+
+    # Try keywords longest-first (most specific match wins)
+    for kw in sorted(set(keywords), key=len, reverse=True)[:3]:
+        result = get_context(repo_path, query=kw)
+        if "No matching decisions" not in result and "No context stored" not in result:
+            return f"[Contexer: auto-fetched for this question]\n{result}"
+
+    return ""
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0) -> str:
