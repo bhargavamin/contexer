@@ -70,6 +70,33 @@ def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
     return store.get_context_for_prompt(resolved, prompt)
 
 
+@mcp.tool()
+def update_global_context(content: str, subtype: str = "") -> str:
+    """Stores a cross-cutting rule in the global store — applies to ALL repos.
+
+    Use this only for constraints or conventions that genuinely apply everywhere:
+    e.g. "always use conventional commits", "never commit untested code".
+    Do NOT use for repo-specific decisions — use update_context instead.
+
+    subtype: constraint | convention (defaults to convention if omitted)
+    """
+    stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype)
+    if stored:
+        return f"Stored globally. id={entry_id}"
+    return "Filtered — must be a novel constraint or convention (architecture/pattern are always repo-specific)."
+
+
+@mcp.tool()
+def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) -> str:
+    """Returns stored global context — constraints and conventions that apply across all repos.
+
+    query: optional keyword filter (case-insensitive substring match).
+    entry_type: constraint | convention
+    limit: max decisions to return (0 = auto: 25 for filtered, 10 for unfiltered).
+    """
+    return store.get_global_context(query, entry_type, limit)
+
+
 def main():
     mcp.run()
 

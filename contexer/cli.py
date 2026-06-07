@@ -122,6 +122,7 @@ def install() -> None:
         "mcp__contexer__capture_context", "mcp__contexer__update_context",
         "mcp__contexer__get_context", "mcp__contexer__bootstrap_context",
         "mcp__contexer__get_context_for_prompt",
+        "mcp__contexer__update_global_context", "mcp__contexer__get_global_context",
     ]:
         if p not in allow:
             allow.append(p)
