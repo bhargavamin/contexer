@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-contexer = "contexer.server:main"
+contexer = "contexer.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/bhargavamin/contexer"

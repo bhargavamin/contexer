@@ -23,7 +23,7 @@ uv tool install contexer
 **Step 2 — wire it into Claude Code:**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/bhargavamin/contexer/main/scripts/install.sh)
+contexer install
 ```
 
 **Step 3 — restart Claude Code** and open any git repo. Bootstrap runs automatically on the first session.
