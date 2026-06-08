@@ -377,17 +377,21 @@ def get_session_start_context(repo_path: str) -> dict:
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
 
-    parts: list[str] = []
+    loaded_parts: list[str] = []
     if global_rules:
-        parts.append(_pl(len(global_rules), "global rule"))
+        loaded_parts.append(_pl(len(global_rules), "global rule"))
     if constraints:
-        parts.append(_pl(len(constraints), "constraint"))
+        loaded_parts.append(_pl(len(constraints), "constraint"))
     if conventions:
-        parts.append(_pl(len(conventions), "convention"))
-    if deferred_count > 0:
-        parts.append(f"{_pl(deferred_count, 'arch/pattern')} on demand")
+        loaded_parts.append(_pl(len(conventions), "convention"))
 
-    user_line = f"Contexer: {', '.join(parts)} loaded." if parts else "Contexer: active."
+    sentences: list[str] = []
+    if loaded_parts:
+        sentences.append(f"{', '.join(loaded_parts)} loaded")
+    if deferred_count > 0:
+        sentences.append(f"{_pl(deferred_count, 'arch/pattern')} will be loaded on demand")
+
+    user_line = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
 
     return {
         "systemMessage": user_line,
