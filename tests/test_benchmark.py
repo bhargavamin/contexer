@@ -98,14 +98,18 @@ MISS_PROMPTS = [
     "show me the schema for the orders table",
     "why is the sky blue?",                              # rationale word, no domain keyword
     "why do plants grow upward?",                        # rationale word, no domain keyword
-    "what is the reason for rain?",                     # rationale word, no domain keyword
+    "what is the reason for rain?",                      # rationale word, no domain keyword
+    "is this variable in scope?",                        # "scope" trigger but domain keyword present
+    "give me an overview of Docker networking",          # "overview" trigger but domain keywords present
+    "add a NOT NULL constraint to the users table",      # "constraint" trigger but SQL-specific
 ]
 
 # Known edge-case false positives — short keywords that substring-match unrelated decisions.
 # e.g. "form" (from "why do clouds form?") matches "format" in the commits convention.
 # These are documented limitations, not bugs.
 KNOWN_FALSE_POSITIVES = [
-    "why do clouds form?",   # "form" substring-matches "format" in commits convention
+    "why do clouds form?",            # "form" substring-matches "format" in commits convention
+    "is this variable in scope?",     # "variable" substring-matches "environment variables"
 ]
 
 # On-demand get_context queries: (query, expected_hit: bool)

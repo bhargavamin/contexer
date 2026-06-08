@@ -476,13 +476,16 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
             if "No matching decisions" not in result and "No context stored" not in result:
                 return f"[Contexer: auto-fetched for this question]\n{result}"
 
-        # Project questions with no keyword match get the full overview — these questions
-        # are asking about the repo itself, not a specific technology, so a broad dump
-        # is more useful than returning nothing.
+        # Overview fallback: only when the prompt has NO domain-specific keywords beyond
+        # the project-context trigger word itself. If there are other keywords (e.g. "variable",
+        # "docker", "react") the question is topic-specific, not a high-level project question,
+        # so injecting the full context would be a false positive.
         if is_project:
-            result = get_context(repo_path)
-            if "No context stored" not in result:
-                return f"[Contexer: project context]\n{result}"
+            non_project_kws = [k for k in ordered_kws if k not in _PROJECT_CONTEXT_WORDS]
+            if not non_project_kws:
+                result = get_context(repo_path)
+                if "No context stored" not in result:
+                    return f"[Contexer: project context]\n{result}"
 
     # Fall back to global decisions when repo search yields nothing
     for kw in ordered_kws:
