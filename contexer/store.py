@@ -235,6 +235,16 @@ def _sanitize_directive(text: str) -> str:
     text = re.sub(r"\s{2,}", " ", text).strip().strip("!?,. ")
     return text[0].upper() + text[1:] if text else text
 
+# Sarcasm/irony signals — prompts matching these are not stored as constraints even if
+# a directive trigger word is present. "love always use pip", "yeah right never again /s".
+_SARCASM_EXCLUDES = re.compile(
+    r"(?:"
+    r"/s\s*$"                                      # /s at end (explicit sarcasm marker)
+    r"|^(?:love|oh\s+sure|yeah\s+right|oh\s+great|sure,?|lol,?|haha,?)\s+"  # ironic openers
+    r")",
+    re.IGNORECASE,
+)
+
 # "forward-looking practice" signals — convention subtype when used alone (without always/never)
 _CONVENTION_SIGNALS = re.compile(
     r"\b(?:from\s+now\s+on|going\s+forward|henceforth)\b",
@@ -252,8 +262,11 @@ _PERSONAL_DESCRIPTOR = re.compile(
 
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
-    Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')."""
+    Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
+    and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
     if text.strip().endswith("?"):
+        return False, ""
+    if _SARCASM_EXCLUDES.search(text.strip()):
         return False, ""
     if not _CONSTRAINT_TRIGGER.search(text):
         return False, ""

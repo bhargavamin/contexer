@@ -817,6 +817,27 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint("make sure the API is RESTful")
         assert is_c is False
 
+    def test_love_always_irony_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("love always use pip")
+        assert is_c is False
+
+    def test_slash_s_sarcasm_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("always use pip /s")
+        assert is_c is False
+
+    def test_yeah_right_irony_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("yeah right never push to main directly")
+        assert is_c is False
+
+    def test_oh_sure_irony_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("oh sure always commit broken code")
+        assert is_c is False
+
+    def test_genuine_always_still_detected(self):
+        # Sarcasm exclusion should not affect real directives
+        is_c, _ = store._is_prescriptive_constraint("always use uv not pip")
+        assert is_c is True
+
 
 class TestSanitizeDirective:
     def test_profanity_stripped(self):
