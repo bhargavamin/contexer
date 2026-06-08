@@ -121,7 +121,7 @@ class TestInstall:
         cli.install()
         hooks = _settings(tmp_home).get("hooks", {})
         poc = hooks.get("PostCompact", [])
-        assert _in_groups(poc, "reloaded after compaction")
+        assert _in_groups(poc, "get_post_compact_context")
 
     @pytest.mark.parametrize("perm", [
         "mcp__contexer__capture_context",
@@ -195,7 +195,7 @@ class TestSessionStart:
     def test_new_repo_returns_bootstrap_offer(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "Yes or no?" in ctx
+        assert "yes" in ctx.lower() and "no" in ctx.lower()
         assert "Do NOT" in ctx
 
     def test_new_repo_no_stop_mandate(self, tmp_repo):
@@ -250,7 +250,7 @@ class TestBootstrapOffer:
     def test_no_context_returns_opt_in_question(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
-        assert "Yes or no?" in ctx
+        assert "yes" in ctx.lower() and "no" in ctx.lower()
 
     def test_no_context_has_do_not_directive(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo)
@@ -262,6 +262,70 @@ class TestBootstrapOffer:
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
         assert ctx == ""
+
+
+# ── 4b. PostCompact bootstrap re-trigger ─────────────────────────────────────
+
+class TestPostCompactContext:
+    def test_no_context_returns_bootstrap_offer(self, tmp_repo):
+        """Bug fix: PostCompact was returning 'No context stored' string, not a bootstrap offer."""
+        result = store.get_post_compact_context(tmp_repo)
+        sys_msg = result.get("systemMessage", "")
+        assert "yes" in sys_msg.lower() and "full" in sys_msg.lower(), \
+            "PostCompact should re-offer bootstrap when no context stored"
+
+    def test_no_context_does_not_say_reloaded(self, tmp_repo):
+        result = store.get_post_compact_context(tmp_repo)
+        sys_msg = result.get("systemMessage", "")
+        assert "context reloaded" not in sys_msg
+
+    def test_with_context_returns_reloaded_message(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION, "architecture")
+        result = store.get_post_compact_context(tmp_repo)
+        sys_msg = result.get("systemMessage", "")
+        assert "reloaded after compaction" in sys_msg
+
+    def test_with_context_includes_decisions(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL for the main database", SESSION, "architecture")
+        result = store.get_post_compact_context(tmp_repo)
+        sys_msg = result.get("systemMessage", "")
+        assert "PostgreSQL" in sys_msg
+
+    def test_returns_dict_always(self, tmp_repo):
+        result = store.get_post_compact_context(tmp_repo)
+        assert isinstance(result, dict)
+        assert "systemMessage" in result
+
+
+# ── 4c. Bootstrap instruction correctness ────────────────────────────────────
+
+class TestBootstrapInstructions:
+    def test_always_shown_for_task_prompts(self, tmp_repo):
+        """Bug fix: 'just continues → skip' was suppressing bootstrap for task prompts."""
+        lines = store._build_bootstrap_context(tmp_repo)
+        full_text = "\n".join(lines)
+        assert "ALWAYS" in full_text, "Bootstrap must be shown always, even for task prompts"
+
+    def test_no_just_continues_skip_rule(self, tmp_repo):
+        """'just continues → skip' was the original bug — must be gone."""
+        lines = store._build_bootstrap_context(tmp_repo)
+        full_text = "\n".join(lines)
+        assert "just continues" not in full_text
+
+    def test_task_prompt_answer_immediately(self, tmp_repo):
+        lines = store._build_bootstrap_context(tmp_repo)
+        full_text = "\n".join(lines)
+        assert "immediately answer" in full_text or "proceed to answer" in full_text
+
+    def test_no_skip_path_for_direct_no(self, tmp_repo):
+        lines = store._build_bootstrap_context(tmp_repo)
+        full_text = "\n".join(lines)
+        assert "no or skip" in full_text
+
+    def test_quick_and_full_options_documented(self, tmp_repo):
+        lines = store._build_bootstrap_context(tmp_repo)
+        full_text = "\n".join(lines)
+        assert "yes" in full_text.lower() and "full" in full_text.lower()
 
 
 # ── 5. Constraint capture ─────────────────────────────────────────────────────
@@ -276,7 +340,7 @@ class TestConstraintCapture:
         ("going forward, prefer async functions", "convention"),
     ])
     def test_prescriptive_directive_captured_with_correct_subtype(self, tmp_repo, prompt, expected_subtype):
-        eid = store.capture_user_constraint(tmp_repo, prompt, SESSION)
+        eid, content = store.capture_user_constraint(tmp_repo, prompt, SESSION)
         assert eid is not None, f"Expected capture for: {prompt!r}"
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
@@ -290,23 +354,23 @@ class TestConstraintCapture:
         "fix the login bug",            # task, no trigger
     ])
     def test_non_directive_rejected(self, tmp_repo, prompt):
-        eid = store.capture_user_constraint(tmp_repo, prompt, SESSION)
+        eid, content = store.capture_user_constraint(tmp_repo, prompt, SESSION)
         assert eid is None, f"Expected rejection for: {prompt!r}"
 
     def test_duplicate_directive_silently_discarded(self, tmp_repo):
         store.capture_user_constraint(tmp_repo, "always use type hints in Python", SESSION)
-        eid2 = store.capture_user_constraint(tmp_repo, "always use type hints in Python", SESSION)
+        eid2, content = store.capture_user_constraint(tmp_repo, "always use type hints in Python", SESSION)
         assert eid2 is None
 
     def test_stored_as_decision_type(self, tmp_repo):
-        eid = store.capture_user_constraint(tmp_repo, "never push to main directly", SESSION)
+        eid, content = store.capture_user_constraint(tmp_repo, "never push to main directly", SESSION)
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["type"] == "decision"
 
     def test_long_prompt_truncated_to_600_chars(self, tmp_repo):
         long_prompt = "always " + "x" * 700
-        eid = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
+        eid, content = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
         assert eid is not None
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)

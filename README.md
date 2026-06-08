@@ -83,16 +83,38 @@ sudo contexer install
 
 ---
 
+## Contexer runs silently — you'll forget it's there
+
+That's intentional. Once installed, Contexer runs in the background on every session, in every repo. You do not need to interact with it for it to work.
+
+The only time it surfaces is:
+
+1. **When you open a repo with no stored context** — Claude starts its first response with a one-line offer:
+
+```
+Contexer: no project context stored for this repo. Save decisions so future sessions start with full context?
+ · yes — quick (1 question: what does this repo do?)
+ · full — thorough (up to 5 questions: purpose, tests, CI, deploy, constraints)
+ · no — skip
+```
+
+This appears at the top of Claude's response regardless of what you asked. Claude answers your request immediately after the offer — you do not have to respond to it to get help. Say **yes**, **full**, or **no** in your next message to act on it, or ignore it and the offer goes away.
+
+2. **At the start of every subsequent session** — a short status line confirming what was loaded:
+
+```
+Contexer: 5 constraints, 4 conventions loaded. 11 arch/patterns will be loaded on demand.
+```
+
+That's it. No other interruptions.
+
+---
+
 ## How a session looks after Contexer is set up
 
 **Session 1 (first time in a repo):**
 
-Claude offers bootstrap setup. You answer 2–3 questions:
-- *"What does this repo do?"* → stored as an architecture decision
-- *"Is there a CI pipeline?"* → stored as a convention
-- *"Any constraints?"* → stored as a constraint
-
-As you work, Claude stores further decisions automatically.
+Claude's first response includes the bootstrap offer. Say **yes** for a quick one-question setup or **full** for up to 5 questions. As you work, Claude stores further decisions automatically.
 
 **Every session after that:**
 
