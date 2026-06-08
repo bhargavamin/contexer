@@ -311,8 +311,10 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         "  \"No project context stored yet — want a quick setup?"
         " I can ask 2-3 questions to capture key decisions for future sessions. Yes or no?\"",
         "Do NOT call bootstrap_context and do NOT ask setup questions until the user replies yes.",
-        "If the user says yes → call bootstrap_context, confirm each inferred item, call update_context"
-        " for each confirmed one, then answer their original request.",
+        "If the user says yes → call bootstrap_context. For each inferred item confirm and store with"
+        " update_context(subtype='architecture'). For each gap question ask the user and store their answer"
+        " using the subtype from the gap entry (architecture | convention | constraint)."
+        " Store each answer as a separate update_context call — do NOT bundle multiple answers into one entry.",
         "If the user says no, skip, or just continues → answer their original request directly, no bootstrap.",
     ]
 
@@ -421,6 +423,14 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
 _RATIONALE_WORDS = frozenset({
     "why", "reason", "rationale", "decision", "decided", "chose", "choice",
     "motivation", "intent", "reasoning", "background", "justif",
+    # approach/design questions: "what approach did we take?", "what's the architecture?"
+    "approach", "architecture", "tradeoff", "tradeoffs", "constraint", "convention",
+})
+
+# Project-context questions: "what is the purpose?", "what is planned?", "what's the goal?"
+# "plan" excluded — too ambiguous ("premium plan", "payment plan")
+_PROJECT_CONTEXT_WORDS = frozenset({
+    "purpose", "goal", "planned", "overview", "scope",
 })
 
 _QUERY_STOP_WORDS = frozenset({
@@ -439,12 +449,15 @@ _QUERY_STOP_WORDS = frozenset({
 
 def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
-    the prompt is a rationale/decision question. Silent no-op for all other prompts.
+    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
     Searches repo decisions first; falls back to global decisions."""
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
 
-    if not (word_set & _RATIONALE_WORDS):
+    is_rationale = bool(word_set & _RATIONALE_WORDS)
+    is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
+
+    if not is_rationale and not is_project:
         return ""
 
     # Extract content keywords: alpha-only, length >= 3, not stop words.
@@ -462,6 +475,14 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
             result = get_context(repo_path, query=kw)
             if "No matching decisions" not in result and "No context stored" not in result:
                 return f"[Contexer: auto-fetched for this question]\n{result}"
+
+        # Project questions with no keyword match get the full overview — these questions
+        # are asking about the repo itself, not a specific technology, so a broad dump
+        # is more useful than returning nothing.
+        if is_project:
+            result = get_context(repo_path)
+            if "No context stored" not in result:
+                return f"[Contexer: project context]\n{result}"
 
     # Fall back to global decisions when repo search yields nothing
     for kw in ordered_kws:
@@ -576,8 +597,8 @@ def bootstrap_scan(repo_path: str) -> dict:
         if _is_novel(fact, existing + proxy):
             inferred.append(fact)
 
-    def _gap(assumption: str, question: str, hint: str) -> dict:
-        return {"assumption": assumption, "question": question, "hint": hint}
+    def _gap(assumption: str, question: str, hint: str, subtype: str = "architecture") -> dict:
+        return {"assumption": assumption, "question": question, "hint": hint, "subtype": subtype}
 
     def _has_dep(*names: str) -> bool:
         return any(n in dep for n in names for dep in all_deps)
@@ -884,6 +905,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             if name else
             "e.g. 'REST API for internal task management, used by 3 frontend apps'"
         ),
+        subtype="architecture",
     ))
 
     # Tests — only if no test framework detected
@@ -892,6 +914,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No automated test framework detected",
             question="Is automated testing in scope?",
             hint=_test_hint(),
+            subtype="convention",
         ))
 
     # CI — only if no CI config found
@@ -900,6 +923,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No CI/CD config found in this repo",
             question="Is there a build or deploy pipeline, or is one planned?",
             hint="e.g. GitHub Actions, GitLab CI, CircleCI; or: manual deploys, not needed yet",
+            subtype="convention",
         ))
 
     # Deployment — only if no container or infra config
@@ -908,6 +932,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No container or infra config found — deployment target unclear",
             question="Where does this run, or is it local-only?",
             hint="e.g. containerized VPS, serverless function, internal CLI, local-only tool, not deployed yet",
+            subtype="architecture",
         ))
 
     # Cloud SDK but no deploy config — probably in a separate repo
@@ -916,6 +941,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption=f"{sig['cloud_detected']} SDK detected but no deploy config found here",
             question=f"Is the {sig['cloud_detected']} deploy config in a separate repo?",
             hint="e.g. separate infra repo, serverless framework config, or not yet set up",
+            subtype="architecture",
         ))
 
     # Compliance — only if auth or payment deps detected
@@ -924,6 +950,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="Auth or payment handling detected — compliance requirements unknown",
             question="Any compliance or security requirements given the auth/payment handling?",
             hint="e.g. GDPR, PCI-DSS, SOC2, HIPAA; internal security policy; audit logging; data residency",
+            subtype="constraint",
         ))
 
     # Team conventions — only if architecture signals suggest a team wrote this
@@ -936,6 +963,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="Team conventions not captured in config files",
             question="Any branching model, PR process, or unwritten norms beyond what's in config files?",
             hint="e.g. trunk-based vs feature branches; PR review requirements; who owns which area",
+            subtype="convention",
         ))
 
     # Exclusions — only if dep tree suggests architectural choices were made
@@ -945,6 +973,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No known intentional library exclusions or architectural mandates",
             question="Any libraries or patterns that are intentionally excluded or always required?",
             hint=_exclusions_hint(),
+            subtype="constraint",
         ))
 
     # Constraints — only if production signals exist
@@ -957,6 +986,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No known performance, scale, or compliance constraints",
             question="Any constraints that shape technical decisions?",
             hint=_constraints_hint(),
+            subtype="constraint",
         ))
 
     return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files}
