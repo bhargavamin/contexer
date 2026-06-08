@@ -177,14 +177,16 @@ class TestSessionStartPermutations:
     def test_no_global_no_repo_bootstraps(self):
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "STOP" in ctx
+        assert "Do NOT" in ctx
+        assert "yes" in ctx
         assert "Global rules" not in ctx
 
     def test_global_only_no_repo_bootstraps_with_global_rules(self):
         _add_global("Always use conventional commits", "convention")
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "STOP" in ctx
+        assert "Do NOT" in ctx
+        assert "yes" in ctx
         assert "Global rules" in ctx
         assert "conventional commits" in ctx
 
@@ -193,7 +195,7 @@ class TestSessionStartPermutations:
         result = store.get_session_start_context(REPO)
         msg = result["systemMessage"]
         assert "global rule" in msg
-        assert "bootstrapping" in msg
+        assert "bootstrap" in msg
 
     def test_no_global_repo_has_decisions_injects_project_rules(self):
         _add_repo("Never commit without tests", "constraint")

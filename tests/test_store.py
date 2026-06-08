@@ -380,12 +380,14 @@ class TestGetSessionStartContext:
         assert "no context stored" in result["systemMessage"].lower()
 
     def test_empty_repo_directive_is_offer_not_stop(self, tmp_repo):
-        # Bootstrap is offered as a choice — Claude asks the user, not a STOP mandate
+        # Bootstrap is an opt-in question — Claude must ask the user and wait, not proceed automatically
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "STOP" not in ctx
-        assert "yes" in ctx.lower()    # user can say yes
-        assert "skip" in ctx.lower()   # user can skip
+        assert "yes" in ctx.lower()
+        assert "skip" in ctx.lower()
+        # Hard constraint: Claude must not call bootstrap_context before hearing yes
+        assert "do not" in ctx.lower() or "don't" in ctx.lower()
 
     def test_empty_repo_directive_includes_repo_path(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
@@ -431,7 +433,7 @@ class TestGetBootstrapContextPrompt:
         assert result == {}
 
     def test_directive_tells_claude_to_call_bootstrap_tool(self, tmp_repo):
-        # Offer framing: Claude asks the user, calls bootstrap_context on yes, skips on no
+        # Opt-in: Claude asks first, calls bootstrap_context only after user says yes
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "uv.lock").write_text("")
         result = store.get_bootstrap_context_prompt(tmp_repo)
@@ -440,6 +442,7 @@ class TestGetBootstrapContextPrompt:
         assert "STOP" not in ctx
         assert "yes" in ctx.lower()
         assert "skip" in ctx.lower()
+        assert "do not" in ctx.lower() or "don't" in ctx.lower()
 
     def test_directive_includes_repo_path(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)

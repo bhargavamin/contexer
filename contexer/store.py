@@ -307,12 +307,13 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     return [
         f"No project context stored for {repo_path}.",
-        "Before responding, offer the user a one-time bootstrap:",
-        "  Say: \"No project context stored yet — want a quick setup? I can ask 2-3 questions to capture"
-        " key decisions for future sessions. Reply yes to run it now, or just continue and I'll skip it.\"",
-        "If the user says yes or any affirmative: call bootstrap_context, confirm each inferred item with"
-        " the user, call update_context for each confirmed one, then answer their original request.",
-        "If the user says no, skip, or just continues: answer their original request directly, no bootstrap.",
+        "Before doing anything else, ask the user this exact question and wait for their answer:",
+        "  \"No project context stored yet — want a quick setup?"
+        " I can ask 2-3 questions to capture key decisions for future sessions. Yes or no?\"",
+        "Do NOT call bootstrap_context and do NOT ask setup questions until the user replies yes.",
+        "If the user says yes → call bootstrap_context, confirm each inferred item, call update_context"
+        " for each confirmed one, then answer their original request.",
+        "If the user says no, skip, or just continues → answer their original request directly, no bootstrap.",
     ]
 
 

@@ -24,6 +24,14 @@ def _filter_groups(groups: list, markers: list) -> list:
     ]
 
 
+def _has_mcp_tool(groups: list, tool: str) -> bool:
+    return any(
+        any(h.get("type") == "mcp_tool" and h.get("server") == "contexer"
+            and h.get("tool") == tool for h in grp.get("hooks", []))
+        for grp in groups
+    )
+
+
 def install() -> None:
     home = Path.home()
     python = sys.executable
@@ -51,6 +59,18 @@ def install() -> None:
         "print(json.dumps({'systemMessage': 'Contexer: context reloaded after compaction\\\\n' + ctx}))"
     )
 
+    anchor_cmd = (
+        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && "
+        "printf '%s' \"$REPO\" > ~/.contexer/.current_repo && "
+        "FLAG=\"$HOME/.contexer/.pending_capture\" && "
+        "if [ -f \"$FLAG\" ]; then "
+        "rm -f \"$FLAG\" && "
+        "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
+        "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
+        "— call update_context for any architecture, pattern, constraint, or convention decisions before responding.\"}}'; "
+        "else echo '{}'; fi"
+    )
+
     contexer_bin = shutil.which("contexer") or "contexer"
 
     # MCP server (~/.claude.json)
@@ -74,6 +94,12 @@ def install() -> None:
             "statusMessage": "Loading session context...",
             "command": _py(ss_code)}]})
 
+    # PostToolUse: set a flag after Write/Edit so next prompt reminds Claude to call update_context
+    put = hooks.setdefault("PostToolUse", [])
+    if not _in_groups(put, ".pending_capture"):
+        put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
+            "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+
     pc = hooks.setdefault("PreCompact", [])
     if not _in_groups(pc, "compaction starting"):
         pc.append({"hooks": [{"type": "command",
@@ -87,31 +113,35 @@ def install() -> None:
             "command": _py(post_code)}]})
 
     ups = hooks.setdefault("UserPromptSubmit", [])
-    if not _in_groups(ups, ".current_repo"):
+
+    # Replace old anchor hook (without .pending_capture logic) with new one
+    if _in_groups(ups, ".current_repo") and not _in_groups(ups, ".pending_capture"):
+        ups = _filter_groups(ups, [".current_repo"])
+        hooks["UserPromptSubmit"] = ups
+
+    if not _in_groups(ups, ".pending_capture"):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && printf '%s' \"$REPO\" > ~/.contexer/.current_repo && echo '{}'"}]})
+            "command": anchor_cmd}]})
 
     if not _in_groups(ups, "get_bootstrap_context_prompt"):
         ups.append({"hooks": [{"type": "command", "once": True,
             "statusMessage": "Checking bootstrap context...",
             "command": _py(boot_code)}]})
 
-    if not any(
-        any(h.get("type") == "mcp_tool" and h.get("server") == "contexer"
-            and h.get("tool") == "capture_context" for h in grp.get("hooks", []))
-        for grp in ups
-    ):
+    if not _has_mcp_tool(ups, "capture_context"):
         ups.append({"hooks": [{"type": "mcp_tool", "server": "contexer",
             "tool": "capture_context",
             "input": {"repo_path": "", "description": "${prompt}"},
             "once": True, "statusMessage": "Capturing task..."}]})
 
-    if not any(
-        any(h.get("type") == "mcp_tool" and h.get("server") == "contexer"
-            and h.get("tool") == "get_context_for_prompt" for h in grp.get("hooks", []))
-        for grp in ups
-    ):
+    if not _has_mcp_tool(ups, "capture_user_constraint"):
+        ups.append({"hooks": [{"type": "mcp_tool", "server": "contexer",
+            "tool": "capture_user_constraint",
+            "input": {"repo_path": "", "prompt": "${prompt}"},
+            "statusMessage": "Checking for constraint directives..."}]})
+
+    if not _has_mcp_tool(ups, "get_context_for_prompt"):
         ups.append({"hooks": [{"type": "mcp_tool", "server": "contexer",
             "tool": "get_context_for_prompt",
             "input": {"repo_path": "", "prompt": "${prompt}"},
@@ -123,6 +153,7 @@ def install() -> None:
         "mcp__contexer__get_context", "mcp__contexer__bootstrap_context",
         "mcp__contexer__get_context_for_prompt",
         "mcp__contexer__update_global_context", "mcp__contexer__get_global_context",
+        "mcp__contexer__capture_user_constraint",
     ]:
         if p not in allow:
             allow.append(p)
@@ -156,9 +187,10 @@ def uninstall() -> None:
 
         event_markers = {
             "SessionStart":     ["get_session_start_context"],
+            "PostToolUse":      [".pending_capture"],
             "PreCompact":       ["compaction starting"],
             "PostCompact":      ["reloaded after compaction"],
-            "UserPromptSubmit": [".current_repo", "get_bootstrap_context_prompt"],
+            "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt"],
         }
         for event, markers in event_markers.items():
             before = hooks.get(event, [])
