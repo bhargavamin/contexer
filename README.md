@@ -74,10 +74,10 @@ sudo contexer install
 
 | Command | Description |
 |---|---|
-| `sudo contexer install` | Register MCP server and all hooks with Claude Code |
-| `contexer status` | Show installation health — MCP registration, hooks, store size, current repo |
-| `contexer reinstall` | Re-sync config (uninstall + install — use after Claude Code updates) |
-| `contexer uninstall` | Remove MCP registration and hooks; context store is kept |
+| `sudo contexer install` | Connect Contexer to Claude Code |
+| `contexer status` | Show installation health — connection status, store size, current repo |
+| `contexer reinstall` | Re-sync connection (use after Claude Code updates) |
+| `contexer uninstall` | Disconnect from Claude Code; context store is kept |
 | `contexer uninstall --purge` | Remove everything including the context store (`~/.contexer/`) |
 | `contexer version` | Print installed version |
 
@@ -182,7 +182,7 @@ You can also edit the store file directly — it is plain JSON at `~/.contexer/`
 
 Contexer does not slow down Claude's response generation. Here is exactly what happens and when:
 
-**All hook processing runs before Claude begins generating a response — never during it.** The moment you submit a prompt, Contexer's hooks execute in the background. By the time Claude starts writing, the relevant decisions are already in context. Nothing is added on top of Claude's response time.
+**All context processing runs before Claude begins generating a response — never during it.** The moment you submit a prompt, Contexer processes context in the background. By the time Claude starts writing, the relevant decisions are already in context. Nothing is added on top of Claude's response time.
 
 **Store lookups are sub-millisecond.** Measured on real data:
 
@@ -192,7 +192,7 @@ Contexer does not slow down Claude's response generation. Here is exactly what h
 | Lookup with a miss (no match) | ~0ms |
 | Session start context load | ~1ms |
 
-These numbers are pure Python/disk operations, independent of model. They hold the same whether you have 10 or 500 decisions stored.
+These are local operations, independent of model. They hold the same whether you have 10 or 500 decisions stored.
 
 **Token cost is front-loaded and fixed.** You pay once at session start; every subsequent prompt in the session is free.
 
@@ -204,7 +204,7 @@ These numbers are pure Python/disk operations, independent of model. They hold t
 
 Cost per rule is flat at **~26 tokens**, regardless of store size. ~250 tokens is under 0.5% of a typical Claude Code session — less than a one-sentence follow-up question.
 
-**Context injection only fires when relevant.** On prompts that don't match a rationale or project keyword, Contexer performs a fast word-set check (~0ms) and returns immediately — no store read, no tokens added.
+**Context injection only fires when relevant.** On prompts that don't relate to stored decisions, Contexer skips silently — no store read, no tokens added.
 
 ---
 
