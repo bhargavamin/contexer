@@ -37,7 +37,7 @@ uv tool install contexer
 contexer install
 ```
 
-**Step 3 — restart Claude Code** and open any git repo. Bootstrap runs automatically on the first session.
+**Step 3 — restart Claude Code** and open any git repo. On your first message, Claude will offer a quick bootstrap setup — answer yes to capture initial decisions, or skip to start immediately.
 
 ---
 
@@ -177,7 +177,7 @@ Say *"delete the X decision"* or edit the store file directly.
 If the content is too close to an existing decision, it is silently skipped. Rephrase it to include what specifically changed.
 
 **No context appeared at session start.**
-This happens the first time you open a repo — bootstrap will run to capture your initial decisions. Complete it once and all future sessions will have context.
+This happens the first time you open a repo. Claude will offer bootstrap setup — answer yes to capture your initial decisions. Once done, all future sessions will have context.
 
 ---
 
