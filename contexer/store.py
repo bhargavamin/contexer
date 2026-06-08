@@ -46,7 +46,7 @@ def _load(repo_path: str) -> dict:
 
 def _save(repo_path: str, data: dict) -> None:
     path = _store_path(repo_path)
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     path.chmod(0o600)
 
 
@@ -69,7 +69,7 @@ def _load_global() -> dict:
 
 def _save_global(data: dict) -> None:
     path = _global_path()
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     path.chmod(0o600)
 
 
@@ -294,16 +294,16 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     return True, subtype
 
 
-def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> str | None:
+def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tuple[str, str] | tuple[None, None]:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
-    and stores them as decisions. Returns entry_id if stored, None if not a constraint or duplicate."""
+    and stores them as decisions. Returns (entry_id, sanitized_content) if stored, (None, None) otherwise."""
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
-        return None
+        return None, None
     content = _sanitize_directive(prompt.strip())[:600]
     data = _load(repo_path)
     if not _passes_filter(content, data["entries"]):
-        return None
+        return None, None
     entry = {
         "id": str(uuid.uuid4()),
         "type": "decision",
@@ -315,12 +315,19 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> str
     data["entries"].append(entry)
     data["entries"] = data["entries"][-MAX_ENTRIES:]
     _save(repo_path, data)
-    return entry["id"]
+    return entry["id"], content
 
 
 _QUESTION_STARTS = {
     "what", "how", "why", "when", "where", "who", "which",
     "is", "are", "can", "does", "do", "will", "would", "could", "should",
+}
+
+# Prompts starting with these are answers to questions or acknowledgements, not task descriptions
+_ANSWER_STARTS = {
+    "no", "yes", "nope", "yep", "yeah", "nah", "ok", "okay",
+    "not", "none", "never", "nope", "sure", "correct", "right",
+    "nowhere", "nothing", "neither",
 }
 
 def _is_task(content: str) -> bool:
@@ -331,6 +338,8 @@ def _is_task(content: str) -> bool:
     if stripped.endswith("?") and len(words) < 20:
         return False
     if words[0] in _QUESTION_STARTS and len(words) < 12:
+        return False
+    if words[0] in _ANSWER_STARTS:
         return False
     return True
 
@@ -375,15 +384,24 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     return [
         f"No project context stored for {repo_path}.",
-        "Before doing anything else, ask the user this exact question and wait for their answer:",
-        "  \"No project context stored yet — want a quick setup?"
-        " I can ask 2-3 questions to capture key decisions for future sessions. Yes or no?\"",
-        "Do NOT call bootstrap_context and do NOT ask setup questions until the user replies yes.",
-        "If the user says yes → call bootstrap_context. For each inferred item confirm and store with"
-        " update_context(subtype='architecture'). For each gap question ask the user and store their answer"
-        " using the subtype from the gap entry (architecture | convention | constraint)."
-        " Store each answer as a separate update_context call — do NOT bundle multiple answers into one entry.",
-        "If the user says no, skip, or just continues → answer their original request directly, no bootstrap.",
+        "ALWAYS start your response with this exact offer (even if the user sent a task or question):",
+        "  \"Contexer: no project context stored for this repo."
+        " Save decisions so future sessions start with full context?",
+        "   · yes — quick (1 question: what does this repo do?)",
+        "   · full — thorough (up to 5 questions: purpose, tests, CI, deploy, constraints)",
+        "   · no — skip\"",
+        "Do NOT call bootstrap_context until the user replies to this offer.",
+        "After showing the offer, immediately answer the user's original request (if any) — do not wait.",
+        "If the user says yes (quick) → call bootstrap_context. Ask ONLY the first gap question"
+        " (purpose). Store the answer with update_context using the gap's subtype. Stop — do not ask more.",
+        "If the user says full (thorough) → call bootstrap_context. For each inferred item confirm and store"
+        " with update_context(subtype='architecture'). For each gap question ask the user one at a time."
+        " After each answer, re-evaluate remaining gaps — if the purpose answer reveals a docs-only,"
+        " portfolio, personal, or learning repo, skip tests/CI/deploy/compliance/exclusion gaps."
+        " Store each answer as a separate update_context call using the gap's subtype."
+        " Write each stored entry as a single plain sentence, max 15 words, no em dashes, no filler phrases."
+        " Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD pipeline planned or needed for this repo.'",
+        "If the user says no or skip → answer their original request directly, do not mention bootstrap again.",
     ]
 
 
@@ -488,6 +506,18 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
     }
 
 
+def get_post_compact_context(repo_path: str) -> dict:
+    """Called by PostCompact hook. Re-injects stored context after compaction, or
+    re-offers bootstrap if no context exists — so the offer is not silently lost after compact."""
+    data = _load(repo_path)
+    decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    if not decisions:
+        lines = _build_bootstrap_context(repo_path)
+        return {"systemMessage": "\n".join(lines)}
+    ctx = get_context(repo_path)
+    return {"systemMessage": f"Contexer: context reloaded after compaction\n{ctx}"}
+
+
 _RATIONALE_WORDS = frozenset({
     "why", "reason", "rationale", "decision", "decided", "chose", "choice",
     "motivation", "intent", "reasoning", "background", "justif",
@@ -512,6 +542,13 @@ _QUERY_STOP_WORDS = frozenset({
     "build", "built", "create", "created", "add", "added", "make", "made",
     "just", "here", "there", "when", "then", "than", "also", "get",
     "into", "which", "who", "where", "what", "that", "its", "been",
+})
+
+# Additional words excluded when deciding if a project-context question is domain-specific.
+# "repo" can be a valid search term ("repo pattern") so it stays in the keyword pool for
+# rationale searches, but when gating the overview fallback it's treated as generic.
+_OVERVIEW_GENERIC_WORDS = frozenset({
+    "repo", "codebase", "project", "repository", "app", "service",
 })
 
 
@@ -545,11 +582,14 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
                 return f"[Contexer: auto-fetched for this question]\n{result}"
 
         # Overview fallback: only when the prompt has NO domain-specific keywords beyond
-        # the project-context trigger word itself. If there are other keywords (e.g. "variable",
-        # "docker", "react") the question is topic-specific, not a high-level project question,
-        # so injecting the full context would be a false positive.
+        # the project-context trigger word itself. Generic referential words like "repo",
+        # "project", "app" don't count — they just mean "this thing we're discussing."
+        # Real domain keywords (e.g. "docker", "react", "postgres") block the overview.
         if is_project:
-            non_project_kws = [k for k in ordered_kws if k not in _PROJECT_CONTEXT_WORDS]
+            non_project_kws = [
+                k for k in ordered_kws
+                if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
+            ]
             if not non_project_kws:
                 result = get_context(repo_path)
                 if "No context stored" not in result:
@@ -661,7 +701,14 @@ def bootstrap_scan(repo_path: str) -> dict:
         "has_infra": False,
         "has_security_sensitive": False,  # auth or payment deps detected
         "cloud_detected": "",             # "AWS" | "GCP" | "Azure" | ""
+        "is_simple_repo": False,          # portfolio, docs-only, learning — suppress infra/CI/test gaps
     }
+
+    _SIMPLE_REPO_SIGNALS = frozenset({
+        "portfolio", "showcase", "interview", "submission", "assignment", "homework",
+        "course", "tutorial", "example", "demo", "learning", "experiment", "practice",
+        "challenge", "exercises", "playground", "kata", "advent",
+    })
 
     def _add(fact: str) -> None:
         proxy = [{"content": f} for f in inferred]
@@ -913,15 +960,57 @@ def bootstrap_scan(repo_path: str) -> dict:
     if readme.exists():
         found_files.append("README.md")
         try:
-            lines = [l.strip() for l in readme.read_text().splitlines()
-                     if l.strip() and not l.startswith("#")]
+            text = readme.read_text(errors="ignore")
+            lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("#")]
             if lines:
                 sig["readme_summary"] = lines[0][:120]
+            if any(w in text.lower()[:2000] for w in _SIMPLE_REPO_SIGNALS):
+                sig["is_simple_repo"] = True
         except Exception:
             pass
-    for cf in ["CLAUDE.md", ".cursorrules"]:
-        if (root / cf).exists():
+    # CLAUDE.md / .cursorrules / docs/ — read for purpose hints before asking questions
+    _CONTEXT_FILES = ["CLAUDE.md", ".cursorrules", ".windsurfrules"]
+    for cf in _CONTEXT_FILES:
+        cf_path = root / cf
+        if cf_path.exists():
             found_files.append(cf)
+            try:
+                cf_text = cf_path.read_text(errors="ignore")[:3000]
+                # Extract first meaningful non-heading line as summary if README had none
+                if not sig["readme_summary"]:
+                    lines = [l.strip() for l in cf_text.splitlines()
+                             if l.strip() and not l.startswith("#") and len(l.strip()) > 20]
+                    if lines:
+                        sig["readme_summary"] = lines[0][:120]
+                if any(w in cf_text.lower() for w in _SIMPLE_REPO_SIGNALS):
+                    sig["is_simple_repo"] = True
+            except Exception:
+                pass
+
+    docs_dir = root / "docs"
+    if docs_dir.is_dir():
+        found_files.append("docs/")
+        # Scan first doc file for purpose hints
+        for doc in sorted(docs_dir.glob("*.md"))[:3]:
+            try:
+                doc_text = doc.read_text(errors="ignore")[:1500]
+                if not sig["readme_summary"]:
+                    lines = [l.strip() for l in doc_text.splitlines()
+                             if l.strip() and not l.startswith("#") and len(l.strip()) > 20]
+                    if lines:
+                        sig["readme_summary"] = lines[0][:120]
+                if any(w in doc_text.lower() for w in _SIMPLE_REPO_SIGNALS):
+                    sig["is_simple_repo"] = True
+            except Exception:
+                pass
+
+    # Repos with no build/package config and no inferred stack facts are docs-only
+    has_code_config = any([
+        (root / "pyproject.toml").exists(), (root / "package.json").exists(),
+        (root / "go.mod").exists(), (root / "Cargo.toml").exists(),
+    ])
+    if not has_code_config and not inferred:
+        sig["is_simple_repo"] = True
 
     # --- Primary stack detection for stack-aware hints ---
     primary_stack = (
@@ -979,8 +1068,10 @@ def bootstrap_scan(repo_path: str) -> dict:
         subtype="architecture",
     ))
 
-    # Tests — only if no test framework detected
-    if not sig["has_tests"]:
+    is_simple = sig["is_simple_repo"]
+
+    # Tests — only if no test framework detected AND not a simple/docs repo
+    if not sig["has_tests"] and not is_simple:
         gaps.append(_gap(
             assumption="No automated test framework detected",
             question="Is automated testing in scope?",
@@ -988,8 +1079,8 @@ def bootstrap_scan(repo_path: str) -> dict:
             subtype="convention",
         ))
 
-    # CI — only if no CI config found
-    if not sig["has_ci"]:
+    # CI — only if no CI config found AND not a simple/docs repo
+    if not sig["has_ci"] and not is_simple:
         gaps.append(_gap(
             assumption="No CI/CD config found in this repo",
             question="Is there a build or deploy pipeline, or is one planned?",
@@ -997,8 +1088,8 @@ def bootstrap_scan(repo_path: str) -> dict:
             subtype="convention",
         ))
 
-    # Deployment — only if no container or infra config
-    if not sig["has_container"] and not sig["has_infra"]:
+    # Deployment — only if no container or infra config AND not a simple/docs repo
+    if not sig["has_container"] and not sig["has_infra"] and not is_simple:
         gaps.append(_gap(
             assumption="No container or infra config found — deployment target unclear",
             question="Where does this run, or is it local-only?",
@@ -1029,7 +1120,7 @@ def bootstrap_scan(repo_path: str) -> dict:
         any("Architecture" in i or "layered" in i for i in inferred) or
         len(inferred) > 5
     )
-    if has_team_signals:
+    if has_team_signals and not is_simple:
         gaps.append(_gap(
             assumption="Team conventions not captured in config files",
             question="Any branching model, PR process, or unwritten norms beyond what's in config files?",
@@ -1039,7 +1130,7 @@ def bootstrap_scan(repo_path: str) -> dict:
 
     # Exclusions — only if dep tree suggests architectural choices were made
     has_dep_choices = len(all_deps) > 5 or bool(detected_orm) or len(detected_db) > 0
-    if has_dep_choices:
+    if has_dep_choices and not is_simple:
         gaps.append(_gap(
             assumption="No known intentional library exclusions or architectural mandates",
             question="Any libraries or patterns that are intentionally excluded or always required?",

@@ -48,7 +48,7 @@ class TestInstall:
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         cmds = [h["command"] for grp in settings["hooks"]["PostCompact"]
                 for h in grp["hooks"] if "command" in h]
-        assert any("reloaded after compaction" in c for c in cmds)
+        assert any("get_post_compact_context" in c for c in cmds)
 
     def test_post_compact_cmd_uses_current_python(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())

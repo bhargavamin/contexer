@@ -89,8 +89,7 @@ def install() -> None:
     )
     post_code = (
         "from contexer import store; import json,sys; "
-        "ctx=store.get_context(sys.argv[1]); "
-        "print(json.dumps({'systemMessage': 'Contexer: context reloaded after compaction\\\\n' + ctx}))"
+        "print(json.dumps(store.get_post_compact_context(sys.argv[1])))"
     )
 
     anchor_cmd = (
@@ -141,7 +140,11 @@ def install() -> None:
             "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'"}]})
 
     poc = hooks.setdefault("PostCompact", [])
-    if not _in_groups(poc, "reloaded after compaction"):
+    # Migrate: old hook used get_context (no bootstrap offer); replace with get_post_compact_context
+    if _in_groups(poc, "reloaded after compaction") and not _in_groups(poc, "get_post_compact_context"):
+        hooks["PostCompact"] = _filter_groups(poc, ["reloaded after compaction"])
+        poc = hooks["PostCompact"]
+    if not _in_groups(poc, "get_post_compact_context"):
         poc.append({"hooks": [{"type": "command",
             "statusMessage": "Reloading context after compact...",
             "command": _py(post_code)}]})
@@ -223,7 +226,7 @@ def uninstall(purge: bool = False) -> None:
             "SessionStart":     ["get_session_start_context"],
             "PostToolUse":      [".pending_capture"],
             "PreCompact":       ["compaction starting"],
-            "PostCompact":      ["reloaded after compaction"],
+            "PostCompact":      ["reloaded after compaction", "get_post_compact_context"],
             "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt"],
         }
         for event, markers in event_markers.items():

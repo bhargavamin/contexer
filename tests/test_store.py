@@ -48,6 +48,16 @@ class TestIsTask:
     def test_short_question_start_rejected(self):
         assert store._is_task("how does this work with the API?") is False
 
+    def test_bootstrap_answer_negation_rejected(self):
+        # "no where is just documentation nothing else" is a Q&A answer, not a task
+        assert store._is_task("no where is just documentation nothing else") is False
+
+    def test_bootstrap_answer_yes_rejected(self):
+        assert store._is_task("yes that sounds correct to me") is False
+
+    def test_bootstrap_answer_none_rejected(self):
+        assert store._is_task("none of those apply to this repo") is False
+
 
 # ── _is_novel ─────────────────────────────────────────────────────────────────
 
@@ -582,6 +592,8 @@ class TestBootstrapScan:
 
     def test_no_dockerfile_adds_deployment_gap(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        # pyproject.toml marks this as a real code repo — not a simple/docs repo
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
         result = store.bootstrap_scan(tmp_repo)
         env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
         assert "no container" in env_gap["assumption"].lower() or "deployment target" in env_gap["assumption"].lower()
@@ -680,6 +692,138 @@ class TestBootstrapScan:
 
         result = store.bootstrap_scan(tmp_repo)
         assert not any("uv" in i.lower() for i in result["inferred"])
+
+    # ── is_simple_repo detection ───────────────────────────────────────────────
+
+    def test_empty_repo_is_simple(self, tmp_repo):
+        """No code config + no inferred stack → docs-only → is_simple_repo suppresses infra questions."""
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_scan(tmp_repo)
+        # Simple repo: only the purpose gap should appear, no tests/CI/deploy gaps
+        questions = [g["question"].lower() for g in result["gaps"]]
+        assert not any("automated testing" in q for q in questions)
+        assert not any("build or deploy" in q for q in questions)
+        assert not any("where does this run" in q for q in questions)
+
+    def test_readme_portfolio_keyword_suppresses_infra_questions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "README.md").write_text(
+            "# Interview Submissions\nThis is a portfolio of job interview submissions.\n"
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        questions = [g["question"].lower() for g in result["gaps"]]
+        assert not any("automated testing" in q for q in questions)
+        assert not any("where does this run" in q for q in questions)
+
+    def test_readme_tutorial_keyword_suppresses_infra_questions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "README.md").write_text("# Tutorial\nA demo project for learning.\n")
+        result = store.bootstrap_scan(tmp_repo)
+        questions = [g["question"].lower() for g in result["gaps"]]
+        assert not any("automated testing" in q for q in questions)
+
+    def test_claude_md_portfolio_keyword_suppresses_infra_questions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "CLAUDE.md").write_text(
+            "This is a portfolio project showcasing interview submissions.\n"
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        questions = [g["question"].lower() for g in result["gaps"]]
+        assert not any("automated testing" in q for q in questions)
+        assert not any("where does this run" in q for q in questions)
+
+    def test_docs_dir_with_portfolio_keyword_suppresses_infra_questions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        docs = Path(tmp_repo) / "docs"
+        docs.mkdir()
+        (docs / "overview.md").write_text(
+            "This is a learning exercise and kata for practicing algorithms.\n"
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        questions = [g["question"].lower() for g in result["gaps"]]
+        assert not any("automated testing" in q for q in questions)
+
+    def test_code_repo_without_portfolio_keywords_gets_infra_questions(self, tmp_repo):
+        """A real code repo (with pyproject.toml, no simple-repo keywords) gets all relevant gaps."""
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
+        result = store.bootstrap_scan(tmp_repo)
+        questions = [g["question"].lower() for g in result["gaps"]]
+        assert any("where does this run" in q for q in questions)
+        assert any("automated testing" in q for q in questions)
+
+    def test_claude_md_provides_readme_summary_fallback(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "CLAUDE.md").write_text(
+            "# Project\nThis service handles payment processing for e-commerce.\n"
+        )
+        result = store.bootstrap_scan(tmp_repo)
+        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
+        assert "payment" in purpose_gap["assumption"].lower()
+
+
+# ── session start subtype breakdown (v0.4.0) ─────────────────────────────────
+
+SESSION_ID_SS = "test-ss-session"
+
+class TestSessionStartBreakdown:
+    def test_constraints_and_conventions_shown_separately(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never commit untested code", SESSION_ID_SS, "constraint")
+        store.update_decision(tmp_repo, "Always use uv not pip", SESSION_ID_SS, "convention")
+        result = store.get_session_start_context(tmp_repo)
+        msg = result["systemMessage"]
+        assert "constraint" in msg
+        assert "convention" in msg
+
+    def test_arch_shown_as_on_demand(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION_ID_SS, "architecture")
+        result = store.get_session_start_context(tmp_repo)
+        msg = result["systemMessage"]
+        assert "on demand" in msg
+        assert "arch" in msg.lower() or "pattern" in msg.lower()
+
+    def test_only_constraints_no_conventions(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never commit untested code", SESSION_ID_SS, "constraint")
+        result = store.get_session_start_context(tmp_repo)
+        msg = result["systemMessage"]
+        assert "constraint" in msg
+
+    def test_mixed_pre_loaded_and_deferred(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never commit secrets", SESSION_ID_SS, "constraint")
+        store.update_decision(tmp_repo, "Use uv", SESSION_ID_SS, "convention")
+        store.update_decision(tmp_repo, "Chose REST over GraphQL", SESSION_ID_SS, "architecture")
+        result = store.get_session_start_context(tmp_repo)
+        msg = result["systemMessage"]
+        assert "on demand" in msg  # arch deferred
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "constraint" in ctx or "convention" in ctx  # pre-loaded rules shown
+
+
+# ── project-context overview fallback (v0.4.0) ───────────────────────────────
+
+class TestProjectContextOverviewFallback:
+    def test_purpose_question_triggers_overview(self, tmp_repo):
+        store.update_decision(tmp_repo, "This API serves internal dashboards", SESSION_ID_SS, "architecture")
+        result = store.get_context_for_prompt(tmp_repo, "what is the purpose of this repo?")
+        assert result != "", "purpose question should trigger context injection"
+        assert "project context" in result.lower() or "auto-fetched" in result.lower()
+
+    def test_domain_keyword_in_purpose_question_uses_query_not_overview(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION_ID_SS, "architecture")
+        result = store.get_context_for_prompt(tmp_repo, "what is the purpose of the postgres schema?")
+        # "postgres" is a domain keyword — should search, not dump full overview
+        if result:
+            assert "PostgreSQL" in result or "postgres" in result.lower()
+
+    def test_scope_without_domain_keywords_triggers_overview(self, tmp_repo):
+        store.update_decision(tmp_repo, "Handles payment processing for e-commerce", SESSION_ID_SS, "architecture")
+        result = store.get_context_for_prompt(tmp_repo, "what is the scope of this project?")
+        assert result != ""
+
+    def test_non_rationale_prompt_returns_empty(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL", SESSION_ID_SS, "architecture")
+        result = store.get_context_for_prompt(tmp_repo, "fix the login bug")
+        assert result == ""
 
 
 # ── _is_prescriptive_constraint ───────────────────────────────────────────────
@@ -895,19 +1039,20 @@ class TestSanitizeDirective:
 
 class TestCaptureUserConstraint:
     def test_stores_always_directive_as_constraint(self, tmp_repo):
-        entry_id = store.capture_user_constraint(
+        entry_id, content = store.capture_user_constraint(
             tmp_repo,
             "ensure terraform always stores state on s3 with dynamodb locking",
             "sess-1",
         )
         assert entry_id is not None
+        assert content
         data = store._load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == 1
         assert decisions[0]["subtype"] == "constraint"
 
     def test_stores_never_directive_as_constraint(self, tmp_repo):
-        entry_id = store.capture_user_constraint(
+        entry_id, content = store.capture_user_constraint(
             tmp_repo, "never push secrets or credentials to the repository", "sess-1"
         )
         assert entry_id is not None
@@ -916,21 +1061,22 @@ class TestCaptureUserConstraint:
         assert decisions[0]["subtype"] == "constraint"
 
     def test_non_directive_prompt_returns_none(self, tmp_repo):
-        entry_id = store.capture_user_constraint(
+        entry_id, content = store.capture_user_constraint(
             tmp_repo, "write tests for the authentication module", "sess-1"
         )
         assert entry_id is None
+        assert content is None
         data = store._load(tmp_repo)
         assert data["entries"] == []
 
     def test_question_prompt_returns_none(self, tmp_repo):
-        entry_id = store.capture_user_constraint(
+        entry_id, content = store.capture_user_constraint(
             tmp_repo, "should we always use s3 for terraform state?", "sess-1"
         )
         assert entry_id is None
 
     def test_personal_descriptive_returns_none(self, tmp_repo):
-        entry_id = store.capture_user_constraint(
+        entry_id, content = store.capture_user_constraint(
             tmp_repo, "I always get a permission error when running this", "sess-1"
         )
         assert entry_id is None
@@ -939,7 +1085,7 @@ class TestCaptureUserConstraint:
         store.capture_user_constraint(
             tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-1"
         )
-        entry_id = store.capture_user_constraint(
+        entry_id, content = store.capture_user_constraint(
             tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-2"
         )
         assert entry_id is None
@@ -958,7 +1104,7 @@ class TestCaptureUserConstraint:
 
     def test_long_prompt_truncated_to_600_chars(self, tmp_repo):
         long_prompt = "always " + "x" * 700
-        entry_id = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
+        entry_id, content = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
         assert entry_id is not None
         data = store._load(tmp_repo)
         assert len(data["entries"][0]["content"]) <= 600
