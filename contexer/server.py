@@ -60,6 +60,19 @@ def bootstrap_context(repo_path: str = "") -> str:
 
 
 @mcp.tool()
+def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
+    """Called on every UserPromptSubmit. Detects prescriptive directives ('always X', 'never Y',
+    'from now on Z') and stores them as constraint or convention decisions automatically."""
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return ""
+    entry_id = store.capture_user_constraint(resolved, prompt, SESSION_ID)
+    if entry_id is None:
+        return ""
+    return f"Captured. id={entry_id}"
+
+
+@mcp.tool()
 def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
     """Auto-called by UserPromptSubmit hook on every prompt. Detects rationale/decision
     questions (why, reason, rationale, decided...) and injects matching stored decisions

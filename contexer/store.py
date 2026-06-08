@@ -170,6 +170,86 @@ def _passes_filter(content: str, existing: list) -> bool:
     return _is_novel(content, decisions_only)
 
 
+# Prescriptive constraint/convention signals in user prompts.
+# al+w(?:ay|ya)s catches "always", "allways" (double-l), "alwyas" (transposition).
+_CONSTRAINT_TRIGGER = re.compile(
+    r"\b(?:"
+    r"al+w(?:ay|ya)s"               # always + common typos: allways, alwyas
+    r"|never"                        # never
+    r"|must\s+(?:always|never)"      # must always / must never
+    r"|should\s+(?:always|never)"    # should always / should never
+    r"|at\s+all\s+times"             # at all times
+    r"|every\s+time"                 # every time
+    r"|each\s+time"                  # each time
+    r"|no\s+exceptions?"             # no exception / no exceptions
+    r"|without\s+exception"          # without exception
+    r"|as\s+a\s+rule"                # as a rule
+    r"|make\s+it\s+a\s+rule"        # make it a rule
+    r"|from\s+now\s+on"             # from now on
+    r"|going\s+forward"              # going forward
+    r"|henceforth"                   # henceforth
+    r")\b",
+    re.IGNORECASE,
+)
+
+# "forward-looking practice" signals — convention subtype when used alone (without always/never)
+_CONVENTION_SIGNALS = re.compile(
+    r"\b(?:from\s+now\s+on|going\s+forward|henceforth)\b",
+    re.IGNORECASE,
+)
+
+# Personal-descriptive patterns — these describe existing habits, not directives.
+# "I always get this error", "we never did that", "it always worked before" are descriptive.
+# NOTE: "it should always" is NOT caught here because "should" sits between "it" and "always".
+_PERSONAL_DESCRIPTOR = re.compile(
+    r"\b(i|we|it)\s+(have\s+|has\s+|did\s+|does\s+)?(always|never)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
+    """Returns (is_constraint, subtype). Detects user-stated directives.
+    Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')."""
+    if text.strip().endswith("?"):
+        return False, ""
+    if not _CONSTRAINT_TRIGGER.search(text):
+        return False, ""
+    # Strip descriptive personal instances; if nothing remains, it was purely descriptive
+    cleaned = _PERSONAL_DESCRIPTOR.sub("", text)
+    if not _CONSTRAINT_TRIGGER.search(cleaned):
+        return False, ""
+    # Pure forward-looking practice signals (no always/never) → convention
+    # Everything else (mandatory requirements, prohibitions) → constraint
+    is_soft = bool(_CONVENTION_SIGNALS.search(cleaned))
+    has_hard = bool(re.search(r"\b(?:al+w(?:ay|ya)s|never|must|should)\b", cleaned, re.IGNORECASE))
+    subtype = "convention" if (is_soft and not has_hard) else "constraint"
+    return True, subtype
+
+
+def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> str | None:
+    """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
+    and stores them as decisions. Returns entry_id if stored, None if not a constraint or duplicate."""
+    is_constraint, subtype = _is_prescriptive_constraint(prompt)
+    if not is_constraint:
+        return None
+    content = prompt.strip()[:600]
+    data = _load(repo_path)
+    if not _passes_filter(content, data["entries"]):
+        return None
+    entry = {
+        "id": str(uuid.uuid4()),
+        "type": "decision",
+        "subtype": subtype,
+        "content": content,
+        "session_id": session_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    data["entries"].append(entry)
+    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    _save(repo_path, data)
+    return entry["id"]
+
+
 _QUESTION_STARTS = {
     "what", "how", "why", "when", "where", "who", "which",
     "is", "are", "can", "does", "do", "will", "would", "could", "should",
@@ -226,14 +306,13 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     return [
-        "STOP — do not answer the user's request yet.",
-        f"Repo: {repo_path}. No stored context — complete a quick bootstrap first.",
-        "Do this now, before anything else:",
-        "  1. Call the bootstrap_context MCP tool with repo_path='' to get items to confirm.",
-        "  2. Take the first item. State it to the user, ask 'Correct? yes / no / [correction]'. Wait for reply.",
-        "  3. Call update_context to store the confirmed fact. Then move to item 2.",
-        "  4. Repeat until all items are done. Then — and only then — address the user's original request.",
-        "Start by calling bootstrap_context now.",
+        f"No project context stored for {repo_path}.",
+        "Before responding, offer the user a one-time bootstrap:",
+        "  Say: \"No project context stored yet — want a quick setup? I can ask 2-3 questions to capture"
+        " key decisions for future sessions. Reply yes to run it now, or just continue and I'll skip it.\"",
+        "If the user says yes or any affirmative: call bootstrap_context, confirm each inferred item with"
+        " the user, call update_context for each confirmed one, then answer their original request.",
+        "If the user says no, skip, or just continues: answer their original request directly, no bootstrap.",
     ]
 
 
@@ -259,7 +338,7 @@ def get_session_start_context(repo_path: str) -> dict:
         sys_parts.extend(lines)
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "systemMessage": f"Contexer: no context stored{global_note} — bootstrapping now",
+            "systemMessage": f"Contexer: no context stored{global_note} — offer bootstrap",
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": "\n".join(sys_parts),
