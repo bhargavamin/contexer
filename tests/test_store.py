@@ -871,6 +871,25 @@ class TestSanitizeDirective:
         assert "never" in result.lower()
         assert "code" in result.lower()
 
+    def test_trailing_hence_stripped(self):
+        result = store._sanitize_directive("always use pip hence this would work")
+        assert "hence" not in result.lower()
+        assert result.lower().startswith("always use pip")
+
+    def test_trailing_so_that_stripped(self):
+        result = store._sanitize_directive("never commit without tests so that it stays clean")
+        assert "so that" not in result.lower()
+        assert "never commit without tests" in result.lower()
+
+    def test_trailing_because_of_this_stripped(self):
+        result = store._sanitize_directive("always use uv not pip because of this")
+        assert "because" not in result.lower()
+        assert "always use uv not pip" in result.lower()
+
+    def test_clean_directive_unchanged(self):
+        result = store._sanitize_directive("Always use uv not pip")
+        assert result == "Always use uv not pip"
+
 
 # ── capture_user_constraint ───────────────────────────────────────────────────
 

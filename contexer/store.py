@@ -218,11 +218,23 @@ _FRUSTRATION_OPENER = re.compile(
 )
 
 
+# Trailing filler connectors that add no meaning to a stored rule.
+# "always use pip hence this would work" → "always use pip"
+_TRAILING_FILLER = re.compile(
+    r"\s*(?:hence|so\s+(?:that|it|we|this)|because\s+(?:of\s+)?(?:this|that|it)|"
+    r"as\s+(?:this|that|it)|that\s+way|which\s+(?:means|would)|"
+    r"and\s+(?:it\s+)?(?:should|would|will)\s+work|this\s+(?:should|would|will)\s+(?:work|help))"
+    r".*$",
+    re.IGNORECASE,
+)
+
+
 def _sanitize_directive(text: str) -> str:
-    """Strip profanity and frustration framing from a directive. Preserves the rule itself.
-    Called before storing any auto-captured constraint so the content is always clean."""
+    """Strip profanity, frustration framing, and trailing filler from a directive.
+    Preserves only the rule itself. Called before storing any auto-captured constraint."""
     text = _FRUSTRATION_OPENER.sub("", text).strip()
     text = _PROFANITY.sub("", text)
+    text = _TRAILING_FILLER.sub("", text)          # strip "hence this would work" etc.
     text = re.sub(r"[!]{2,}", "!", text)           # !!!! → !
     text = re.sub(r"[?]{2,}", "?", text)           # ???? → ?
     # If the whole message is ≥ 70% uppercase letters (shouting), normalise to sentence case.
