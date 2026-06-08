@@ -188,10 +188,6 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|from\s+now\s+on"             # from now on
     r"|going\s+forward"              # going forward
     r"|henceforth"                   # henceforth
-    # "ensure you/that you" and "make sure you/that you" — scoped to agent-directed
-    # instructions to avoid false positives on task instructions like "ensure the tests pass"
-    r"|ensure\s+(?:you\s+|that\s+you\s+)"
-    r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"
     r")\b",
     re.IGNORECASE,
 )
