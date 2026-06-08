@@ -12,7 +12,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write  # required for OIDC trusted publisher
-      contents: read   # required to checkout private repo
+      contents: write  # required to create GitHub releases
 
     steps:
       - uses: actions/checkout@v4
@@ -26,3 +26,12 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag
