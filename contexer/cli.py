@@ -1,7 +1,41 @@
 import json
 import shutil
 import sys
+from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
+
+USAGE = """contexer — persistent context for Claude Code
+
+Usage: contexer [command]
+
+Commands:
+  (no args)     Run the MCP server over stdio (how Claude Code launches it).
+  install       Register the MCP server + hooks in your global Claude config.
+  uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
+  reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
+  status        Show install state: version, binary path, MCP/hooks, store summary.
+  version       Print the installed version.
+  help          Show this message.
+
+Flags:
+  -V, --version   Same as `version`.
+  -h, --help      Same as `help`.
+  --purge         With `uninstall`: also delete ~/.contexer/ (stored context).
+
+To upgrade the program itself (rebuild the binary):
+  uv tool install --reinstall contexer
+"""
+
+
+def _version() -> str:
+    try:
+        return _dist_version("contexer")
+    except PackageNotFoundError:
+        return "unknown (not installed as a package)"
+
+
+def _usage(stream=None) -> None:
+    print(USAGE, file=stream or sys.stdout)
 
 
 def _load(path: Path) -> dict:
@@ -165,7 +199,7 @@ def install() -> None:
     print("Done. Restart Claude Code and open any git repo to activate Contexer.")
 
 
-def uninstall() -> None:
+def uninstall(purge: bool = False) -> None:
     home = Path.home()
     changed = False
 
@@ -222,9 +256,58 @@ def uninstall() -> None:
         else:
             print("  - No Contexer hooks found in ~/.claude/settings.json")
 
+    store_dir = home / ".contexer"
     print()
-    print("Uninstall complete. Context store (~/.contexer/) was not removed.")
-    print("To delete stored context: rm -rf ~/.contexer/")
+    if purge:
+        if store_dir.exists():
+            shutil.rmtree(store_dir)
+            print(f"  ✓ Removed {store_dir} (stored context purged)")
+        else:
+            print(f"  - No store to purge ({store_dir} absent)")
+        print("Uninstall complete.")
+    else:
+        print("Uninstall complete. Context store (~/.contexer/) was not removed.")
+        print("To delete stored context too: contexer uninstall --purge")
+
+
+def version() -> None:
+    print(f"contexer {_version()}")
+
+
+def reinstall() -> None:
+    print("Re-syncing Contexer config (uninstall + install)...\n")
+    uninstall()
+    print()
+    install()
+    print()
+    print("Note: this only re-synced the MCP/hook config. To upgrade the program itself,")
+    print("run `uv tool install --reinstall contexer`, then restart Claude Code.")
+
+
+def status() -> None:
+    home = Path.home()
+    bin_path = shutil.which("contexer") or "(not on PATH)"
+
+    mcp = _load(home / ".claude.json").get("mcpServers", {}).get("contexer")
+    hooks = _load(home / ".claude" / "settings.json").get("hooks", {})
+    hooks_ok = (_in_groups(hooks.get("SessionStart", []), "get_session_start_context")
+                and _has_mcp_tool(hooks.get("UserPromptSubmit", []), "get_context_for_prompt"))
+
+    store_dir = home / ".contexer"
+    stores = sorted(store_dir.glob("*.json")) if store_dir.exists() else []
+    entries = sum(len(_load(p).get("entries", [])) for p in stores)
+    current = store_dir / ".current_repo"
+
+    print(f"contexer {_version()}")
+    print(f"  binary:       {bin_path}")
+    print(f"  MCP server:   {'registered → ' + mcp.get('command', '?') if mcp else 'NOT registered'}")
+    print(f"  hooks:        {'installed' if hooks_ok else 'missing or partial'}")
+    print(f"  store dir:    {store_dir}{'' if store_dir.exists() else ' (absent)'}")
+    print(f"  repo stores:  {len(stores)} ({entries} entries total)")
+    if current.exists():
+        print(f"  current repo: {current.read_text().strip()}")
+    if not (mcp and hooks_ok):
+        print("\n  Not fully installed — run `contexer install`.")
 
 
 def main() -> None:
@@ -235,12 +318,20 @@ def main() -> None:
         _server()
         return
 
-    cmd = args[0]
-    if cmd == "install":
+    cmd, rest = args[0], args[1:]
+    if cmd in ("version", "--version", "-V"):
+        version()
+    elif cmd in ("help", "--help", "-h"):
+        _usage()
+    elif cmd == "install":
         install()
     elif cmd == "uninstall":
-        uninstall()
+        uninstall(purge="--purge" in rest)
+    elif cmd == "reinstall":
+        reinstall()
+    elif cmd == "status":
+        status()
     else:
-        print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Usage: contexer [install|uninstall]", file=sys.stderr)
+        print(f"Unknown command: {cmd}\n", file=sys.stderr)
+        _usage(sys.stderr)
         sys.exit(1)
