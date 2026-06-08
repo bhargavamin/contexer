@@ -7,7 +7,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/contexer)](https://pypi.org/project/contexer/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
-[![Discord](https://img.shields.io/discord/1513284860821639328?label=Discord&logo=discord&logoColor=white)](https://discord.gg/Fk6JSaW4p)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/Fk6JSaW4p)
 
 **[contexer.ai](https://contexer.ai)** · [Discord](https://discord.gg/Fk6JSaW4p) · [Docs](docs/install.md)
 
