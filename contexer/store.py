@@ -188,6 +188,8 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|from\s+now\s+on"             # from now on
     r"|going\s+forward"              # going forward
     r"|henceforth"                   # henceforth
+    r"|ensure\s+(?:you\s+|that\s+you\s+)"       # ensure you / ensure that you
+    r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
     r")\b",
     re.IGNORECASE,
 )

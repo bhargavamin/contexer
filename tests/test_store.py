@@ -795,6 +795,28 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
         assert subtype == "constraint"
 
+    def test_ensure_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("ensure you never commit without running tests")
+        assert is_c is True
+
+    def test_ensure_that_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "ensure that you are not revealing architecture in documentation"
+        )
+        assert is_c is True
+
+    def test_make_sure_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make sure you always write tests before committing")
+        assert is_c is True
+
+    def test_ensure_task_instruction_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("ensure the tests pass before the release")
+        assert is_c is False
+
+    def test_make_sure_task_instruction_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make sure the API is RESTful")
+        assert is_c is False
+
 
 class TestSanitizeDirective:
     def test_profanity_stripped(self):
