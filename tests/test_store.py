@@ -401,7 +401,7 @@ class TestGetSessionStartContext:
     def test_populated_repo_injects_pointer_not_full_dump(self, populated_repo):
         # JIT: SessionStart injects a count pointer, not the full context
         result = store.get_session_start_context(populated_repo)
-        assert "decision" in result["systemMessage"]
+        assert "on demand" in result["systemMessage"]
         assert "get_context" in result["hookSpecificOutput"]["additionalContext"]
         # Must NOT contain the decision content — Claude fetches that on demand
         assert "JWT" not in result["hookSpecificOutput"]["additionalContext"]
