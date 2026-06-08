@@ -34,8 +34,8 @@ def _version() -> str:
         return "unknown (not installed as a package)"
 
 
-def _usage(stream=sys.stdout) -> None:
-    print(USAGE, file=stream)
+def _usage(stream=None) -> None:
+    print(USAGE, file=stream or sys.stdout)
 
 
 def _load(path: Path) -> dict:
