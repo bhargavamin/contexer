@@ -360,21 +360,38 @@ def get_session_start_context(repo_path: str) -> dict:
         for d in pre_loaded:
             sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
     if deferred_count > 0:
+        arch_count = sum(1 for d in decisions if d.get("subtype") == "architecture")
+        pat_count = sum(1 for d in decisions if d.get("subtype") == "pattern")
+        breakdown_parts = []
+        if arch_count:
+            breakdown_parts.append(f"{arch_count} architecture")
+        if pat_count:
+            breakdown_parts.append(f"{pat_count} pattern")
+        breakdown = f" ({', '.join(breakdown_parts)})" if breakdown_parts else ""
         sys_parts.append(
-            f"{deferred_count} decision(s) stored (architecture/patterns). "
+            f"{deferred_count} decision(s) stored{breakdown}. "
             "Call get_context BEFORE reading files for any question about architecture, "
             "design decisions, rationale, or patterns."
         )
 
-    parts: list[str] = []
-    if global_rules:
-        parts.append(_pl(len(global_rules), "global rule"))
-    if pre_loaded:
-        parts.append(_pl(len(pre_loaded), "project rule"))
-    if deferred_count > 0:
-        parts.append(f"{_pl(deferred_count, 'decision')} on demand")
+    constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
+    conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
 
-    user_line = f"Contexer: {', '.join(parts)} loaded." if parts else "Contexer: active."
+    loaded_parts: list[str] = []
+    if global_rules:
+        loaded_parts.append(_pl(len(global_rules), "global rule"))
+    if constraints:
+        loaded_parts.append(_pl(len(constraints), "constraint"))
+    if conventions:
+        loaded_parts.append(_pl(len(conventions), "convention"))
+
+    sentences: list[str] = []
+    if loaded_parts:
+        sentences.append(f"{', '.join(loaded_parts)} loaded")
+    if deferred_count > 0:
+        sentences.append(f"{_pl(deferred_count, 'arch/pattern')} will be loaded on demand")
+
+    user_line = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
 
     return {
         "systemMessage": user_line,

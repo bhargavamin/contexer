@@ -209,7 +209,7 @@ class TestSessionStartPermutations:
         _add_repo("Never commit without tests", "constraint")
         result = store.get_session_start_context(REPO)
         msg = result["systemMessage"]
-        assert "project rule" in msg
+        assert "constraint" in msg
         assert "global rule" not in msg
 
     def test_both_global_and_repo_injects_both_sections(self):
@@ -237,7 +237,7 @@ class TestSessionStartPermutations:
         result = store.get_session_start_context(REPO)
         msg = result["systemMessage"]
         assert "global rule" in msg
-        assert "project rule" in msg
+        assert "constraint" in msg
 
     def test_deferred_decisions_mentioned_in_context(self):
         _add_repo("Chose REST over GraphQL for external API", "architecture")
