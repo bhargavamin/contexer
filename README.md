@@ -34,10 +34,23 @@ uv tool install contexer
 **Step 2 — wire it into Claude Code:**
 
 ```bash
-contexer install
+sudo contexer install
 ```
 
 **Step 3 — restart Claude Code** and open any git repo. On your first message, Claude will offer a quick bootstrap setup — answer yes to capture initial decisions, or skip to start immediately.
+
+---
+
+## CLI reference
+
+| Command | Description |
+|---|---|
+| `sudo contexer install` | Register MCP server and all hooks with Claude Code |
+| `contexer status` | Show installation health — MCP registration, hooks, store size, current repo |
+| `contexer reinstall` | Re-sync config (uninstall + install — use after Claude Code updates) |
+| `contexer uninstall` | Remove MCP registration and hooks; context store is kept |
+| `contexer uninstall --purge` | Remove everything including the context store (`~/.contexer/`) |
+| `contexer version` | Print installed version |
 
 ---
 
@@ -47,7 +60,7 @@ You work normally. Contexer runs silently in the background.
 
 - **Session start** — all your constraints and conventions are injected as project rules before you type anything
 - **As you work** — Claude captures significant decisions automatically; you never have to do it manually
-- **"Why" questions** — if you ask about rationale or past decisions, Contexer auto-fetches the relevant ones
+- **"Why" and project questions** — if you ask about rationale, architecture, approach, purpose, or plans, Contexer auto-fetches the relevant stored decisions
 - **Context window limit** — decisions are saved before compaction and restored after, so nothing is lost
 
 **You never call anything directly.** If Claude misses something, say *"store that decision"* and it will be captured immediately.
