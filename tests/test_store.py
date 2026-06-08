@@ -795,6 +795,63 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
         assert subtype == "constraint"
 
+    def test_ensure_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("ensure you never commit without running tests")
+        assert is_c is True
+
+    def test_ensure_that_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "ensure that you are not revealing architecture in documentation"
+        )
+        assert is_c is True
+
+    def test_make_sure_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make sure you always write tests before committing")
+        assert is_c is True
+
+    def test_ensure_task_instruction_not_detected(self):
+        # "ensure the tests pass" — task instruction, no "you" after ensure
+        is_c, _ = store._is_prescriptive_constraint("ensure the tests pass before the release")
+        assert is_c is False
+
+    def test_make_sure_task_instruction_not_detected(self):
+        # "make sure the API is RESTful" — task instruction, no "you" after make sure
+        is_c, _ = store._is_prescriptive_constraint("make sure the API is RESTful")
+        assert is_c is False
+
+
+class TestSanitizeDirective:
+    def test_profanity_stripped(self):
+        result = store._sanitize_directive("always fucking use uv not pip")
+        assert "fucking" not in result.lower()
+        assert "uv" in result
+        assert "pip" in result
+
+    def test_frustration_opener_stripped(self):
+        result = store._sanitize_directive("what the hell, always add tests dammit")
+        assert "hell" not in result.lower()
+        assert "always add tests" in result.lower()
+
+    def test_excessive_exclamation_normalised(self):
+        result = store._sanitize_directive("never commit broken code!!!!")
+        assert "!!!!" not in result
+        assert "never" in result.lower()
+
+    def test_all_caps_normalised(self):
+        result = store._sanitize_directive("ALWAYS USE UV NOT PIP")
+        assert result == result[0].upper() + result[1:]
+        assert "uv" in result.lower() or "UV" in result  # content preserved
+
+    def test_clean_input_unchanged(self):
+        text = "Always use uv not pip"
+        assert store._sanitize_directive(text) == text
+
+    def test_profanity_in_middle_stripped(self):
+        result = store._sanitize_directive("never commit shit code again")
+        assert "shit" not in result.lower()
+        assert "never" in result.lower()
+        assert "code" in result.lower()
+
 
 # ── capture_user_constraint ───────────────────────────────────────────────────
 

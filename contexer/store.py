@@ -188,9 +188,54 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|from\s+now\s+on"             # from now on
     r"|going\s+forward"              # going forward
     r"|henceforth"                   # henceforth
+    # "ensure you/that you" and "make sure you/that you" — scoped to agent-directed
+    # instructions to avoid false positives on task instructions like "ensure the tests pass"
+    r"|ensure\s+(?:you\s+|that\s+you\s+)"
+    r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"
     r")\b",
     re.IGNORECASE,
 )
+
+# Profanity and frustration words that carry no directive meaning.
+# These are stripped before storing so the rule itself is preserved cleanly.
+# Covers both fully-spelled and asterisk/symbol-censored forms (f***, sh**).
+_PROFANITY = re.compile(
+    r"\b(?:"
+    r"f+u+c+k+(?:ing|ed|er|s|face|wit|head)?"   # fuck + variations
+    r"|f[\*\#@!]+(?:ing|ed|er|s)?"               # f*** / f**king (censored)
+    r"|sh[i1\*\#@!]+t+(?:ty|hole|head)?"         # shit / sh*t
+    r"|a+s+s+(?:hole|hat|wipe)?"                 # ass + variations
+    r"|b[i1\*]+t+c+h+(?:es|ing|y)?"              # bitch + variations
+    r"|d+a+m+(?:n+(?:it)?|m+it)?"               # damn / damnit / dammit
+    r"|c+r+a+p+(?:py)?"                          # crap
+    r"|wtf|ffs|stfu|omfg"                        # abbreviations
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Common frustration openers: "what the hell,", "oh my god," — stripped before storing.
+_FRUSTRATION_OPENER = re.compile(
+    r"^(?:what\s+the\s+\w+|oh\s+(?:my\s+)?\w+|for\s+\w+(?:'s)?\s+sake)[,\s!]*",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_directive(text: str) -> str:
+    """Strip profanity and frustration framing from a directive. Preserves the rule itself.
+    Called before storing any auto-captured constraint so the content is always clean."""
+    text = _FRUSTRATION_OPENER.sub("", text).strip()
+    text = _PROFANITY.sub("", text)
+    text = re.sub(r"[!]{2,}", "!", text)           # !!!! → !
+    text = re.sub(r"[?]{2,}", "?", text)           # ???? → ?
+    # If the whole message is ≥ 70% uppercase letters (shouting), normalise to sentence case.
+    alpha = [c for c in text if c.isalpha()]
+    if alpha and sum(1 for c in alpha if c.isupper()) / len(alpha) >= 0.7:
+        text = text.lower()
+    else:
+        # Otherwise only normalise isolated all-caps words of 4+ letters (not short acronyms)
+        text = re.sub(r"\b([A-Z]{4,})\b", lambda m: m.group(1).capitalize(), text)
+    text = re.sub(r"\s{2,}", " ", text).strip().strip("!?,. ")
+    return text[0].upper() + text[1:] if text else text
 
 # "forward-looking practice" signals — convention subtype when used alone (without always/never)
 _CONVENTION_SIGNALS = re.compile(
@@ -232,7 +277,7 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> str
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
         return None
-    content = prompt.strip()[:600]
+    content = _sanitize_directive(prompt.strip())[:600]
     data = _load(repo_path)
     if not _passes_filter(content, data["entries"]):
         return None
