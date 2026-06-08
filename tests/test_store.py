@@ -389,11 +389,11 @@ class TestGetSessionStartContext:
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert "no context stored" in result["systemMessage"].lower()
 
-    def test_empty_repo_directive_is_offer_not_stop(self, tmp_repo):
-        # Bootstrap is an opt-in question — Claude must ask the user and wait, not proceed automatically
+    def test_empty_repo_directive_stops_and_waits(self, tmp_repo):
+        # Bootstrap offer must pause Claude — it waits for yes/full/no before doing anything
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "STOP" not in ctx
+        assert "STOP" in ctx
         assert "yes" in ctx.lower()
         assert "skip" in ctx.lower()
         # Hard constraint: Claude must not call bootstrap_context before hearing yes
@@ -449,7 +449,7 @@ class TestGetBootstrapContextPrompt:
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "bootstrap_context" in ctx
-        assert "STOP" not in ctx
+        assert "STOP" in ctx
         assert "yes" in ctx.lower()
         assert "skip" in ctx.lower()
         assert "do not" in ctx.lower() or "don't" in ctx.lower()

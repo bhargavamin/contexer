@@ -391,7 +391,7 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         "   · full — thorough (up to 5 questions: purpose, tests, CI, deploy, constraints)",
         "   · no — skip\"",
         "Do NOT call bootstrap_context until the user replies to this offer.",
-        "After showing the offer, immediately answer the user's original request (if any) — do not wait.",
+        "After showing the offer, STOP. Wait for the user to reply (yes / full / no) before doing anything else.",
         "If the user says yes (quick) → call bootstrap_context. Ask ONLY the first gap question"
         " (purpose). Store the answer with update_context using the gap's subtype. Stop — do not ask more.",
         "If the user says full (thorough) → call bootstrap_context. For each inferred item confirm and store"
@@ -401,7 +401,7 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " Store each answer as a separate update_context call using the gap's subtype."
         " Write each stored entry as a single plain sentence, max 15 words, no em dashes, no filler phrases."
         " Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD pipeline planned or needed for this repo.'",
-        "If the user says no or skip → answer their original request directly, do not mention bootstrap again.",
+        "If the user says no or skip → proceed with their original request directly, do not mention bootstrap again.",
     ]
 
 

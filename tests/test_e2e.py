@@ -198,10 +198,11 @@ class TestSessionStart:
         assert "yes" in ctx.lower() and "no" in ctx.lower()
         assert "Do NOT" in ctx
 
-    def test_new_repo_no_stop_mandate(self, tmp_repo):
+    def test_new_repo_has_stop_mandate(self, tmp_repo):
+        """Bootstrap must tell Claude to stop and wait for yes/full/no."""
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "STOP" not in ctx
+        assert "STOP" in ctx
 
     def test_new_repo_offers_skip_path(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
@@ -312,10 +313,12 @@ class TestBootstrapInstructions:
         full_text = "\n".join(lines)
         assert "just continues" not in full_text
 
-    def test_task_prompt_answer_immediately(self, tmp_repo):
+    def test_stops_and_waits_for_response(self, tmp_repo):
+        """Bootstrap must pause after the offer — not proceed with the original task."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
-        assert "immediately answer" in full_text or "proceed to answer" in full_text
+        assert "STOP" in full_text and "wait" in full_text.lower()
+        assert "immediately answer" not in full_text
 
     def test_no_skip_path_for_direct_no(self, tmp_repo):
         lines = store._build_bootstrap_context(tmp_repo)
