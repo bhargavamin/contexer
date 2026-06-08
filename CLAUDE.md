@@ -19,7 +19,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 Three files, no more:
 
-- **`server.py`** — MCP server entry point. Defines five tools (`capture_context`, `update_context`, `get_context`, `get_context_for_prompt`, `bootstrap_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
+- **`server.py`** — MCP server entry point. Defines tools (`capture_context`, `capture_user_constraint`, `update_context`, `get_context`, `get_context_for_prompt`, `bootstrap_context`, `update_global_context`, `get_global_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
 - **`store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 500` per repo. Display is separately capped: `_UNFILTERED_DISPLAY = 10` for overview calls, `_FILTERED_DISPLAY = 25` for query/type-filtered calls.
 - **`requirements.txt`** — Kept for reference; `pyproject.toml` is the authoritative dependency spec managed by `uv`.
 
@@ -45,15 +45,26 @@ The server is registered in `~/.claude.json` under `mcpServers`:
 
 `~/.claude/settings.json` wires up hooks globally (applies to every repo):
 
-- **`SessionStart`** — injects all conventions and constraints directly as project rules; injects a count pointer for deferred architecture/pattern decisions (fetched JIT via `get_context`); injects the bootstrap STOP directive if no context exists.
-- **`UserPromptSubmit` (anchor, command, every prompt)** — writes the git root to `~/.contexer/.current_repo` so MCP tools can resolve `repo_path=""` correctly even across concurrent sessions. Runs before all mcp_tool hooks.
-- **`UserPromptSubmit` (bootstrap, mcp_tool, once)** — calls `get_bootstrap_context_prompt` on the first prompt; injects the bootstrap directive if no context exists (fallback for when SessionStart is skipped).
+- **`SessionStart`** — injects all conventions and constraints directly as project rules; injects a count pointer for deferred architecture/pattern decisions (fetched JIT via `get_context`); injects a bootstrap offer if no context exists.
+- **`PostToolUse` (Write|Edit, silent flag)** — fires after every `Write` or `Edit` tool call. Touches `~/.contexer/.pending_capture` and returns `{}`. Completely silent — no UI output.
+- **`UserPromptSubmit` (anchor, command, every prompt)** — writes the git root to `~/.contexer/.current_repo`. Also checks for `~/.contexer/.pending_capture`: if present, deletes it and injects `additionalContext` reminding Claude to call `update_context` for decisions from the previous turn. Silent to the user — only Claude sees the injected context.
+- **`UserPromptSubmit` (bootstrap, mcp_tool, once)** — calls `get_bootstrap_context_prompt` on the first prompt; injects the bootstrap offer if no context exists (fallback for when SessionStart is skipped).
 - **`UserPromptSubmit` (capture, mcp_tool, once)** — calls `capture_context` with the first user prompt as the task description. Stores as `type=task` only — never as a decision or constraint.
+- **`UserPromptSubmit` (constraint, mcp_tool, every prompt)** — calls `capture_user_constraint` with the prompt text. Detects prescriptive directives (`always X`, `never Y`, `from now on Z`) and stores them as `decision` entries automatically — no Claude involvement needed. Silent no-op for all other prompts.
 - **`UserPromptSubmit` (rationale, mcp_tool, every prompt)** — calls `get_context_for_prompt` with the prompt text; auto-injects matching decisions when the prompt contains rationale keywords (why, reason, rationale, decided, etc.). Silent no-op for all other prompts.
 - **`PreCompact`** — injects a systemMessage reminding Claude to call `update_context` for any unsaved decisions before the context window is compacted.
 - **`PostCompact`** — re-injects the full context via systemMessage so Claude resumes with full awareness after compaction.
 
-**During a session**, call `update_context` whenever you make a significant decision, establish a pattern, or document a constraint. Pass the full reasoning, not just the conclusion. Optionally pass `subtype` (`architecture` | `constraint` | `pattern` | `convention`) to enable filtered retrieval later. The server filters — if content doesn't meet the novelty criteria it will be silently discarded, so err on the side of calling it.
+**During a session**, call `update_context` whenever you make a significant decision, establish a pattern, or document a constraint. This is mandatory — not optional. After you write or edit files, the next user prompt will inject a reminder via `additionalContext`, but you should call it proactively within the same turn, not wait for the next prompt.
+
+Call `update_context` for any of these:
+- A technology, library, or approach chosen over alternatives (subtype: `architecture`)
+- A file structure, naming convention, or code organization pattern established (subtype: `pattern`)
+- A rule stated by the user or inferred from their preferences: "always X", "never Y" (subtype: `constraint` or `convention`)
+- A build, deploy, or tooling convention established (subtype: `convention`)
+- Any decision that would surprise a future Claude session if it wasn't stored
+
+Pass the full reasoning, not just the conclusion. Pass `subtype` so decisions are retrievable by type. The server's novelty filter discards duplicates silently, so err on the side of calling it.
 
 **Retrieving context JIT**: call `get_context` **before reading files** for any question about architecture, design decisions, rationale, constraints, patterns, or conventions. Fall back to reading files only when context is missing or the question is about current code state (exact syntax, current values). Use `query` for keyword search or `entry_type` to retrieve a specific subtype: `get_context(entry_type="constraint")` returns only constraints (up to 25). Use `limit` to override the display cap. When results are truncated, the output includes a `"showing N of M"` note so you know more exist.
 

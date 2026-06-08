@@ -379,8 +379,15 @@ class TestGetSessionStartContext:
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert "no context stored" in result["systemMessage"].lower()
 
+    def test_empty_repo_directive_is_offer_not_stop(self, tmp_repo):
+        # Bootstrap is offered as a choice — Claude asks the user, not a STOP mandate
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "STOP" not in ctx
+        assert "yes" in ctx.lower()    # user can say yes
+        assert "skip" in ctx.lower()   # user can skip
+
     def test_empty_repo_directive_includes_repo_path(self, tmp_repo):
-        # Directive includes repo path so Claude knows which repo is being bootstrapped
         result = store.get_session_start_context(tmp_repo)
         assert tmp_repo in result["hookSpecificOutput"]["additionalContext"]
 
@@ -388,7 +395,6 @@ class TestGetSessionStartContext:
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "bootstrap_context" in ctx
-        assert "STOP" in ctx
 
     def test_populated_repo_injects_pointer_not_full_dump(self, populated_repo):
         # JIT: SessionStart injects a count pointer, not the full context
@@ -417,7 +423,7 @@ class TestGetBootstrapContextPrompt:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "no stored context" in ctx.lower()
+        assert "no project context" in ctx.lower()
         assert "update_context" in ctx
 
     def test_populated_repo_returns_empty_dict(self, populated_repo):
@@ -425,13 +431,15 @@ class TestGetBootstrapContextPrompt:
         assert result == {}
 
     def test_directive_tells_claude_to_call_bootstrap_tool(self, tmp_repo):
-        # The hook emits a STOP directive — inferred facts are fetched via the MCP tool, not inline
+        # Offer framing: Claude asks the user, calls bootstrap_context on yes, skips on no
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "uv.lock").write_text("")
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "bootstrap_context" in ctx
-        assert "STOP" in ctx
+        assert "STOP" not in ctx
+        assert "yes" in ctx.lower()
+        assert "skip" in ctx.lower()
 
     def test_directive_includes_repo_path(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -669,3 +677,190 @@ class TestBootstrapScan:
 
         result = store.bootstrap_scan(tmp_repo)
         assert not any("uv" in i.lower() for i in result["inferred"])
+
+
+# ── _is_prescriptive_constraint ───────────────────────────────────────────────
+
+class TestIsPrescriptiveConstraint:
+    def test_always_before_verb_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "ensure that the terraform you write is as per best practice and always store state on s3 bucket secured"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_never_keyword_yields_constraint_subtype(self):
+        is_c, subtype = store._is_prescriptive_constraint("never commit untested code to main")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_always_standalone_at_start_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("always use conventional commits")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_from_now_on_alone_is_convention(self):
+        is_c, subtype = store._is_prescriptive_constraint("from now on use uv not pip for dependency management")
+        assert is_c is True
+        assert subtype == "convention"
+
+    def test_going_forward_alone_is_convention(self):
+        is_c, subtype = store._is_prescriptive_constraint("going forward use semantic versioning for all releases")
+        assert is_c is True
+        assert subtype == "convention"
+
+    def test_henceforth_alone_is_convention(self):
+        is_c, subtype = store._is_prescriptive_constraint("henceforth all pull requests require two approvals")
+        assert is_c is True
+        assert subtype == "convention"
+
+    def test_from_now_on_with_always_is_constraint(self):
+        # combined with "always" → constraint wins
+        is_c, subtype = store._is_prescriptive_constraint("from now on always run tests before committing")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_must_always_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("terraform must always store state on s3 with locking")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_should_never_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("api keys should never be hardcoded in source files")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_at_all_times_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("encryption must be enabled at all times for s3 buckets")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_every_time_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("every time you deploy run the smoke tests first")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_no_exceptions_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("all endpoints require authentication no exceptions")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_as_a_rule_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("as a rule all database migrations must be reversible")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_typo_allways_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("allways use https not http for external api calls")
+        assert is_c is True
+
+    def test_typo_alwyas_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("alwyas ensure the tests pass before merging the pr")
+        assert is_c is True
+
+    def test_question_prompt_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("should we always use s3 for state storage?")
+        assert is_c is False
+
+    def test_personal_i_always_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("I always get this error when running the server")
+        assert is_c is False
+
+    def test_personal_we_always_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("we always use this pattern in the codebase")
+        assert is_c is False
+
+    def test_personal_it_always_excluded(self):
+        # "it always worked" is descriptive — not a directive
+        is_c, _ = store._is_prescriptive_constraint("it always worked before the last deployment")
+        assert is_c is False
+
+    def test_it_should_always_is_prescriptive(self):
+        # "should" sits between "it" and "always" so the personal descriptor does not strip it
+        is_c, subtype = store._is_prescriptive_constraint("it should always return 200 for the health endpoint")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_no_trigger_words_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("write tests for the authentication module")
+        assert is_c is False
+
+    def test_both_never_and_always_yields_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "always encrypt sensitive data and never log passwords"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+
+# ── capture_user_constraint ───────────────────────────────────────────────────
+
+class TestCaptureUserConstraint:
+    def test_stores_always_directive_as_constraint(self, tmp_repo):
+        entry_id = store.capture_user_constraint(
+            tmp_repo,
+            "ensure terraform always stores state on s3 with dynamodb locking",
+            "sess-1",
+        )
+        assert entry_id is not None
+        data = store._load(tmp_repo)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+        assert len(decisions) == 1
+        assert decisions[0]["subtype"] == "constraint"
+
+    def test_stores_never_directive_as_constraint(self, tmp_repo):
+        entry_id = store.capture_user_constraint(
+            tmp_repo, "never push secrets or credentials to the repository", "sess-1"
+        )
+        assert entry_id is not None
+        data = store._load(tmp_repo)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+        assert decisions[0]["subtype"] == "constraint"
+
+    def test_non_directive_prompt_returns_none(self, tmp_repo):
+        entry_id = store.capture_user_constraint(
+            tmp_repo, "write tests for the authentication module", "sess-1"
+        )
+        assert entry_id is None
+        data = store._load(tmp_repo)
+        assert data["entries"] == []
+
+    def test_question_prompt_returns_none(self, tmp_repo):
+        entry_id = store.capture_user_constraint(
+            tmp_repo, "should we always use s3 for terraform state?", "sess-1"
+        )
+        assert entry_id is None
+
+    def test_personal_descriptive_returns_none(self, tmp_repo):
+        entry_id = store.capture_user_constraint(
+            tmp_repo, "I always get a permission error when running this", "sess-1"
+        )
+        assert entry_id is None
+
+    def test_duplicate_directive_silently_discarded(self, tmp_repo):
+        store.capture_user_constraint(
+            tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-1"
+        )
+        entry_id = store.capture_user_constraint(
+            tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-2"
+        )
+        assert entry_id is None
+        data = store._load(tmp_repo)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+        assert len(decisions) == 1
+
+    def test_stored_as_decision_type(self, tmp_repo):
+        store.capture_user_constraint(
+            tmp_repo, "never commit without running tests first", "sess-1"
+        )
+        data = store._load(tmp_repo)
+        entry = data["entries"][0]
+        assert entry["type"] == "decision"
+        assert entry["session_id"] == "sess-1"
+
+    def test_long_prompt_truncated_to_600_chars(self, tmp_repo):
+        long_prompt = "always " + "x" * 700
+        entry_id = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
+        assert entry_id is not None
+        data = store._load(tmp_repo)
+        assert len(data["entries"][0]["content"]) <= 600
