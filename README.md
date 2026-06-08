@@ -7,17 +7,46 @@
 [![PyPI version](https://img.shields.io/pypi/v/contexer)](https://pypi.org/project/contexer/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
-[![Discord](https://img.shields.io/discord/1513284860821639328?label=Discord&logo=discord&logoColor=white)](https://discord.gg/Fk6JSaW4p)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/Fk6JSaW4p)
 
-**[contexer.ai](https://contexer.ai)** · [Discord](https://discord.gg/Fk6JSaW4p) · [Docs](docs/install.md)
+**[contexer.ai](https://contexer.ai)** · [Discord](https://discord.gg/Fk6WSaW4p) · [Docs](docs/install.md)
 
-Contexer is a lightweight MCP server for Claude Code that automatically captures decisions made during coding sessions and surfaces them at the start of every future session — so Claude never starts blind.
+Contexer is an MCP server for Claude Code that **automatically remembers every decision made during a session and replays them at the start of every future session** — so Claude never starts blind again.
+
+---
 
 ## The problem
 
-Every Claude Code session starts with no memory of the previous one. CLAUDE.md files require manual maintenance and go stale. When Claude works autonomously, the reasoning behind decisions disappears when the session ends. Teams end up re-explaining the same constraints, conventions, and architecture choices every time.
+Every Claude Code session starts completely fresh. There is no memory of what was decided yesterday, last week, or five minutes ago in a different window.
 
-Contexer solves this by capturing decisions as they happen — silently, automatically, in the background — and replaying them as project rules at session start.
+This means you repeat yourself — constantly:
+
+- *"We use uv, not pip"* — every session
+- *"Always write tests before committing"* — every session
+- *"We chose Postgres over MongoDB because of transactions"* — every session
+
+CLAUDE.md files help but require manual maintenance and go stale. When Claude works autonomously, the reasoning behind its choices vanishes when the session ends. Teams waste the first 10–15 minutes of every session re-establishing context that Claude already had yesterday.
+
+---
+
+## What Contexer does
+
+Contexer runs silently in the background and fixes this in three ways:
+
+**1 — It captures decisions as you work.**
+When Claude makes a meaningful choice — picks a library, establishes a pattern, agrees to a rule — Contexer stores it automatically. You never manually copy decisions into a file. If Claude misses something, say *"store that as a constraint"* and it is saved immediately.
+
+**2 — It replays your context at every session start.**
+The next time you open this repo, before you type a single character, Claude already knows your rules. The session start message tells you exactly what was loaded:
+
+```
+Contexer: 5 constraints, 4 conventions loaded. 11 arch/patterns will be loaded on demand.
+```
+
+Constraints and conventions are injected immediately. Architecture and pattern decisions are fetched silently when the task requires them — not before.
+
+**3 — It answers "why" and "what" questions from stored history.**
+Ask *"what is the purpose of this repo?"*, *"what's planned?"*, or *"why did we choose Postgres?"* and Contexer automatically fetches the stored answer. Claude doesn't need to re-read files or ask you again.
 
 ---
 
@@ -34,23 +63,51 @@ uv tool install contexer
 **Step 2 — wire it into Claude Code:**
 
 ```bash
-contexer install
+sudo contexer install
 ```
 
 **Step 3 — restart Claude Code** and open any git repo. On your first message, Claude will offer a quick bootstrap setup — answer yes to capture initial decisions, or skip to start immediately.
 
 ---
 
-## How it works
+## CLI reference
 
-You work normally. Contexer runs silently in the background.
+| Command | Description |
+|---|---|
+| `sudo contexer install` | Connect Contexer to Claude Code |
+| `contexer status` | Show installation health — connection status, store size, current repo |
+| `contexer reinstall` | Re-sync connection (use after Claude Code updates) |
+| `contexer uninstall` | Disconnect from Claude Code; context store is kept |
+| `contexer uninstall --purge` | Remove everything including the context store (`~/.contexer/`) |
+| `contexer version` | Print installed version |
 
-- **Session start** — all your constraints and conventions are injected as project rules before you type anything
-- **As you work** — Claude captures significant decisions automatically; you never have to do it manually
-- **"Why" questions** — if you ask about rationale or past decisions, Contexer auto-fetches the relevant ones
-- **Context window limit** — decisions are saved before compaction and restored after, so nothing is lost
+---
 
-**You never call anything directly.** If Claude misses something, say *"store that decision"* and it will be captured immediately.
+## How a session looks after Contexer is set up
+
+**Session 1 (first time in a repo):**
+
+Claude offers bootstrap setup. You answer 2–3 questions:
+- *"What does this repo do?"* → stored as an architecture decision
+- *"Is there a CI pipeline?"* → stored as a convention
+- *"Any constraints?"* → stored as a constraint
+
+As you work, Claude stores further decisions automatically.
+
+**Every session after that:**
+
+Before your first message, Claude reads:
+```
+Contexer: 5 constraints, 4 conventions loaded. 11 arch/patterns will be loaded on demand.
+```
+
+Claude already knows:
+- "Never commit without tests"
+- "Use uv, not pip"
+- "Conventional commits format required"
+- "We chose REST over GraphQL for the external API"
+
+You skip the re-introduction entirely. Claude starts from where you left off.
 
 ---
 
@@ -65,7 +122,7 @@ Every stored decision has a type that controls when it is surfaced.
 | `architecture` | Structural decisions — "chose REST over GraphQL for this service" | No — fetched when relevant |
 | `pattern` | Recurring implementation approaches — "always validate at the boundary" | No — fetched when relevant |
 
-Constraints and conventions apply to every task, so they load immediately. Architecture and pattern decisions are fetched on demand when the task requires them.
+Constraints and conventions apply to every task, so they load immediately. Architecture and pattern decisions are fetched on demand when the task requires them — this keeps the session start lean regardless of how many decisions you have stored.
 
 ---
 
@@ -109,18 +166,10 @@ To see what is stored globally:
 "show everything stored for this repo"
 ```
 
-### Update a decision
+### Update or remove a decision
 
 ```
 "update the uv decision — we switched back to pip"
-"correct the constraint about commit format"
-```
-
-The old entry stays alongside the new one. If the revision is too similar to the original, rephrase it to include what changed.
-
-### Remove a decision
-
-```
 "delete the postgres decision"
 "remove all outdated constraints"
 ```
@@ -129,36 +178,33 @@ You can also edit the store file directly — it is plain JSON at `~/.contexer/`
 
 ---
 
-## Token cost
+## Performance — no impact on response speed
 
-Contexer is front-loaded by design. Cost is paid once at session start; everything after is near-zero.
+Contexer does not slow down Claude's response generation. Here is exactly what happens and when:
 
-**What gets injected at session start:**
+**All context processing runs before Claude begins generating a response — never during it.** The moment you submit a prompt, Contexer processes context in the background. By the time Claude starts writing, the relevant decisions are already in context. Nothing is added on top of Claude's response time.
 
-Only `constraint` and `convention` decisions are pre-loaded. `architecture` and `pattern` decisions cost **0 tokens** at session start — they are fetched on demand when relevant.
+**Store lookups are sub-millisecond.** Measured on real data:
 
-| Decisions stored | Pre-loaded rules | Tokens at session start |
-|---|---|---|
-| 10 | 5 | ~125 |
-| 20 | 10 | ~250 |
-| 50 | 25 | ~625 |
+| Operation | Time |
+|---|---|
+| Lookup with a hit (decision found) | 0.3–0.5ms |
+| Lookup with a miss (no match) | ~0ms |
+| Session start context load | ~1ms |
 
-Cost is flat at **~25 tokens per pre-loaded rule**, regardless of store size.
+These are local operations, independent of model. They hold the same whether you have 10 or 500 decisions stored.
 
-**What that compares to:**
+**Token cost is front-loaded and fixed.** You pay once at session start; every subsequent prompt in the session is free.
 
-~250 tokens (20 decisions) is 0.3–2.5% of a typical Claude Code session. Without Contexer, Claude spends 200–500 tokens re-establishing each rule through back-and-forth — every session. A single corrected mistake costs 500–2,000 tokens. The tool pays for itself after one avoided repetition.
+| Pre-loaded rules | Tokens at session start |
+|---|---|
+| 5 | ~125 |
+| 10 | ~250 |
+| 25 | ~625 |
 
-**Rationale injection — only fires on "why" questions:**
+Cost per rule is flat at **~26 tokens**, regardless of store size. ~250 tokens is under 0.5% of a typical Claude Code session — less than a one-sentence follow-up question.
 
-| Event | Tokens added | Latency |
-|---|---|---|
-| Hit — relevant decision found | ~45–80 | ~0.06ms store lookup |
-| Miss — no rationale keyword | 0 | 0.000ms |
-
-**Latency:** Contexer's store operations take 0.03–0.27ms. The perceived delay is the MCP hook call round-trip (~50–200ms), which runs before Claude responds — not added on top of it. Sessions with 500 stored decisions have the same sub-millisecond retrieval as sessions with 10.
-
-> These numbers were measured on Claude Sonnet 4.6. Haiku will process injected tokens faster; Opus will take slightly longer but produce higher-quality responses with the same context. The store lookup times are model-independent — they are pure Python/disk operations.
+**Context injection only fires when relevant.** On prompts that don't relate to stored decisions, Contexer skips silently — no store read, no tokens added.
 
 ---
 

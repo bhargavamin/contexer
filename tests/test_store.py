@@ -795,6 +795,101 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
         assert subtype == "constraint"
 
+    def test_ensure_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("ensure you never commit without running tests")
+        assert is_c is True
+
+    def test_ensure_that_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "ensure that you are not revealing architecture in documentation"
+        )
+        assert is_c is True
+
+    def test_make_sure_you_is_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make sure you always write tests before committing")
+        assert is_c is True
+
+    def test_ensure_task_instruction_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("ensure the tests pass before the release")
+        assert is_c is False
+
+    def test_make_sure_task_instruction_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make sure the API is RESTful")
+        assert is_c is False
+
+    def test_love_always_irony_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("love always use pip")
+        assert is_c is False
+
+    def test_slash_s_sarcasm_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("always use pip /s")
+        assert is_c is False
+
+    def test_yeah_right_irony_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("yeah right never push to main directly")
+        assert is_c is False
+
+    def test_oh_sure_irony_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("oh sure always commit broken code")
+        assert is_c is False
+
+    def test_genuine_always_still_detected(self):
+        # Sarcasm exclusion should not affect real directives
+        is_c, _ = store._is_prescriptive_constraint("always use uv not pip")
+        assert is_c is True
+
+
+class TestSanitizeDirective:
+    def test_profanity_stripped(self):
+        result = store._sanitize_directive("always fucking use uv not pip")
+        assert "fucking" not in result.lower()
+        assert "uv" in result
+        assert "pip" in result
+
+    def test_frustration_opener_stripped(self):
+        result = store._sanitize_directive("what the hell, always add tests dammit")
+        assert "hell" not in result.lower()
+        assert "always add tests" in result.lower()
+
+    def test_excessive_exclamation_normalised(self):
+        result = store._sanitize_directive("never commit broken code!!!!")
+        assert "!!!!" not in result
+        assert "never" in result.lower()
+
+    def test_all_caps_normalised(self):
+        result = store._sanitize_directive("ALWAYS USE UV NOT PIP")
+        assert result == result[0].upper() + result[1:]
+        assert "uv" in result.lower() or "UV" in result  # content preserved
+
+    def test_clean_input_unchanged(self):
+        text = "Always use uv not pip"
+        assert store._sanitize_directive(text) == text
+
+    def test_profanity_in_middle_stripped(self):
+        result = store._sanitize_directive("never commit shit code again")
+        assert "shit" not in result.lower()
+        assert "never" in result.lower()
+        assert "code" in result.lower()
+
+    def test_trailing_hence_stripped(self):
+        result = store._sanitize_directive("always use pip hence this would work")
+        assert "hence" not in result.lower()
+        assert result.lower().startswith("always use pip")
+
+    def test_trailing_so_that_stripped(self):
+        result = store._sanitize_directive("never commit without tests so that it stays clean")
+        assert "so that" not in result.lower()
+        assert "never commit without tests" in result.lower()
+
+    def test_trailing_because_of_this_stripped(self):
+        result = store._sanitize_directive("always use uv not pip because of this")
+        assert "because" not in result.lower()
+        assert "always use uv not pip" in result.lower()
+
+    def test_clean_directive_unchanged(self):
+        result = store._sanitize_directive("Always use uv not pip")
+        assert result == "Always use uv not pip"
+
 
 # ── capture_user_constraint ───────────────────────────────────────────────────
 

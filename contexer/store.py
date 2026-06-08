@@ -188,7 +188,72 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|from\s+now\s+on"             # from now on
     r"|going\s+forward"              # going forward
     r"|henceforth"                   # henceforth
+    r"|ensure\s+(?:you\s+|that\s+you\s+)"       # ensure you / ensure that you
+    r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
     r")\b",
+    re.IGNORECASE,
+)
+
+# Profanity and frustration words that carry no directive meaning.
+# These are stripped before storing so the rule itself is preserved cleanly.
+# Covers both fully-spelled and asterisk/symbol-censored forms (f***, sh**).
+_PROFANITY = re.compile(
+    r"\b(?:"
+    r"f+u+c+k+(?:ing|ed|er|s|face|wit|head)?"   # fuck + variations
+    r"|f[\*\#@!]+(?:ing|ed|er|s)?"               # f*** / f**king (censored)
+    r"|sh[i1\*\#@!]+t+(?:ty|hole|head)?"         # shit / sh*t
+    r"|a+s+s+(?:hole|hat|wipe)?"                 # ass + variations
+    r"|b[i1\*]+t+c+h+(?:es|ing|y)?"              # bitch + variations
+    r"|d+a+m+(?:n+(?:it)?|m+it)?"               # damn / damnit / dammit
+    r"|c+r+a+p+(?:py)?"                          # crap
+    r"|wtf|ffs|stfu|omfg"                        # abbreviations
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Common frustration openers: "what the hell,", "oh my god," — stripped before storing.
+_FRUSTRATION_OPENER = re.compile(
+    r"^(?:what\s+the\s+\w+|oh\s+(?:my\s+)?\w+|for\s+\w+(?:'s)?\s+sake)[,\s!]*",
+    re.IGNORECASE,
+)
+
+
+# Trailing filler connectors that add no meaning to a stored rule.
+# "always use pip hence this would work" → "always use pip"
+_TRAILING_FILLER = re.compile(
+    r"\s*(?:hence|so\s+(?:that|it|we|this)|because\s+(?:of\s+)?(?:this|that|it)|"
+    r"as\s+(?:this|that|it)|that\s+way|which\s+(?:means|would)|"
+    r"and\s+(?:it\s+)?(?:should|would|will)\s+work|this\s+(?:should|would|will)\s+(?:work|help))"
+    r".*$",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_directive(text: str) -> str:
+    """Strip profanity, frustration framing, and trailing filler from a directive.
+    Preserves only the rule itself. Called before storing any auto-captured constraint."""
+    text = _FRUSTRATION_OPENER.sub("", text).strip()
+    text = _PROFANITY.sub("", text)
+    text = _TRAILING_FILLER.sub("", text)          # strip "hence this would work" etc.
+    text = re.sub(r"[!]{2,}", "!", text)           # !!!! → !
+    text = re.sub(r"[?]{2,}", "?", text)           # ???? → ?
+    # If the whole message is ≥ 70% uppercase letters (shouting), normalise to sentence case.
+    alpha = [c for c in text if c.isalpha()]
+    if alpha and sum(1 for c in alpha if c.isupper()) / len(alpha) >= 0.7:
+        text = text.lower()
+    else:
+        # Otherwise only normalise isolated all-caps words of 4+ letters (not short acronyms)
+        text = re.sub(r"\b([A-Z]{4,})\b", lambda m: m.group(1).capitalize(), text)
+    text = re.sub(r"\s{2,}", " ", text).strip().strip("!?,. ")
+    return text[0].upper() + text[1:] if text else text
+
+# Sarcasm/irony signals — prompts matching these are not stored as constraints even if
+# a directive trigger word is present. "love always use pip", "yeah right never again /s".
+_SARCASM_EXCLUDES = re.compile(
+    r"(?:"
+    r"/s\s*$"                                      # /s at end (explicit sarcasm marker)
+    r"|^(?:love|oh\s+sure|yeah\s+right|oh\s+great|sure,?|lol,?|haha,?)\s+"  # ironic openers
+    r")",
     re.IGNORECASE,
 )
 
@@ -209,8 +274,11 @@ _PERSONAL_DESCRIPTOR = re.compile(
 
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
-    Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')."""
+    Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
+    and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
     if text.strip().endswith("?"):
+        return False, ""
+    if _SARCASM_EXCLUDES.search(text.strip()):
         return False, ""
     if not _CONSTRAINT_TRIGGER.search(text):
         return False, ""
@@ -232,7 +300,7 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> str
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
         return None
-    content = prompt.strip()[:600]
+    content = _sanitize_directive(prompt.strip())[:600]
     data = _load(repo_path)
     if not _passes_filter(content, data["entries"]):
         return None
@@ -311,8 +379,10 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         "  \"No project context stored yet — want a quick setup?"
         " I can ask 2-3 questions to capture key decisions for future sessions. Yes or no?\"",
         "Do NOT call bootstrap_context and do NOT ask setup questions until the user replies yes.",
-        "If the user says yes → call bootstrap_context, confirm each inferred item, call update_context"
-        " for each confirmed one, then answer their original request.",
+        "If the user says yes → call bootstrap_context. For each inferred item confirm and store with"
+        " update_context(subtype='architecture'). For each gap question ask the user and store their answer"
+        " using the subtype from the gap entry (architecture | convention | constraint)."
+        " Store each answer as a separate update_context call — do NOT bundle multiple answers into one entry.",
         "If the user says no, skip, or just continues → answer their original request directly, no bootstrap.",
     ]
 
@@ -421,6 +491,14 @@ def get_bootstrap_context_prompt(repo_path: str) -> dict:
 _RATIONALE_WORDS = frozenset({
     "why", "reason", "rationale", "decision", "decided", "chose", "choice",
     "motivation", "intent", "reasoning", "background", "justif",
+    # approach/design questions: "what approach did we take?", "what's the architecture?"
+    "approach", "architecture", "tradeoff", "tradeoffs", "constraint", "convention",
+})
+
+# Project-context questions: "what is the purpose?", "what is planned?", "what's the goal?"
+# "plan" excluded — too ambiguous ("premium plan", "payment plan")
+_PROJECT_CONTEXT_WORDS = frozenset({
+    "purpose", "goal", "planned", "overview", "scope",
 })
 
 _QUERY_STOP_WORDS = frozenset({
@@ -439,12 +517,15 @@ _QUERY_STOP_WORDS = frozenset({
 
 def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
-    the prompt is a rationale/decision question. Silent no-op for all other prompts.
+    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
     Searches repo decisions first; falls back to global decisions."""
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
 
-    if not (word_set & _RATIONALE_WORDS):
+    is_rationale = bool(word_set & _RATIONALE_WORDS)
+    is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
+
+    if not is_rationale and not is_project:
         return ""
 
     # Extract content keywords: alpha-only, length >= 3, not stop words.
@@ -462,6 +543,17 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
             result = get_context(repo_path, query=kw)
             if "No matching decisions" not in result and "No context stored" not in result:
                 return f"[Contexer: auto-fetched for this question]\n{result}"
+
+        # Overview fallback: only when the prompt has NO domain-specific keywords beyond
+        # the project-context trigger word itself. If there are other keywords (e.g. "variable",
+        # "docker", "react") the question is topic-specific, not a high-level project question,
+        # so injecting the full context would be a false positive.
+        if is_project:
+            non_project_kws = [k for k in ordered_kws if k not in _PROJECT_CONTEXT_WORDS]
+            if not non_project_kws:
+                result = get_context(repo_path)
+                if "No context stored" not in result:
+                    return f"[Contexer: project context]\n{result}"
 
     # Fall back to global decisions when repo search yields nothing
     for kw in ordered_kws:
@@ -576,8 +668,8 @@ def bootstrap_scan(repo_path: str) -> dict:
         if _is_novel(fact, existing + proxy):
             inferred.append(fact)
 
-    def _gap(assumption: str, question: str, hint: str) -> dict:
-        return {"assumption": assumption, "question": question, "hint": hint}
+    def _gap(assumption: str, question: str, hint: str, subtype: str = "architecture") -> dict:
+        return {"assumption": assumption, "question": question, "hint": hint, "subtype": subtype}
 
     def _has_dep(*names: str) -> bool:
         return any(n in dep for n in names for dep in all_deps)
@@ -884,6 +976,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             if name else
             "e.g. 'REST API for internal task management, used by 3 frontend apps'"
         ),
+        subtype="architecture",
     ))
 
     # Tests — only if no test framework detected
@@ -892,6 +985,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No automated test framework detected",
             question="Is automated testing in scope?",
             hint=_test_hint(),
+            subtype="convention",
         ))
 
     # CI — only if no CI config found
@@ -900,6 +994,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No CI/CD config found in this repo",
             question="Is there a build or deploy pipeline, or is one planned?",
             hint="e.g. GitHub Actions, GitLab CI, CircleCI; or: manual deploys, not needed yet",
+            subtype="convention",
         ))
 
     # Deployment — only if no container or infra config
@@ -908,6 +1003,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No container or infra config found — deployment target unclear",
             question="Where does this run, or is it local-only?",
             hint="e.g. containerized VPS, serverless function, internal CLI, local-only tool, not deployed yet",
+            subtype="architecture",
         ))
 
     # Cloud SDK but no deploy config — probably in a separate repo
@@ -916,6 +1012,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption=f"{sig['cloud_detected']} SDK detected but no deploy config found here",
             question=f"Is the {sig['cloud_detected']} deploy config in a separate repo?",
             hint="e.g. separate infra repo, serverless framework config, or not yet set up",
+            subtype="architecture",
         ))
 
     # Compliance — only if auth or payment deps detected
@@ -924,6 +1021,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="Auth or payment handling detected — compliance requirements unknown",
             question="Any compliance or security requirements given the auth/payment handling?",
             hint="e.g. GDPR, PCI-DSS, SOC2, HIPAA; internal security policy; audit logging; data residency",
+            subtype="constraint",
         ))
 
     # Team conventions — only if architecture signals suggest a team wrote this
@@ -936,6 +1034,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="Team conventions not captured in config files",
             question="Any branching model, PR process, or unwritten norms beyond what's in config files?",
             hint="e.g. trunk-based vs feature branches; PR review requirements; who owns which area",
+            subtype="convention",
         ))
 
     # Exclusions — only if dep tree suggests architectural choices were made
@@ -945,6 +1044,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No known intentional library exclusions or architectural mandates",
             question="Any libraries or patterns that are intentionally excluded or always required?",
             hint=_exclusions_hint(),
+            subtype="constraint",
         ))
 
     # Constraints — only if production signals exist
@@ -957,6 +1057,7 @@ def bootstrap_scan(repo_path: str) -> dict:
             assumption="No known performance, scale, or compliance constraints",
             question="Any constraints that shape technical decisions?",
             hint=_constraints_hint(),
+            subtype="constraint",
         ))
 
     return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files}

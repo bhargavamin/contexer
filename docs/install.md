@@ -2,7 +2,7 @@
 
 Install once; it activates automatically in every git repo you open.
 
-**Prerequisite:** [uv](https://docs.astral.sh/uv/getting-started/installation/) must be on your `PATH`.
+**Requirements:** Python 3.12 or later. [uv](https://docs.astral.sh/uv/getting-started/installation/) must be on your `PATH`.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -14,7 +14,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 uv tool install contexer
-contexer install
+sudo contexer install
 ```
 
 That's it. The second command registers the MCP server and all hooks with Claude Code automatically.
@@ -87,9 +87,10 @@ You should see a `.json` file named after your repo. Each file holds the decisio
 
 ```bash
 uv tool upgrade contexer
+sudo contexer reinstall
 ```
 
-No reinstall needed — the existing MCP registration and hooks continue to work.
+Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed.
 
 ---
 
@@ -100,10 +101,11 @@ contexer uninstall
 uv tool uninstall contexer
 ```
 
-Removes the MCP server registration and all hooks. Your context store (`~/.contexer/`) is not deleted. To also remove stored context:
+Removes the MCP server registration and all hooks. Your context store (`~/.contexer/`) is kept. To also remove stored context:
 
 ```bash
-rm -rf ~/.contexer/
+contexer uninstall --purge
+uv tool uninstall contexer
 ```
 
 ---
