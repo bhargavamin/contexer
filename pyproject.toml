@@ -39,7 +39,15 @@ packages = ["contexer"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
+
+[tool.coverage.run]
+omit = [
+    "contexer/server.py",   # MCP entry point — thin wrappers, tested via store
+    "contexer/__main__.py", # CLI entry point
+]

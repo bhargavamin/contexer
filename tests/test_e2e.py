@@ -471,3 +471,44 @@ class TestUninstall:
         cli.uninstall()
         allow = _settings(tmp_home).get("permissions", {}).get("allow", [])
         assert not any("contexer" in p for p in allow)
+
+    def test_non_contexer_hooks_in_same_event_are_preserved(self, tmp_home):
+        """Uninstall must not remove hooks from other tools in the same event bucket."""
+        settings_path = tmp_home / ".claude" / "settings.json"
+        # Pre-populate with a non-contexer hook in UserPromptSubmit
+        existing = {"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "echo other-tool"}]}
+        ]}}
+        settings_path.write_text(json.dumps(existing))
+        cli.install()
+        cli.uninstall()
+        hooks = _settings(tmp_home).get("hooks", {})
+        ups = hooks.get("UserPromptSubmit", [])
+        cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])]
+        assert any("other-tool" in c for c in cmds)
+
+    def test_no_settings_file_is_graceful(self, tmp_home):
+        """Uninstall without a prior install should not raise."""
+        cli.uninstall()  # no install first — should complete without error
+
+
+# ── 12. main() dispatch ───────────────────────────────────────────────────────
+
+class TestMainDispatch:
+    def test_unknown_command_exits_nonzero(self, tmp_home, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["contexer", "badcmd"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert "Unknown command" in capsys.readouterr().err
+
+    def test_install_command_dispatches(self, tmp_home, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
+        cli.main()  # should not raise
+        assert (tmp_home / ".claude.json").exists()
+
+    def test_uninstall_command_dispatches(self, tmp_home, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
+        cli.main()
+        monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
+        cli.main()  # should not raise
