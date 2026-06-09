@@ -4,6 +4,8 @@ import sys
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
+from contexer.store import _atomic_write
+
 USAGE = """contexer — persistent context for Claude Code
 
 Usage: contexer [command]
@@ -43,8 +45,10 @@ def _load(path: Path) -> dict:
 
 
 def _save(path: Path, data: dict) -> None:
+    # Atomic for the same reason as the store: a torn ~/.claude.json or
+    # settings.json would break all of Claude Code, not just contexer.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    _atomic_write(path, json.dumps(data, indent=2))
 
 
 def _in_groups(groups: list, marker: str) -> bool:

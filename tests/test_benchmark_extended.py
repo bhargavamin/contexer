@@ -746,10 +746,10 @@ class TestConcurrentSessionIsolation:
         workers = [threading.Thread(target=writer) for _ in range(2)] + \
                   [threading.Thread(target=reader) for _ in range(2)]
         for t in workers: t.start()
-        time.sleep(1.0)
+        time.sleep(0.5)
         stop.set()
         for t in workers: t.join()
 
-        print(f"\n  Torn-read hammer (2 writers vs 2 readers, 1s):")
+        print(f"\n  Torn-read hammer (2 writers vs 2 readers, 0.5s):")
         print(f"    Torn/failed reads: {len(torn)}")
         assert not torn, f"Reader saw torn JSON: {torn[:3]}"

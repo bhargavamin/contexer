@@ -1132,6 +1132,30 @@ class TestAtomicSave:
         assert json.loads(before)["entries"] == []
         assert len(after["entries"]) == 1
 
+    def test_failed_write_cleans_up_temp_and_preserves_old_file(self, tmp_repo, monkeypatch):
+        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        before = store._store_path(tmp_repo).read_text()
+
+        def boom(src, dst):
+            raise OSError("disk full")
+        monkeypatch.setattr(store.os, "replace", boom)
+        with pytest.raises(OSError):
+            store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+                {"id": "1", "type": "decision", "subtype": "", "content": "c",
+                 "session_id": "s", "timestamp": "t"}]})
+        assert not list(store.STORE_DIR.glob("*.tmp")), "temp file must be removed on failure"
+        assert store._store_path(tmp_repo).read_text() == before, "old store must be untouched"
+
+    def test_non_ascii_content_round_trips(self, tmp_repo):
+        # Write side pins UTF-8 (ensure_ascii=False emits raw bytes); read side must
+        # pin UTF-8 too — a locale-default read would corrupt this on non-UTF-8 systems.
+        content = "décision: use café-naming → emoji ✓ 日本語"
+        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+            {"id": "1", "type": "decision", "subtype": "", "content": content,
+             "session_id": "s", "timestamp": "t"}]})
+        data = store._load(tmp_repo)
+        assert data["entries"][0]["content"] == content
+
 
 class TestCorruptionRecovery:
     def _corrupt(self, path: Path) -> None:
@@ -1159,17 +1183,3 @@ class TestCorruptionRecovery:
         assert ok
         data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
         assert len(data["entries"]) == 1
-
-    def test_failed_write_cleans_up_temp_and_preserves_old_file(self, tmp_repo, monkeypatch):
-        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
-        before = store._store_path(tmp_repo).read_text()
-
-        def boom(src, dst):
-            raise OSError("disk full")
-        monkeypatch.setattr(store.os, "replace", boom)
-        with pytest.raises(OSError):
-            store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
-                {"id": "1", "type": "decision", "subtype": "", "content": "c",
-                 "session_id": "s", "timestamp": "t"}]})
-        assert not list(store.STORE_DIR.glob("*.tmp")), "temp file must be removed on failure"
-        assert store._store_path(tmp_repo).read_text() == before, "old store must be untouched"

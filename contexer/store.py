@@ -39,8 +39,9 @@ def _load(repo_path: str) -> dict:
     path = _store_path(repo_path)
     if path.exists():
         try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            # encoding pinned to match _atomic_write — never the locale default
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             # Treat a corrupted or unreadable file as empty — recovers from concurrent-write races.
             return {"repo_path": repo_path, "entries": []}
     return {"repo_path": repo_path, "entries": []}
@@ -49,19 +50,17 @@ def _load(repo_path: str) -> dict:
 def _atomic_write(path: Path, text: str) -> None:
     """Write via a unique temp file + os.replace so readers never see a torn file.
 
-    mkstemp creates the temp file with mode 0o600, so the store is never readable
-    by others — not even between creation and the final rename."""
+    mkstemp creates the temp file with mode 0o600 (umask-independent), so the store
+    is never readable by others — not even between creation and the final rename.
+    Deliberate trade-offs: no fsync (atomic, not power-loss durable — acceptable for
+    a context cache), and if `path` is a symlink it is replaced by a regular file."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    finally:
+        Path(tmp).unlink(missing_ok=True)  # no-op after a successful replace
 
 
 def _save(repo_path: str, data: dict) -> None:
@@ -80,8 +79,8 @@ def _load_global() -> dict:
     path = _global_path()
     if path.exists():
         try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return {"repo_path": GLOBAL_SLUG, "entries": []}
     return {"repo_path": GLOBAL_SLUG, "entries": []}
 
