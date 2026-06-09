@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import tempfile
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -37,17 +39,33 @@ def _load(repo_path: str) -> dict:
     path = _store_path(repo_path)
     if path.exists():
         try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            # encoding pinned to match _atomic_write — never the locale default
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             # Treat a corrupted or unreadable file as empty — recovers from concurrent-write races.
             return {"repo_path": repo_path, "entries": []}
     return {"repo_path": repo_path, "entries": []}
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a unique temp file + os.replace so readers never see a torn file.
+
+    mkstemp creates the temp file with mode 0o600 (umask-independent), so the store
+    is never readable by others — not even between creation and the final rename.
+    Deliberate trade-offs: no fsync (atomic, not power-loss durable — acceptable for
+    a context cache), and if `path` is a symlink it is replaced by a regular file."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)  # no-op after a successful replace
+
+
 def _save(repo_path: str, data: dict) -> None:
     path = _store_path(repo_path)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    path.chmod(0o600)
+    _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
 # ── Global store ───────────────────────────────────────────────────────────────
@@ -61,16 +79,14 @@ def _load_global() -> dict:
     path = _global_path()
     if path.exists():
         try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return {"repo_path": GLOBAL_SLUG, "entries": []}
     return {"repo_path": GLOBAL_SLUG, "entries": []}
 
 
 def _save_global(data: dict) -> None:
-    path = _global_path()
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    path.chmod(0o600)
+    _atomic_write(_global_path(), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def update_global_decision(content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:

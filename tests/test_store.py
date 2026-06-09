@@ -1108,3 +1108,78 @@ class TestCaptureUserConstraint:
         assert entry_id is not None
         data = store._load(tmp_repo)
         assert len(data["entries"][0]["content"]) <= 600
+
+
+# ── Atomic save & corruption recovery ─────────────────────────────────────────
+
+class TestAtomicSave:
+    def test_save_leaves_no_temp_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "decided to use redis for caching hot reads", "sess-1")
+        assert not list(store.STORE_DIR.glob("*.tmp")), "atomic write must clean up its temp file"
+
+    def test_saved_file_is_owner_only(self, tmp_repo):
+        store.update_decision(tmp_repo, "decided to use redis for caching hot reads", "sess-1")
+        mode = store._store_path(tmp_repo).stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_save_replaces_existing_file_atomically(self, tmp_repo):
+        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        before = store._store_path(tmp_repo).read_text()
+        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+            {"id": "1", "type": "decision", "subtype": "", "content": "c",
+             "session_id": "s", "timestamp": "t"}]})
+        after = json.loads(store._store_path(tmp_repo).read_text())
+        assert json.loads(before)["entries"] == []
+        assert len(after["entries"]) == 1
+
+    def test_failed_write_cleans_up_temp_and_preserves_old_file(self, tmp_repo, monkeypatch):
+        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        before = store._store_path(tmp_repo).read_text()
+
+        def boom(src, dst):
+            raise OSError("disk full")
+        monkeypatch.setattr(store.os, "replace", boom)
+        with pytest.raises(OSError):
+            store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+                {"id": "1", "type": "decision", "subtype": "", "content": "c",
+                 "session_id": "s", "timestamp": "t"}]})
+        assert not list(store.STORE_DIR.glob("*.tmp")), "temp file must be removed on failure"
+        assert store._store_path(tmp_repo).read_text() == before, "old store must be untouched"
+
+    def test_non_ascii_content_round_trips(self, tmp_repo):
+        # Write side pins UTF-8 (ensure_ascii=False emits raw bytes); read side must
+        # pin UTF-8 too — a locale-default read would corrupt this on non-UTF-8 systems.
+        content = "décision: use café-naming → emoji ✓ 日本語"
+        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+            {"id": "1", "type": "decision", "subtype": "", "content": content,
+             "session_id": "s", "timestamp": "t"}]})
+        data = store._load(tmp_repo)
+        assert data["entries"][0]["content"] == content
+
+
+class TestCorruptionRecovery:
+    def _corrupt(self, path: Path) -> None:
+        path.write_text('{"repo_path": "/x", "entries": [{"id": "1", "type": "dec')  # truncated
+
+    def test_load_recovers_from_truncated_json(self, tmp_repo):
+        self._corrupt(store._store_path(tmp_repo))
+        data = store._load(tmp_repo)
+        assert data == {"repo_path": tmp_repo, "entries": []}
+
+    def test_load_global_recovers_from_truncated_json(self, tmp_repo):
+        self._corrupt(store._global_path())
+        data = store._load_global()
+        assert data == {"repo_path": store.GLOBAL_SLUG, "entries": []}
+
+    def test_get_context_on_corrupt_store_is_graceful(self, tmp_repo):
+        self._corrupt(store._store_path(tmp_repo))
+        result = store.get_context(tmp_repo)
+        assert "No context stored" in result
+
+    def test_capture_after_corruption_rewrites_valid_store(self, tmp_repo):
+        self._corrupt(store._store_path(tmp_repo))
+        ok, _ = store.update_decision(
+            tmp_repo, "decided to use JWT instead of sessions — stateless auth", "sess-1")
+        assert ok
+        data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
+        assert len(data["entries"]) == 1
