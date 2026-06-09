@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import tempfile
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -44,10 +46,27 @@ def _load(repo_path: str) -> dict:
     return {"repo_path": repo_path, "entries": []}
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a unique temp file + os.replace so readers never see a torn file.
+
+    mkstemp creates the temp file with mode 0o600, so the store is never readable
+    by others — not even between creation and the final rename."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _save(repo_path: str, data: dict) -> None:
     path = _store_path(repo_path)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    path.chmod(0o600)
+    _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
 # ── Global store ───────────────────────────────────────────────────────────────
@@ -68,9 +87,7 @@ def _load_global() -> dict:
 
 
 def _save_global(data: dict) -> None:
-    path = _global_path()
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    path.chmod(0o600)
+    _atomic_write(_global_path(), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def update_global_decision(content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
