@@ -1,6 +1,7 @@
 import json
 import shutil
 import sys
+import time
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
@@ -53,26 +54,45 @@ def _load_safe(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _is_corrupt(path: Path) -> bool:
+    """True when the file exists but is not a JSON object — status() uses this to
+    give honest advice (a corrupt config must be fixed, not re-installed over)."""
+    if not path.exists():
+        return False
+    try:
+        return not isinstance(_load(path), dict)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return True
+
+
 def _save(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
 
 
+def _hooks_of(grp) -> list:
+    """Hook list of one group, tolerating hand-edited shapes (non-dict group,
+    non-list hooks value) — used by status() on configs it must not crash on."""
+    hooks = grp.get("hooks", []) if isinstance(grp, dict) else []
+    return hooks if isinstance(hooks, list) else []
+
+
 def _in_groups(groups: list, marker: str) -> bool:
-    return any(marker in str(h) for grp in groups for h in grp.get("hooks", []))
+    return any(marker in str(h) for grp in groups for h in _hooks_of(grp))
 
 
 def _filter_groups(groups: list, markers: list) -> list:
     return [
         grp for grp in groups
-        if not any(marker in str(h) for marker in markers for h in grp.get("hooks", []))
+        if not any(marker in str(h) for marker in markers for h in _hooks_of(grp))
     ]
 
 
 def _has_mcp_tool(groups: list, tool: str) -> bool:
     return any(
-        any(h.get("type") == "mcp_tool" and h.get("server") == "contexer"
-            and h.get("tool") == tool for h in grp.get("hooks", []))
+        any(isinstance(h, dict) and h.get("type") == "mcp_tool"
+            and h.get("server") == "contexer" and h.get("tool") == tool
+            for h in _hooks_of(grp))
         for grp in groups
     )
 
@@ -319,9 +339,13 @@ def status() -> None:
     swept = 0
     if store_dir.exists():
         # Sweep temp files leaked by interrupted atomic writes (hard crash between
-        # mkstemp and os.replace). Never matched by the *.json glob below.
+        # mkstemp and os.replace). Never matched by the *.json glob below. The age
+        # gate keeps us from unlinking a temp another process is writing right now —
+        # that would make its os.replace fail and lose the save.
         for tmp in store_dir.glob("*.tmp"):
             try:
+                if time.time() - tmp.stat().st_mtime < 3600:
+                    continue
                 tmp.unlink()
                 swept += 1
             except OSError:
@@ -345,8 +369,18 @@ def status() -> None:
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     if current.exists():
-        print(f"  current repo: {current.read_text().strip()}")
-    if not (mcp and hooks_ok):
+        try:
+            print(f"  current repo: {current.read_text().strip()}")
+        except OSError:
+            print("  current repo: (unreadable)")
+
+    corrupt = [p for p in (home / ".claude.json", home / ".claude" / "settings.json")
+               if _is_corrupt(p)]
+    if corrupt:
+        for p in corrupt:
+            print(f"\n  WARNING: {p} exists but is not valid JSON — fix or remove it.")
+        print("  (`contexer install` fails loudly on a corrupt file rather than overwrite it.)")
+    elif not (mcp and hooks_ok):
         print("\n  Not fully installed — run `contexer install`.")
 
 
