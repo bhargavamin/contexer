@@ -42,6 +42,17 @@ def _load(path: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def _load_safe(path: Path) -> dict:
+    """Tolerant load for diagnostics: a malformed or non-object JSON file reads as
+    empty instead of crashing. Mutating paths (install/uninstall) keep the strict
+    _load so a corrupt config fails loudly rather than being silently clobbered."""
+    try:
+        data = _load(path)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _save(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
@@ -291,22 +302,48 @@ def status() -> None:
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
 
-    mcp = _load(home / ".claude.json").get("mcpServers", {}).get("contexer")
-    hooks = _load(home / ".claude" / "settings.json").get("hooks", {})
-    hooks_ok = (_in_groups(hooks.get("SessionStart", []), "get_session_start_context")
-                and _has_mcp_tool(hooks.get("UserPromptSubmit", []), "get_context_for_prompt"))
+    # status is a diagnostic — it must survive any state it might be asked to
+    # diagnose, including corrupt config files and hand-edited entries.
+    mcp = _load_safe(home / ".claude.json").get("mcpServers", {}).get("contexer")
+    raw_hooks = _load_safe(home / ".claude" / "settings.json").get("hooks", {})
+    hooks = raw_hooks if isinstance(raw_hooks, dict) else {}
+
+    def _groups(event: str) -> list:
+        v = hooks.get(event, [])
+        return v if isinstance(v, list) else []
+
+    hooks_ok = (_in_groups(_groups("SessionStart"), "get_session_start_context")
+                and _has_mcp_tool(_groups("UserPromptSubmit"), "get_context_for_prompt"))
 
     store_dir = home / ".contexer"
+    swept = 0
+    if store_dir.exists():
+        # Sweep temp files leaked by interrupted atomic writes (hard crash between
+        # mkstemp and os.replace). Never matched by the *.json glob below.
+        for tmp in store_dir.glob("*.tmp"):
+            try:
+                tmp.unlink()
+                swept += 1
+            except OSError:
+                pass
+
+    def _entry_count(p: Path) -> int:
+        entries = _load_safe(p).get("entries", [])
+        return len(entries) if isinstance(entries, list) else 0
+
     stores = sorted(store_dir.glob("*.json")) if store_dir.exists() else []
-    entries = sum(len(_load(p).get("entries", [])) for p in stores)
+    entries = sum(_entry_count(p) for p in stores)
     current = store_dir / ".current_repo"
+    mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
 
     print(f"contexer {_version()}")
     print(f"  binary:       {bin_path}")
-    print(f"  MCP server:   {'registered → ' + mcp.get('command', '?') if mcp else 'NOT registered'}")
+    print(f"  MCP server:   {'registered → ' + mcp_cmd if mcp else 'NOT registered'}")
     print(f"  hooks:        {'installed' if hooks_ok else 'missing or partial'}")
     print(f"  store dir:    {store_dir}{'' if store_dir.exists() else ' (absent)'}")
     print(f"  repo stores:  {len(stores)} ({entries} entries total)")
+    if swept:
+        print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     if current.exists():
         print(f"  current repo: {current.read_text().strip()}")
     if not (mcp and hooks_ok):

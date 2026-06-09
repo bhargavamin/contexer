@@ -155,3 +155,69 @@ class TestMainDispatch:
         monkeypatch.setattr(sys, "argv", ["contexer"])
         cli.main()
         assert called == [True]
+
+
+# ── status resilience ─────────────────────────────────────────────────────────
+
+class TestStatusResilience:
+    """status() is a diagnostic — it must survive any state it is asked to diagnose."""
+
+    def test_corrupt_store_file_does_not_crash(self, installed_home, capsys):
+        (installed_home / ".contexer" / "broken.json").write_text('{"entries": [{"id"')
+        status()
+        out = capsys.readouterr().out
+        assert "repo stores:" in out  # counted as 0 entries, no crash
+
+    def test_non_object_store_file_does_not_crash(self, installed_home, capsys):
+        (installed_home / ".contexer" / "list.json").write_text('[1, 2, 3]')
+        (installed_home / ".contexer" / "weird.json").write_text('{"entries": "not-a-list"}')
+        status()
+        assert "repo stores:" in capsys.readouterr().out
+
+    def test_corrupt_claude_json_reports_not_registered(self, installed_home, capsys):
+        (installed_home / ".claude.json").write_text('{"mcpServers": {')
+        status()
+        out = capsys.readouterr().out
+        assert "NOT registered" in out
+        assert "Not fully installed" in out
+
+    def test_corrupt_settings_json_reports_hooks_missing(self, installed_home, capsys):
+        (installed_home / ".claude" / "settings.json").write_text('not json at all')
+        status()
+        assert "missing or partial" in capsys.readouterr().out
+
+    def test_non_dict_mcp_entry_does_not_crash(self, installed_home, capsys):
+        claude_path = installed_home / ".claude.json"
+        claude = json.loads(claude_path.read_text())
+        claude["mcpServers"]["contexer"] = "stdio"  # hand-edited to a non-dict
+        claude_path.write_text(json.dumps(claude))
+        status()
+        assert "registered → ?" in capsys.readouterr().out
+
+    def test_non_list_hook_event_does_not_crash(self, installed_home, capsys):
+        settings_path = installed_home / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["hooks"]["SessionStart"] = "bogus"
+        settings_path.write_text(json.dumps(settings))
+        status()
+        assert "missing or partial" in capsys.readouterr().out
+
+    def test_sweeps_stale_temp_files(self, installed_home, capsys):
+        store_dir = installed_home / ".contexer"
+        (store_dir / "repo.json.abc123.tmp").write_text("orphaned")
+        (store_dir / "other.json.def456.tmp").write_text("orphaned")
+        status()
+        out = capsys.readouterr().out
+        assert "cleaned:      2 stale temp file(s)" in out
+        assert not list(store_dir.glob("*.tmp"))
+
+    def test_no_sweep_line_when_no_temp_files(self, installed_home, capsys):
+        status()
+        assert "cleaned:" not in capsys.readouterr().out
+
+    def test_install_on_corrupt_claude_json_fails_loudly(self, clean_home):
+        # Deliberate: mutating commands keep the strict loader — a corrupt config
+        # must not be silently replaced with a fresh minimal one.
+        (clean_home / ".claude.json").write_text('{"mcpServers": {')
+        with pytest.raises(json.JSONDecodeError):
+            install()
