@@ -12,7 +12,7 @@ Tests:
   5. Realistic prompt noise   — typos, truncation, multi-intent, indirect phrasing
   6. Novelty threshold        — sensitivity sweep 50%–90% with false-neg/pos counts
   7. Decision length          — short (5w), medium (25w), long (80w) effects on filter and tokens
-  8. Concurrent session       — .current_repo race condition documentation
+  8. Concurrent session       — atomic-write invariants: no torn JSON under concurrent writers/readers
 """
 
 import json
@@ -675,6 +675,10 @@ class TestConcurrentSessionIsolation:
         assert valid, f"File corrupted: {final!r}"
 
     def test_store_file_integrity_under_concurrent_writes(self, tmp_path, monkeypatch):
+        # INVARIANT: _save is atomic (temp file + os.replace), so no matter how
+        # writers interleave, the store file on disk is always complete valid JSON.
+        # Lost updates (last-write-wins) can still happen — that needs locking and
+        # is reported informationally below — but a torn/corrupt file cannot.
         monkeypatch.setattr(store, "STORE_DIR", tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         repo = "/bench/concurrent"
@@ -696,23 +700,56 @@ class TestConcurrentSessionIsolation:
         for t in threads: t.start()
         for t in threads: t.join()
 
-        try:
-            slug = store._slug(repo)
-            data = json.loads((tmp_path / f"{slug}.json").read_text())
-            count = len(data["entries"])
-            corrupted = False
-        except Exception:
-            corrupted = True
-            count = -1
+        store_file = tmp_path / f"{store._slug(repo)}.json"
+        data = json.loads(store_file.read_text())  # must parse — atomic save invariant
+        count = len(data["entries"])
 
         print(f"\n  Concurrent store writes (3 threads × 10 writes = 30 attempted):")
-        print(f"    JSON corrupted post-writes:  {'yes ✗' if corrupted else 'no ✓'}")
-        print(f"    Entries stored:              {count}/30  (rest lost to last-write-wins race)")
-        print(f"    JSONDecodeErrors during run: {len(errors)}")
-        print(f"    Conclusion: Path.write_text() is NOT atomic — concurrent writes can corrupt the file")
-        print(f"    Mitigation: store is single-user (one Claude Code session per repo at a time)")
-        print(f"    If concurrent: callers must catch JSONDecodeError and treat as empty store")
-        # This is a characterisation test — it documents behaviour, not an invariant.
-        # The store is explicitly not designed for concurrent multi-writer access.
-        # We only assert the test itself ran without a Python exception.
-        assert True
+        print(f"    File valid JSON post-writes: yes ✓ (atomic temp-file + os.replace)")
+        print(f"    Entries stored:              {count}/30  (gap = novelty filter rejecting "
+              f"near-identical payloads + last-write-wins races; locking would fix only the latter)")
+        print(f"    Writer exceptions:           {len(errors)}")
+        assert not errors, f"Writers raised: {errors}"
+        assert count >= 1, "At least the final writer's entries must survive"
+        assert all(e["type"] == "decision" for e in data["entries"])
+        leftover_tmps = list(tmp_path.glob("*.tmp"))
+        assert not leftover_tmps, f"Temp files leaked: {leftover_tmps}"
+
+    def test_reader_never_sees_torn_json_during_writes(self, tmp_path, monkeypatch):
+        # INVARIANT: while writers continuously rewrite the store, every read of the
+        # file parses as valid JSON — readers see old-or-new content, never partial.
+        # With the previous non-atomic write_text() this flaked; os.replace makes it law.
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        repo = "/bench/torn-read"
+        # Large payload so a non-atomic write would have a wide torn window.
+        big = {"repo_path": repo,
+               "entries": [{"id": str(n), "type": "decision", "subtype": "architecture",
+                            "content": "x" * 500, "session_id": "s", "timestamp": "t"}
+                           for n in range(120)]}
+        store._save(repo, big)
+        store_file = tmp_path / f"{store._slug(repo)}.json"
+        stop = threading.Event()
+        torn: list[str] = []
+
+        def writer():
+            while not stop.is_set():
+                store._save(repo, big)
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    json.loads(store_file.read_text())
+                except (json.JSONDecodeError, OSError) as e:
+                    torn.append(str(e))
+
+        workers = [threading.Thread(target=writer) for _ in range(2)] + \
+                  [threading.Thread(target=reader) for _ in range(2)]
+        for t in workers: t.start()
+        time.sleep(1.0)
+        stop.set()
+        for t in workers: t.join()
+
+        print(f"\n  Torn-read hammer (2 writers vs 2 readers, 1s):")
+        print(f"    Torn/failed reads: {len(torn)}")
+        assert not torn, f"Reader saw torn JSON: {torn[:3]}"
