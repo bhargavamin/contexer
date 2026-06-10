@@ -17,6 +17,17 @@ It reports the installed version, binary path, MCP registration, hook state, and
    - **registered** but still missing in `/mcp` → restart Claude Code. The MCP server is spawned once at session start; config changes are not picked up mid-session.
 2. Check the binary path printed by `status` exists: `ls -l ~/.local/bin/contexer`. If missing, `uv tool install contexer` first.
 
+## `Permission denied` during `contexer install` / `uninstall` / `reinstall`
+
+contexer writes only to files in your own home directory (`~/.claude.json`, `~/.claude/settings.json`, `~/.contexer/`) — being an administrator is not required, and **sudo is not the fix**. A permission error here almost always means a previous run *with* sudo left those files owned by root (Claude Code itself then can't update its own config either). Restore ownership and re-run without sudo:
+
+```bash
+sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.contexer
+contexer install
+```
+
+If your home directory itself is read-only (some managed/corporate setups), sudo won't help either — the files must be writable by the user Claude Code runs as; talk to whoever manages the machine.
+
 ## `status` says `hooks: missing or partial`
 
 Run `contexer install` (it is idempotent — re-running never duplicates hooks), then restart Claude Code.
