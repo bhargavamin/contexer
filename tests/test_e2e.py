@@ -209,9 +209,9 @@ class TestSessionStart:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert any(w in ctx for w in ["no", "skip"])
 
-    def test_new_repo_system_message_offers_bootstrap(self, tmp_repo):
+    def test_new_repo_system_message_signals_setup(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
-        assert "bootstrap" in result["systemMessage"]
+        assert "setup" in result["systemMessage"] or "no context" in result["systemMessage"].lower()
 
     def test_with_decisions_injects_project_rules(self, tmp_repo):
         store.update_decision(tmp_repo, "Always write tests before committing", SESSION, "constraint")

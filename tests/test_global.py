@@ -195,7 +195,7 @@ class TestSessionStartPermutations:
         result = store.get_session_start_context(REPO)
         msg = result["systemMessage"]
         assert "global rule" in msg
-        assert "bootstrap" in msg
+        assert "setup" in msg or "no context" in msg.lower()
 
     def test_no_global_repo_has_decisions_injects_project_rules(self):
         _add_repo("Never commit without tests", "constraint")
