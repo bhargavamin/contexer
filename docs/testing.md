@@ -33,7 +33,7 @@ Run in this order when verifying a significant change:
 | `test_e2e.py` | End-to-end hook sequences — install, session start, bootstrap trigger, constraint capture, `PostCompact` re-offer, decision storage | Always |
 | `test_global.py` | Global store — `update_global_decision`, `get_global_context`, cross-repo rules | When touching global store or session start |
 | `test_install.py` | `contexer install` / `uninstall` hook registration and migration | When touching `cli.py` |
-| `test_cli_commands.py` | CLI commands — `status`, `version`, `reinstall` output | When touching `cli.py` |
+| `test_cli_commands.py` | CLI commands — `status`, `version`, `reinstall`, `uninstall --purge`, dispatch, and `status` resilience against corrupt config/store files | When touching `cli.py` |
 | `test_benchmark.py` | Hit/miss rates, token cost, novelty filter at scale, rationale injection accuracy | When changing filter logic or `get_context_for_prompt` |
 | `test_benchmark_extended.py` | Noise tolerance, edge cases for constraint detection and rationale matching | When changing `_is_prescriptive_constraint`, `_sanitize_directive`, or `get_context_for_prompt` |
 
@@ -48,6 +48,7 @@ Run in this order when verifying a significant change:
 - `get_session_start_context` — constraints/conventions pre-loaded, arch/patterns deferred, bootstrap offered when no context
 - `bootstrap_scan` — repo file scanning, `is_simple_repo` suppression, gap question generation
 - `get_context_for_prompt` — rationale injection, project-context overview fallback
+- `TestAtomicSave` / `TestCorruptionRecovery` — atomic write invariants (temp file + `os.replace`, 0o600, failure cleanup) and corrupt-store recovery (truncated JSON reads as empty, next save rewrites a valid file)
 
 **`test_e2e.py`** — integration tests simulating the full hook lifecycle:
 - Install writes correct hooks (SessionStart, PostCompact, UserPromptSubmit)

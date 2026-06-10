@@ -388,6 +388,28 @@ def status() -> None:
         print("\n  Not fully installed — run `contexer install`.")
 
 
+def _run_guarded(fn) -> None:
+    """Run a mutating command; turn a PermissionError into actionable advice.
+
+    contexer only ever writes inside the user's own home (~/.claude.json,
+    ~/.claude/settings.json, ~/.contexer/), so permission errors almost always
+    mean a previous `sudo` run left those files owned by root — the fix is to
+    restore ownership, never to escalate."""
+    try:
+        fn()
+    except PermissionError as e:
+        target = e.filename or "a config file"
+        print(f"Permission denied: {target}", file=sys.stderr)
+        print("contexer writes only to files in your own home directory "
+              "(~/.claude.json, ~/.claude/settings.json, ~/.contexer/) — "
+              "it never needs sudo.", file=sys.stderr)
+        print("A previous run with sudo can leave those files owned by root. "
+              "Restore ownership:", file=sys.stderr)
+        print('  sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.contexer', file=sys.stderr)
+        print("then re-run this command without sudo.", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -402,11 +424,11 @@ def main() -> None:
     elif cmd in ("help", "--help", "-h"):
         _usage()
     elif cmd == "install":
-        install()
+        _run_guarded(install)
     elif cmd == "uninstall":
-        uninstall(purge="--purge" in rest)
+        _run_guarded(lambda: uninstall(purge="--purge" in rest))
     elif cmd == "reinstall":
-        reinstall()
+        _run_guarded(reinstall)
     elif cmd == "status":
         status()
     else:

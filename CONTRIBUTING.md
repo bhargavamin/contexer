@@ -1,6 +1,6 @@
 # Contributing to Contexer
 
-Thanks for your interest. Contexer is a small, focused tool — three files, no framework — and contributions should keep it that way.
+Thanks for your interest. Contexer is a small, focused tool — three core modules, no framework — and contributions should keep it that way.
 
 ---
 
@@ -31,13 +31,13 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## Project structure
 
-Three files, intentionally. Do not add a fourth without discussion.
+Three core modules, intentionally. Do not add a fourth without discussion.
 
 | File | Role |
 |---|---|
 | `contexer/server.py` | MCP server entry point — defines tools, delegates to `store.py` |
-| `contexter/store.py` | All read/write and filtering logic |
-| `contexer/cli.py` | `contexer install` / `contexer uninstall` commands |
+| `contexer/store.py` | All read/write and filtering logic |
+| `contexer/cli.py` | The `contexer` console script — runs the server bare; `install` / `uninstall [--purge]` / `reinstall` / `status` / `version` subcommands |
 
 Any logic change belongs in `store.py`. `server.py` is thin by design — it maps MCP calls to store functions and nothing else.
 
@@ -123,7 +123,7 @@ Good contributions:
 Out of scope for this repo:
 
 - Team sync / multi-user features (planned for a future paid version)
-- New MCP tools beyond the current five
+- New MCP tools beyond the current set (eight: capture, constraint capture, update, get, prompt-triggered get, bootstrap, and the two global-store tools)
 - Alternative storage backends
 - Language support beyond Python
 

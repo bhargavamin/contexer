@@ -260,3 +260,43 @@ class TestStatusResilience:
         (clean_home / ".claude.json").write_text('{"mcpServers": {')
         with pytest.raises(json.JSONDecodeError):
             install()
+
+
+# ── permission-denied guidance ────────────────────────────────────────────────
+
+class TestPermissionDeniedGuidance:
+    """Mutating commands turn PermissionError into actionable advice (exit 1),
+    instead of a raw traceback — and the advice is chown, never sudo."""
+
+    def test_install_into_unwritable_claude_dir(self, clean_home, monkeypatch, capsys):
+        claude_dir = clean_home / ".claude"
+        claude_dir.mkdir()
+        claude_dir.chmod(0o500)  # read+exec only — settings.json write must fail
+        try:
+            monkeypatch.setattr(sys, "argv", ["contexer", "install"])
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+            assert exc.value.code == 1
+            err = capsys.readouterr().err
+            assert "Permission denied" in err
+            assert "never needs sudo" in err
+            assert "chown" in err
+        finally:
+            claude_dir.chmod(0o700)
+
+    def test_uninstall_permission_error_guarded(self, installed_home, monkeypatch, capsys):
+        def boom(path, data):
+            raise PermissionError(13, "Permission denied", str(path))
+        monkeypatch.setattr(cli, "_save", boom)
+        monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Permission denied" in err and "chown" in err
+
+    def test_status_is_not_guarded_but_tolerant(self, clean_home, monkeypatch, capsys):
+        # status is read-only + already resilient; it must keep working normally
+        monkeypatch.setattr(sys, "argv", ["contexer", "status"])
+        cli.main()
+        assert "contexer " in capsys.readouterr().out
