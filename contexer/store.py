@@ -446,7 +446,7 @@ def get_session_start_context(repo_path: str) -> dict:
         sys_parts.extend(lines)
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "systemMessage": f"Contexer: no context stored{global_note} — offer bootstrap",
+            "systemMessage": f"Contexer: no context stored{global_note} — will initiate bootstrap sequence from next prompt",
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": "\n".join(sys_parts),
