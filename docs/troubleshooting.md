@@ -6,7 +6,7 @@ Start every diagnosis with:
 contexer status
 ```
 
-It reports the installed version, binary path, MCP registration, hook state, and store summary — and it is built to survive (and report on) corrupt files. Then find your symptom below.
+It reports the installed version, binary path, MCP registration, hook state, and store summary. It is built to survive corrupt files: a corrupt **config** file gets an explicit WARNING; a corrupt **store** file is simply excluded from the entry counts. Then find your symptom below.
 
 ---
 
@@ -40,7 +40,7 @@ Then restart Claude Code — a running session keeps the old server process.
 
 - Say *"store that as a constraint"* (or convention/architecture/pattern) to save explicitly.
 - Content too similar to an existing entry (>70% token overlap) is silently rejected as a duplicate. Rephrase to include what specifically changed.
-- Your **first prompt** of a session is captured as the current *task*, never as a constraint — follow up with *"store that as a constraint"* if it was a rule.
+- Your **first prompt** of a session is captured as the current *task*. If it is phrased as a clear directive (*"always X"*, *"never Y"*), it is **also** auto-saved as a constraint — but a rule phrased indirectly may slip past the detector, so follow up with *"store that as a constraint"* to be sure.
 
 ## A stored decision isn't appearing at session start
 
@@ -60,4 +60,4 @@ That's usually correct behavior: Contexer is silent by design. To verify it's ac
 
 ---
 
-Still stuck? [Open a bug report](../.github/ISSUE_TEMPLATE/bug_report.md) with the output of `contexer status` and `contexer version`, or ask on [Discord](https://discord.gg/Fk6JSaW4p).
+Still stuck? [Open a bug report](https://github.com/bhargavamin/contexer/issues/new?template=bug_report.md) with the output of `contexer status` and `contexer version`, or ask on [Discord](https://discord.gg/Fk6JSaW4p).
