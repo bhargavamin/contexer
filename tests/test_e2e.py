@@ -199,10 +199,10 @@ class TestSessionStart:
         assert "Do NOT" in ctx
 
     def test_new_repo_has_stop_mandate(self, tmp_repo):
-        """Bootstrap must tell Claude to stop and wait for yes/full/no."""
+        """Bootstrap must tell Claude to output only the offer and wait."""
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "STOP" in ctx
+        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
 
     def test_new_repo_offers_skip_path(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
@@ -302,10 +302,10 @@ class TestPostCompactContext:
 
 class TestBootstrapInstructions:
     def test_always_shown_for_task_prompts(self, tmp_repo):
-        """Bug fix: 'just continues → skip' was suppressing bootstrap for task prompts."""
+        """Bootstrap offer must be shown always — even when user sent a task or question."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
-        assert "ALWAYS" in full_text, "Bootstrap must be shown always, even for task prompts"
+        assert "CRITICAL" in full_text, "Bootstrap must use a critical instruction so it isn't skipped for task prompts"
 
     def test_no_just_continues_skip_rule(self, tmp_repo):
         """'just continues → skip' was the original bug — must be gone."""
@@ -317,7 +317,8 @@ class TestBootstrapInstructions:
         """Bootstrap must pause after the offer — not proceed with the original task."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
-        assert "STOP" in full_text and "wait" in full_text.lower()
+        assert "CRITICAL" in full_text or "stop completely" in full_text.lower()
+        assert "wait" in full_text.lower()
         assert "immediately answer" not in full_text
 
     def test_no_skip_path_for_direct_no(self, tmp_repo):

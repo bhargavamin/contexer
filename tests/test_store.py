@@ -393,7 +393,7 @@ class TestGetSessionStartContext:
         # Bootstrap offer must pause Claude — it waits for yes/full/no before doing anything
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "STOP" in ctx
+        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
         assert "yes" in ctx.lower()
         assert "skip" in ctx.lower()
         # Hard constraint: Claude must not call bootstrap_context before hearing yes
@@ -449,7 +449,7 @@ class TestGetBootstrapContextPrompt:
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "bootstrap_context" in ctx
-        assert "STOP" in ctx
+        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
         assert "yes" in ctx.lower()
         assert "skip" in ctx.lower()
         assert "do not" in ctx.lower() or "don't" in ctx.lower()
