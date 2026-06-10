@@ -27,7 +27,7 @@ You end up repeating yourself constantly: *"we use uv not pip"*, *"always write 
 
 ```bash
 uv tool install contexer
-sudo contexer install
+contexer install
 ```
 
 Restart Claude Code and open any git repo. That's it.
@@ -64,12 +64,13 @@ As you work, Claude stores decisions automatically. If it misses something, say 
 
 | Command | Description |
 |---|---|
-| `sudo contexer install` | Connect Contexer to Claude Code |
-| `contexer status` | Show connection status, store size, current repo |
+| `contexer install` | Connect Contexer to Claude Code |
+| `contexer status` | Show connection status, store size, current repo; warns about corrupt config files and cleans stale temp files |
 | `contexer reinstall` | Re-sync after a Claude Code update |
 | `contexer uninstall` | Disconnect; context store is kept |
 | `contexer uninstall --purge` | Remove everything including `~/.contexer/` |
 | `contexer version` | Print installed version |
+| `contexer help` | Show all commands and flags |
 
 ---
 

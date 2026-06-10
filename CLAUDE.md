@@ -17,29 +17,32 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## Architecture
 
-Three files, no more:
+A small package (`contexer/`), intentionally minimal:
 
-- **`server.py`** — MCP server entry point. Defines tools (`capture_context`, `capture_user_constraint`, `update_context`, `get_context`, `get_context_for_prompt`, `bootstrap_context`, `update_global_context`, `get_global_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
-- **`store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 500` per repo. Display is separately capped: `_UNFILTERED_DISPLAY = 10` for overview calls, `_FILTERED_DISPLAY = 25` for query/type-filtered calls.
+- **`contexer/server.py`** — MCP server entry point. Defines tools (`capture_context`, `capture_user_constraint`, `update_context`, `get_context`, `get_context_for_prompt`, `bootstrap_context`, `update_global_context`, `get_global_context`) using `FastMCP`. Generates a `SESSION_ID` (UUID) at process start shared across all tool calls in a session. Delegates all logic to `store.py`.
+- **`contexer/store.py`** — All read/write and filtering logic. `_passes_filter` is the core gate: content is stored only if it is novel (token-overlap check — >70% overlap with existing decisions = duplicate). Storage is capped at `MAX_ENTRIES = 500` per repo. Display is separately capped: `_UNFILTERED_DISPLAY = 10` for overview calls, `_FILTERED_DISPLAY = 25` for query/type-filtered calls.
+- **`contexer/cli.py`** — the `contexer` console script: bare invocation runs the MCP server; subcommands `install` / `uninstall [--purge]` / `reinstall` / `status` / `version` / `help` manage the global Claude Code config.
+- **`server.py`** (repo root) — back-compat shim importing `contexer.server`; keeps `uv run python server.py` working.
 - **`requirements.txt`** — Kept for reference; `pyproject.toml` is the authoritative dependency spec managed by `uv`.
 
 ## Storage
 
-Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo. The slug is the repo path with non-alphanumeric characters replaced by underscores. Each file holds a flat list of entries, each with `id`, `type` (`task` | `decision`), `subtype` (`architecture` | `constraint` | `pattern` | `convention` — decisions only), `content`, `session_id`, and `timestamp`.
+Context is stored at `~/.contexer/<repo_slug>.json` — one file per repo, plus `_global.json` for cross-repo decisions. The slug is the repo path with non-alphanumeric characters replaced by underscores. Each file holds a flat list of entries, each with `id`, `type` (`task` | `decision`), `subtype` (`architecture` | `constraint` | `pattern` | `convention` — decisions only), `content`, `session_id`, and `timestamp`. Writes are atomic (unique temp file + `os.replace`, mode 0o600) so readers never see a torn file; corrupt files are read as empty rather than crashing.
 
 ## MCP integration
 
-The server is registered in `~/.claude.json` under `mcpServers`:
+`contexer install` registers the server in `~/.claude.json` under `mcpServers`, pointing at the installed console script:
 
 ```json
 {
   "contexer": {
     "type": "stdio",
-    "command": "uv",
-    "args": ["run", "--directory", "/Users/bhargavamin/repos/personal/contexer", "python", "server.py"]
+    "command": "/Users/<you>/.local/bin/contexer"
   }
 }
 ```
+
+(A from-source dev install via `scripts/install.sh` wires `uv run --directory <clone> python server.py` instead.)
 
 ## Session behaviour (hooks)
 
@@ -71,6 +74,6 @@ Pass the full reasoning, not just the conclusion. Pass `subtype` so decisions ar
 ## Design constraints
 
 - **Silent operation is essential.** Tools must not produce noise — `update_context` silently discards filtered content without logging.
-- **No abstraction beyond what exists.** The three-file structure is intentional. Do not add classes, config files, or layers unless the spec changes.
+- **No abstraction beyond what exists.** The minimal module structure (`server.py` / `store.py` / `cli.py`) is intentional. Do not add classes, config files, or layers unless the spec changes.
 - **`update_context` is called by Claude Code, not the developer.** Claude Code nominates content; the server filters. The filtering criterion is novelty — >70% token overlap with any existing decision is rejected as a duplicate, not an LLM call.
 - **Git hooks and CLI commits are out of scope.** The MCP tool call path is the only capture mechanism.

@@ -14,8 +14,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 uv tool install contexer
-sudo contexer install
+contexer install
 ```
+
+> Do **not** run `contexer install` with `sudo` — it writes to *your* `~/.claude.json` and `~/.claude/settings.json`. Under `sudo` it would target root's home directory instead and Claude Code would never see the config.
 
 That's it. The second command registers the MCP server and all hooks with Claude Code automatically.
 
@@ -87,10 +89,12 @@ You should see a `.json` file named after your repo. Each file holds the decisio
 
 ```bash
 uv tool upgrade contexer
-sudo contexer reinstall
+contexer reinstall
 ```
 
-Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed.
+Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed. Then restart Claude Code: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
+
+> If `uv tool upgrade` doesn't pick up a release published minutes ago, force past the cache: `uv tool install --reinstall --refresh contexer`.
 
 ---
 
