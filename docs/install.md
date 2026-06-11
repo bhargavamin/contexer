@@ -60,10 +60,15 @@ Only `constraint` and `convention` decisions are pre-loaded. `architecture` and 
 
 Open Claude Code in any git repo. On your first message, Claude will ask:
 
-> "No project context stored yet — want a quick setup? I can ask 2-3 questions to capture key decisions for future sessions. Yes or no?"
+> "Contexer: no project context stored for this repo. How should I set up context for future sessions?"
 
-- **Yes** — Claude runs a short bootstrap: scans your stack, presents inferred facts one at a time (`Correct? yes / no / [correction]`), stores confirmed items, then answers your original question.
-- **No / skip** — Claude answers your original question immediately. Bootstrap is skipped.
+The offer adapts to how well you know the repo, judged from its git history — if you have commits there it leads with quick/full; if not, it suggests scanning instead of quizzing you; if it can't tell, it asks. Asking a newcomer question as your first message ("what is this repo doing?") skips the menu entirely: Contexer confirms it should scan, stores what it finds, and answers you. All options stay available either way:
+
+- **Quick** — one question (what does this repo do?), answer stored, then Claude answers your original question.
+- **Full** — guided setup: Claude scans your stack, presents inferred facts one at a time (`Correct? yes / no / [correction]`), asks a few questions about intent and constraints, and stores the answers. Best if you develop or maintain the repo.
+- **Some** — you work with the repo but didn't build it: facts are stored from the scan, and you're only asked what the repo does and what you're working on.
+- **Scan** — you're seeing this repo for the first time: no quiz. Contexer scans the code and docs, stores what it finds, and asks only what you're planning to do here.
+- **Skip** — Claude answers your original question immediately. Bootstrap is skipped.
 
 To trigger bootstrap manually at any time:
 

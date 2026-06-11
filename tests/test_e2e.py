@@ -5,6 +5,7 @@ constraint capture, decision storage, context retrieval, rationale injection, ta
 and bootstrap scan. Uses tmp_path + monkeypatch to isolate all filesystem side effects.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,36 @@ def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
     return str(tmp_path / "myrepo")
+
+
+@pytest.fixture
+def git_repo(tmp_path, monkeypatch):
+    """Real git repo with global/system git config isolated; returns its path."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = tmp_path / "gitrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return str(repo)
+
+
+ME = "me@test.local"
+OTHER = "other@test.local"
+
+
+def _git_commit(repo: str, email: str, n: int = 1) -> None:
+    for i in range(n):
+        (Path(repo) / f"{email.split('@')[0]}-{i}.txt").write_text(f"{email}-{i}")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", f"user.email={email}", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", "commit", "-q", "-m", f"c-{i}"],
+            cwd=repo, check=True)
+
+
+def _set_me(repo: str) -> None:
+    subprocess.run(["git", "config", "user.email", ME], cwd=repo, check=True)
 
 
 SESSION = "e2e-session"
@@ -326,10 +357,291 @@ class TestBootstrapInstructions:
         full_text = "\n".join(lines)
         assert "no or skip" in full_text
 
-    def test_quick_and_full_options_documented(self, tmp_repo):
-        lines = store._build_bootstrap_context(tmp_repo)
-        full_text = "\n".join(lines)
-        assert "yes" in full_text.lower() and "full" in full_text.lower()
+    def test_ambiguous_offer_options_are_parallel_modes(self, tmp_repo):
+        """Options must be modes, not yes/no mixed with modes. tmp_repo has no .git → ambiguous variant."""
+        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        for option in ["· quick —", "· full —", "· some —", "· scan —", "· skip —"]:
+            assert option in full_text
+
+    def test_scan_option_maps_to_low_insight(self, tmp_repo):
+        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "insight='low'" in full_text
+        assert "do NOT quiz" in full_text
+
+    def test_some_option_maps_to_medium_insight(self, tmp_repo):
+        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "insight='medium'" in full_text
+
+
+# ── 4d. Offer variants by detected insight ────────────────────────────────────
+
+class TestOfferVariants:
+    def test_high_decisive_skips_familiarity_and_demotes_scan(self, git_repo):
+        _git_commit(git_repo, ME, 5)
+        _set_me(git_repo)
+        text = "\n".join(store._build_bootstrap_context(git_repo))
+        assert "How well do you know this repo?" not in text
+        assert "· quick —" in text and "· full —" in text
+        assert "reply scan if you're actually new" in text, "override must stay visible"
+
+    def test_low_decisive_states_evidence_not_conclusion(self, git_repo, tmp_path):
+        _git_commit(git_repo, OTHER, 3)
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
+        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
+        text = "\n".join(store._build_bootstrap_context(str(clone)))
+        assert "No commits from your git email" in text, "must state the evidence"
+        assert "you're new to this repo" not in text, "must not assert a conclusion that may be wrong"
+        assert "· scan —" in text and "quick / full" in text, "override must stay visible"
+
+    def test_ambiguous_asks_familiarity(self, tmp_repo):
+        text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "How well do you know this repo?" in text
+
+    def test_medium_nondecisive_suggests_some(self, git_repo):
+        _git_commit(git_repo, OTHER, 1)
+        _git_commit(git_repo, ME, 2)
+        _set_me(git_repo)
+        text = "\n".join(store._build_bootstrap_context(git_repo))
+        assert "How well do you know this repo?" in text, "1-4 commits is non-decisive — must still ask"
+        assert "'some' is likely right" in text
+
+    def test_newcomer_question_check_comes_before_menu(self, tmp_repo):
+        """'what is this repo doing?' is low-insight evidence — the check must precede the
+        'response must be ONLY the offer' directive, or it loses to it."""
+        text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "STEP 0" in text
+        assert "assume you're new here" in text
+        assert text.index("STEP 0") < text.index("ENTIRE response must be ONLY the offer block")
+
+    def test_newcomer_question_check_in_low_variant(self, git_repo, tmp_path):
+        _git_commit(git_repo, OTHER, 3)
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
+        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
+        text = "\n".join(store._build_bootstrap_context(str(clone)))
+        assert "STEP 0" in text
+
+    def test_no_newcomer_check_when_high_decisive(self, git_repo):
+        """Commits by this user outweigh one curious question — keep the menu."""
+        _git_commit(git_repo, ME, 5)
+        _set_me(git_repo)
+        text = "\n".join(store._build_bootstrap_context(git_repo))
+        assert "STEP 0" not in text
+
+    def test_purpose_question_never_echoed_back(self, tmp_repo):
+        """Picking full after asking 'what does this repo do?' must not quiz the user
+        with their own question."""
+        text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "never echo it back" in text
+        assert "store the confirmed summary as the purpose" in text
+
+
+# ── 4f. Deterministic newcomer-question detection ─────────────────────────────
+
+class TestNewcomerQuestionDetection:
+    @pytest.mark.parametrize("prompt", [
+        "what is this repo doing?",
+        "What does this project do?",
+        "explain this codebase",
+        "tell me about this repo",
+        "how does this code work",
+        "walk me through this codebase please",
+        "give me an overview of this project",
+        "whats this repo about",
+    ])
+    def test_newcomer_questions_match(self, prompt):
+        assert store._is_newcomer_question(prompt) is True
+
+    @pytest.mark.parametrize("prompt", [
+        "fix the bug in store.py",
+        "add a logout endpoint to the api",
+        "why did we choose uv over pip?",
+        "what is this function doing",  # code-element question, not repo-level
+        "refactor the elevator scheduling logic",
+        "",
+    ])
+    def test_other_prompts_do_not_match(self, prompt):
+        assert store._is_newcomer_question(prompt) is False
+
+    def test_newcomer_prompt_overrides_menu(self, tmp_repo):
+        result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "OVERRIDE" in ctx and "assume you're new here" in ctx
+        assert "How well do you know this repo?" not in ctx
+
+    def test_task_prompt_gets_the_menu(self, tmp_repo):
+        result = store.get_bootstrap_context_prompt(tmp_repo, "fix the login bug")
+        assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
+
+    def test_newcomer_prompt_in_own_repo_keeps_menu(self, git_repo):
+        """Commits by the user outweigh one curious question — even deterministically."""
+        _git_commit(git_repo, ME, 5)
+        _set_me(git_repo)
+        result = store.get_bootstrap_context_prompt(git_repo, "what is this repo doing?")
+        assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
+
+    def test_existing_context_stays_silent(self, tmp_repo):
+        store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
+        assert store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?") == {}
+
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"prompt": "hello"}', "hello"),
+        ("", ""),
+        ("not json at all", ""),
+        ("[1, 2, 3]", ""),
+        ('{"no_prompt_key": 1}', ""),
+        ('{broken json', ""),
+    ])
+    def test_prompt_from_hook_stdin_never_crashes(self, raw, expected):
+        assert store.prompt_from_hook_stdin(raw) == expected
+
+
+# ── 4g. Resume-aware session start ────────────────────────────────────────────
+
+class TestResumeSessionStart:
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"source": "resume"}', "resume"),
+        ('{"source": "startup"}', "startup"),
+        ("", ""),
+        ("garbage", ""),
+        ('{"other": 1}', ""),
+    ])
+    def test_source_from_hook_stdin_is_safe(self, raw, expected):
+        assert store.source_from_hook_stdin(raw) == expected
+
+    def test_resume_with_context_skips_reinjection(self, tmp_repo):
+        """The resumed conversation already contains the original injection —
+        re-injecting duplicates ~1k tokens."""
+        store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
+        result = store.get_session_start_context(tmp_repo, source="resume")
+        assert "hookSpecificOutput" not in result
+        assert "resumed" in result["systemMessage"]
+
+    def test_resume_without_context_mines_conversation(self, tmp_repo):
+        result = store.get_session_start_context(tmp_repo, source="resume")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "RESUMED session" in ctx
+        assert "update_context" in ctx and "bootstrap_context" in ctx
+        assert "never invent" in ctx
+        assert "How well do you know this repo?" not in ctx, "no menu on resume — mine instead"
+
+    def test_resume_mining_suppresses_menu_fallback(self, tmp_repo):
+        """The UserPromptSubmit once-hook must not inject a contradictory menu after
+        the SessionStart resume branch injected mining instructions."""
+        store.get_session_start_context(tmp_repo, source="resume")
+        assert store.get_bootstrap_context_prompt(tmp_repo, "continue please") == {}
+        # flag is consumed — the next call behaves normally again
+        result = store.get_bootstrap_context_prompt(tmp_repo, "continue please")
+        assert result != {}
+
+    def test_startup_clears_stale_resume_flag(self, tmp_repo):
+        store.get_session_start_context(tmp_repo, source="resume")  # writes flag
+        store.get_session_start_context(tmp_repo, source="startup")  # must clear it
+        result = store.get_bootstrap_context_prompt(tmp_repo, "fix the bug")
+        assert result != {}, "stale resume flag must not suppress the bootstrap fallback"
+
+    @pytest.mark.parametrize("source", ["", "startup", "clear", "compact"])
+    def test_non_resume_sources_keep_menu_behavior(self, tmp_repo, source):
+        result = store.get_session_start_context(tmp_repo, source=source)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "RESUMED session" not in ctx
+        assert "CRITICAL INSTRUCTION" in ctx
+
+    def test_resume_includes_global_rules(self, tmp_repo):
+        store.update_global_decision("always use conventional commits", "s1", subtype="constraint")
+        result = store.get_session_start_context(tmp_repo, source="resume")
+        assert "Global rules" in result["hookSpecificOutput"]["additionalContext"]
+
+
+# ── 4h. Reaction-matrix invariants ────────────────────────────────────────────
+
+class TestReactionMatrix:
+    """Every combination of repo state × insight must keep the conversation sane:
+    bounded question counts, well-formed gaps, and a handler for every advertised option."""
+
+    def _repo_states(self, tmp_path):
+        bare = tmp_path / "bare"; bare.mkdir()
+        simple = tmp_path / "simple"; simple.mkdir()
+        (simple / "main.py").write_text("print('hi')\n")
+        rich = tmp_path / "rich"; rich.mkdir()
+        (rich / "pyproject.toml").write_text(
+            '[project]\nname = "x"\ndependencies = ["fastapi", "stripe", "boto3", '
+            '"httpx", "pydantic", "sqlalchemy"]\n')
+        missing = tmp_path / "never-created"
+        return [str(bare), str(simple), str(rich), str(missing)]
+
+    def test_gap_invariants_hold_for_all_combinations(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        for repo in self._repo_states(tmp_path):
+            for insight in ["low", "medium", "high", "", "banana"]:
+                result = store.bootstrap_scan(repo, insight=insight)
+                gaps = result["gaps"]
+                label = f"{Path(repo).name} × insight={insight!r}"
+                assert 1 <= len(gaps) <= 10, f"{label}: {len(gaps)} gaps"
+                assert result["insight"] in {"low", "medium", "high"}, label
+                for g in gaps:
+                    assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
+                    assert g["subtype"] in {"architecture", "constraint", "pattern", "convention"}, label
+                    assert g["min_insight"] in {"low", "medium", "high"}, label
+                    assert g["assumption"] and g["hint"], label
+
+    def test_every_advertised_option_has_a_handler(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        for repo in self._repo_states(tmp_path):
+            text = "\n".join(store._build_bootstrap_context(repo))
+            for option in ["quick", "full", "some", "scan"]:
+                if f"· {option} —" in text:
+                    assert f"If {option}" in text, \
+                        f"{Path(repo).name}: option '{option}' advertised without a handler"
+            assert "no or skip" in text, f"{Path(repo).name}: skip has no handler"
+
+
+# ── 4e. Insight detection from git signals ────────────────────────────────────
+
+class TestInsightDetection:
+    def test_plain_dir_without_git_is_ambiguous(self, tmp_repo):
+        assert store._detect_insight(tmp_repo) == ("low", False)
+
+    def test_no_user_email_is_ambiguous_never_high(self, git_repo):
+        """The --author='' trap: empty email must not match every commit."""
+        _git_commit(git_repo, OTHER, 6)
+        assert store._detect_insight(git_repo) == ("low", False)
+
+    def test_empty_repo_with_email_is_creator(self, git_repo):
+        _set_me(git_repo)
+        assert store._detect_insight(git_repo) == ("high", True)
+
+    def test_first_commit_author_is_high_regardless_of_count(self, git_repo):
+        _git_commit(git_repo, ME, 1)
+        _git_commit(git_repo, OTHER, 6)
+        _set_me(git_repo)
+        assert store._detect_insight(git_repo) == ("high", True)
+
+    def test_five_own_commits_is_high_decisive(self, git_repo):
+        _git_commit(git_repo, OTHER, 1)
+        _git_commit(git_repo, ME, 5)
+        _set_me(git_repo)
+        assert store._detect_insight(git_repo) == ("high", True)
+
+    def test_few_commits_is_medium_nondecisive(self, git_repo):
+        _git_commit(git_repo, OTHER, 1)
+        _git_commit(git_repo, ME, 2)
+        _set_me(git_repo)
+        assert store._detect_insight(git_repo) == ("medium", False)
+
+    def test_zero_commits_in_local_repo_is_ambiguous(self, git_repo):
+        """Could be an email mismatch in the user's own repo — must ask, not conclude."""
+        _git_commit(git_repo, OTHER, 3)
+        _set_me(git_repo)
+        assert store._detect_insight(git_repo) == ("low", False)
+
+    def test_fresh_clone_is_low_decisive(self, git_repo, tmp_path):
+        _git_commit(git_repo, OTHER, 3)
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
+        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
+        assert store._detect_insight(str(clone)) == ("low", True)
 
 
 # ── 5. Constraint capture ─────────────────────────────────────────────────────
@@ -513,6 +825,77 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo)
         assert isinstance(result["inferred"], list)
         assert isinstance(result["gaps"], list)
+
+    def test_insight_auto_detected_when_not_given(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo)
+        assert result["insight_source"] == "auto"
+        assert result["insight"] == "low" and result["decisive"] is False  # no .git → ambiguous
+
+    def test_invalid_insight_triggers_auto_detect(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo, insight="banana")
+        assert result["insight_source"] == "auto"
+
+    def test_user_supplied_insight_is_decisive(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert result["insight_source"] == "user" and result["decisive"] is True
+
+    def test_low_insight_gets_single_goal_question(self, tmp_repo):
+        """First-timers can't answer insider questions — only their own goal is askable."""
+        result = store.bootstrap_scan(tmp_repo, insight="low")
+        assert len(result["gaps"]) == 1
+        assert "planning to do" in result["gaps"][0]["question"]
+
+    def test_medium_insight_gets_goal_and_purpose_only(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo, insight="medium")
+        questions = [g["question"] for g in result["gaps"]]
+        assert len(questions) == 2
+        assert any("planning to do" in q for q in questions)
+        assert any("What does this repo do" in q for q in questions)
+
+    def test_high_insight_gets_no_goal_question(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert not any("planning to do" in g["question"] for g in result["gaps"])
+
+    def test_low_insight_gets_no_insider_questions(self, tmp_repo):
+        """Questions about conventions, compliance, CI, or exclusions assume repo authorship."""
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
+            '"boto3", "stripe", "httpx", "pydantic"]\n'
+        )
+        high = store.bootstrap_scan(tmp_repo, insight="high")
+        low = store.bootstrap_scan(tmp_repo, insight="low")
+        assert len(high["gaps"]) > 1, "high insight should get intent questions for a production-signal repo"
+        assert len(low["gaps"]) == 1, "low insight must never get insider questions"
+
+    def test_low_insight_still_infers_facts_from_code(self, tmp_repo):
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "some-lib"\n')
+        result = store.bootstrap_scan(tmp_repo, insight="low")
+        assert any("some-lib" in f for f in result["inferred"])
+
+    def test_full_on_bare_repo_still_interviews(self, tmp_repo):
+        """'full' is explicit opt-in to an interview — a simple repo must not collapse it
+        to a single question; the author's head holds decisions no scan can reach."""
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert len(result["gaps"]) >= 4
+        subtypes = {g["subtype"] for g in result["gaps"]}
+        assert {"architecture", "convention", "constraint"} <= subtypes
+
+    def test_signal_rich_repo_gets_no_interview_padding(self, tmp_repo):
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
+            '"boto3", "stripe", "httpx", "pydantic"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert len(result["gaps"]) >= 4
+        assert not any("aren't visible in it" in g["question"] for g in result["gaps"]), \
+            "signal-rich repos have real questions — generic interview padding not needed"
+
+    def test_interview_floor_not_applied_below_high(self, tmp_repo):
+        assert len(store.bootstrap_scan(tmp_repo, insight="low")["gaps"]) == 1
+        assert len(store.bootstrap_scan(tmp_repo, insight="medium")["gaps"]) == 2
 
 
 # ── 11. Uninstall ─────────────────────────────────────────────────────────────

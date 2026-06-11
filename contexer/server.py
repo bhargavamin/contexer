@@ -49,14 +49,23 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
 
 
 @mcp.tool()
-def bootstrap_context(repo_path: str = "") -> str:
-    """Scans a repo for inferable decisions and gap questions. Present inferred
-    items to the user for confirmation, store confirmed ones via update_context,
-    then ask the gap questions and store each answer."""
+def bootstrap_context(repo_path: str = "", insight: str = "") -> str:
+    """Scans a repo for inferable decisions and gap questions, filtered by how much
+    insight the user has into the repo.
+
+    insight: 'high' — user wrote or maintains the repo: confirm inferred items with
+    them, then ask the intent gap questions.
+    'medium' — user works with the repo but didn't build it: store inferred facts
+    directly, ask only purpose and the user's goal.
+    'low' — user is seeing the repo for the first time: store inferred facts directly,
+    read README/docs for purpose, ask only what the user plans to do here.
+    Empty — auto-detect from git history. The result includes 'insight' and 'decisive';
+    if decisive is false, ask the user how well they know the repo, then re-call
+    with their answer."""
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return json.dumps({"error": "repo path not detected"})
-    return json.dumps(store.bootstrap_scan(resolved), indent=2)
+    return json.dumps(store.bootstrap_scan(resolved, insight), indent=2)
 
 
 @mcp.tool()

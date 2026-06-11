@@ -42,13 +42,13 @@ See **[docs/install.md](docs/install.md)** for verification, update, and uninsta
 
 Contexer runs silently in every session. You don't interact with it directly.
 
-**First time in a repo** — Claude includes a brief offer at the top of its first response:
+**First time in a repo** — Claude includes a brief offer at the top of its first response. The offer adapts to how well you know the repo, judged from its git history:
 
-```
-Contexer: no project context stored. Save decisions for future sessions? (yes / full / no)
-```
+- The repo has commits from you → pick **quick** (one question) or **full** (guided setup).
+- No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs instead of asking questions you can't answer.
+- Can't tell → it simply asks how well you know the repo.
 
-Say **yes** for one question (what does this repo do?), **full** for a thorough setup, or **no** to skip. Claude answers your original request either way.
+Whatever was detected, all options (**quick / full / scan / skip**) stay available — reply with the one you want. And if your first message is itself a newcomer question ("what is this repo doing?"), Contexer skips the menu entirely and just confirms it should scan before answering you. Claude answers your original request either way.
 
 **Every session after that** — before your first message, Claude reads:
 
@@ -59,6 +59,8 @@ Contexer: 3 constraints, 2 conventions loaded. 8 arch/patterns will be loaded on
 Constraints and conventions are injected immediately — they apply to every task. Architecture and pattern decisions load on demand when the task needs them.
 
 As you work, Claude stores decisions automatically. If it misses something, say *"store that as a constraint"* and it's saved.
+
+**Resumed sessions** (`--resume` / `--continue`) don't repeat any of this — the context is already in the conversation. And if you installed Contexer mid-project, resuming an old session makes Claude mine that conversation for decisions already made and store them, no questions asked.
 
 ---
 
