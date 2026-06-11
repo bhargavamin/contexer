@@ -48,7 +48,7 @@ Contexer runs silently in every session. You don't interact with it directly.
 - No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs instead of asking questions you can't answer.
 - Can't tell → it simply asks how well you know the repo.
 
-Whatever was detected, all options (**quick / full / scan / skip**) stay available — reply with the one you want. Claude answers your original request either way.
+Whatever was detected, all options (**quick / full / scan / skip**) stay available — reply with the one you want. And if your first message is itself a newcomer question ("what is this repo doing?"), Contexer skips the menu entirely and just confirms it should scan before answering you. Claude answers your original request either way.
 
 **Every session after that** — before your first message, Claude reads:
 

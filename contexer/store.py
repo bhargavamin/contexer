@@ -492,13 +492,34 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         ]
         replies = "quick / full / some / scan / skip"
 
+    # A newcomer question ("what is this repo doing?") is itself low-insight evidence —
+    # don't answer it with a menu whose first option mirrors the question back.
+    # Decisive-high keeps the menu: commits by this user outweigh one curious question.
+    newbie_exception = [] if (decisive and level == "high") else [
+        "EXCEPTION — newcomer question: if the user's message is itself asking what this"
+        " repo or code is or does ('what is this repo doing?', 'explain this codebase',"
+        " 'tell me about this repo'), do NOT output the menu — their question already"
+        " signals they're new here. Instead output exactly:",
+        "  \"Contexer: you're asking what this repo does, so I'll assume you're new here —"
+        " I'll scan the code and docs, store what I find for future sessions, then answer"
+        " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
+        "Then stop and wait. If they confirm (ok / yes / scan) → follow the scan path below,"
+        " and after storing, answer their original question."
+        " Any other reply → follow that option's path below.",
+    ]
+    output_directive = (
+        "Output the offer block (or the EXCEPTION confirmation instead, when it applies)."
+        if newbie_exception else "Output the offer."
+    )
+
     return [
         f"No project context stored for {repo_path}.",
         "CRITICAL INSTRUCTION — read before writing a single word:",
         "Your ENTIRE response must be ONLY the offer block below. No task work. No file reads."
         " No acknowledgment of any prior request. No explanation. Just the offer, then stop.",
         *offer,
-        "Output the offer. Then stop completely. Do NOT call bootstrap_context yet."
+        *newbie_exception,
+        f"{output_directive} Then stop completely. Do NOT call bootstrap_context yet."
         f" Do NOT start the user's task. Wait for them to reply {replies}.",
         "Once the user replies:",
         "If quick (or yes) → call bootstrap_context with insight='high'. Ask ONLY the first gap question"
@@ -522,6 +543,7 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " Ask only the single gap question returned (what the user plans to do here) and store the answer."
         " Same sentence style: plain, max 15 words.",
         "If no or skip → proceed with their original request directly, do not mention bootstrap again.",
+        "After any path completes, answer the user's original message — never leave it hanging.",
     ]
 
 

@@ -406,6 +406,27 @@ class TestOfferVariants:
         assert "How well do you know this repo?" in text, "1-4 commits is non-decisive — must still ask"
         assert "'some' is likely right" in text
 
+    def test_newcomer_question_exception_in_ambiguous_variant(self, tmp_repo):
+        """'what is this repo doing?' is low-insight evidence — must not be answered with a menu."""
+        text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "EXCEPTION — newcomer question" in text
+        assert "assume you're new here" in text
+
+    def test_newcomer_question_exception_in_low_variant(self, git_repo, tmp_path):
+        _git_commit(git_repo, OTHER, 3)
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
+        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
+        text = "\n".join(store._build_bootstrap_context(str(clone)))
+        assert "EXCEPTION — newcomer question" in text
+
+    def test_no_newcomer_exception_when_high_decisive(self, git_repo):
+        """Commits by this user outweigh one curious question — keep the menu."""
+        _git_commit(git_repo, ME, 5)
+        _set_me(git_repo)
+        text = "\n".join(store._build_bootstrap_context(git_repo))
+        assert "EXCEPTION — newcomer question" not in text
+
 
 # ── 4e. Insight detection from git signals ────────────────────────────────────
 

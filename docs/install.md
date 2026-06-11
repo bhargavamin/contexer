@@ -62,7 +62,7 @@ Open Claude Code in any git repo. On your first message, Claude will ask:
 
 > "Contexer: no project context stored for this repo. How should I set up context for future sessions?"
 
-The offer adapts to how well you know the repo, judged from its git history — if you have commits there it leads with quick/full; if not, it suggests scanning instead of quizzing you; if it can't tell, it asks. All options stay available either way:
+The offer adapts to how well you know the repo, judged from its git history — if you have commits there it leads with quick/full; if not, it suggests scanning instead of quizzing you; if it can't tell, it asks. Asking a newcomer question as your first message ("what is this repo doing?") skips the menu entirely: Contexer confirms it should scan, stores what it finds, and answers you. All options stay available either way:
 
 - **Quick** — one question (what does this repo do?), answer stored, then Claude answers your original question.
 - **Full** — guided setup: Claude scans your stack, presents inferred facts one at a time (`Correct? yes / no / [correction]`), asks a few questions about intent and constraints, and stores the answers. Best if you develop or maintain the repo.
