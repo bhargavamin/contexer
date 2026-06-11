@@ -406,10 +406,11 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         "  \"Contexer: no project context stored for this repo."
         " Save decisions so future sessions start with full context?",
         "   · yes — quick (1 question: what does this repo do?)",
-        "   · full — thorough (up to 5 questions: purpose, tests, CI, deploy, constraints)",
+        "   · full — thorough (up to 5 questions — best if you develop or maintain this repo)",
+        "   · new — I'm new to this repo (no questions: scans code and docs, stores what it finds)",
         "   · no — skip\"",
         "Output the offer. Then stop completely. Do NOT call bootstrap_context yet."
-        " Do NOT start the user's task. Wait for them to reply yes / full / no.",
+        " Do NOT start the user's task. Wait for them to reply yes / full / new / no.",
         "Once the user replies:",
         "If yes (quick) → call bootstrap_context. Ask ONLY the first gap question"
         " (purpose). Store the answer with update_context using the gap's subtype. Stop — do not ask more.",
@@ -420,6 +421,13 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " Store each answer as a separate update_context call using the gap's subtype."
         " Write each stored entry as a single plain sentence, max 15 words, no em dashes, no filler phrases."
         " Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD pipeline planned or needed for this repo.'",
+        "If new (first time seeing this repo) → call bootstrap_context with audience='explorer'."
+        " The user cannot answer questions about this repo's history or conventions — do NOT quiz them."
+        " Store each inferred fact directly via update_context using subtype='architecture'"
+        " (no confirmation needed: the facts come from the code, the user cannot validate them)."
+        " Read the README and any docs/ to determine the repo's purpose and store it."
+        " Ask only the single gap question returned (what the user plans to do here) and store the answer."
+        " Same sentence style: plain, max 15 words.",
         "If no or skip → proceed with their original request directly, do not mention bootstrap again.",
     ]
 
@@ -702,7 +710,8 @@ def _infer_purpose(name: str, readme_summary: str) -> str:
     return f"\"{name}\" — type not obvious from name alone"
 
 
-def bootstrap_scan(repo_path: str) -> dict:
+def bootstrap_scan(repo_path: str, audience: str = "developer") -> dict:
+    audience = "explorer" if audience == "explorer" else "developer"
     root = Path(repo_path)
     data = _load(repo_path)
     existing = [e for e in data.get("entries", []) if e["type"] == "decision"]
@@ -1073,9 +1082,20 @@ def bootstrap_scan(repo_path: str) -> dict:
 
     # --- Intent gaps: all conditional on signals ---
     gaps: list[dict] = []
+    name = sig["project_name"]
+
+    if audience == "explorer":
+        # Explorers can't answer intent questions about a repo they didn't write —
+        # the only thing they know is their own goal. Everything else comes from scanning.
+        gaps.append(_gap(
+            assumption=_infer_purpose(name, sig["readme_summary"]),
+            question="What are you planning to do with this repo?",
+            hint="e.g. evaluating it, learning the codebase, fixing a specific bug, integrating it into another project",
+            subtype="architecture",
+        ))
+        return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files, "audience": audience}
 
     # Purpose — always: can never be inferred from code
-    name = sig["project_name"]
     gaps.append(_gap(
         assumption=_infer_purpose(name, sig["readme_summary"]),
         question="What does this repo do and who uses it?",
@@ -1170,4 +1190,4 @@ def bootstrap_scan(repo_path: str) -> dict:
             subtype="constraint",
         ))
 
-    return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files}
+    return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files, "audience": audience}

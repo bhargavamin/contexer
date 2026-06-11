@@ -331,6 +331,14 @@ class TestBootstrapInstructions:
         full_text = "\n".join(lines)
         assert "yes" in full_text.lower() and "full" in full_text.lower()
 
+    def test_new_to_repo_option_documented(self, tmp_repo):
+        """Audience must be determined in the offer — explorers get scanning, not a quiz."""
+        lines = store._build_bootstrap_context(tmp_repo)
+        full_text = "\n".join(lines)
+        assert "new — I'm new to this repo" in full_text
+        assert "audience='explorer'" in full_text
+        assert "do NOT quiz" in full_text
+
 
 # ── 5. Constraint capture ─────────────────────────────────────────────────────
 
@@ -513,6 +521,39 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo)
         assert isinstance(result["inferred"], list)
         assert isinstance(result["gaps"], list)
+
+    def test_default_audience_is_developer(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo)
+        assert result["audience"] == "developer"
+
+    def test_unknown_audience_falls_back_to_developer(self, tmp_repo):
+        result = store.bootstrap_scan(tmp_repo, audience="manager")
+        assert result["audience"] == "developer"
+
+    def test_explorer_gets_single_goal_question(self, tmp_repo):
+        """Explorers can't answer insider questions — only their own goal is askable."""
+        result = store.bootstrap_scan(tmp_repo, audience="explorer")
+        assert result["audience"] == "explorer"
+        assert len(result["gaps"]) == 1
+        assert "planning to do" in result["gaps"][0]["question"]
+
+    def test_explorer_gets_no_insider_questions(self, tmp_repo):
+        """Questions about conventions, compliance, CI, or exclusions assume repo authorship."""
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
+            '"boto3", "stripe", "httpx", "pydantic"]\n'
+        )
+        dev = store.bootstrap_scan(tmp_repo, audience="developer")
+        exp = store.bootstrap_scan(tmp_repo, audience="explorer")
+        assert len(dev["gaps"]) > 1, "developer scan should ask intent questions for a production-signal repo"
+        assert len(exp["gaps"]) == 1, "explorer scan must never ask insider questions"
+
+    def test_explorer_still_infers_facts_from_code(self, tmp_repo):
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "some-lib"\n')
+        result = store.bootstrap_scan(tmp_repo, audience="explorer")
+        assert any("some-lib" in f for f in result["inferred"])
 
 
 # ── 11. Uninstall ─────────────────────────────────────────────────────────────

@@ -60,9 +60,11 @@ Only `constraint` and `convention` decisions are pre-loaded. `architecture` and 
 
 Open Claude Code in any git repo. On your first message, Claude will ask:
 
-> "No project context stored yet — want a quick setup? I can ask 2-3 questions to capture key decisions for future sessions. Yes or no?"
+> "Contexer: no project context stored for this repo. Save decisions so future sessions start with full context? (yes / full / new / no)"
 
-- **Yes** — Claude runs a short bootstrap: scans your stack, presents inferred facts one at a time (`Correct? yes / no / [correction]`), stores confirmed items, then answers your original question.
+- **Yes** — quick setup: one question (what does this repo do?), answer stored, then Claude answers your original question.
+- **Full** — thorough setup: Claude scans your stack, presents inferred facts one at a time (`Correct? yes / no / [correction]`), asks a few questions about intent and constraints, and stores the answers. Best if you develop or maintain the repo.
+- **New** — you're seeing this repo for the first time: no quiz. Contexer scans the code and docs, stores what it finds, and asks only what you're planning to do here.
 - **No / skip** — Claude answers your original question immediately. Bootstrap is skipped.
 
 To trigger bootstrap manually at any time:

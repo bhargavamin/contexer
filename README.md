@@ -45,10 +45,10 @@ Contexer runs silently in every session. You don't interact with it directly.
 **First time in a repo** — Claude includes a brief offer at the top of its first response:
 
 ```
-Contexer: no project context stored. Save decisions for future sessions? (yes / full / no)
+Contexer: no project context stored. Save decisions for future sessions? (yes / full / new / no)
 ```
 
-Say **yes** for one question (what does this repo do?), **full** for a thorough setup, or **no** to skip. Claude answers your original request either way.
+Say **yes** for one question (what does this repo do?), **full** for a thorough setup, **new** if you're seeing this repo for the first time — Contexer scans the code and docs instead of asking questions you can't answer — or **no** to skip. Claude answers your original request either way.
 
 **Every session after that** — before your first message, Claude reads:
 
