@@ -478,7 +478,7 @@ class TestBootstrapScan:
 
     def test_gaps_are_dicts_with_required_keys(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         for gap in result["gaps"]:
             assert "assumption" in gap
             assert "question" in gap
@@ -486,7 +486,7 @@ class TestBootstrapScan:
 
     def test_always_asks_primary_purpose(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("what does this repo do" in q.lower() for q in _gap_questions(result))
 
     def test_team_context_asked_when_architecture_signals_present(self, tmp_repo):
@@ -496,7 +496,7 @@ class TestBootstrapScan:
         (src / "api").mkdir(parents=True)
         (src / "services").mkdir(parents=True)
         (src / "models").mkdir(parents=True)
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("branch" in q.lower() or "team" in q.lower() or "pr" in q.lower() for q in _gap_questions(result))
 
     def test_exclusions_asked_when_dep_choices_exist(self, tmp_repo):
@@ -506,7 +506,7 @@ class TestBootstrapScan:
             '[project]\nname = "api"\nrequires-python = ">=3.12"\n'
             'dependencies = ["sqlalchemy>=2.0","httpx","pydantic","redis","celery","stripe"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("exclusion" in q.lower() or "intentionally" in q.lower() for q in _gap_questions(result))
 
     def test_constraints_asked_when_production_signals_present(self, tmp_repo):
@@ -515,20 +515,20 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("constraint" in q.lower() for q in _gap_questions(result))
 
     def test_purpose_assumption_derived_from_readme(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "README.md").write_text("# MyApp\nA payment processing service for e-commerce.\n")
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
         assert "payment" in purpose_gap["assumption"].lower()
 
     def test_purpose_assumption_inferred_from_name(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "my-api-service"\nrequires-python = ">=3.12"\n')
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
         assert "api" in purpose_gap["assumption"].lower() or "service" in purpose_gap["assumption"].lower()
 
@@ -538,7 +538,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "app"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0","stripe>=2.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert len(result["gaps"]) <= 10
 
     # ── language / tooling detection ──────────────────────────────────────────
@@ -550,7 +550,7 @@ class TestBootstrapScan:
         )
         (Path(tmp_repo) / "uv.lock").write_text("")
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         inferred = " ".join(result["inferred"]).lower()
         assert "python" in inferred
         assert "uv" in inferred
@@ -565,7 +565,7 @@ class TestBootstrapScan:
         }
         (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         inferred = " ".join(result["inferred"]).lower()
         assert "node" in inferred
         assert "typescript" in inferred
@@ -576,7 +576,7 @@ class TestBootstrapScan:
         wf_dir.mkdir(parents=True)
         (wf_dir / "ci.yml").write_text("on: [push]")
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("github actions" in i.lower() for i in result["inferred"])
 
     # ── deployment detection ───────────────────────────────────────────────────
@@ -586,7 +586,7 @@ class TestBootstrapScan:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("dockerfile" in i.lower() or "container" in i.lower() for i in result["inferred"])
         assert not any("where does this run" in g["question"].lower() for g in result["gaps"])
 
@@ -594,7 +594,7 @@ class TestBootstrapScan:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         # pyproject.toml marks this as a real code repo — not a simple/docs repo
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
         assert "no container" in env_gap["assumption"].lower() or "deployment target" in env_gap["assumption"].lower()
 
@@ -605,7 +605,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["psycopg[binary]>=3.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("postgresql" in i.lower() for i in result["inferred"])
 
     def test_detects_redis_dep(self, tmp_repo):
@@ -613,7 +613,7 @@ class TestBootstrapScan:
         pkg = {"name": "app", "dependencies": {"redis": "^4.0.0"}}
         (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("redis" in i.lower() for i in result["inferred"])
 
     def test_detects_orm_dep(self, tmp_repo):
@@ -621,7 +621,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["sqlalchemy>=2.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("sqlalchemy" in i.lower() for i in result["inferred"])
 
     # ── auth and security-sensitive detection ──────────────────────────────────
@@ -631,7 +631,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["python-jose[cryptography]>=3.3"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("jwt" in i.lower() or "auth" in i.lower() for i in result["inferred"])
 
     def test_security_sensitive_deps_add_compliance_gap(self, tmp_repo):
@@ -640,7 +640,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["stripe>=2.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("compliance" in q.lower() or "security" in q.lower() for q in _gap_questions(result))
 
     # ── cloud and integration detection ───────────────────────────────────────
@@ -650,7 +650,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("aws" in i.lower() for i in result["inferred"])
 
     def test_detects_stripe_integration(self, tmp_repo):
@@ -658,7 +658,7 @@ class TestBootstrapScan:
         pkg = {"name": "app", "dependencies": {"stripe": "^14.0.0"}}
         (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("stripe" in i.lower() for i in result["inferred"])
 
     def test_detects_openai_integration(self, tmp_repo):
@@ -666,7 +666,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["openai>=1.0"]\n'
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("openai" in i.lower() for i in result["inferred"])
 
     # ── monorepo detection ─────────────────────────────────────────────────────
@@ -675,7 +675,7 @@ class TestBootstrapScan:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "nx.json").write_text("{}")
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("monorepo" in i.lower() for i in result["inferred"])
 
     # ── novelty veto ───────────────────────────────────────────────────────────
@@ -690,7 +690,7 @@ class TestBootstrapScan:
         })
         store._save(tmp_repo, data)
 
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         assert not any("uv" in i.lower() for i in result["inferred"])
 
     # ── is_simple_repo detection ───────────────────────────────────────────────
@@ -698,7 +698,7 @@ class TestBootstrapScan:
     def test_empty_repo_is_simple(self, tmp_repo):
         """No code config + no inferred stack → docs-only → is_simple_repo suppresses infra questions."""
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         # Simple repo: only the purpose gap should appear, no tests/CI/deploy gaps
         questions = [g["question"].lower() for g in result["gaps"]]
         assert not any("automated testing" in q for q in questions)
@@ -710,7 +710,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "README.md").write_text(
             "# Interview Submissions\nThis is a portfolio of job interview submissions.\n"
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         questions = [g["question"].lower() for g in result["gaps"]]
         assert not any("automated testing" in q for q in questions)
         assert not any("where does this run" in q for q in questions)
@@ -718,7 +718,7 @@ class TestBootstrapScan:
     def test_readme_tutorial_keyword_suppresses_infra_questions(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "README.md").write_text("# Tutorial\nA demo project for learning.\n")
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         questions = [g["question"].lower() for g in result["gaps"]]
         assert not any("automated testing" in q for q in questions)
 
@@ -727,7 +727,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "CLAUDE.md").write_text(
             "This is a portfolio project showcasing interview submissions.\n"
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         questions = [g["question"].lower() for g in result["gaps"]]
         assert not any("automated testing" in q for q in questions)
         assert not any("where does this run" in q for q in questions)
@@ -739,7 +739,7 @@ class TestBootstrapScan:
         (docs / "overview.md").write_text(
             "This is a learning exercise and kata for practicing algorithms.\n"
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         questions = [g["question"].lower() for g in result["gaps"]]
         assert not any("automated testing" in q for q in questions)
 
@@ -747,7 +747,7 @@ class TestBootstrapScan:
         """A real code repo (with pyproject.toml, no simple-repo keywords) gets all relevant gaps."""
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         questions = [g["question"].lower() for g in result["gaps"]]
         assert any("where does this run" in q for q in questions)
         assert any("automated testing" in q for q in questions)
@@ -757,7 +757,7 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "CLAUDE.md").write_text(
             "# Project\nThis service handles payment processing for e-commerce.\n"
         )
-        result = store.bootstrap_scan(tmp_repo)
+        result = store.bootstrap_scan(tmp_repo, insight="high")
         purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
         assert "payment" in purpose_gap["assumption"].lower()
 

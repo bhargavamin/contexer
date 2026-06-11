@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import subprocess
 import tempfile
+import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -397,31 +399,122 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     return True, entry["id"]
 
 
+_INSIGHT_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+_FRESH_CLONE_DAYS = 7
+
+
+def _git(repo_path: str, *args: str) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_path, *args],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def _detect_insight(repo_path: str) -> tuple[str, bool]:
+    """Infers how much insight the current user has into this repo from git
+    signals. Returns (level, decisive) — non-decisive means ask the user.
+    Known limitation: commit count is repo-wide, so a few commits in one corner
+    of a monorepo read as insight into the whole repo."""
+    if not (Path(repo_path) / ".git").exists():
+        return "low", False
+    email = _git(repo_path, "config", "user.email")
+    if not email:
+        # must bail before any --author query: an empty author matches every commit
+        return "low", False
+    head = _git(repo_path, "log", "--oneline", "-n", "1")
+    if not head:
+        return "high", True  # repo exists but has no commits — user just created it
+    roots = (_git(repo_path, "rev-list", "--max-parents=0", "HEAD") or "").splitlines()
+    if roots and _git(repo_path, "show", "-s", "--format=%ae", roots[0]) == email:
+        return "high", True  # authored the first commit — repo creator
+    mine = _git(repo_path, "log", f"--author={email}", "--oneline", "-n", "5") or ""
+    count = len(mine.splitlines()) if mine else 0
+    if count >= 5:
+        return "high", True
+    if count >= 1:
+        # commit count alone can't separate a drive-by contributor from a regular one
+        return "medium", False
+    reflog = _git(repo_path, "reflog", "--format=%gs::%gd", "--date=unix")
+    if reflog:
+        oldest_msg, _, oldest_when = reflog.splitlines()[-1].partition("::")
+        stamp = re.search(r"\{(\d+)\}", oldest_when)
+        if oldest_msg.startswith("clone:") and stamp and \
+                time.time() - int(stamp.group(1)) < _FRESH_CLONE_DAYS * 86400:
+            return "low", True  # fresh clone of someone else's history
+    return "low", False  # zero commits could also be an email mismatch — ask
+
+
 def _build_bootstrap_context(repo_path: str) -> list[str]:
+    level, decisive = _detect_insight(repo_path)
+
+    if decisive and level == "high":
+        # commits by this user found — don't ask how well they know their own repo
+        offer = [
+            "  \"Contexer: no project context stored for this repo."
+            " How should I set up context for future sessions?",
+            "   · quick — 1 question (what does this repo do?)",
+            "   · full — guided setup, a few questions",
+            "   · skip — not now",
+            "   (reply scan if you're actually new to this repo)\"",
+        ]
+        replies = "quick / full / skip (or scan)"
+    elif decisive and level == "low":
+        # state the evidence, never the conclusion — detection can be wrong
+        offer = [
+            "  \"Contexer: no project context stored for this repo."
+            " No commits from your git email found here, so I'd scan the code and docs"
+            " instead of asking questions you may not be able to answer.",
+            "   · scan — go ahead (no questions)",
+            "   · quick / full — I actually know this repo (quick: 1 question, full: guided setup)",
+            "   · skip — not now\"",
+        ]
+        replies = "scan / quick / full / skip"
+    else:
+        # ambiguous signals — ask familiarity directly
+        suggestion = (
+            ["   (a few commits from your git email found — 'some' is likely right)"]
+            if level == "medium" else []
+        )
+        offer = [
+            "  \"Contexer: no project context stored for this repo."
+            " How well do you know this repo?",
+            "   · quick — I wrote or maintain it (1 question: what does this repo do?)",
+            "   · full — I wrote or maintain it (guided setup, a few questions)",
+            "   · some — I work with it but didn't build it",
+            "   · scan — first time seeing it: scan code and docs, no questions",
+            "   · skip — not now\"",
+            *suggestion,
+        ]
+        replies = "quick / full / some / scan / skip"
+
     return [
         f"No project context stored for {repo_path}.",
         "CRITICAL INSTRUCTION — read before writing a single word:",
         "Your ENTIRE response must be ONLY the offer block below. No task work. No file reads."
         " No acknowledgment of any prior request. No explanation. Just the offer, then stop.",
-        "  \"Contexer: no project context stored for this repo."
-        " How should I set up context for future sessions?",
-        "   · quick — 1 question (what does this repo do?)",
-        "   · full — guided setup, a few questions (best if you develop or maintain this repo)",
-        "   · scan — I'm new to this repo: scan code and docs, no questions",
-        "   · skip — not now\"",
+        *offer,
         "Output the offer. Then stop completely. Do NOT call bootstrap_context yet."
-        " Do NOT start the user's task. Wait for them to reply quick / full / scan / skip.",
+        f" Do NOT start the user's task. Wait for them to reply {replies}.",
         "Once the user replies:",
-        "If quick (or yes) → call bootstrap_context. Ask ONLY the first gap question"
+        "If quick (or yes) → call bootstrap_context with insight='high'. Ask ONLY the first gap question"
         " (purpose). Store the answer with update_context using the gap's subtype. Stop — do not ask more.",
-        "If full (guided) → call bootstrap_context. For each inferred item confirm and store"
+        "If full (guided) → call bootstrap_context with insight='high'. For each inferred item confirm and store"
         " with update_context(subtype='architecture'). For each gap question ask the user one at a time."
         " After each answer, re-evaluate remaining gaps — if the purpose answer reveals a docs-only,"
         " portfolio, personal, or learning repo, skip tests/CI/deploy/compliance/exclusion gaps."
         " Store each answer as a separate update_context call using the gap's subtype."
         " Write each stored entry as a single plain sentence, max 15 words, no em dashes, no filler phrases."
         " Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD pipeline planned or needed for this repo.'",
-        "If scan (first time seeing this repo) → call bootstrap_context with audience='explorer'."
+        "If some (works with the repo but didn't build it) → call bootstrap_context with insight='medium'."
+        " Store each inferred fact directly via update_context (subtype='architecture', no confirmation)."
+        " Ask the returned gap questions one at a time (purpose and the user's goal) and store each answer."
+        " Same sentence style: plain, max 15 words.",
+        "If scan (first time seeing this repo) → call bootstrap_context with insight='low'."
         " The user cannot answer questions about this repo's history or conventions — do NOT quiz them."
         " Store each inferred fact directly via update_context using subtype='architecture'"
         " (no confirmation needed: the facts come from the code, the user cannot validate them)."
@@ -710,8 +803,12 @@ def _infer_purpose(name: str, readme_summary: str) -> str:
     return f"\"{name}\" — type not obvious from name alone"
 
 
-def bootstrap_scan(repo_path: str, audience: str = "developer") -> dict:
-    audience = "explorer" if audience == "explorer" else "developer"
+def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
+    if insight in _INSIGHT_ORDER:
+        insight_source, decisive = "user", True
+    else:
+        insight, decisive = _detect_insight(repo_path)
+        insight_source = "auto"
     root = Path(repo_path)
     data = _load(repo_path)
     existing = [e for e in data.get("entries", []) if e["type"] == "decision"]
@@ -743,8 +840,10 @@ def bootstrap_scan(repo_path: str, audience: str = "developer") -> dict:
         if _is_novel(fact, existing + proxy):
             inferred.append(fact)
 
-    def _gap(assumption: str, question: str, hint: str, subtype: str = "architecture") -> dict:
-        return {"assumption": assumption, "question": question, "hint": hint, "subtype": subtype}
+    def _gap(assumption: str, question: str, hint: str, subtype: str = "architecture",
+             min_insight: str = "high") -> dict:
+        return {"assumption": assumption, "question": question, "hint": hint,
+                "subtype": subtype, "min_insight": min_insight}
 
     def _has_dep(*names: str) -> bool:
         return any(n in dep for n in names for dep in all_deps)
@@ -1080,22 +1179,22 @@ def bootstrap_scan(repo_path: str, audience: str = "developer") -> dict:
             return f"e.g. {sig['cloud_detected']} cost ceiling; latency SLA; multi-region requirements"
         return "e.g. <100ms p99 latency; 1M+ concurrent users; GDPR; monthly cost ceiling"
 
-    # --- Intent gaps: all conditional on signals ---
+    # --- Intent gaps: conditional on signals, filtered by user insight ---
     gaps: list[dict] = []
     name = sig["project_name"]
+    user_rank = _INSIGHT_ORDER[insight]
 
-    if audience == "explorer":
-        # Explorers can't answer intent questions about a repo they didn't write —
-        # the only thing they know is their own goal. Everything else comes from scanning.
+    # Goal — anyone can answer what *they* plan to do; irrelevant for repo authors
+    if user_rank < _INSIGHT_ORDER["high"]:
         gaps.append(_gap(
             assumption=_infer_purpose(name, sig["readme_summary"]),
             question="What are you planning to do with this repo?",
             hint="e.g. evaluating it, learning the codebase, fixing a specific bug, integrating it into another project",
             subtype="architecture",
+            min_insight="low",
         ))
-        return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files, "audience": audience}
 
-    # Purpose — always: can never be inferred from code
+    # Purpose — can never be inferred from code; first-timers can't answer it either
     gaps.append(_gap(
         assumption=_infer_purpose(name, sig["readme_summary"]),
         question="What does this repo do and who uses it?",
@@ -1105,6 +1204,7 @@ def bootstrap_scan(repo_path: str, audience: str = "developer") -> dict:
             "e.g. 'REST API for internal task management, used by 3 frontend apps'"
         ),
         subtype="architecture",
+        min_insight="medium",
     ))
 
     is_simple = sig["is_simple_repo"]
@@ -1190,4 +1290,12 @@ def bootstrap_scan(repo_path: str, audience: str = "developer") -> dict:
             subtype="constraint",
         ))
 
-    return {"inferred": inferred, "gaps": gaps, "existing_context_files": found_files, "audience": audience}
+    gaps = [g for g in gaps if user_rank >= _INSIGHT_ORDER[g["min_insight"]]]
+    return {
+        "inferred": inferred,
+        "gaps": gaps,
+        "existing_context_files": found_files,
+        "insight": insight,
+        "insight_source": insight_source,
+        "decisive": decisive,
+    }

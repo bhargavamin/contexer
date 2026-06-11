@@ -42,13 +42,13 @@ See **[docs/install.md](docs/install.md)** for verification, update, and uninsta
 
 Contexer runs silently in every session. You don't interact with it directly.
 
-**First time in a repo** — Claude includes a brief offer at the top of its first response:
+**First time in a repo** — Claude includes a brief offer at the top of its first response. The offer adapts to how well you know the repo, judged from its git history:
 
-```
-Contexer: no project context stored. How should I set up context for future sessions? (quick / full / scan / skip)
-```
+- The repo has commits from you → pick **quick** (one question) or **full** (guided setup).
+- No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs instead of asking questions you can't answer.
+- Can't tell → it simply asks how well you know the repo.
 
-Say **quick** for one question (what does this repo do?), **full** for a guided setup, **scan** if you're seeing this repo for the first time — Contexer scans the code and docs instead of asking questions you can't answer — or **skip**. Claude answers your original request either way.
+Whatever was detected, all options (**quick / full / scan / skip**) stay available — reply with the one you want. Claude answers your original request either way.
 
 **Every session after that** — before your first message, Claude reads:
 
