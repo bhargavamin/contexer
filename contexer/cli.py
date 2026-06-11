@@ -4,10 +4,17 @@ import shutil
 import sys
 import time
 import urllib.request
+from importlib import resources
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
+
+_BOOTSTRAP_CMD_MARKER = "managed by contexer"
+
+
+def _bootstrap_command_text() -> str:
+    return resources.files("contexer").joinpath("bootstrap_command.md").read_text()
 
 from contexer.store import _atomic_write
 
@@ -262,6 +269,18 @@ def install() -> None:
         if p not in allow:
             allow.append(p)
 
+    # Global /bootstrap command (~/.claude/commands/bootstrap.md) — a project-level
+    # command file only works inside that repo, so the command ships in the package
+    # and installs globally. Never clobber a bootstrap.md we don't own.
+    cmd_path = home / ".claude" / "commands" / "bootstrap.md"
+    existing_cmd = cmd_path.read_text() if cmd_path.exists() else ""
+    if not existing_cmd or _BOOTSTRAP_CMD_MARKER in existing_cmd:
+        cmd_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd_path.write_text(_bootstrap_command_text())
+        print("  ✓ /bootstrap command installed to ~/.claude/commands/")
+    else:
+        print("  ! ~/.claude/commands/bootstrap.md exists and is not Contexer's — left untouched")
+
     (home / ".contexer").mkdir(exist_ok=True)
     _save(settings_json, settings)
     print("  ✓ Hooks and permissions written to ~/.claude/settings.json")
@@ -325,6 +344,12 @@ def uninstall(purge: bool = False) -> None:
             print("  ✓ Hooks and permissions removed from ~/.claude/settings.json")
         else:
             print("  - No Contexer hooks found in ~/.claude/settings.json")
+
+    cmd_path = home / ".claude" / "commands" / "bootstrap.md"
+    if cmd_path.exists() and _BOOTSTRAP_CMD_MARKER in cmd_path.read_text():
+        cmd_path.unlink()
+        print("  ✓ /bootstrap command removed from ~/.claude/commands/")
+        changed = True
 
     store_dir = home / ".contexer"
     print()
