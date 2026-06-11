@@ -406,26 +406,35 @@ class TestOfferVariants:
         assert "How well do you know this repo?" in text, "1-4 commits is non-decisive — must still ask"
         assert "'some' is likely right" in text
 
-    def test_newcomer_question_exception_in_ambiguous_variant(self, tmp_repo):
-        """'what is this repo doing?' is low-insight evidence — must not be answered with a menu."""
+    def test_newcomer_question_check_comes_before_menu(self, tmp_repo):
+        """'what is this repo doing?' is low-insight evidence — the check must precede the
+        'response must be ONLY the offer' directive, or it loses to it."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "EXCEPTION — newcomer question" in text
+        assert "STEP 0" in text
         assert "assume you're new here" in text
+        assert text.index("STEP 0") < text.index("ENTIRE response must be ONLY the offer block")
 
-    def test_newcomer_question_exception_in_low_variant(self, git_repo, tmp_path):
+    def test_newcomer_question_check_in_low_variant(self, git_repo, tmp_path):
         _git_commit(git_repo, OTHER, 3)
         clone = tmp_path / "clone"
         subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
         subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
         text = "\n".join(store._build_bootstrap_context(str(clone)))
-        assert "EXCEPTION — newcomer question" in text
+        assert "STEP 0" in text
 
-    def test_no_newcomer_exception_when_high_decisive(self, git_repo):
+    def test_no_newcomer_check_when_high_decisive(self, git_repo):
         """Commits by this user outweigh one curious question — keep the menu."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
         text = "\n".join(store._build_bootstrap_context(git_repo))
-        assert "EXCEPTION — newcomer question" not in text
+        assert "STEP 0" not in text
+
+    def test_purpose_question_never_echoed_back(self, tmp_repo):
+        """Picking full after asking 'what does this repo do?' must not quiz the user
+        with their own question."""
+        text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "never echo it back" in text
+        assert "store the confirmed summary as the purpose" in text
 
 
 # ── 4e. Insight detection from git signals ────────────────────────────────────
