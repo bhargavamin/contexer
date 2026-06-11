@@ -67,7 +67,7 @@ As you work, Claude stores decisions automatically. If it misses something, say 
 | Command | Description |
 |---|---|
 | `contexer install` | Connect Contexer to Claude Code |
-| `contexer status` | Show connection status, store size, current repo; warns about corrupt config files and cleans stale temp files |
+| `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after a Claude Code update |
 | `contexer uninstall` | Disconnect; context store is kept |
 | `contexer uninstall --purge` | Remove everything including `~/.contexer/` |

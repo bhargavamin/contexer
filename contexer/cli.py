@@ -1,9 +1,13 @@
 import json
+import os
 import shutil
 import sys
 import time
+import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
+
+_PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
 
 from contexer.store import _atomic_write
 
@@ -35,6 +39,25 @@ def _version() -> str:
         return _dist_version("contexer")
     except PackageNotFoundError:
         return "unknown (not installed as a package)"
+
+
+def _latest_pypi_version() -> str | None:
+    """Latest release on PyPI, or None. Best-effort: never raises, short timeout,
+    and skipped entirely when CONTEXER_NO_UPDATE_CHECK is set (airgapped boxes)."""
+    if os.environ.get("CONTEXER_NO_UPDATE_CHECK"):
+        return None
+    try:
+        with urllib.request.urlopen(_PYPI_JSON_URL, timeout=2) as resp:
+            return json.load(resp)["info"]["version"]
+    except Exception:
+        return None
+
+
+def _version_tuple(v: str) -> tuple | None:
+    try:
+        return tuple(int(p) for p in v.split("."))
+    except (ValueError, AttributeError):
+        return None
 
 
 def _usage(stream=None) -> None:
@@ -364,12 +387,20 @@ def status() -> None:
     current = store_dir / ".current_repo"
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
 
-    print(f"contexer {_version()}")
+    installed = _version()
+    installed_t = _version_tuple(installed)
+    latest = _latest_pypi_version() if installed_t else None
+    latest_t = _version_tuple(latest) if latest else None
+
+    print(f"contexer {installed}")
     print(f"  binary:       {bin_path}")
     print(f"  MCP server:   {'registered → ' + mcp_cmd if mcp else 'NOT registered'}")
     print(f"  hooks:        {'installed' if hooks_ok else 'missing or partial'}")
     print(f"  store dir:    {store_dir}{'' if store_dir.exists() else ' (absent)'}")
     print(f"  repo stores:  {len(stores)} ({entries} entries total)")
+    if latest_t and installed_t and latest_t > installed_t:
+        print(f"  update:       {latest} available — run `uv tool upgrade contexer`, "
+              f"then restart Claude Code")
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     if current.exists():

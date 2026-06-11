@@ -11,6 +11,15 @@ from contexer import cli
 from contexer.cli import install, reinstall, status, uninstall, version
 
 
+@pytest.fixture(autouse=True)
+def _no_network_update_check(monkeypatch):
+    """status() checks PyPI for updates — tests must never hit the network.
+    Yields the real function so opt-out tests can exercise it directly."""
+    original = cli._latest_pypi_version
+    monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
+    yield original
+
+
 @pytest.fixture
 def clean_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -300,3 +309,57 @@ class TestPermissionDeniedGuidance:
         monkeypatch.setattr(sys, "argv", ["contexer", "status"])
         cli.main()
         assert "contexer " in capsys.readouterr().out
+
+
+# ── update check ──────────────────────────────────────────────────────────────
+
+class TestUpdateCheck:
+    def test_update_line_when_newer_available(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
+        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        status()
+        out = capsys.readouterr().out
+        assert "update:       0.5.4 available" in out
+        assert "uv tool upgrade contexer" in out
+
+    def test_no_line_when_current(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.4")
+        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        status()
+        assert "update:" not in capsys.readouterr().out
+
+    def test_no_line_when_installed_is_newer(self, installed_home, monkeypatch, capsys):
+        # local dev build ahead of PyPI must not suggest a "downgrade"
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.6.0")
+        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        status()
+        assert "update:" not in capsys.readouterr().out
+
+    def test_no_line_when_pypi_unreachable(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
+        status()
+        assert "update:" not in capsys.readouterr().out
+
+    def test_no_fetch_when_installed_version_unknown(self, installed_home, monkeypatch, capsys):
+        def _raise(_name):
+            raise cli.PackageNotFoundError
+        monkeypatch.setattr(cli, "_dist_version", _raise)
+        called = []
+        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: called.append(1) or "9.9.9")
+        status()
+        assert called == []  # no point asking PyPI if we can't compare
+        assert "update:" not in capsys.readouterr().out
+
+    def test_env_var_opts_out_of_network_call(self, _no_network_update_check, monkeypatch):
+        real_fetch = _no_network_update_check  # the un-stubbed function
+        monkeypatch.setenv("CONTEXER_NO_UPDATE_CHECK", "1")
+
+        def _no_io(*a, **k):
+            raise AssertionError("network I/O attempted despite opt-out")
+        monkeypatch.setattr(cli.urllib.request, "urlopen", _no_io)
+        assert real_fetch() is None  # env guard returns before any I/O
+
+    def test_version_tuple_parsing(self):
+        assert cli._version_tuple("0.5.4") == (0, 5, 4)
+        assert cli._version_tuple("0.5.x") is None
+        assert cli._version_tuple("unknown (not installed as a package)") is None
