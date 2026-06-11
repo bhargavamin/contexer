@@ -326,16 +326,18 @@ class TestBootstrapInstructions:
         full_text = "\n".join(lines)
         assert "no or skip" in full_text
 
-    def test_quick_and_full_options_documented(self, tmp_repo):
+    def test_all_offer_options_are_parallel_modes(self, tmp_repo):
+        """Options must be modes (quick/full/scan/skip), not yes/no mixed with modes."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
-        assert "yes" in full_text.lower() and "full" in full_text.lower()
+        for option in ["· quick —", "· full —", "· scan —", "· skip —"]:
+            assert option in full_text
 
-    def test_new_to_repo_option_documented(self, tmp_repo):
+    def test_scan_option_determines_explorer_audience(self, tmp_repo):
         """Audience must be determined in the offer — explorers get scanning, not a quiz."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
-        assert "new — I'm new to this repo" in full_text
+        assert "scan — I'm new to this repo" in full_text
         assert "audience='explorer'" in full_text
         assert "do NOT quiz" in full_text
 

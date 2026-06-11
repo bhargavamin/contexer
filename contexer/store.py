@@ -404,24 +404,24 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         "Your ENTIRE response must be ONLY the offer block below. No task work. No file reads."
         " No acknowledgment of any prior request. No explanation. Just the offer, then stop.",
         "  \"Contexer: no project context stored for this repo."
-        " Save decisions so future sessions start with full context?",
-        "   · yes — quick (1 question: what does this repo do?)",
-        "   · full — thorough (up to 5 questions — best if you develop or maintain this repo)",
-        "   · new — I'm new to this repo (no questions: scans code and docs, stores what it finds)",
-        "   · no — skip\"",
+        " How should I set up context for future sessions?",
+        "   · quick — 1 question (what does this repo do?)",
+        "   · full — guided setup, a few questions (best if you develop or maintain this repo)",
+        "   · scan — I'm new to this repo: scan code and docs, no questions",
+        "   · skip — not now\"",
         "Output the offer. Then stop completely. Do NOT call bootstrap_context yet."
-        " Do NOT start the user's task. Wait for them to reply yes / full / new / no.",
+        " Do NOT start the user's task. Wait for them to reply quick / full / scan / skip.",
         "Once the user replies:",
-        "If yes (quick) → call bootstrap_context. Ask ONLY the first gap question"
+        "If quick (or yes) → call bootstrap_context. Ask ONLY the first gap question"
         " (purpose). Store the answer with update_context using the gap's subtype. Stop — do not ask more.",
-        "If full (thorough) → call bootstrap_context. For each inferred item confirm and store"
+        "If full (guided) → call bootstrap_context. For each inferred item confirm and store"
         " with update_context(subtype='architecture'). For each gap question ask the user one at a time."
         " After each answer, re-evaluate remaining gaps — if the purpose answer reveals a docs-only,"
         " portfolio, personal, or learning repo, skip tests/CI/deploy/compliance/exclusion gaps."
         " Store each answer as a separate update_context call using the gap's subtype."
         " Write each stored entry as a single plain sentence, max 15 words, no em dashes, no filler phrases."
         " Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD pipeline planned or needed for this repo.'",
-        "If new (first time seeing this repo) → call bootstrap_context with audience='explorer'."
+        "If scan (first time seeing this repo) → call bootstrap_context with audience='explorer'."
         " The user cannot answer questions about this repo's history or conventions — do NOT quiz them."
         " Store each inferred fact directly via update_context using subtype='architecture'"
         " (no confirmation needed: the facts come from the code, the user cannot validate them)."
