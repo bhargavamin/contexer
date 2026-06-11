@@ -1,8 +1,10 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="assets/logo-horizontal-light.svg">
-  <img alt="Contexer" src="assets/logo-horizontal-light.svg" height="60">
-</picture>
+<a href="https://contexer.ai">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-horizontal-light.svg">
+    <img alt="Contexer" src="assets/logo-horizontal-light.svg" height="60">
+  </picture>
+</a>
 
 [![PyPI version](https://img.shields.io/pypi/v/contexer)](https://pypi.org/project/contexer/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
