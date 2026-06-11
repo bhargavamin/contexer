@@ -142,7 +142,7 @@ def install() -> None:
     )
     boot_code = (
         "from contexer import store; import json,sys; "
-        "result=store.get_bootstrap_context_prompt(sys.argv[1]); "
+        "result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); "
         "print(json.dumps(result))"
     )
     post_code = (
@@ -218,6 +218,11 @@ def install() -> None:
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...",
             "command": anchor_cmd}]})
+
+    # Migrate: old bootstrap hook didn't read the prompt from stdin; replace it
+    if _in_groups(ups, "get_bootstrap_context_prompt") and not _in_groups(ups, "prompt_from_hook_stdin"):
+        ups = _filter_groups(ups, ["get_bootstrap_context_prompt"])
+        hooks["UserPromptSubmit"] = ups
 
     if not _in_groups(ups, "get_bootstrap_context_prompt"):
         ups.append({"hooks": [{"type": "command", "once": True,

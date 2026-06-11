@@ -437,6 +437,109 @@ class TestOfferVariants:
         assert "store the confirmed summary as the purpose" in text
 
 
+# ── 4f. Deterministic newcomer-question detection ─────────────────────────────
+
+class TestNewcomerQuestionDetection:
+    @pytest.mark.parametrize("prompt", [
+        "what is this repo doing?",
+        "What does this project do?",
+        "explain this codebase",
+        "tell me about this repo",
+        "how does this code work",
+        "walk me through this codebase please",
+        "give me an overview of this project",
+        "whats this repo about",
+    ])
+    def test_newcomer_questions_match(self, prompt):
+        assert store._is_newcomer_question(prompt) is True
+
+    @pytest.mark.parametrize("prompt", [
+        "fix the bug in store.py",
+        "add a logout endpoint to the api",
+        "why did we choose uv over pip?",
+        "what is this function doing",  # code-element question, not repo-level
+        "refactor the elevator scheduling logic",
+        "",
+    ])
+    def test_other_prompts_do_not_match(self, prompt):
+        assert store._is_newcomer_question(prompt) is False
+
+    def test_newcomer_prompt_overrides_menu(self, tmp_repo):
+        result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "OVERRIDE" in ctx and "assume you're new here" in ctx
+        assert "How well do you know this repo?" not in ctx
+
+    def test_task_prompt_gets_the_menu(self, tmp_repo):
+        result = store.get_bootstrap_context_prompt(tmp_repo, "fix the login bug")
+        assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
+
+    def test_newcomer_prompt_in_own_repo_keeps_menu(self, git_repo):
+        """Commits by the user outweigh one curious question — even deterministically."""
+        _git_commit(git_repo, ME, 5)
+        _set_me(git_repo)
+        result = store.get_bootstrap_context_prompt(git_repo, "what is this repo doing?")
+        assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
+
+    def test_existing_context_stays_silent(self, tmp_repo):
+        store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
+        assert store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?") == {}
+
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"prompt": "hello"}', "hello"),
+        ("", ""),
+        ("not json at all", ""),
+        ("[1, 2, 3]", ""),
+        ('{"no_prompt_key": 1}', ""),
+        ('{broken json', ""),
+    ])
+    def test_prompt_from_hook_stdin_never_crashes(self, raw, expected):
+        assert store.prompt_from_hook_stdin(raw) == expected
+
+
+# ── 4g. Reaction-matrix invariants ────────────────────────────────────────────
+
+class TestReactionMatrix:
+    """Every combination of repo state × insight must keep the conversation sane:
+    bounded question counts, well-formed gaps, and a handler for every advertised option."""
+
+    def _repo_states(self, tmp_path):
+        bare = tmp_path / "bare"; bare.mkdir()
+        simple = tmp_path / "simple"; simple.mkdir()
+        (simple / "main.py").write_text("print('hi')\n")
+        rich = tmp_path / "rich"; rich.mkdir()
+        (rich / "pyproject.toml").write_text(
+            '[project]\nname = "x"\ndependencies = ["fastapi", "stripe", "boto3", '
+            '"httpx", "pydantic", "sqlalchemy"]\n')
+        missing = tmp_path / "never-created"
+        return [str(bare), str(simple), str(rich), str(missing)]
+
+    def test_gap_invariants_hold_for_all_combinations(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        for repo in self._repo_states(tmp_path):
+            for insight in ["low", "medium", "high", "", "banana"]:
+                result = store.bootstrap_scan(repo, insight=insight)
+                gaps = result["gaps"]
+                label = f"{Path(repo).name} × insight={insight!r}"
+                assert 1 <= len(gaps) <= 10, f"{label}: {len(gaps)} gaps"
+                assert result["insight"] in {"low", "medium", "high"}, label
+                for g in gaps:
+                    assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
+                    assert g["subtype"] in {"architecture", "constraint", "pattern", "convention"}, label
+                    assert g["min_insight"] in {"low", "medium", "high"}, label
+                    assert g["assumption"] and g["hint"], label
+
+    def test_every_advertised_option_has_a_handler(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        for repo in self._repo_states(tmp_path):
+            text = "\n".join(store._build_bootstrap_context(repo))
+            for option in ["quick", "full", "some", "scan"]:
+                if f"· {option} —" in text:
+                    assert f"If {option}" in text, \
+                        f"{Path(repo).name}: option '{option}' advertised without a handler"
+            assert "no or skip" in text, f"{Path(repo).name}: skip has no handler"
+
+
 # ── 4e. Insight detection from git signals ────────────────────────────────────
 
 class TestInsightDetection:
@@ -713,6 +816,29 @@ class TestBootstrapScan:
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "some-lib"\n')
         result = store.bootstrap_scan(tmp_repo, insight="low")
         assert any("some-lib" in f for f in result["inferred"])
+
+    def test_full_on_bare_repo_still_interviews(self, tmp_repo):
+        """'full' is explicit opt-in to an interview — a simple repo must not collapse it
+        to a single question; the author's head holds decisions no scan can reach."""
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert len(result["gaps"]) >= 4
+        subtypes = {g["subtype"] for g in result["gaps"]}
+        assert {"architecture", "convention", "constraint"} <= subtypes
+
+    def test_signal_rich_repo_gets_no_interview_padding(self, tmp_repo):
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
+            '"boto3", "stripe", "httpx", "pydantic"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert len(result["gaps"]) >= 4
+        assert not any("aren't visible in it" in g["question"] for g in result["gaps"]), \
+            "signal-rich repos have real questions — generic interview padding not needed"
+
+    def test_interview_floor_not_applied_below_high(self, tmp_repo):
+        assert len(store.bootstrap_scan(tmp_repo, insight="low")["gaps"]) == 1
+        assert len(store.bootstrap_scan(tmp_repo, insight="medium")["gaps"]) == 2
 
 
 # ── 11. Uninstall ─────────────────────────────────────────────────────────────

@@ -635,14 +635,61 @@ def get_session_start_context(repo_path: str) -> dict:
     }
 
 
-def get_bootstrap_context_prompt(repo_path: str) -> dict:
+_NEWCOMER_QUESTION_RE = re.compile(
+    r"\b(what (is|does) (this|the) (repo|repository|codebase|project|code)\b"
+    r"|what'?s (this|the) (repo|repository|codebase|project)( about| for| doing)?\b"
+    r"|explain (this|the) (repo|repository|codebase|project|code)\b"
+    r"|tell me about (this|the) (repo|repository|codebase|project|code)\b"
+    r"|how does (this|the) (repo|repository|codebase|project|code) work\b"
+    r"|walk me through (this|the) (repo|repository|codebase|project|code)\b"
+    r"|overview of (this|the) (repo|repository|codebase|project|code)\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_newcomer_question(prompt: str) -> bool:
+    return bool(_NEWCOMER_QUESTION_RE.search(prompt or ""))
+
+
+def prompt_from_hook_stdin(raw: str) -> str:
+    """Extracts the user prompt from a UserPromptSubmit hook's stdin JSON. Safe on
+    any input — hooks must never crash on malformed stdin."""
+    try:
+        data = json.loads(raw)
+        return data.get("prompt", "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
+def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
     """Fallback for UserPromptSubmit: catches the case where SessionStart bootstrap
-    was skipped (e.g. non-interactive session). Returns empty dict when context exists."""
+    was skipped (e.g. non-interactive session). Returns empty dict when context exists.
+    When the first prompt is itself a newcomer question, the menu is replaced with a
+    low-insight confirmation — decided deterministically here, not by model judgment,
+    because this is the first thing a user sees after installing."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
         return {}
-    lines = _build_bootstrap_context(repo_path)
+    level, decisive = _detect_insight(repo_path)
+    if _is_newcomer_question(prompt) and not (decisive and level == "high"):
+        lines = [
+            "Contexer OVERRIDE — ignore any earlier bootstrap menu instructions for this turn.",
+            "The user's first message asks what this repo is or does. That is low-insight"
+            " evidence (matched deterministically). Your ENTIRE response must be ONLY:",
+            "  \"Contexer: you're asking what this repo does, so I'll assume you're new here —"
+            " I'll scan the code and docs, store what I find for future sessions, then answer"
+            " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
+            "Then stop and wait. If they confirm (ok / yes / scan) → call bootstrap_context"
+            " with insight='low', store each inferred fact directly via update_context"
+            " (subtype='architecture'), read the README and docs for the repo's purpose and"
+            " store it, ask the single returned goal question and store the answer, then"
+            " answer their original question.",
+            "If they reply quick / full / skip instead → follow the session-start bootstrap"
+            " instructions for that option.",
+        ]
+    else:
+        lines = _build_bootstrap_context(repo_path)
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -1314,6 +1361,32 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
             hint=_constraints_hint(),
             subtype="constraint",
         ))
+
+    # Interview floor for repo authors: signal-conditional gaps collapse to almost
+    # nothing on simple repos (no config to scan), but 'full' is an explicit opt-in
+    # to an interview — the author's head holds decisions no scan can reach.
+    if user_rank == _INSIGHT_ORDER["high"] and len(gaps) < 4:
+        interview = [
+            _gap(
+                assumption="Non-obvious decisions exist only in the author's head",
+                question="What decisions shaped this code that aren't visible in it — libraries chosen over alternatives, approaches rejected, structure?",
+                hint="e.g. 'argparse over click to avoid deps'; 'rejected async — overkill here'",
+                subtype="architecture",
+            ),
+            _gap(
+                assumption="No coding or workflow conventions captured",
+                question="Any conventions future sessions should respect — naming, structure, commit style, how you like code written?",
+                hint="e.g. 'single file until it hurts'; 'conventional commits'; 'comments only for why'",
+                subtype="convention",
+            ),
+            _gap(
+                assumption="No working rules for Claude captured",
+                question="Any rules for how Claude should work in this repo — always do, never touch, check before changing?",
+                hint="e.g. 'always run tests before commit'; 'never edit data/'; 'ask before adding deps'",
+                subtype="constraint",
+            ),
+        ]
+        gaps.extend(interview[:4 - len(gaps)])
 
     gaps = [g for g in gaps if user_rank >= _INSIGHT_ORDER[g["min_insight"]]]
     return {
