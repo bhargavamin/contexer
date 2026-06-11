@@ -1,3 +1,7 @@
+---
+description: Guided Contexer setup — capture this repo's decisions for future sessions.
+---
+
 Run a guided context setup for this repo.
 
 1. Call `bootstrap_context` with `repo_path=""` and no `insight` — the server auto-detects how well the user knows the repo from git history.
@@ -7,3 +11,5 @@ Run a guided context setup for this repo.
 5. When all items are done, confirm how many were stored.
 
 Keep it conversational — no upfront lists, one item per turn.
+
+<!-- managed by contexer — reinstall overwrites this file; edits will be lost -->

@@ -110,7 +110,7 @@ contexer uninstall
 uv tool uninstall contexer
 ```
 
-Removes the MCP server registration and all hooks. Your context store (`~/.contexer/`) is kept. To also remove stored context:
+Removes the MCP server registration, all hooks, and the `/bootstrap` command. Your context store (`~/.contexer/`) is kept. To also remove stored context:
 
 ```bash
 contexer uninstall --purge

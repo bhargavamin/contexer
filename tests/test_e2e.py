@@ -136,6 +136,27 @@ class TestInstall:
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
         assert _has_mcp_tool(ups, "get_context_for_prompt")
 
+    def test_bootstrap_command_installed_globally(self, tmp_home):
+        """A project-level command file only works inside that repo — end users
+        installing from PyPI must get /bootstrap in ~/.claude/commands/."""
+        cli.install()
+        cmd = (tmp_home / ".claude" / "commands" / "bootstrap.md").read_text()
+        assert "bootstrap_context" in cmd
+        assert "managed by contexer" in cmd
+
+    def test_bootstrap_command_install_is_idempotent(self, tmp_home):
+        cli.install()
+        first = (tmp_home / ".claude" / "commands" / "bootstrap.md").read_text()
+        cli.install()
+        assert (tmp_home / ".claude" / "commands" / "bootstrap.md").read_text() == first
+
+    def test_foreign_bootstrap_command_not_clobbered(self, tmp_home):
+        cmd_path = tmp_home / ".claude" / "commands" / "bootstrap.md"
+        cmd_path.parent.mkdir(parents=True)
+        cmd_path.write_text("my own custom bootstrap command")
+        cli.install()
+        assert cmd_path.read_text() == "my own custom bootstrap command"
+
     def test_bootstrap_hook_registered(self, tmp_home):
         cli.install()
         hooks = _settings(tmp_home).get("hooks", {})
@@ -941,6 +962,19 @@ class TestUninstall:
     def test_no_settings_file_is_graceful(self, tmp_home):
         """Uninstall without a prior install should not raise."""
         cli.uninstall()  # no install first — should complete without error
+
+    def test_bootstrap_command_removed(self, tmp_home):
+        cli.install()
+        cli.uninstall()
+        assert not (tmp_home / ".claude" / "commands" / "bootstrap.md").exists()
+
+    def test_foreign_bootstrap_command_survives_uninstall(self, tmp_home):
+        cmd_path = tmp_home / ".claude" / "commands" / "bootstrap.md"
+        cmd_path.parent.mkdir(parents=True)
+        cmd_path.write_text("my own custom bootstrap command")
+        cli.install()   # leaves the foreign file alone
+        cli.uninstall()
+        assert cmd_path.read_text() == "my own custom bootstrap command"
 
 
 # ── 12. main() dispatch ───────────────────────────────────────────────────────
