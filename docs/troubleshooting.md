@@ -47,6 +47,10 @@ contexer reinstall          # re-sync hooks if they changed
 
 Then restart Claude Code — a running session keeps the old server process.
 
+`contexer status` checks PyPI (2-second timeout, silent when offline) and prints an
+`update:` line when a newer version exists. Set `CONTEXER_NO_UPDATE_CHECK=1` to skip
+the check entirely (airgapped machines).
+
 ## Decisions aren't being stored
 
 - Say *"store that as a constraint"* (or convention/architecture/pattern) to save explicitly.
