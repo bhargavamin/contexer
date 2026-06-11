@@ -138,7 +138,7 @@ def install() -> None:
         "from contexer import store; import json,sys; "
         "store.STORE_DIR.mkdir(exist_ok=True); "
         "(store.STORE_DIR/'.current_repo').write_text(sys.argv[1]); "
-        "print(json.dumps(store.get_session_start_context(sys.argv[1])))"
+        "print(json.dumps(store.get_session_start_context(sys.argv[1], store.source_from_hook_stdin(sys.stdin.read()))))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
@@ -180,6 +180,10 @@ def install() -> None:
     hooks = settings.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
+    # Migrate: old SessionStart hook didn't read the session source from stdin; replace it
+    if _in_groups(ss, "get_session_start_context") and not _in_groups(ss, "source_from_hook_stdin"):
+        ss = _filter_groups(ss, ["get_session_start_context"])
+        hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...",

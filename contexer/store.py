@@ -554,10 +554,55 @@ def _pl(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
-def get_session_start_context(repo_path: str) -> dict:
+def _build_resume_mining_context(repo_path: str) -> list[str]:
+    return [
+        f"No project context stored for {repo_path}, but this is a RESUMED session —"
+        " the conversation above may already contain decisions. Do NOT show any setup"
+        " menu and do NOT quiz the user. Instead, in your FIRST response:",
+        "1. Review the visible conversation for decisions already made — technology"
+        " choices, constraints, conventions, approaches chosen over alternatives."
+        " Store each via update_context with the right subtype and the original reasoning.",
+        "2. Call bootstrap_context (no insight argument) and store each inferred fact"
+        " via update_context(subtype='architecture') — baseline repo facts from the code.",
+        "3. Tell the user in one line how many decisions were stored, e.g."
+        " 'Contexer: stored 4 decisions from this conversation.'",
+        "4. Then continue with the user's request as normal.",
+        "If the conversation contains no decisions, store only the scan facts — never invent.",
+    ]
+
+
+def get_session_start_context(repo_path: str, source: str = "") -> dict:
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()  # always constraint or convention
+    resume_flag = STORE_DIR / ".resume_mining"
+
+    if source == "resume":
+        if decisions:
+            # The conversation already contains the original session-start injection —
+            # re-injecting would duplicate ~1k tokens for nothing.
+            return {"systemMessage":
+                    f"Contexer: session resumed — {_pl(len(decisions), 'decision')} already loaded in conversation"}
+        # Fresh install mid-conversation: the transcript is the best decision source
+        # there will ever be. Mine it in the first turn instead of offering a menu —
+        # no human round-trip, so decisions are banked even if the session dies early.
+        STORE_DIR.mkdir(exist_ok=True)
+        resume_flag.write_text(repo_path)  # suppresses the UserPromptSubmit menu fallback
+        sys_parts = []
+        if global_rules:
+            sys_parts.append("## Global rules (apply to ALL repos):")
+            sys_parts.extend(f"- [{d.get('subtype', '')}] {d['content']}" for d in global_rules)
+            sys_parts.append("")
+        sys_parts.extend(_build_resume_mining_context(repo_path))
+        return {
+            "systemMessage": "Contexer: resumed with no stored context — mining this conversation for decisions",
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": "\n".join(sys_parts),
+            },
+        }
+
+    resume_flag.unlink(missing_ok=True)  # stale flag from a resume that never got a prompt
 
     if not decisions:
         # No repo context — bootstrap. Inject global rules above the STOP directive
@@ -661,6 +706,16 @@ def prompt_from_hook_stdin(raw: str) -> str:
         return ""
 
 
+def source_from_hook_stdin(raw: str) -> str:
+    """Extracts how the session began (startup|resume|clear|compact) from a
+    SessionStart hook's stdin JSON. Safe on any input."""
+    try:
+        data = json.loads(raw)
+        return data.get("source", "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
 def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
     """Fallback for UserPromptSubmit: catches the case where SessionStart bootstrap
     was skipped (e.g. non-interactive session). Returns empty dict when context exists.
@@ -671,6 +726,17 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
         return {}
+    # Resumed session: SessionStart already injected mining instructions — a menu
+    # here would contradict them ("ENTIRE response must be ONLY the offer").
+    resume_flag = STORE_DIR / ".resume_mining"
+    if resume_flag.exists():
+        try:
+            flagged = resume_flag.read_text().strip()
+        except Exception:
+            flagged = ""
+        if flagged == repo_path:
+            resume_flag.unlink(missing_ok=True)
+            return {}
     level, decisive = _detect_insight(repo_path)
     if _is_newcomer_question(prompt) and not (decisive and level == "high"):
         lines = [

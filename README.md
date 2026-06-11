@@ -60,6 +60,8 @@ Constraints and conventions are injected immediately — they apply to every tas
 
 As you work, Claude stores decisions automatically. If it misses something, say *"store that as a constraint"* and it's saved.
 
+**Resumed sessions** (`--resume` / `--continue`) don't repeat any of this — the context is already in the conversation. And if you installed Contexer mid-project, resuming an old session makes Claude mine that conversation for decisions already made and store them, no questions asked.
+
 ---
 
 ## CLI reference

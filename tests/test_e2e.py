@@ -497,7 +497,64 @@ class TestNewcomerQuestionDetection:
         assert store.prompt_from_hook_stdin(raw) == expected
 
 
-# ── 4g. Reaction-matrix invariants ────────────────────────────────────────────
+# ── 4g. Resume-aware session start ────────────────────────────────────────────
+
+class TestResumeSessionStart:
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"source": "resume"}', "resume"),
+        ('{"source": "startup"}', "startup"),
+        ("", ""),
+        ("garbage", ""),
+        ('{"other": 1}', ""),
+    ])
+    def test_source_from_hook_stdin_is_safe(self, raw, expected):
+        assert store.source_from_hook_stdin(raw) == expected
+
+    def test_resume_with_context_skips_reinjection(self, tmp_repo):
+        """The resumed conversation already contains the original injection —
+        re-injecting duplicates ~1k tokens."""
+        store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
+        result = store.get_session_start_context(tmp_repo, source="resume")
+        assert "hookSpecificOutput" not in result
+        assert "resumed" in result["systemMessage"]
+
+    def test_resume_without_context_mines_conversation(self, tmp_repo):
+        result = store.get_session_start_context(tmp_repo, source="resume")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "RESUMED session" in ctx
+        assert "update_context" in ctx and "bootstrap_context" in ctx
+        assert "never invent" in ctx
+        assert "How well do you know this repo?" not in ctx, "no menu on resume — mine instead"
+
+    def test_resume_mining_suppresses_menu_fallback(self, tmp_repo):
+        """The UserPromptSubmit once-hook must not inject a contradictory menu after
+        the SessionStart resume branch injected mining instructions."""
+        store.get_session_start_context(tmp_repo, source="resume")
+        assert store.get_bootstrap_context_prompt(tmp_repo, "continue please") == {}
+        # flag is consumed — the next call behaves normally again
+        result = store.get_bootstrap_context_prompt(tmp_repo, "continue please")
+        assert result != {}
+
+    def test_startup_clears_stale_resume_flag(self, tmp_repo):
+        store.get_session_start_context(tmp_repo, source="resume")  # writes flag
+        store.get_session_start_context(tmp_repo, source="startup")  # must clear it
+        result = store.get_bootstrap_context_prompt(tmp_repo, "fix the bug")
+        assert result != {}, "stale resume flag must not suppress the bootstrap fallback"
+
+    @pytest.mark.parametrize("source", ["", "startup", "clear", "compact"])
+    def test_non_resume_sources_keep_menu_behavior(self, tmp_repo, source):
+        result = store.get_session_start_context(tmp_repo, source=source)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "RESUMED session" not in ctx
+        assert "CRITICAL INSTRUCTION" in ctx
+
+    def test_resume_includes_global_rules(self, tmp_repo):
+        store.update_global_decision("always use conventional commits", "s1", subtype="constraint")
+        result = store.get_session_start_context(tmp_repo, source="resume")
+        assert "Global rules" in result["hookSpecificOutput"]["additionalContext"]
+
+
+# ── 4h. Reaction-matrix invariants ────────────────────────────────────────────
 
 class TestReactionMatrix:
     """Every combination of repo state × insight must keep the conversation sane:
