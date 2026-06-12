@@ -13,15 +13,23 @@
 
 **[contexer.ai](https://contexer.ai)** · [Discord](https://discord.gg/Fk6JSaW4p) · [Docs](docs/install.md)
 
-Contexer is an MCP server for Claude Code that remembers decisions made during a session and replays them at the start of every future session.
+---
+
+Every Claude Code session starts fresh. No memory of what was decided last week. No knowledge of the constraints your team spent months establishing. No recollection of the architecture choices that took three PRs to get right.
+
+The result: developers re-explain the same rules every session. Claude re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
+
+Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.
 
 ---
 
-## The problem
+## What changes
 
-Every Claude Code session starts fresh. No memory of what was decided yesterday, last week, or in a different window.
+**Before Contexer:** You establish "mock at the service boundary, not the DB layer" in session one. Session two, Claude is back to mocking the DB. You correct it. Session three, same thing. Every session pays the re-explanation tax, and every mistake Claude makes because it forgot costs correction turns that run sessions long.
 
-You end up repeating yourself constantly: *"we use uv not pip"*, *"always write tests before committing"*, *"we chose Postgres because of transactions"*. CLAUDE.md files help, but they need manual upkeep and go stale. The reasoning behind decisions disappears when the session ends.
+**After Contexer:** That rule is stored once as a constraint. Every future session starts with it already injected. Claude never forgets it. You never say it again.
+
+The impact compounds across a team. Shared constraints mean every engineer's agent follows the same rules, enforces the same quality standards, and stays within the same architectural boundaries — without anyone managing it manually.
 
 ---
 
