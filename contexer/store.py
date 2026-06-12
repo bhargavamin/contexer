@@ -238,8 +238,9 @@ _FRUSTRATION_OPENER = re.compile(
 
 # Trailing filler connectors that add no meaning to a stored rule.
 # "always use pip hence this would work" → "always use pip"
+# NOTE: \bhence\b (not bare "hence") so "henceforth" is NOT accidentally matched here.
 _TRAILING_FILLER = re.compile(
-    r"\s*(?:hence|so\s+(?:that|it|we|this)|because\s+(?:of\s+)?(?:this|that|it)|"
+    r"\s*(?:\bhence\b|so\s+(?:that|it|we|this)|because\s+(?:of\s+)?(?:this|that|it)|"
     r"as\s+(?:this|that|it)|that\s+way|which\s+(?:means|would)|"
     r"and\s+(?:it\s+)?(?:should|would|will)\s+work|this\s+(?:should|would|will)\s+(?:work|help))"
     r".*$",
@@ -276,8 +277,9 @@ _SARCASM_EXCLUDES = re.compile(
 )
 
 # "forward-looking practice" signals — convention subtype when used alone (without always/never)
+# "as a rule" and "make it a rule" are soft-practice signals like "from now on" / "going forward".
 _CONVENTION_SIGNALS = re.compile(
-    r"\b(?:from\s+now\s+on|going\s+forward|henceforth)\b",
+    r"\b(?:from\s+now\s+on|going\s+forward|henceforth|as\s+a\s+rule|make\s+it\s+a\s+rule)\b",
     re.IGNORECASE,
 )
 
