@@ -1,9 +1,13 @@
-name: Publish to PyPI
+name: Manual publish to PyPI
 
+# Emergency fallback — use only if the release-please workflow fails.
+# Normal releases are handled automatically by release-please.yml on merge to main.
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to publish (e.g. v0.6.3)'
+        required: true
 
 jobs:
   build-and-publish:
@@ -11,11 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # required for OIDC trusted publisher
-      contents: write  # required to create GitHub releases
+      id-token: write
+      contents: write
 
     steps:
       - uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ inputs.tag }}
 
       - uses: astral-sh/setup-uv@v8.2.0
         with:
@@ -27,11 +33,7 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Create GitHub release
+      - name: Upload dist to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            --verify-tag
+        run: gh release upload "${{ inputs.tag }}" dist/*
