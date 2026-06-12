@@ -33,6 +33,28 @@ The impact compounds across a team. Shared constraints mean every engineer's age
 
 ---
 
+## vs. static instruction files
+
+`CLAUDE.md`, `AGENTS.md`, and `.cursorrules` are worth having. They work well for stable project context — setup notes, architecture overviews, things you know before you start working.
+
+The gap they don't cover is decisions made during development.
+
+You can't write a `CLAUDE.md` entry for a constraint you haven't established yet. The rules that matter most — the ones that emerge from real work, real mistakes, real conversations — get established mid-session and disappear when it ends. Static files capture what you remember to write down. Contexer captures what actually happened.
+
+| | Static files | Contexer |
+|---|---|---|
+| **Source** | Written manually, when you think of it | Captured automatically as decisions are made |
+| **Freshness** | As current as the last time someone edited the file | Updated continuously; novelty filter prevents drift |
+| **Token cost** | Entire file on every prompt | Only constraints/conventions at session start; architecture fetched when relevant |
+| **New repo** | Blank — you start from scratch | Bootstrap scans git history and code to infer initial decisions |
+| **Scope** | One file, one repo | Per-repo decisions + global rules that follow you across every repo |
+
+Today Contexer is a personal decision store — private by default, per-user, per-machine. Team sharing is next.
+
+**Use both.** `CLAUDE.md` is the right place for onboarding context and stable project notes. Contexer is where the decisions made *during development* live — automatically, without discipline to maintain a file.
+
+---
+
 ## Quick start
 
 Install takes under two minutes.
