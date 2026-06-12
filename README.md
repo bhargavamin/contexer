@@ -19,7 +19,7 @@ Every Claude Code session starts fresh. No memory of what was decided last week.
 
 The result: developers re-explain the same rules every session. Claude re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
 
-Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.
+**Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.**
 
 ---
 
@@ -33,14 +33,19 @@ The impact compounds across a team. Shared constraints mean every engineer's age
 
 ---
 
-## Install
+## Quick start
+
+Install takes under two minutes.
 
 ```bash
+# Step 1 — install
 uv tool install contexer
+
+# Step 2 — wire into Claude Code
 contexer install
 ```
 
-Restart Claude Code and open any git repo. That's it.
+Step 3 — restart Claude Code and open any git repo. Contexer runs silently from here.
 
 See **[docs/install.md](docs/install.md)** for verification, update, and uninstall steps.
 
@@ -48,7 +53,14 @@ See **[docs/install.md](docs/install.md)** for verification, update, and uninsta
 
 ## How it works
 
-Contexer runs silently in every session. You don't interact with it directly.
+You work normally. Contexer captures decisions in the background.
+
+- **Session start** — constraints and conventions inject automatically before you type anything
+- **As you work** — Claude captures significant decisions; no manual intervention needed
+- **"Why" questions** — if you ask about rationale or past decisions, Contexer fetches them automatically
+- **Context window limit** — decisions are saved before compaction and restored after, so nothing is lost
+
+If Claude misses something, say *"store that decision"* and it is captured immediately.
 
 **First time in a repo** — Claude includes a brief offer at the top of its first response. The offer adapts to how well you know the repo, judged from its git history:
 
@@ -56,19 +68,123 @@ Contexer runs silently in every session. You don't interact with it directly.
 - No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs instead of asking questions you can't answer.
 - Can't tell → it simply asks how well you know the repo.
 
-Whatever was detected, all options (**quick / full / scan / skip**) stay available — reply with the one you want. And if your first message is itself a newcomer question ("what is this repo doing?"), Contexer skips the menu entirely and just confirms it should scan before answering you. Claude answers your original request either way.
+**Resumed sessions** (`--resume` / `--continue`) don't repeat any of this — the context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes Claude mine that conversation for decisions already made and store them, no questions asked.
 
-**Every session after that** — before your first message, Claude reads:
+---
+
+## Decision types
+
+Not all context is equal. Contexer distinguishes between what must always apply and what is only relevant sometimes — and only loads what the current task actually needs.
+
+| Type | What it captures | Loaded at session start |
+|---|---|---|
+| `constraint` | Rules that must always apply — "never merge untested code" | Yes — always |
+| `convention` | Team or project standards — "use uv not pip", "conventional commits" | Yes — always |
+| `architecture` | Structural decisions — "chose REST over GraphQL" | No — fetched when relevant |
+| `pattern` | Recurring implementation approaches | No — fetched when relevant |
+
+Constraints and conventions load every session because they apply to every task. Architecture and pattern decisions cost zero tokens at session start — they are retrieved only when the work requires them.
+
+---
+
+## Why this saves money
+
+Contexer has a fixed, predictable cost: ~26 tokens per rule at every session start, paid only for constraints and conventions. Architecture and pattern decisions cost nothing at session start.
+
+The saving comes from what that replaces.
+
+| Without Contexer | With Contexer |
+|---|---|
+| 200–500 tokens re-explaining rules per session through back-and-forth | ~26 tokens per rule at session start, flat and predictable |
+| Claude re-introduces rejected patterns, correction turns follow | Pattern stored once, correction never needed |
+| Developer reworks output that didn't follow established decisions | Decisions enforced from session start |
+| Long sessions from accumulated re-explanation and mistakes | Sessions stay focused, context stays clean |
 
 ```
-Contexer: 3 constraints, 2 conventions loaded. 8 arch/patterns will be loaded on demand.
+10 constraints/conventions stored  →  ~260 tokens at every session start
+20 constraints/conventions stored  →  ~520 tokens at every session start
 ```
 
-Constraints and conventions are injected immediately — they apply to every task. Architecture and pattern decisions load on demand when the task needs them.
+The trade: unpredictable, recurring re-explanation cost replaced by a small, flat, predictable session-start cost. A single avoided correction turn saves more than a full week of that overhead.
 
-As you work, Claude stores decisions automatically. If it misses something, say *"store that as a constraint"* and it's saved.
+**The ROI is in eliminated rework across sessions, not token compression within one.**
 
-**Resumed sessions** (`--resume` / `--continue`) don't repeat any of this — the context is already in the conversation. And if you installed Contexer mid-project, resuming an old session makes Claude mine that conversation for decisions already made and store them, no questions asked.
+---
+
+## Managing decisions
+
+Everything uses natural language.
+
+### Store a decision
+
+```
+"store that as a constraint"
+"save this as a convention: always use uv not pip"
+"remember this architecture decision"
+```
+
+Global decisions apply across all repos — use them for commit style, branch naming, or anything that travels with you:
+
+```
+"store that globally as a convention"
+"save this as a global constraint: always use conventional commits"
+```
+
+Only `constraint` and `convention` types can be stored globally. Architecture and pattern decisions are always repo-specific.
+
+### Query decisions
+
+```
+"show me all constraints"
+"what decisions did we make about postgres?"
+"show everything stored for this repo"
+```
+
+### Update or remove
+
+```
+"update the uv decision — we switched back to pip"
+"delete the postgres decision"
+"remove all outdated constraints"
+```
+
+The store is plain JSON at `~/.contexer/` — edit it directly if you prefer.
+
+---
+
+## Why it stays lightweight
+
+Contexer is a single Python MCP server with a plain JSON store. No background worker. No vector database. No port listening. No infrastructure to maintain.
+
+This is intentional. Every piece of complexity added to a memory system is a piece of complexity that can fail, drift, or accumulate noise. Contexer stores only what matters — decisions — and keeps everything inspectable, auditable, and greppable.
+
+---
+
+## Token cost reference
+
+Context processing runs before Claude generates a response, not during it. It adds nothing to response time.
+
+**Session start — pre-loaded rules (constraints + conventions):**
+
+| Pre-loaded rules | Tokens at session start |
+|---|---|
+| 5 | ~125 |
+| 10 | ~250 |
+| 25 | ~625 |
+
+~26 tokens per rule, fixed regardless of total store size. Architecture and pattern decisions cost 0 tokens at session start — fetched on demand only.
+
+Token cost is paid once at session start. Every subsequent prompt within that session adds nothing — the rules are already in context.
+
+**Retrieval latency:**
+
+| Operation | Time |
+|---|---|
+| Hit (decision found) | 0.3–0.5ms |
+| Miss (no match) | ~0ms |
+| Session start load | ~1ms |
+
+On prompts unrelated to stored decisions, Contexer skips entirely — no read, no tokens.
 
 ---
 
@@ -86,71 +202,17 @@ As you work, Claude stores decisions automatically. If it misses something, say 
 
 ---
 
-## Decision types
-
-| Type | What it captures | Loaded at session start |
-|---|---|---|
-| `constraint` | Hard rules — "never commit untested code" | Yes |
-| `convention` | Team standards — "use uv not pip", "conventional commits" | Yes |
-| `architecture` | Structural choices — "REST over GraphQL for the external API" | On demand |
-| `pattern` | Recurring approaches — "validate at the boundary" | On demand |
-
----
-
-## Storing and querying decisions
-
-```
-"store that as a constraint"
-"save this as a convention: always use uv not pip"
-"what decisions did we make about postgres?"
-"show all constraints"
-"delete the postgres decision"
-"save this as a global constraint: always use conventional commits"
-```
-
-Global decisions apply across all repos — use them for commit style, branch naming, anything that travels with you.
-
-> **Note:** Your first prompt each session is also captured as the current task. A first prompt phrased as a clear directive (*"always update docs before committing"*) is still auto-saved as a constraint — but a rule phrased indirectly may slip past the detector, so follow up with *"store that as a constraint"* to be sure.
-
-Edit the store directly if you prefer — it's plain JSON at `~/.contexer/`.
-
----
-
-## Performance
-
-Context processing runs before Claude generates a response, not during it. It adds nothing to response time.
-
-| Operation | Time |
-|---|---|
-| Hit (decision found) | 0.3–0.5ms |
-| Miss (no match) | ~0ms |
-| Session start load | ~1ms |
-
-Token cost is paid once at session start. Every prompt after that is free.
-
-| Pre-loaded rules | Tokens |
-|---|---|
-| 5 | ~125 |
-| 10 | ~250 |
-| 25 | ~625 |
-
-~26 tokens per rule, fixed regardless of store size. On prompts unrelated to stored decisions, Contexer skips entirely — no read, no tokens.
-
----
-
 ## Troubleshooting
 
-**Decisions aren't being stored automatically.**
-Say *"store that decision"* to save it manually.
+**Claude isn't storing decisions automatically.** Say *"store that decision"* and it is captured immediately.
 
-**A decision isn't appearing at session start.**
-Constraints and conventions load at session start. One added mid-session shows up next time.
+**A decision was stored but isn't appearing.** Constraints and conventions load at session start. If added mid-session, they appear from the next session onward.
 
-**A new decision was silently skipped.**
-Content too similar to an existing entry is rejected as a duplicate. Rephrase to include what specifically changed.
+**A decision is outdated or wrong.** Say *"delete the X decision"* or edit the store file directly at `~/.contexer/`.
 
-**No context at session start on a new repo.**
-Claude will offer bootstrap setup. Say yes to capture initial decisions — all future sessions will have context.
+**A new decision wasn't saved — looks like a duplicate.** Content too similar to an existing decision is silently skipped. Rephrase to include what specifically changed.
+
+**No context appeared at session start on a new repo.** Claude will offer bootstrap setup. Complete it once and all future sessions will have context.
 
 ---
 
@@ -158,7 +220,7 @@ Claude will offer bootstrap setup. Say yes to capture initial decisions — all 
 
 Bug reports, fixes, and documentation improvements are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, code style, and the PR process.
 
-Questions? [Discord](https://discord.gg/Fk6JSaW4p).
+Questions or ideas? Join the community on [Discord](https://discord.gg/Fk6JSaW4p).
 
 ---
 
@@ -166,4 +228,4 @@ Questions? [Discord](https://discord.gg/Fk6JSaW4p).
 
 MIT — see [LICENSE](LICENSE) for full terms.
 
-The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the name or logo in a way that implies official affiliation.
+The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
