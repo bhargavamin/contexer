@@ -451,11 +451,13 @@ def _detect_insight(repo_path: str) -> tuple[str, bool]:
 
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     level, decisive = _detect_insight(repo_path)
+    repo_name = Path(repo_path).name if repo_path else ""
+    label = f'"{repo_name}"' if repo_name else "this repo"
 
     if decisive and level == "high":
         # commits by this user found — don't ask how well they know their own repo
         offer = [
-            "  \"Contexer: no project context stored for this repo."
+            f"  \"Contexer: no project context stored for {label}."
             " How should I set up context for future sessions?",
             "   · quick — 1 question (what does this repo do?)",
             "   · full — guided setup, a few questions",
@@ -466,7 +468,7 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
     elif decisive and level == "low":
         # state the evidence, never the conclusion — detection can be wrong
         offer = [
-            "  \"Contexer: no project context stored for this repo."
+            f"  \"Contexer: no project context stored for {label}."
             " No commits from your git email found here, so I'd scan the code and docs"
             " instead of asking questions you may not be able to answer.",
             "   · scan — go ahead (no questions)",
@@ -481,7 +483,7 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
             if level == "medium" else []
         )
         offer = [
-            "  \"Contexer: no project context stored for this repo."
+            f"  \"Contexer: no project context stored for {label}."
             " How well do you know this repo?",
             "   · quick — I wrote or maintain it (1 question: what does this repo do?)",
             "   · full — I wrote or maintain it (guided setup, a few questions)",
@@ -492,16 +494,19 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         ]
         replies = "quick / full / some / scan / skip"
 
-    # A newcomer question ("what is this repo doing?") is itself low-insight evidence —
-    # don't answer it with a menu whose first option mirrors the question back. This check
-    # must come FIRST: placed after the menu it loses to "response must be ONLY the offer".
-    # Decisive-high keeps the menu: commits by this user outweigh one curious question.
+    # A newcomer question ("what is this repo doing?", "summarize this repo") is itself
+    # low-insight evidence — don't answer it with a menu whose first option mirrors the
+    # question back. This check must come FIRST: placed after the menu it loses to
+    # "response must be ONLY the offer". Decisive-high keeps the menu: commits by this
+    # user outweigh one curious question.
     newbie_exception = [] if (decisive and level == "high") else [
         "STEP 0 — read the user's message before anything else: if it is asking what this"
-        " repo or code is or does ('what is this repo doing?', 'explain this codebase',"
-        " 'tell me about this repo'), their question already signals they're new here."
+        " repo or code is or does, or asking to summarize it"
+        " ('what is this repo doing?', 'explain this codebase', 'tell me about this repo',"
+        " 'summarize this codebase', 'give me an overview'), their message already signals"
+        " they're new here."
         " In that case your ENTIRE response is ONLY this confirmation — NOT the menu below:",
-        "  \"Contexer: you're asking what this repo does, so I'll assume you're new here —"
+        f"  \"Contexer: you're asking about {label}, so I'll assume you're new here —"
         " I'll scan the code and docs, store what I find for future sessions, then answer"
         " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
         "Then stop and wait. If they confirm (ok / yes / scan) → follow the scan path below,"
@@ -687,7 +692,9 @@ _NEWCOMER_QUESTION_RE = re.compile(
     r"|tell me about (this|the) (repo|repository|codebase|project|code)\b"
     r"|how does (this|the) (repo|repository|codebase|project|code) work\b"
     r"|walk me through (this|the) (repo|repository|codebase|project|code)\b"
-    r"|overview of (this|the) (repo|repository|codebase|project|code)\b)",
+    r"|overview of (this|the) (repo|repository|codebase|project|code)\b"
+    r"|summarize (this|the) (repo|repository|codebase|project|code)\b"
+    r"|summary of (this|the) (repo|repository|codebase|project|code)\b)",
     re.IGNORECASE,
 )
 
@@ -738,12 +745,14 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
             resume_flag.unlink(missing_ok=True)
             return {}
     level, decisive = _detect_insight(repo_path)
+    repo_name = Path(repo_path).name if repo_path else ""
+    label = f'"{repo_name}"' if repo_name else "this repo"
     if _is_newcomer_question(prompt) and not (decisive and level == "high"):
         lines = [
             "Contexer OVERRIDE — ignore any earlier bootstrap menu instructions for this turn.",
-            "The user's first message asks what this repo is or does. That is low-insight"
-            " evidence (matched deterministically). Your ENTIRE response must be ONLY:",
-            "  \"Contexer: you're asking what this repo does, so I'll assume you're new here —"
+            "The user's first message asks about or wants to summarize this repo. That is"
+            " low-insight evidence (matched deterministically). Your ENTIRE response must be ONLY:",
+            f"  \"Contexer: you're asking about {label}, so I'll assume you're new here —"
             " I'll scan the code and docs, store what I find for future sessions, then answer"
             " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
             "Then stop and wait. If they confirm (ok / yes / scan) → call bootstrap_context"

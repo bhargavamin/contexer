@@ -450,6 +450,13 @@ class TestOfferVariants:
         text = "\n".join(store._build_bootstrap_context(git_repo))
         assert "STEP 0" not in text
 
+    def test_offer_includes_repo_name(self, tmp_repo):
+        """Offer text must show the repo folder name so misfiring is immediately visible."""
+        from pathlib import Path
+        name = Path(tmp_repo).name
+        text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert f'"{name}"' in text
+
     def test_purpose_question_never_echoed_back(self, tmp_repo):
         """Picking full after asking 'what does this repo do?' must not quiz the user
         with their own question."""
@@ -470,6 +477,14 @@ class TestNewcomerQuestionDetection:
         "walk me through this codebase please",
         "give me an overview of this project",
         "whats this repo about",
+        # summarize variants — the original misfiring report
+        "summarize this repo",
+        "summarize the codebase",
+        "summarize this project",
+        "can you summarize this repo?",
+        "please summarize the code",
+        "summary of this repo",
+        "give me a summary of this project",
     ])
     def test_newcomer_questions_match(self, prompt):
         assert store._is_newcomer_question(prompt) is True
@@ -480,6 +495,7 @@ class TestNewcomerQuestionDetection:
         "why did we choose uv over pip?",
         "what is this function doing",  # code-element question, not repo-level
         "refactor the elevator scheduling logic",
+        "summarize the changes in the last commit",  # not repo-level
         "",
     ])
     def test_other_prompts_do_not_match(self, prompt):
@@ -487,6 +503,13 @@ class TestNewcomerQuestionDetection:
 
     def test_newcomer_prompt_overrides_menu(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "OVERRIDE" in ctx and "assume you're new here" in ctx
+        assert "How well do you know this repo?" not in ctx
+
+    def test_summarize_prompt_overrides_menu(self, tmp_repo):
+        """'summarize this repo' was the original misfiring report — must trigger OVERRIDE."""
+        result = store.get_bootstrap_context_prompt(tmp_repo, "summarize this repo")
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "OVERRIDE" in ctx and "assume you're new here" in ctx
         assert "How well do you know this repo?" not in ctx
