@@ -33,15 +33,15 @@ The impact compounds across a team. Shared constraints mean every engineer's age
 
 ---
 
-## vs. static instruction files
+## vs. `CLAUDE.md`, `AGENTS.md`, `.cursorrules`
 
 `CLAUDE.md`, `AGENTS.md`, and `.cursorrules` are worth having. They work well for stable project context — setup notes, architecture overviews, things you know before you start working.
 
 The gap they don't cover is decisions made during development.
 
-You can't write a `CLAUDE.md` entry for a constraint you haven't established yet. The rules that matter most — the ones that emerge from real work, real mistakes, real conversations — get established mid-session and disappear when it ends. Static files capture what you remember to write down. Contexer captures what actually happened.
+You can't write a `CLAUDE.md` entry for a constraint you haven't established yet. The rules that matter most — the ones that emerge from real work, real mistakes, real conversations — get established mid-session and disappear when it ends. `CLAUDE.md` captures what you remember to write down. Contexer captures what actually happened.
 
-| | Static files | Contexer |
+| | `CLAUDE.md` / `AGENTS.md` / `.cursorrules` | Contexer |
 |---|---|---|
 | **Source** | Written manually, when you think of it | Captured automatically as decisions are made |
 | **Freshness** | As current as the last time someone edited the file | Updated continuously; novelty filter prevents drift |
