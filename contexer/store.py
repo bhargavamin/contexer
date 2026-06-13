@@ -821,6 +821,17 @@ def source_from_hook_stdin(raw: str) -> str:
         return ""
 
 
+def session_from_hook_stdin(raw: str) -> str:
+    """Extracts the host's session id from a hook's stdin JSON (both Claude Code
+    and Cursor provide `session_id`). Used by command-type capture hooks so stored
+    entries are grouped by session. Safe on any input."""
+    try:
+        data = json.loads(raw)
+        return data.get("session_id", "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
 def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
     """Fallback for UserPromptSubmit: catches the case where SessionStart bootstrap
     was skipped (e.g. non-interactive session). Returns empty dict when context exists.

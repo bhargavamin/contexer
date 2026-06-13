@@ -1183,3 +1183,17 @@ class TestCorruptionRecovery:
         assert ok
         data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
         assert len(data["entries"]) == 1
+
+
+class TestSessionFromHookStdin:
+    def test_extracts_session_id(self):
+        from contexer import store
+        assert store.session_from_hook_stdin('{"session_id": "abc-123"}') == "abc-123"
+
+    def test_missing_session_id_returns_empty(self):
+        from contexer import store
+        assert store.session_from_hook_stdin('{"prompt": "hi"}') == ""
+
+    def test_malformed_stdin_returns_empty(self):
+        from contexer import store
+        assert store.session_from_hook_stdin("not json") == ""
