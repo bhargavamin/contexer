@@ -176,8 +176,8 @@ class TestSessionStartContext:
         print("BENCHMARK 1 — Session start context")
         print(f"{'='*60}")
         print(f"  Status line:      {msg}")
-        print(f"  Preloaded:        {preloaded_count} decisions (convention + constraint)")
-        print(f"  Deferred (JIT):   {deferred_count} decisions (architecture + pattern)")
+        print(f"  Preloaded:        {preloaded_count} decisions (convention + constraint + pattern)")
+        print(f"  Deferred (JIT):   {deferred_count} decisions (architecture)")
         print(f"  Tokens injected:  ~{_approx_tokens(ctx)}")
         print(f"  Tokens baseline:  0 (no Contexer)")
         print(f"  Overhead:         +{_approx_tokens(ctx)} tokens per session start")
@@ -187,8 +187,8 @@ class TestSessionStartContext:
         if len(preloaded_lines) > 3:
             print(f"    ... and {len(preloaded_lines) - 3} more")
 
-        assert preloaded_count == 10, f"Expected 10 preloaded (5 conv + 5 constraint), got {preloaded_count}"
-        assert deferred_count == 10, f"Expected 10 deferred (5 arch + 5 pattern), got {deferred_count}"
+        assert preloaded_count == 15, f"Expected 15 preloaded (5 conv + 5 constraint + 5 pattern), got {preloaded_count}"
+        assert deferred_count == 5, f"Expected 5 deferred (5 arch), got {deferred_count}"
 
     def test_context_token_size_is_bounded(self, populated_store, monkeypatch_module):
         result = store.get_session_start_context(DEMO_REPO)
@@ -566,8 +566,8 @@ class TestLargeScaleBenchmark:
 
         # 20-decision baseline (from earlier benchmark)
         BASELINE_TOKENS   = 288
-        BASELINE_PRE      = 10
-        BASELINE_DEFERRED = 10
+        BASELINE_PRE      = 15
+        BASELINE_DEFERRED = 5
 
         print(f"\n{'='*60}")
         print("LARGE-SCALE BENCHMARK (50 decisions) vs baseline (20)")
@@ -577,14 +577,14 @@ class TestLargeScaleBenchmark:
         print(f"\n  Session start:")
         print(f"    {'Metric':<28} {'20 decisions':>14} {'50 decisions':>14} {'Delta':>10}")
         print(f"    {'-'*66}")
-        print(f"    {'Preloaded (conv+constraint)':<28} {BASELINE_PRE:>14} {preloaded_count:>14} {preloaded_count-BASELINE_PRE:>+10}")
-        print(f"    {'Deferred (arch+pattern)':<28} {BASELINE_DEFERRED:>14} {deferred_count:>14} {deferred_count-BASELINE_DEFERRED:>+10}")
+        print(f"    {'Preloaded (conv+con+pat)':<28} {BASELINE_PRE:>14} {preloaded_count:>14} {preloaded_count-BASELINE_PRE:>+10}")
+        print(f"    {'Deferred (arch only)':<28} {BASELINE_DEFERRED:>14} {deferred_count:>14} {deferred_count-BASELINE_DEFERRED:>+10}")
         print(f"    {'Tokens injected':<28} {BASELINE_TOKENS:>14} {tokens:>14} {tokens-BASELINE_TOKENS:>+10}")
         print(f"    {'Tokens per preloaded rule':<28} {BASELINE_TOKENS//BASELINE_PRE:>14} {tokens//preloaded_count:>14}")
         print(f"\n  Status line: {msg}")
 
-        assert preloaded_count == 25, f"Expected 25 preloaded (13+12), got {preloaded_count}"
-        assert deferred_count == 25, f"Expected 25 deferred (13+12), got {deferred_count}"
+        assert preloaded_count == 37, f"Expected 37 preloaded (13 conv + 12 constraint + 12 pattern), got {preloaded_count}"
+        assert deferred_count == 13, f"Expected 13 deferred (13 arch), got {deferred_count}"
         assert tokens < 2000, f"Session start context unexpectedly large: {tokens} tokens"
 
     def test_retrieval_timing_at_scale(self, large_store, monkeypatch_module):

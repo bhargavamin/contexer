@@ -14,6 +14,7 @@ MAX_ENTRIES = 500
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
+_PATTERN_PROMOTION_THRESHOLD = 2  # near-duplicate hits needed to promote architecture → pattern
 
 
 def _current_repo_path() -> str:
@@ -165,20 +166,24 @@ def _tokenize(text: str) -> set[str]:
     return set(_PUNCT_RE.sub("", text.lower()).split())
 
 
-def _is_novel(content: str, existing: list) -> bool:
+def _find_match(content: str, existing: list) -> dict | None:
+    """Returns the first existing entry with >70% token overlap, or None."""
     if not existing:
-        return True
+        return None
     tokens = _tokenize(content)
     if not tokens:
-        return False
+        return None
     for entry in existing:
         other = _tokenize(entry.get("content", ""))
         if not other:
             continue
-        overlap = len(tokens & other) / max(len(tokens), len(other))
-        if overlap > 0.7:
-            return False
-    return True
+        if len(tokens & other) / max(len(tokens), len(other)) > 0.7:
+            return entry
+    return None
+
+
+def _is_novel(content: str, existing: list) -> bool:
+    return _find_match(content, existing) is None
 
 
 def _passes_filter(content: str, existing: list) -> bool:
@@ -186,6 +191,16 @@ def _passes_filter(content: str, existing: list) -> bool:
     # Novel content always passes: update_context is only called for significant decisions.
     decisions_only = [e for e in existing if e["type"] == "decision"]
     return _is_novel(content, decisions_only)
+
+
+def _try_promote_to_pattern(match: dict, data: dict) -> bool:
+    """Increment occurrence_count on a matched entry. Promotes architecture → pattern
+    when the count reaches _PATTERN_PROMOTION_THRESHOLD. Always returns True (caller saves)."""
+    count = match.get("occurrence_count", 1) + 1
+    match["occurrence_count"] = count
+    if match.get("subtype") == "architecture" and count >= _PATTERN_PROMOTION_THRESHOLD:
+        match["subtype"] = "pattern"
+    return True
 
 
 # Prescriptive constraint/convention signals in user prompts.
@@ -322,7 +337,11 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         return None, None
     content = _sanitize_directive(prompt.strip())[:600]
     data = _load(repo_path)
-    if not _passes_filter(content, data["entries"]):
+    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+    match = _find_match(content, decisions_only)
+    if match is not None:
+        _try_promote_to_pattern(match, data)
+        _save(repo_path, data)
         return None, None
     entry = {
         "id": str(uuid.uuid4()),
@@ -385,7 +404,11 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
     data = _load(repo_path)
-    if not _passes_filter(content, data["entries"]):
+    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+    match = _find_match(content, decisions_only)
+    if match is not None:
+        _try_promote_to_pattern(match, data)
+        _save(repo_path, data)
         return False, None
     entry = {
         "id": str(uuid.uuid4()),
@@ -394,6 +417,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         "content": content,
         "session_id": session_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "occurrence_count": 1,
     }
     data["entries"].append(entry)
     data["entries"] = data["entries"][-MAX_ENTRIES:]
@@ -632,7 +656,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         }
 
     count = len(decisions)
-    pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint")]
+    pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint", "pattern")]
     deferred_count = count - len(pre_loaded)
 
     sys_parts = []
@@ -674,7 +698,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     if loaded_parts:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
-        sentences.append(f"{_pl(deferred_count, 'arch/pattern')} will be loaded on demand")
+        sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
 
     user_line = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
 
@@ -1437,6 +1461,30 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
             question="Any constraints that shape technical decisions?",
             hint=_constraints_hint(),
             subtype="constraint",
+        ))
+
+    # Validation placement — only if a web framework is present
+    has_web_framework = _has_dep(
+        "fastapi", "flask", "django", "express", "hono", "elysia", "fastify",
+        "next", "nuxt", "remix", "svelte", "aiohttp", "starlette",
+    )
+    if has_web_framework and not is_simple:
+        gaps.append(_gap(
+            assumption="Input validation placement not documented",
+            question="Where does input validation live — at the HTTP boundary, in the service layer, or both?",
+            hint="e.g. Pydantic models at the route layer only; or service layer validates too; or middleware",
+            subtype="pattern",
+            min_insight="high",
+        ))
+
+    # Error handling — only if production signals exist
+    if has_production_signals:
+        gaps.append(_gap(
+            assumption="Error handling approach not documented",
+            question="How are errors surfaced — exceptions bubble up, result types, or error middleware?",
+            hint="e.g. raise HTTPException at route layer; Result[T, E] types; global exception handler",
+            subtype="pattern",
+            min_insight="high",
         ))
 
     # Interview floor for repo authors: signal-conditional gaps collapse to almost

@@ -770,6 +770,81 @@ class TestDecisionStorage:
         assert len(data["entries"]) == 2
 
 
+# ── 6b. Pattern promotion ─────────────────────────────────────────────────────
+
+class TestPatternPromotion:
+    def test_near_duplicate_increments_occurrence_count(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry.get("occurrence_count", 1) == 2
+
+    def test_architecture_promoted_to_pattern_at_threshold(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "pattern"
+
+    def test_convention_near_duplicate_does_not_promote(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use conventional commits for all merges", SESSION, "convention")
+        store.update_decision(tmp_repo, "Conventional commits used for all merges", SESSION, "convention")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "convention"
+
+    def test_constraint_near_duplicate_does_not_promote(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never commit secrets to the repository", SESSION, "constraint")
+        store.update_decision(tmp_repo, "Never commit secrets to the repo", SESSION, "constraint")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "constraint"
+
+    def test_new_entry_has_occurrence_count_one(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        assert entry.get("occurrence_count") == 1
+
+    def test_legacy_entry_without_field_treated_as_count_one(self, tmp_repo):
+        """Entries written before this change lack occurrence_count — must behave as count=1."""
+        store.update_decision(tmp_repo, "Use Redis for caching decisions", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        data["entries"][0].pop("occurrence_count", None)
+        store._save(tmp_repo, data)
+        store.update_decision(tmp_repo, "Redis used for caching decisions", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "pattern"
+        assert entry.get("occurrence_count") == 2
+
+    def test_promoted_pattern_appears_in_session_start_preload(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "FastAPI" in ctx
+
+    def test_within_session_repeat_promotes(self, tmp_repo):
+        """Two calls with similar content in the same session promote without cross-session."""
+        store.update_decision(tmp_repo, "Validate inputs at HTTP boundary with Pydantic", SESSION, "architecture")
+        store.update_decision(tmp_repo, "Validate inputs at the HTTP boundary using Pydantic", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "pattern"
+        assert entry.get("occurrence_count") == 2
+
+    def test_bootstrap_scan_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\ndependencies = ["fastapi", "boto3", "stripe"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        pattern_gaps = [g for g in result["gaps"] if g["subtype"] == "pattern"]
+        assert pattern_gaps, "high-insight web repo should produce at least one pattern gap"
+
+
 # ── 7. Context retrieval ──────────────────────────────────────────────────────
 
 class TestContextRetrieval:
