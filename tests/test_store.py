@@ -1197,3 +1197,31 @@ class TestSessionFromHookStdin:
     def test_malformed_stdin_returns_empty(self):
         from contexer import store
         assert store.session_from_hook_stdin("not json") == ""
+
+
+class TestSessionStartPayload:
+    def test_empty_repo_payload_has_bootstrap_context(self, tmp_repo):
+        from contexer import store
+        p = store.session_start_payload(tmp_repo)
+        assert "bootstrap" in p["context"].lower()
+        assert "no context stored" in p["status"].lower()
+
+    def test_populated_repo_payload_pointer(self, populated_repo):
+        from contexer import store
+        p = store.session_start_payload(populated_repo)
+        assert "get_context" in p["context"]
+        assert "on demand" in p["status"]
+
+    def test_resume_with_decisions_has_status_no_context(self, populated_repo):
+        from contexer import store
+        p = store.session_start_payload(populated_repo, source="resume")
+        assert p["context"] == ""
+        assert "resumed" in p["status"].lower()
+
+    def test_get_session_start_context_envelope_unchanged(self, tmp_repo):
+        # Back-compat: the Claude dict shape is preserved exactly.
+        from contexer import store
+        result = store.get_session_start_context(tmp_repo)
+        assert "no context stored" in result["systemMessage"].lower()
+        assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
+        assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"

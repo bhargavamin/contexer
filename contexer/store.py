@@ -675,23 +675,24 @@ def _build_resume_mining_context(repo_path: str) -> list[str]:
     ]
 
 
-def get_session_start_context(repo_path: str, source: str = "") -> dict:
+def session_start_payload(repo_path: str, source: str = "") -> dict:
+    """Provider-neutral session-start content. Returns {"status": str, "context": str}:
+    `status` is the short human-facing line, `context` is the text to inject into the
+    conversation. Empty `context` means "inject nothing". All filtering/promotion logic
+    is unchanged from the original get_session_start_context."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
-    global_rules = get_global_decisions()  # always constraint or convention
+    global_rules = get_global_decisions()
     resume_flag = STORE_DIR / ".resume_mining"
 
     if source == "resume":
         if decisions:
-            # The conversation already contains the original session-start injection —
-            # re-injecting would duplicate ~1k tokens for nothing.
-            return {"systemMessage":
-                    f"Contexer: session resumed — {_pl(len(decisions), 'decision')} already loaded in conversation"}
-        # Fresh install mid-conversation: the transcript is the best decision source
-        # there will ever be. Mine it in the first turn instead of offering a menu —
-        # no human round-trip, so decisions are banked even if the session dies early.
+            return {
+                "status": f"Contexer: session resumed — {_pl(len(decisions), 'decision')} already loaded in conversation",
+                "context": "",
+            }
         STORE_DIR.mkdir(exist_ok=True)
-        resume_flag.write_text(repo_path)  # suppresses the UserPromptSubmit menu fallback
+        resume_flag.write_text(repo_path)
         sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
@@ -699,20 +700,15 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         return {
-            "systemMessage": "Contexer: resumed with no stored context — mining this conversation for decisions",
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(sys_parts),
-            },
+            "status": "Contexer: resumed with no stored context — mining this conversation for decisions",
+            "context": "\n".join(sys_parts),
         }
 
-    resume_flag.unlink(missing_ok=True)  # stale flag from a resume that never got a prompt
+    resume_flag.unlink(missing_ok=True)
 
     if not decisions:
-        # No repo context — bootstrap. Inject global rules above the STOP directive
-        # so Claude follows them even during the bootstrap conversation.
         lines = _build_bootstrap_context(repo_path)
-        sys_parts: list[str] = []
+        sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
             for d in global_rules:
@@ -721,11 +717,8 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         sys_parts.extend(lines)
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "systemMessage": f"Contexer: no context stored{global_note} — setup offer on next prompt",
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(sys_parts),
-            },
+            "status": f"Contexer: no context stored{global_note} — setup offer on next prompt",
+            "context": "\n".join(sys_parts),
         }
 
     count = len(decisions)
@@ -742,8 +735,6 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         for d in pre_loaded:
             sys_parts.append(f"- [{d.get('subtype', '')}]{_recur_suffix(d)} {d['content']}")
     if deferred_count > 0:
-        # Patterns are pre-loaded above, so they are NOT part of the deferred set —
-        # only architecture (and any subtype-less) decisions are fetched on demand.
         arch_count = sum(1 for d in decisions if d.get("subtype") == "architecture")
         breakdown = f" ({arch_count} architecture)" if arch_count else ""
         sys_parts.append(
@@ -756,7 +747,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
     patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
 
-    loaded_parts: list[str] = []
+    loaded_parts = []
     if global_rules:
         loaded_parts.append(_pl(len(global_rules), "global rule"))
     if constraints:
@@ -766,21 +757,21 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     if patterns:
         loaded_parts.append(_pl(len(patterns), "pattern"))
 
-    sentences: list[str] = []
+    sentences = []
     if loaded_parts:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
         sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
 
-    user_line = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
+    status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
+    return {"status": status, "context": "\n".join(sys_parts)}
 
-    return {
-        "systemMessage": user_line,
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": "\n".join(sys_parts),
-        },
-    }
+
+def get_session_start_context(repo_path: str, source: str = "") -> dict:
+    """Claude Code SessionStart hook output. Thin envelope over session_start_payload —
+    kept for back-compat with installed hooks and the existing test suite."""
+    from contexer.adapters import claude
+    return claude.format_session_start(session_start_payload(repo_path, source))
 
 
 _NEWCOMER_QUESTION_RE = re.compile(
