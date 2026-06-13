@@ -1,9 +1,10 @@
 """Tests for the multi-provider adapter registry."""
+import json as _json
 from pathlib import Path
 
 import pytest
 
-from contexer import adapters
+from contexer import adapters, store
 
 
 class TestRegistry:
@@ -85,3 +86,38 @@ class TestClaudeFormatters:
     def test_post_compact_context_only(self):
         d = claude.format_post_compact({"status": "", "context": "bootstrap lines"})
         assert d == {"systemMessage": "bootstrap lines"}
+
+
+class TestClaudeCaptureEntrypoints:
+    def test_capture_task_stores_and_prints_empty(self, tmp_repo):
+        raw = _json.dumps({"prompt": "Refactor the auth module to use JWT", "session_id": "s1"})
+        assert claude.capture_task(tmp_repo, raw) == "{}"
+        assert "Last task" in store.get_context(tmp_repo)
+
+    def test_capture_task_ignores_question(self, tmp_repo):
+        raw = _json.dumps({"prompt": "what is this repo?", "session_id": "s1"})
+        assert claude.capture_task(tmp_repo, raw) == "{}"
+
+    def test_capture_constraint_stores_and_acks(self, tmp_repo):
+        raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
+        out = _json.loads(claude.capture_constraint(tmp_repo, raw))
+        assert "additionalContext" in out["hookSpecificOutput"]
+        assert "constraint" in out["hookSpecificOutput"]["additionalContext"].lower()
+
+    def test_capture_constraint_noop_on_plain_prompt(self, tmp_repo):
+        raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
+        assert claude.capture_constraint(tmp_repo, raw) == "{}"
+
+    def test_rationale_injects_when_decisions_match(self, populated_repo):
+        raw = _json.dumps({"prompt": "why did we choose JWT for authentication?"})
+        out = _json.loads(claude.rationale(populated_repo, raw))
+        assert "additionalContext" in out["hookSpecificOutput"]
+
+    def test_rationale_noop_on_plain_prompt(self, populated_repo):
+        raw = _json.dumps({"prompt": "add a test"})
+        assert claude.rationale(populated_repo, raw) == "{}"
+
+    def test_entrypoints_never_raise_on_bad_stdin(self, tmp_repo):
+        assert claude.capture_task(tmp_repo, "garbage") == "{}"
+        assert claude.capture_constraint(tmp_repo, "garbage") == "{}"
+        assert claude.rationale(tmp_repo, "garbage") == "{}"
