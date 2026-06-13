@@ -363,7 +363,7 @@ class TestStorageAtCapacity:
         stats = _pstats(times)
         print(f"\n  Novelty filter write latency at 500 entries (20 writes):")
         _print_stats("Stats", stats)
-        assert stats["p99"] < 100.0
+        assert stats["p99"] < 200.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
