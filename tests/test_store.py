@@ -1225,3 +1225,29 @@ class TestSessionStartPayload:
         assert "no context stored" in result["systemMessage"].lower()
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+
+
+class TestBootstrapPromptPayload:
+    def test_decisions_present_payload_empty(self, populated_repo):
+        from contexer import store
+        p = store.bootstrap_prompt_payload(populated_repo, "anything")
+        assert p == {"status": "", "context": ""}
+
+    def test_empty_repo_payload_has_context(self, tmp_repo):
+        from contexer import store
+        p = store.bootstrap_prompt_payload(tmp_repo, "add a feature")
+        assert p["status"] == ""
+        assert p["context"] != ""
+
+
+class TestPostCompactPayload:
+    def test_empty_repo_reoffers_bootstrap(self, tmp_repo):
+        from contexer import store
+        p = store.post_compact_payload(tmp_repo)
+        assert "bootstrap" in p["context"].lower()
+
+    def test_populated_repo_reloads_context(self, populated_repo):
+        from contexer import store
+        p = store.post_compact_payload(populated_repo)
+        assert "reloaded after compaction" in p["status"].lower()
+        assert p["context"] != ""

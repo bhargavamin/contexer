@@ -823,18 +823,13 @@ def session_from_hook_stdin(raw: str) -> str:
         return ""
 
 
-def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
-    """Fallback for UserPromptSubmit: catches the case where SessionStart bootstrap
-    was skipped (e.g. non-interactive session). Returns empty dict when context exists.
-    When the first prompt is itself a newcomer question, the menu is replaced with a
-    low-insight confirmation — decided deterministically here, not by model judgment,
-    because this is the first thing a user sees after installing."""
+def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
+    """Neutral UserPromptSubmit bootstrap-fallback content. {"status": "", "context": str}.
+    Empty context => emit nothing. Logic unchanged from get_bootstrap_context_prompt."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
-        return {}
-    # Resumed session: SessionStart already injected mining instructions — a menu
-    # here would contradict them ("ENTIRE response must be ONLY the offer").
+        return {"status": "", "context": ""}
     resume_flag = STORE_DIR / ".resume_mining"
     if resume_flag.exists():
         try:
@@ -843,7 +838,7 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
             flagged = ""
         if flagged == repo_path:
             resume_flag.unlink(missing_ok=True)
-            return {}
+            return {"status": "", "context": ""}
     level, decisive = _detect_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
@@ -865,24 +860,28 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
         ]
     else:
         lines = _build_bootstrap_context(repo_path)
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(lines),
-        }
-    }
+    return {"status": "", "context": "\n".join(lines)}
 
 
-def get_post_compact_context(repo_path: str) -> dict:
-    """Called by PostCompact hook. Re-injects stored context after compaction, or
-    re-offers bootstrap if no context exists — so the offer is not silently lost after compact."""
+def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
+    """Claude UserPromptSubmit bootstrap-fallback output. Back-compat envelope."""
+    from contexer.adapters import claude
+    return claude.format_bootstrap_prompt(bootstrap_prompt_payload(repo_path, prompt))
+
+
+def post_compact_payload(repo_path: str) -> dict:
+    """Neutral PostCompact content. {"status": str, "context": str}."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if not decisions:
-        lines = _build_bootstrap_context(repo_path)
-        return {"systemMessage": "\n".join(lines)}
-    ctx = get_context(repo_path)
-    return {"systemMessage": f"Contexer: context reloaded after compaction\n{ctx}"}
+        return {"status": "", "context": "\n".join(_build_bootstrap_context(repo_path))}
+    return {"status": "Contexer: context reloaded after compaction", "context": get_context(repo_path)}
+
+
+def get_post_compact_context(repo_path: str) -> dict:
+    """Claude PostCompact output. Back-compat envelope."""
+    from contexer.adapters import claude
+    return claude.format_post_compact(post_compact_payload(repo_path))
 
 
 _RATIONALE_WORDS = frozenset({
