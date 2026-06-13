@@ -167,19 +167,38 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _find_match(content: str, existing: list) -> dict | None:
-    """Returns the first existing entry with >70% token overlap, or None."""
+    """Returns an existing entry with >70% token overlap, or None.
+
+    Prefers an architecture-subtype match when several entries qualify, so the
+    promotion path (architecture → pattern) is never starved by an earlier
+    constraint/convention near-duplicate that happens to appear first in the list.
+
+    Cheap size pre-filter before the set intersection: the ratio |A∩B|/max(|A|,|B|)
+    can exceed 0.7 only if min(|A|,|B|)/max(|A|,|B|) does (since |A∩B| ≤ min). So a
+    length check skips the expensive intersection for most candidates — this is what
+    keeps write latency flat as the store fills toward MAX_ENTRIES."""
     if not existing:
         return None
     tokens = _tokenize(content)
     if not tokens:
         return None
+    n = len(tokens)
+    first_match = None
     for entry in existing:
         other = _tokenize(entry.get("content", ""))
         if not other:
             continue
-        if len(tokens & other) / max(len(tokens), len(other)) > 0.7:
-            return entry
-    return None
+        m = len(other)
+        hi = n if n > m else m
+        lo = m if n > m else n
+        if lo <= 0.7 * hi:                       # overlap can't clear the bar — skip intersection
+            continue
+        if len(tokens & other) / hi > 0.7:
+            if entry.get("subtype") == "architecture":
+                return entry                     # architecture wins — promote-eligible
+            if first_match is None:
+                first_match = entry
+    return first_match
 
 
 def _is_novel(content: str, existing: list) -> bool:
@@ -193,12 +212,37 @@ def _passes_filter(content: str, existing: list) -> bool:
     return _is_novel(content, decisions_only)
 
 
-def _try_promote_to_pattern(match: dict, data: dict) -> bool:
-    """Increment occurrence_count on a matched entry. Promotes architecture → pattern
-    when the count reaches _PATTERN_PROMOTION_THRESHOLD. Always returns True (caller saves)."""
+def _session_set(match: dict) -> set[str]:
+    """Distinct sessions that have hit this entry. Reconstructs from the legacy
+    single `session_id` for entries written before `session_ids` existed."""
+    sessions = set(match.get("session_ids") or [])
+    legacy = match.get("session_id")
+    if legacy:
+        sessions.add(legacy)
+    return sessions
+
+
+def _try_promote_to_pattern(match: dict, data: dict, session_id: str = "") -> bool:
+    """Record another hit on a matched entry. Increments occurrence_count on every hit
+    (so within-session re-application counts, per design) and tracks the distinct
+    session_ids that have produced this approach.
+
+    Promotes architecture → pattern when either signal clears the threshold:
+      • ≥2 distinct sessions  — independent rediscovery, the strongest pattern signal;
+      • ≥2 total occurrences  — within-session re-application (a single session that
+        applies the same approach twice still promotes, by explicit requirement).
+    Tracking distinct sessions keeps the cross-session path auditable and lets future
+    callers tell a genuine two-session pattern apart from one chatty session.
+    Always returns True (caller saves)."""
     count = match.get("occurrence_count", 1) + 1
     match["occurrence_count"] = count
-    if match.get("subtype") == "architecture" and count >= _PATTERN_PROMOTION_THRESHOLD:
+    sessions = _session_set(match)
+    if session_id:
+        sessions.add(session_id)
+    match["session_ids"] = sorted(sessions)
+    if match.get("subtype") == "architecture" and (
+        len(sessions) >= _PATTERN_PROMOTION_THRESHOLD or count >= _PATTERN_PROMOTION_THRESHOLD
+    ):
         match["subtype"] = "pattern"
     return True
 
@@ -340,7 +384,7 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
     decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
     match = _find_match(content, decisions_only)
     if match is not None:
-        _try_promote_to_pattern(match, data)
+        _try_promote_to_pattern(match, data, session_id)
         _save(repo_path, data)
         return None, None
     entry = {
@@ -349,7 +393,9 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         "subtype": subtype,
         "content": content,
         "session_id": session_id,
+        "session_ids": [session_id],
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "occurrence_count": 1,
     }
     data["entries"].append(entry)
     data["entries"] = data["entries"][-MAX_ENTRIES:]
@@ -407,7 +453,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
     match = _find_match(content, decisions_only)
     if match is not None:
-        _try_promote_to_pattern(match, data)
+        _try_promote_to_pattern(match, data, session_id)
         _save(repo_path, data)
         return False, None
     entry = {
@@ -416,6 +462,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         "subtype": subtype,
         "content": content,
         "session_id": session_id,
+        "session_ids": [session_id],
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "occurrence_count": 1,
     }
@@ -669,14 +716,10 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         for d in pre_loaded:
             sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
     if deferred_count > 0:
+        # Patterns are pre-loaded above, so they are NOT part of the deferred set —
+        # only architecture (and any subtype-less) decisions are fetched on demand.
         arch_count = sum(1 for d in decisions if d.get("subtype") == "architecture")
-        pat_count = sum(1 for d in decisions if d.get("subtype") == "pattern")
-        breakdown_parts = []
-        if arch_count:
-            breakdown_parts.append(f"{arch_count} architecture")
-        if pat_count:
-            breakdown_parts.append(f"{pat_count} pattern")
-        breakdown = f" ({', '.join(breakdown_parts)})" if breakdown_parts else ""
+        breakdown = f" ({arch_count} architecture)" if arch_count else ""
         sys_parts.append(
             f"{deferred_count} decision(s) stored{breakdown}. "
             "Call get_context BEFORE reading files for any question about architecture, "
@@ -685,6 +728,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
 
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
+    patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
 
     loaded_parts: list[str] = []
     if global_rules:
@@ -693,6 +737,8 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         loaded_parts.append(_pl(len(constraints), "constraint"))
     if conventions:
         loaded_parts.append(_pl(len(conventions), "convention"))
+    if patterns:
+        loaded_parts.append(_pl(len(patterns), "pattern"))
 
     sentences: list[str] = []
     if loaded_parts:

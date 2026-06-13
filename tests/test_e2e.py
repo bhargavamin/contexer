@@ -844,6 +844,64 @@ class TestPatternPromotion:
         pattern_gaps = [g for g in result["gaps"] if g["subtype"] == "pattern"]
         assert pattern_gaps, "high-insight web repo should produce at least one pattern gap"
 
+    def test_distinct_session_ids_tracked(self, tmp_repo):
+        """Each hit from a new session is recorded; same session is not double-listed."""
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", "s1", "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", "s1", "architecture")
+        store.update_decision(tmp_repo, "Using FastAPI for HTTP routing", "s2", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert set(entry["session_ids"]) == {"s1", "s2"}
+        assert entry["occurrence_count"] == 3
+
+    def test_cross_session_rediscovery_promotes(self, tmp_repo):
+        """A second, independent session rediscovering the same approach promotes it."""
+        store.update_decision(tmp_repo, "Use Postgres for the persistence layer", "s1", "architecture")
+        store.update_decision(tmp_repo, "Postgres used for the persistence layer", "s2", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "pattern"
+
+    def test_legacy_entry_session_id_seeds_distinct_set(self, tmp_repo):
+        """Legacy entries with only `session_id` contribute that id to the distinct set."""
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        data = store._load(tmp_repo)
+        data["entries"][0].pop("session_ids", None)  # simulate pre-change entry
+        store._save(tmp_repo, data)
+        store.update_decision(tmp_repo, "Redis used for caching", "s2", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert set(entry["session_ids"]) == {"s1", "s2"}
+
+    def test_architecture_match_preferred_over_constraint(self, tmp_repo):
+        """When both a constraint and an architecture entry near-match, the architecture
+        one is promoted — it must not be starved by an earlier-listed constraint."""
+        store.update_decision(tmp_repo, "Always validate requests at the API boundary", SESSION, "constraint")
+        store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic models", SESSION, "architecture")
+        # Re-state the architecture approach; the constraint appears first in the list.
+        store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
+        assert arch["subtype"] == "pattern"
+        constraint = next(e for e in data["entries"] if e["content"].startswith("Always"))
+        assert constraint["subtype"] == "constraint", "constraint must not be promoted"
+
+    def test_deferred_breakdown_excludes_preloaded_patterns(self, tmp_repo):
+        """The 'load on demand' breakdown must count only architecture — patterns are
+        pre-loaded inline, so claiming they are deferred would force a wasted get_context."""
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # → pattern
+        store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
+        ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "1 decision(s) stored (1 architecture)" in ctx
+        assert "pattern)" not in ctx  # no deferred-pattern claim
+
+    def test_preloaded_patterns_counted_in_summary(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # → pattern
+        summary = store.get_session_start_context(tmp_repo)["systemMessage"]
+        assert "1 pattern loaded" in summary
+
 
 # ── 7. Context retrieval ──────────────────────────────────────────────────────
 
