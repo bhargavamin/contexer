@@ -54,3 +54,34 @@ class TestSelect:
     def test_select_unknown_raises(self):
         with pytest.raises(KeyError):
             adapters.select("emacs")
+
+
+from contexer.adapters import claude
+
+
+class TestClaudeFormatters:
+    def test_session_start_with_context(self):
+        d = claude.format_session_start({"status": "S", "context": "C"})
+        assert d["systemMessage"] == "S"
+        assert d["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert d["hookSpecificOutput"]["additionalContext"] == "C"
+
+    def test_session_start_empty_context_omits_injection(self):
+        d = claude.format_session_start({"status": "only status", "context": ""})
+        assert d == {"systemMessage": "only status"}
+
+    def test_bootstrap_prompt_empty_is_empty_dict(self):
+        assert claude.format_bootstrap_prompt({"status": "", "context": ""}) == {}
+
+    def test_bootstrap_prompt_with_context(self):
+        d = claude.format_bootstrap_prompt({"status": "", "context": "menu"})
+        assert d["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert d["hookSpecificOutput"]["additionalContext"] == "menu"
+
+    def test_post_compact_combines_status_and_context(self):
+        d = claude.format_post_compact({"status": "reloaded", "context": "ctx"})
+        assert d == {"systemMessage": "reloaded\nctx"}
+
+    def test_post_compact_context_only(self):
+        d = claude.format_post_compact({"status": "", "context": "bootstrap lines"})
+        assert d == {"systemMessage": "bootstrap lines"}
