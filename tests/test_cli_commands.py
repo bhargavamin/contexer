@@ -294,9 +294,11 @@ class TestPermissionDeniedGuidance:
             claude_dir.chmod(0o700)
 
     def test_uninstall_permission_error_guarded(self, installed_home, monkeypatch, capsys):
+        from contexer.adapters import claude
+
         def boom(path, data):
             raise PermissionError(13, "Permission denied", str(path))
-        monkeypatch.setattr(cli, "_save", boom)
+        monkeypatch.setattr(claude, "_save", boom)
         monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
         with pytest.raises(SystemExit) as exc:
             cli.main()
