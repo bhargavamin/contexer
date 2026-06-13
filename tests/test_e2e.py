@@ -961,6 +961,51 @@ class TestPatternPromotion:
         items = [{"timestamp": "2026-01-01", "occurrence_count": 1}]
         assert store._keep_top(items, 5) is items
 
+    # ── review-round fixes ───────────────────────────────────────────────────
+
+    def test_empty_token_content_not_stored(self, tmp_repo):
+        """Punctuation/whitespace-only content tokenizes to empty and must be rejected,
+        not stored as a blank decision (regression guard for the _find_match refactor)."""
+        stored, eid = store.update_decision(tmp_repo, "!!! ...", SESSION, "architecture")
+        assert stored is False and eid is None
+        data = store._load(tmp_repo)
+        assert not [e for e in data["entries"] if e["type"] == "decision"]
+
+    def test_empty_token_global_content_not_stored(self, tmp_repo):
+        stored, _ = store.update_global_decision("???", SESSION, "constraint")
+        assert stored is False
+
+    def test_pinned_new_entry_survives_eviction_at_capacity(self, tmp_repo, monkeypatch):
+        """A freshly written count-1 decision must persist even when the store is full of
+        higher-count entries — otherwise update_decision reports success for a lost write."""
+        monkeypatch.setattr(store, "MAX_ENTRIES", 3)
+        # Fill the cap with recurring (count-2) decisions.
+        recurring = [
+            ("Adopt GraphQL for the public client API surface", "Adopt GraphQL for the public client API layer"),
+            ("Stream domain events through Kafka topics here", "Stream domain events through Kafka topics now"),
+            ("Persist relational data in CockroachDB clusters today", "Persist relational data in CockroachDB clusters now"),
+        ]
+        for a, b in recurring:
+            store.update_decision(tmp_repo, a, SESSION, "architecture")
+            store.update_decision(tmp_repo, b, SESSION, "architecture")  # → count 2
+        stored, eid = store.update_decision(tmp_repo, "Brand new one-off decision lands last here", SESSION, "architecture")
+        assert stored is True
+        data = store._load(tmp_repo)
+        assert any(e["id"] == eid for e in data["entries"]), "pinned new entry must not be evicted"
+
+    def test_constraint_hook_near_dup_does_not_write_or_promote(self, tmp_repo):
+        """capture_user_constraint is a silent no-op on a near-duplicate: no disk write,
+        and it must never promote an architecture entry from a constraint phrasing."""
+        store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
+        before = (store._store_path(tmp_repo)).stat().st_mtime_ns
+        eid, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
+        assert eid is None
+        data = store._load(tmp_repo)
+        arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
+        assert arch["subtype"] == "architecture", "constraint hook must not promote architecture"
+        assert arch.get("occurrence_count", 1) == 1, "constraint hook must not bump the count"
+        assert (store._store_path(tmp_repo)).stat().st_mtime_ns == before, "no write on near-dup"
+
 
 # ── 7. Context retrieval ──────────────────────────────────────────────────────
 

@@ -112,7 +112,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save_global(data)
     return True, entry["id"]
 
@@ -201,7 +201,16 @@ def _find_match(content: str, existing: list) -> dict | None:
     return first_match
 
 
+def _is_storable(content: str) -> bool:
+    """Content needs at least one real token to be a storable decision. Punctuation-
+    or whitespace-only content is rejected — this preserves the pre-refactor behavior
+    where empty-token content was treated as non-novel and never stored."""
+    return bool(_tokenize(content))
+
+
 def _is_novel(content: str, existing: list) -> bool:
+    if not _is_storable(content):
+        return False
     return _find_match(content, existing) is None
 
 
@@ -223,16 +232,15 @@ def _session_set(match: dict) -> set[str]:
 
 
 def _try_promote_to_pattern(match: dict, data: dict, session_id: str = "") -> bool:
-    """Record another hit on a matched entry. Increments occurrence_count on every hit
-    (so within-session re-application counts, per design) and tracks the distinct
-    session_ids that have produced this approach.
+    """Record another hit on a matched entry and promote architecture → pattern once
+    it recurs. Increments occurrence_count on every hit — whether the re-application is
+    cross-session (a fresh session rediscovers the approach) or within-session (the
+    same session applies it twice) — and promotes when the count clears the threshold.
 
-    Promotes architecture → pattern when either signal clears the threshold:
-      • ≥2 distinct sessions  — independent rediscovery, the strongest pattern signal;
-      • ≥2 total occurrences  — within-session re-application (a single session that
-        applies the same approach twice still promotes, by explicit requirement).
-    Tracking distinct sessions keeps the cross-session path auditable and lets future
-    callers tell a genuine two-session pattern apart from one chatty session.
+    The distinct session_ids set is tracked alongside the count for auditability (it
+    lets a caller tell a genuine two-session pattern from one chatty session), but the
+    count is the promotion trigger: any re-hit takes a count-1 entry to 2, so distinct
+    sessions never need to be consulted to reach the threshold of 2.
     Always returns True (caller saves)."""
     count = match.get("occurrence_count", 1) + 1
     match["occurrence_count"] = count
@@ -240,29 +248,33 @@ def _try_promote_to_pattern(match: dict, data: dict, session_id: str = "") -> bo
     if session_id:
         sessions.add(session_id)
     match["session_ids"] = sorted(sessions)
-    if match.get("subtype") == "architecture" and (
-        len(sessions) >= _PATTERN_PROMOTION_THRESHOLD or count >= _PATTERN_PROMOTION_THRESHOLD
-    ):
+    if match.get("subtype") == "architecture" and count >= _PATTERN_PROMOTION_THRESHOLD:
         match["subtype"] = "pattern"
     return True
 
 
-def _keep_top(items: list, limit: int) -> list:
+def _keep_top(items: list, limit: int, pin_last: bool = False) -> list:
     """Keep the `limit` most-entrenched items, returned in chronological order.
 
     Ranking is by occurrence_count (how often the decision recurred), with recency
     as the tiebreak — so a proven, frequently-rediscovered decision survives both
     storage eviction at MAX_ENTRIES and display truncation, instead of being dropped
     just for being old or not the most recent. Items at or below the cap are returned
-    unchanged, so behaviour is identical until a cap is actually exceeded."""
+    unchanged, so behaviour is identical until a cap is actually exceeded.
+
+    pin_last guarantees the final item survives, used by storage callers that append
+    then cap: without it a fresh count-1 entry could be evicted by older high-count
+    entries while the caller still reports the write as stored."""
     if len(items) <= limit:
         return items
+    pinned = [items[-1]] if (pin_last and limit >= 1) else []
+    pool = items[:-1] if pinned else items
     ranked = sorted(
-        items,
+        pool,
         key=lambda x: (x.get("occurrence_count", 1), x.get("timestamp", "")),
         reverse=True,
     )
-    kept = ranked[:limit]
+    kept = ranked[: limit - len(pinned)] + pinned
     kept.sort(key=lambda x: x.get("timestamp", ""))  # restore append/chronological order
     return kept
 
@@ -406,12 +418,14 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
     if not is_constraint:
         return None, None
     content = _sanitize_directive(prompt.strip())[:600]
+    if not _is_storable(content):
+        return None, None
     data = _load(repo_path)
     decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-    match = _find_match(content, decisions_only)
-    if match is not None:
-        _try_promote_to_pattern(match, data, session_id)
-        _save(repo_path, data)
+    # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
+    # Promotion is driven only through update_decision (Claude's update_context channel),
+    # so a constraint phrasing can't quietly flip an architecture entry to a pattern here.
+    if _find_match(content, decisions_only) is not None:
         return None, None
     entry = {
         "id": str(uuid.uuid4()),
@@ -424,7 +438,7 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         "occurrence_count": 1,
     }
     data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return entry["id"], content
 
@@ -469,12 +483,14 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return entry["id"]
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+    if not _is_storable(content):
+        return False, None
     data = _load(repo_path)
     decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
     match = _find_match(content, decisions_only)
@@ -493,7 +509,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         "occurrence_count": 1,
     }
     data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return True, entry["id"]
 
