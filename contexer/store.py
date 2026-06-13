@@ -112,7 +112,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
     _save_global(data)
     return True, entry["id"]
 
@@ -147,12 +147,12 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
 
     if decisions:
         total = len(decisions)
-        shown = decisions[-display_limit:]
+        shown = _keep_top(decisions, display_limit)
         filter_note = f" — showing {len(shown)} of {total}" if total > display_limit else ""
         lines.append(f"## Global decisions{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
     elif is_filtered:
         lines.append("No matching global decisions found.")
 
@@ -245,6 +245,32 @@ def _try_promote_to_pattern(match: dict, data: dict, session_id: str = "") -> bo
     ):
         match["subtype"] = "pattern"
     return True
+
+
+def _keep_top(items: list, limit: int) -> list:
+    """Keep the `limit` most-entrenched items, returned in chronological order.
+
+    Ranking is by occurrence_count (how often the decision recurred), with recency
+    as the tiebreak — so a proven, frequently-rediscovered decision survives both
+    storage eviction at MAX_ENTRIES and display truncation, instead of being dropped
+    just for being old or not the most recent. Items at or below the cap are returned
+    unchanged, so behaviour is identical until a cap is actually exceeded."""
+    if len(items) <= limit:
+        return items
+    ranked = sorted(
+        items,
+        key=lambda x: (x.get("occurrence_count", 1), x.get("timestamp", "")),
+        reverse=True,
+    )
+    kept = ranked[:limit]
+    kept.sort(key=lambda x: x.get("timestamp", ""))  # restore append/chronological order
+    return kept
+
+
+def _recur_suffix(d: dict) -> str:
+    """' ×N' confidence marker for a decision seen more than once; '' for a one-off."""
+    count = d.get("occurrence_count", 1)
+    return f" ×{count}" if count > 1 else ""
 
 
 # Prescriptive constraint/convention signals in user prompts.
@@ -398,7 +424,7 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         "occurrence_count": 1,
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
     _save(repo_path, data)
     return entry["id"], content
 
@@ -443,7 +469,7 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
     _save(repo_path, data)
     return entry["id"]
 
@@ -467,7 +493,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         "occurrence_count": 1,
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES)
     _save(repo_path, data)
     return True, entry["id"]
 
@@ -714,7 +740,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
-            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+            sys_parts.append(f"- [{d.get('subtype', '')}]{_recur_suffix(d)} {d['content']}")
     if deferred_count > 0:
         # Patterns are pre-loaded above, so they are NOT part of the deferred set —
         # only architecture (and any subtype-less) decisions are fetched on demand.
@@ -981,13 +1007,13 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 parts.append(f"type='{entry_type}'")
             filter_note = f" (filtered: {', '.join(parts)})"
         total = len(decisions)
-        shown = decisions[-display_limit:]
+        shown = _keep_top(decisions, display_limit)
         if total > display_limit:
             filter_note += f" — showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
         lines.append("")
     elif is_filtered:
         parts = []

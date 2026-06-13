@@ -902,6 +902,65 @@ class TestPatternPromotion:
         summary = store.get_session_start_context(tmp_repo)["systemMessage"]
         assert "1 pattern loaded" in summary
 
+    # ── recurrence counter use-cases (#1 truncation, #2 eviction, #3 inline ×N) ──
+
+    def test_recurrence_marker_shown_in_get_context(self, tmp_repo):
+        """A decision seen more than once is annotated with ×N in get_context output."""
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        out = store.get_context(tmp_repo)
+        assert "×2" in out
+
+    def test_no_recurrence_marker_for_one_off(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
+        out = store.get_context(tmp_repo)
+        assert "×" not in out
+
+    def test_recurrence_marker_in_session_start_preload(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # → pattern ×2
+        ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "×2" in ctx
+
+    def test_truncation_keeps_high_recurrence_over_recent(self, tmp_repo):
+        """When more decisions exist than the display cap, the recurring one survives
+        even if older — it is not pushed out by newer one-off decisions."""
+        # One recurring decision (count 2), stored first so it is the OLDEST.
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        # Fill past the unfiltered display cap with newer one-off decisions.
+        for i in range(store._UNFILTERED_DISPLAY + 3):
+            store.update_decision(tmp_repo, f"Unique one-off decision number {i} stands alone", SESSION, "architecture")
+        out = store.get_context(tmp_repo)  # unfiltered → capped at _UNFILTERED_DISPLAY
+        assert "FastAPI" in out, "recurring decision should survive truncation despite being oldest"
+
+    def test_eviction_keeps_high_recurrence_at_capacity(self, tmp_repo, monkeypatch):
+        """At MAX_ENTRIES, a frequently-recurring decision is retained even when oldest."""
+        monkeypatch.setattr(store, "MAX_ENTRIES", 5)
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # count 2, oldest
+        # Mutually-distinct one-off decisions so each is stored separately (no near-dup collapse).
+        fillers = [
+            "Adopt GraphQL for the public client API surface",
+            "Stream domain events through Kafka topics",
+            "Persist relational data in CockroachDB clusters",
+            "Render the marketing site with Astro islands",
+            "Queue background jobs via Celery workers",
+            "Cache hot keys inside a Redis sidecar",
+            "Ship logs to Loki with Promtail agents",
+            "Authenticate users through Auth0 tenants",
+        ]
+        for f in fillers:
+            store.update_decision(tmp_repo, f, SESSION, "architecture")
+        data = store._load(tmp_repo)
+        assert len(data["entries"]) == 5
+        assert any("FastAPI" in e["content"] for e in data["entries"]), "recurring decision must not be evicted"
+
+    def test_keep_top_noop_under_limit(self, tmp_repo):
+        """Below the cap, _keep_top returns the list unchanged (same object, same order)."""
+        items = [{"timestamp": "2026-01-01", "occurrence_count": 1}]
+        assert store._keep_top(items, 5) is items
+
 
 # ── 7. Context retrieval ──────────────────────────────────────────────────────
 
