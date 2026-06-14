@@ -121,3 +121,23 @@ class TestClaudeCaptureEntrypoints:
         assert claude.capture_task(tmp_repo, "garbage") == "{}"
         assert claude.capture_constraint(tmp_repo, "garbage") == "{}"
         assert claude.rationale(tmp_repo, "garbage") == "{}"
+
+
+from contexer.adapters import cursor
+
+
+class TestCursorFormatters:
+    def test_session_start_injects_additional_context_with_nudge(self):
+        d = cursor.format_session_start({"status": "ignored on cursor", "context": "RULES"})
+        assert d["additional_context"].startswith("RULES")
+        assert "get_context" in d["additional_context"]   # behavioral nudge appended
+        assert "update_context" in d["additional_context"]
+        assert "systemMessage" not in d  # cursor has no systemMessage channel
+
+    def test_session_start_empty_context_still_emits_nudge_only(self):
+        # Even with no stored rules, the nudge alone is worth injecting once.
+        d = cursor.format_session_start({"status": "", "context": ""})
+        assert "get_context" in d["additional_context"]
+
+    def test_prompt_passthrough_continue_true(self):
+        assert cursor.format_prompt_passthrough() == {"continue": True}
