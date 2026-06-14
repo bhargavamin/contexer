@@ -181,14 +181,27 @@ def uninstall(home: Path) -> list[str]:
     return log
 
 
-def status_lines(home: Path) -> list[str]:
+def _mcp_and_hooks_ok(home: Path) -> tuple:
+    """Read the Cursor config (tolerant of corruption) and report (mcp_entry, hooks_ok).
+    Shared by status_lines and is_installed."""
     cursor_dir = home / ".cursor"
     mcp = base._load_safe(cursor_dir / "mcp.json").get("mcpServers", {}).get("contexer")
     hk = base._load_safe(cursor_dir / "hooks.json").get("hooks", {})
     ss = hk.get("sessionStart", []) if isinstance(hk, dict) else []
     hooks_ok = any(_HOOK_MARKER_SS in h.get("command", "") for h in ss)
+    return mcp, hooks_ok
+
+
+def status_lines(home: Path) -> list[str]:
+    mcp, hooks_ok = _mcp_and_hooks_ok(home)
     return [
         "  [cursor]",
         f"    MCP server: {'registered' if mcp else 'NOT registered'}",
         f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
     ]
+
+
+def is_installed(home: Path) -> bool:
+    """True when both the MCP server and the sessionStart hook are wired for Cursor."""
+    mcp, hooks_ok = _mcp_and_hooks_ok(home)
+    return bool(mcp) and hooks_ok

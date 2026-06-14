@@ -365,3 +365,34 @@ class TestUpdateCheck:
         assert cli._version_tuple("0.5.4") == (0, 5, 4)
         assert cli._version_tuple("0.5.x") is None
         assert cli._version_tuple("unknown (not installed as a package)") is None
+
+
+# ── multi-target status ───────────────────────────────────────────────────────
+
+class TestStatusMultiTarget:
+    """status() with --target cursor (and the target-aware installed_ok check)."""
+
+    @pytest.fixture
+    def cursor_installed_home(self, clean_home, monkeypatch):
+        """Install only for cursor via cli.main() with monkeypatched argv."""
+        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "cursor"])
+        cli.main()
+        return clean_home
+
+    def test_status_shows_cursor_when_installed(self, cursor_installed_home, capsys):
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "[cursor]" in out
+
+    def test_cursor_only_install_not_reported_missing(self, cursor_installed_home, capsys):
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "Not fully installed" not in out
+
+    def test_clean_home_default_target_still_reports_not_fully_installed(self, clean_home, capsys):
+        # Regression guard: default target (no --target flag) on a clean home
+        # must still show "Not fully installed" — _resolve_targets([]) falls back
+        # to [claude], claude.is_installed(clean_home) is False.
+        status()
+        out = capsys.readouterr().out
+        assert "Not fully installed" in out

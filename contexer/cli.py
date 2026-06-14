@@ -135,9 +135,11 @@ def status(rest: list | None = None) -> None:
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
 
+    # Resolve targets once — used for both the status_lines loop and installed_ok.
     # status is a diagnostic — it must survive any state it might be asked to
     # diagnose, including corrupt config files and hand-edited entries.
-    installed_ok = claude.is_installed(home)
+    targets = _resolve_targets(rest or [])
+    installed_ok = all(a.is_installed(home) for a in targets)
 
     store_dir = home / ".contexer"
     swept = 0
@@ -170,7 +172,7 @@ def status(rest: list | None = None) -> None:
 
     print(f"contexer {installed}")
     print(f"  binary:       {bin_path}")
-    for adapter in _resolve_targets(rest or []):
+    for adapter in targets:
         for line in adapter.status_lines(home):
             print(line)
     print(f"  store dir:    {store_dir}{'' if store_dir.exists() else ' (absent)'}")
