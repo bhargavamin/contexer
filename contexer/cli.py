@@ -165,7 +165,9 @@ def install() -> None:
         "rm -f \"$FLAG\" && "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
         "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
-        "— call update_context for any architecture, pattern, constraint, or convention decisions before responding.\"}}'; "
+        "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
+        "(2) any EXISTING approach you applied again (same or similar content is fine — "
+        "the server deduplicates and tracks repetition without storing a duplicate).\"}}'; "
         "else echo '{}'; fi"
     )
 

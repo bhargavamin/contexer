@@ -363,6 +363,9 @@ class TestStorageAtCapacity:
         stats = _pstats(times)
         print(f"\n  Novelty filter write latency at 500 entries (20 writes):")
         _print_stats("Stats", stats)
+        # The size pre-filter in _find_match skips the set intersection for most
+        # candidates, so write latency stays flat at capacity (~20ms p99 locally).
+        # 100ms leaves ~5x headroom for slower CI runners.
         assert stats["p99"] < 100.0
 
 

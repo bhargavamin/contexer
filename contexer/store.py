@@ -111,7 +111,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save_global(data)
     return True, entry["id"]
 
@@ -146,12 +146,12 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
 
     if decisions:
         total = len(decisions)
-        shown = decisions[-display_limit:]
+        shown = _keep_top(decisions, display_limit)
         filter_note = f" — showing {len(shown)} of {total}" if total > display_limit else ""
         lines.append(f"## Global decisions{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
     elif is_filtered:
         lines.append("No matching global decisions found.")
 
@@ -165,20 +165,44 @@ def _tokenize(text: str) -> set[str]:
     return set(_PUNCT_RE.sub("", text.lower()).split())
 
 
-def _is_novel(content: str, existing: list) -> bool:
+def _find_match(content: str, existing: list) -> dict | None:
+    """Returns the first existing entry with >70% token overlap, or None.
+
+    Cheap size pre-filter before the set intersection: the ratio |A∩B|/max(|A|,|B|)
+    can exceed 0.7 only if min(|A|,|B|)/max(|A|,|B|) does (since |A∩B| ≤ min). So a
+    length check skips the expensive intersection for most candidates — this is what
+    keeps write latency flat as the store fills toward MAX_ENTRIES."""
     if not existing:
-        return True
+        return None
     tokens = _tokenize(content)
     if not tokens:
-        return False
+        return None
+    n = len(tokens)
     for entry in existing:
         other = _tokenize(entry.get("content", ""))
         if not other:
             continue
-        overlap = len(tokens & other) / max(len(tokens), len(other))
-        if overlap > 0.7:
-            return False
-    return True
+        m = len(other)
+        hi = n if n > m else m
+        lo = m if n > m else n
+        if lo <= 0.7 * hi:                       # overlap can't clear the bar — skip intersection
+            continue
+        if len(tokens & other) / hi > 0.7:
+            return entry
+    return None
+
+
+def _is_storable(content: str) -> bool:
+    """Content needs at least one real token to be a storable decision. Punctuation-
+    or whitespace-only content is rejected — this preserves the pre-refactor behavior
+    where empty-token content was treated as non-novel and never stored."""
+    return bool(_tokenize(content))
+
+
+def _is_novel(content: str, existing: list) -> bool:
+    if not _is_storable(content):
+        return False
+    return _find_match(content, existing) is None
 
 
 def _passes_filter(content: str, existing: list) -> bool:
@@ -186,6 +210,65 @@ def _passes_filter(content: str, existing: list) -> bool:
     # Novel content always passes: update_context is only called for significant decisions.
     decisions_only = [e for e in existing if e["type"] == "decision"]
     return _is_novel(content, decisions_only)
+
+
+def _session_set(match: dict) -> set[str]:
+    """Distinct sessions that have hit this entry. Reconstructs from the legacy
+    single `session_id` for entries written before `session_ids` existed."""
+    sessions = set(match.get("session_ids") or [])
+    legacy = match.get("session_id")
+    if legacy:
+        sessions.add(legacy)
+    return sessions
+
+
+def _record_recurrence(match: dict, session_id: str = "") -> None:
+    """Record another near-duplicate hit on a matched entry: bump occurrence_count and
+    track the distinct session that produced it.
+
+    The count drives display ranking, eviction protection, and the ×N confidence marker
+    — it does NOT change the entry's subtype. A decision's category (architecture,
+    pattern, constraint, convention) is a semantic judgment made when it is captured,
+    never inferred from how often the same text recurs. Recurrence measures repetition,
+    not reuse-across-different-problems, so it cannot tell a genuine pattern from a
+    one-off decision that simply got restated."""
+    match["occurrence_count"] = match.get("occurrence_count", 1) + 1
+    sessions = _session_set(match)
+    if session_id:
+        sessions.add(session_id)
+    match["session_ids"] = sorted(sessions)
+
+
+def _keep_top(items: list, limit: int, pin_last: bool = False) -> list:
+    """Keep the `limit` most-entrenched items, returned in chronological order.
+
+    Ranking is by occurrence_count (how often the decision recurred), with recency
+    as the tiebreak — so a proven, frequently-rediscovered decision survives both
+    storage eviction at MAX_ENTRIES and display truncation, instead of being dropped
+    just for being old or not the most recent. Items at or below the cap are returned
+    unchanged, so behaviour is identical until a cap is actually exceeded.
+
+    pin_last guarantees the final item survives, used by storage callers that append
+    then cap: without it a fresh count-1 entry could be evicted by older high-count
+    entries while the caller still reports the write as stored."""
+    if len(items) <= limit:
+        return items
+    pinned = [items[-1]] if (pin_last and limit >= 1) else []
+    pool = items[:-1] if pinned else items
+    ranked = sorted(
+        pool,
+        key=lambda x: (x.get("occurrence_count", 1), x.get("timestamp", "")),
+        reverse=True,
+    )
+    kept = ranked[: limit - len(pinned)] + pinned
+    kept.sort(key=lambda x: x.get("timestamp", ""))  # restore append/chronological order
+    return kept
+
+
+def _recur_suffix(d: dict) -> str:
+    """' ×N' confidence marker for a decision seen more than once; '' for a one-off."""
+    count = d.get("occurrence_count", 1)
+    return f" ×{count}" if count > 1 else ""
 
 
 # Prescriptive constraint/convention signals in user prompts.
@@ -321,8 +404,12 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
     if not is_constraint:
         return None, None
     content = _sanitize_directive(prompt.strip())[:600]
+    if not _is_storable(content):
+        return None, None
     data = _load(repo_path)
-    if not _passes_filter(content, data["entries"]):
+    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+    # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
+    if _find_match(content, decisions_only) is not None:
         return None, None
     entry = {
         "id": str(uuid.uuid4()),
@@ -330,10 +417,12 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         "subtype": subtype,
         "content": content,
         "session_id": session_id,
+        "session_ids": [session_id],
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "occurrence_count": 1,
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return entry["id"], content
 
@@ -378,14 +467,20 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return entry["id"]
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+    if not _is_storable(content):
+        return False, None
     data = _load(repo_path)
-    if not _passes_filter(content, data["entries"]):
+    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+    match = _find_match(content, decisions_only)
+    if match is not None:
+        _record_recurrence(match, session_id)
+        _save(repo_path, data)
         return False, None
     entry = {
         "id": str(uuid.uuid4()),
@@ -393,10 +488,12 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         "subtype": subtype,
         "content": content,
         "session_id": session_id,
+        "session_ids": [session_id],
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "occurrence_count": 1,
     }
     data["entries"].append(entry)
-    data["entries"] = data["entries"][-MAX_ENTRIES:]
+    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return True, entry["id"]
 
@@ -632,7 +729,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         }
 
     count = len(decisions)
-    pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint")]
+    pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint", "pattern")]
     deferred_count = count - len(pre_loaded)
 
     sys_parts = []
@@ -643,16 +740,12 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
-            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+            sys_parts.append(f"- [{d.get('subtype', '')}]{_recur_suffix(d)} {d['content']}")
     if deferred_count > 0:
+        # Patterns are pre-loaded above, so they are NOT part of the deferred set —
+        # only architecture (and any subtype-less) decisions are fetched on demand.
         arch_count = sum(1 for d in decisions if d.get("subtype") == "architecture")
-        pat_count = sum(1 for d in decisions if d.get("subtype") == "pattern")
-        breakdown_parts = []
-        if arch_count:
-            breakdown_parts.append(f"{arch_count} architecture")
-        if pat_count:
-            breakdown_parts.append(f"{pat_count} pattern")
-        breakdown = f" ({', '.join(breakdown_parts)})" if breakdown_parts else ""
+        breakdown = f" ({arch_count} architecture)" if arch_count else ""
         sys_parts.append(
             f"{deferred_count} decision(s) stored{breakdown}. "
             "Call get_context BEFORE reading files for any question about architecture, "
@@ -661,6 +754,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
 
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
+    patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
 
     loaded_parts: list[str] = []
     if global_rules:
@@ -669,12 +763,14 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         loaded_parts.append(_pl(len(constraints), "constraint"))
     if conventions:
         loaded_parts.append(_pl(len(conventions), "convention"))
+    if patterns:
+        loaded_parts.append(_pl(len(patterns), "pattern"))
 
     sentences: list[str] = []
     if loaded_parts:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
-        sentences.append(f"{_pl(deferred_count, 'arch/pattern')} will be loaded on demand")
+        sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
 
     user_line = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
 
@@ -911,13 +1007,13 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 parts.append(f"type='{entry_type}'")
             filter_note = f" (filtered: {', '.join(parts)})"
         total = len(decisions)
-        shown = decisions[-display_limit:]
+        shown = _keep_top(decisions, display_limit)
         if total > display_limit:
             filter_note += f" — showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag} {d['content']}")
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
         lines.append("")
     elif is_filtered:
         parts = []
@@ -1437,6 +1533,30 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
             question="Any constraints that shape technical decisions?",
             hint=_constraints_hint(),
             subtype="constraint",
+        ))
+
+    # Validation placement — only if a web framework is present
+    has_web_framework = _has_dep(
+        "fastapi", "flask", "django", "express", "hono", "elysia", "fastify",
+        "next", "nuxt", "remix", "svelte", "aiohttp", "starlette",
+    )
+    if has_web_framework and not is_simple:
+        gaps.append(_gap(
+            assumption="Input validation placement not documented",
+            question="Where does input validation live — at the HTTP boundary, in the service layer, or both?",
+            hint="e.g. Pydantic models at the route layer only; or service layer validates too; or middleware",
+            subtype="pattern",
+            min_insight="high",
+        ))
+
+    # Error handling — only if production signals exist
+    if has_production_signals:
+        gaps.append(_gap(
+            assumption="Error handling approach not documented",
+            question="How are errors surfaced — exceptions bubble up, result types, or error middleware?",
+            hint="e.g. raise HTTPException at route layer; Result[T, E] types; global exception handler",
+            subtype="pattern",
+            min_insight="high",
         ))
 
     # Interview floor for repo authors: signal-conditional gaps collapse to almost

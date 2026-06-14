@@ -770,6 +770,246 @@ class TestDecisionStorage:
         assert len(data["entries"]) == 2
 
 
+# ── 6b. Pattern promotion ─────────────────────────────────────────────────────
+
+class TestPatternPromotion:
+    def test_near_duplicate_increments_occurrence_count(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry.get("occurrence_count", 1) == 2
+
+    def test_architecture_not_auto_promoted_on_recurrence(self, tmp_repo):
+        """Recurrence bumps the count but must NOT change the subtype: a restated
+        architecture decision is still that one decision, not a reusable pattern.
+        Category is a semantic judgment made at capture, never inferred from a count."""
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "architecture"
+        assert entry.get("occurrence_count") == 2
+
+    def test_convention_near_duplicate_does_not_promote(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use conventional commits for all merges", SESSION, "convention")
+        store.update_decision(tmp_repo, "Conventional commits used for all merges", SESSION, "convention")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "convention"
+
+    def test_constraint_near_duplicate_does_not_promote(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never commit secrets to the repository", SESSION, "constraint")
+        store.update_decision(tmp_repo, "Never commit secrets to the repo", SESSION, "constraint")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "constraint"
+
+    def test_new_entry_has_occurrence_count_one(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        assert entry.get("occurrence_count") == 1
+
+    def test_legacy_entry_without_field_treated_as_count_one(self, tmp_repo):
+        """Entries written before this change lack occurrence_count — must behave as count=1."""
+        store.update_decision(tmp_repo, "Use Redis for caching decisions", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        data["entries"][0].pop("occurrence_count", None)
+        store._save(tmp_repo, data)
+        store.update_decision(tmp_repo, "Redis used for caching decisions", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry.get("occurrence_count") == 2
+
+    def test_explicit_pattern_appears_in_session_start_preload(self, tmp_repo):
+        """A decision explicitly captured as a pattern is pre-loaded inline at SessionStart."""
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "route boundary" in ctx
+
+    def test_within_session_repeat_does_not_promote(self, tmp_repo):
+        """Two near-duplicate calls in one session bump the count but must NOT promote:
+        restating a decision in the same conversation is repetition, not reuse."""
+        store.update_decision(tmp_repo, "Validate inputs at HTTP boundary with Pydantic", SESSION, "architecture")
+        store.update_decision(tmp_repo, "Validate inputs at the HTTP boundary using Pydantic", SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "architecture"
+        assert entry.get("occurrence_count") == 2
+
+    def test_bootstrap_scan_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
+        Path(tmp_repo).mkdir()
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "api"\ndependencies = ["fastapi", "boto3", "stripe"]\n'
+        )
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        pattern_gaps = [g for g in result["gaps"] if g["subtype"] == "pattern"]
+        assert pattern_gaps, "high-insight web repo should produce at least one pattern gap"
+
+    def test_distinct_session_ids_tracked(self, tmp_repo):
+        """Each hit from a new session is recorded; same session is not double-listed."""
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", "s1", "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", "s1", "architecture")
+        store.update_decision(tmp_repo, "Using FastAPI for HTTP routing", "s2", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert set(entry["session_ids"]) == {"s1", "s2"}
+        assert entry["occurrence_count"] == 3
+
+    def test_cross_session_rediscovery_does_not_promote(self, tmp_repo):
+        """Independent rediscovery across sessions is tracked (count + session_ids) but
+        does not change the subtype — recurrence cannot distinguish a reused approach
+        from the same fact restated, so it never auto-promotes."""
+        store.update_decision(tmp_repo, "Use Postgres for the persistence layer", "s1", "architecture")
+        store.update_decision(tmp_repo, "Postgres used for the persistence layer", "s2", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["subtype"] == "architecture"
+        assert set(entry["session_ids"]) == {"s1", "s2"}
+
+    def test_legacy_entry_session_id_seeds_distinct_set(self, tmp_repo):
+        """Legacy entries with only `session_id` contribute that id to the distinct set."""
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        data = store._load(tmp_repo)
+        data["entries"][0].pop("session_ids", None)  # simulate pre-change entry
+        store._save(tmp_repo, data)
+        store.update_decision(tmp_repo, "Redis used for caching", "s2", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert set(entry["session_ids"]) == {"s1", "s2"}
+
+    def test_recurrence_never_changes_subtype(self, tmp_repo):
+        """No subtype is ever flipped by recurrence — a near-duplicate only bumps the
+        count on whichever entry it matches first, regardless of that entry's subtype."""
+        store.update_decision(tmp_repo, "Always validate requests at the API boundary", SESSION, "constraint")
+        store.update_decision(tmp_repo, "Always validate requests at the API boundary please", SESSION, "constraint")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["content"].startswith("Always"))
+        assert entry["subtype"] == "constraint"
+        assert entry.get("occurrence_count") == 2
+
+    def test_deferred_breakdown_excludes_preloaded_patterns(self, tmp_repo):
+        """The 'load on demand' breakdown must count only architecture — patterns are
+        pre-loaded inline, so claiming they are deferred would force a wasted get_context."""
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
+        store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
+        ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "1 decision(s) stored (1 architecture)" in ctx
+        assert "pattern)" not in ctx  # no deferred-pattern claim
+
+    def test_preloaded_patterns_counted_in_summary(self, tmp_repo):
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
+        summary = store.get_session_start_context(tmp_repo)["systemMessage"]
+        assert "1 pattern loaded" in summary
+
+    # ── recurrence counter use-cases (#1 truncation, #2 eviction, #3 inline ×N) ──
+
+    def test_recurrence_marker_shown_in_get_context(self, tmp_repo):
+        """A decision seen more than once is annotated with ×N in get_context output."""
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        out = store.get_context(tmp_repo)
+        assert "×2" in out
+
+    def test_no_recurrence_marker_for_one_off(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
+        out = store.get_context(tmp_repo)
+        assert "×" not in out
+
+    def test_recurrence_marker_in_session_start_preload(self, tmp_repo):
+        # Patterns are pre-loaded inline, so a recurring pattern shows its ×N marker there.
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
+        store.update_decision(tmp_repo, "Validate at the route boundary for all endpoints", SESSION, "pattern")  # ×2
+        ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "×2" in ctx
+
+    def test_truncation_keeps_high_recurrence_over_recent(self, tmp_repo):
+        """When more decisions exist than the display cap, the recurring one survives
+        even if older — it is not pushed out by newer one-off decisions."""
+        # One recurring decision (count 2), stored first so it is the OLDEST.
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+        # Fill past the unfiltered display cap with newer one-off decisions.
+        for i in range(store._UNFILTERED_DISPLAY + 3):
+            store.update_decision(tmp_repo, f"Unique one-off decision number {i} stands alone", SESSION, "architecture")
+        out = store.get_context(tmp_repo)  # unfiltered → capped at _UNFILTERED_DISPLAY
+        assert "FastAPI" in out, "recurring decision should survive truncation despite being oldest"
+
+    def test_eviction_keeps_high_recurrence_at_capacity(self, tmp_repo, monkeypatch):
+        """At MAX_ENTRIES, a frequently-recurring decision is retained even when oldest."""
+        monkeypatch.setattr(store, "MAX_ENTRIES", 5)
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
+        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # count 2, oldest
+        # Mutually-distinct one-off decisions so each is stored separately (no near-dup collapse).
+        fillers = [
+            "Adopt GraphQL for the public client API surface",
+            "Stream domain events through Kafka topics",
+            "Persist relational data in CockroachDB clusters",
+            "Render the marketing site with Astro islands",
+            "Queue background jobs via Celery workers",
+            "Cache hot keys inside a Redis sidecar",
+            "Ship logs to Loki with Promtail agents",
+            "Authenticate users through Auth0 tenants",
+        ]
+        for f in fillers:
+            store.update_decision(tmp_repo, f, SESSION, "architecture")
+        data = store._load(tmp_repo)
+        assert len(data["entries"]) == 5
+        assert any("FastAPI" in e["content"] for e in data["entries"]), "recurring decision must not be evicted"
+
+    def test_keep_top_noop_under_limit(self, tmp_repo):
+        """Below the cap, _keep_top returns the list unchanged (same object, same order)."""
+        items = [{"timestamp": "2026-01-01", "occurrence_count": 1}]
+        assert store._keep_top(items, 5) is items
+
+    # ── review-round fixes ───────────────────────────────────────────────────
+
+    def test_empty_token_content_not_stored(self, tmp_repo):
+        """Punctuation/whitespace-only content tokenizes to empty and must be rejected,
+        not stored as a blank decision (regression guard for the _find_match refactor)."""
+        stored, eid = store.update_decision(tmp_repo, "!!! ...", SESSION, "architecture")
+        assert stored is False and eid is None
+        data = store._load(tmp_repo)
+        assert not [e for e in data["entries"] if e["type"] == "decision"]
+
+    def test_empty_token_global_content_not_stored(self, tmp_repo):
+        stored, _ = store.update_global_decision("???", SESSION, "constraint")
+        assert stored is False
+
+    def test_pinned_new_entry_survives_eviction_at_capacity(self, tmp_repo, monkeypatch):
+        """A freshly written count-1 decision must persist even when the store is full of
+        higher-count entries — otherwise update_decision reports success for a lost write."""
+        monkeypatch.setattr(store, "MAX_ENTRIES", 3)
+        # Fill the cap with recurring (count-2) decisions.
+        recurring = [
+            ("Adopt GraphQL for the public client API surface", "Adopt GraphQL for the public client API layer"),
+            ("Stream domain events through Kafka topics here", "Stream domain events through Kafka topics now"),
+            ("Persist relational data in CockroachDB clusters today", "Persist relational data in CockroachDB clusters now"),
+        ]
+        for a, b in recurring:
+            store.update_decision(tmp_repo, a, SESSION, "architecture")
+            store.update_decision(tmp_repo, b, SESSION, "architecture")  # → count 2
+        stored, eid = store.update_decision(tmp_repo, "Brand new one-off decision lands last here", SESSION, "architecture")
+        assert stored is True
+        data = store._load(tmp_repo)
+        assert any(e["id"] == eid for e in data["entries"]), "pinned new entry must not be evicted"
+
+    def test_constraint_hook_near_dup_does_not_write_or_promote(self, tmp_repo):
+        """capture_user_constraint is a silent no-op on a near-duplicate: no disk write,
+        and it must never promote an architecture entry from a constraint phrasing."""
+        store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
+        before = (store._store_path(tmp_repo)).stat().st_mtime_ns
+        eid, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
+        assert eid is None
+        data = store._load(tmp_repo)
+        arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
+        assert arch["subtype"] == "architecture", "constraint hook must not promote architecture"
+        assert arch.get("occurrence_count", 1) == 1, "constraint hook must not bump the count"
+        assert (store._store_path(tmp_repo)).stat().st_mtime_ns == before, "no write on near-dup"
+
+
 # ── 7. Context retrieval ──────────────────────────────────────────────────────
 
 class TestContextRetrieval:
