@@ -19,7 +19,7 @@ Every Claude Code session starts fresh. No memory of what was decided last week.
 
 The result: developers re-explain the same rules every session. Claude re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
 
-**Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.**
+**Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.** It works with Claude Code and Cursor.
 
 ---
 
@@ -67,9 +67,30 @@ uv tool install contexer
 contexer install
 ```
 
-Step 3 — restart Claude Code and open any git repo. Contexer runs silently from here.
+`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor) and wires both. Pass `--target claude`, `--target cursor`, or `--target all` to override.
+
+Restart your AI assistant and open any git repo. Contexer runs silently from here.
 
 See **[docs/install.md](docs/install.md)** for verification, update, and uninstall steps.
+
+---
+
+## Use with Cursor (1.7+)
+
+```bash
+contexer install --target cursor   # or: contexer install (auto-detects ~/.cursor)
+```
+
+This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor
+hooks in `~/.cursor/hooks.json`:
+
+- `sessionStart` — injects your stored project rules and a usage nudge into the session.
+- `beforeSubmitPrompt` — silently captures your task and any "always/never" directives.
+
+**Parity note:** Cursor can only inject context at session start (not per-prompt) and
+exposes no compaction hooks. So per-prompt rationale injection and post-edit reminders
+are delivered as a one-time session-start nudge instead. The core value — automatic
+session-start injection of your stored rules — works identically to Claude Code.
 
 ---
 
@@ -214,9 +235,10 @@ On prompts unrelated to stored decisions, Contexer skips entirely — no read, n
 
 | Command | Description |
 |---|---|
-| `contexer install` | Connect Contexer to Claude Code |
+| `contexer install` | Connect Contexer (auto-detects Claude Code and/or Cursor) |
+| `contexer install --target claude\|cursor\|all` | Install for a specific tool only, or both |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
-| `contexer reinstall` | Re-sync after a Claude Code update |
+| `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
 | `contexer uninstall --purge` | Remove everything including `~/.contexer/` |
 | `contexer version` | Print installed version |
