@@ -1,8 +1,11 @@
 """Cursor integration adapter."""
 import json
+import shutil
+import sys
 from pathlib import Path
 
 from contexer import store
+from contexer.adapters import base
 
 NAME = "cursor"
 
@@ -90,3 +93,102 @@ def capture_constraint(repo_path: str, raw: str) -> str:
     except Exception:
         pass
     return json.dumps(format_prompt_passthrough())
+
+
+# ── install / uninstall / status ──────────────────────────────────────────────
+
+_HOOK_MARKER_TASK = "cursor.capture_task"
+_HOOK_MARKER_CON = "cursor.capture_constraint"
+_HOOK_MARKER_SS = "cursor.session_start"
+
+
+def _cmd(entry: str) -> str:
+    """A Cursor command hook: pass repo via "" (session_start reads workspace_roots from
+    stdin); read stdin for prompt/session. Cursor runs hooks from the project root."""
+    python = sys.executable
+    return (f'"{python}" -c "from contexer.adapters import cursor; import sys; '
+            f'print(cursor.{entry}(\'\', sys.stdin.read()))"')
+
+
+def _has(hook_list: list, marker: str) -> bool:
+    return any(marker in h.get("command", "") for h in hook_list)
+
+
+def install(home: Path) -> list[str]:
+    log: list[str] = []
+    cursor_dir = home / ".cursor"
+    contexer_bin = shutil.which("contexer") or "contexer"
+
+    mcp_path = cursor_dir / "mcp.json"
+    mcp = base._load(mcp_path)
+    mcp.setdefault("mcpServers", {})["contexer"] = {"command": contexer_bin}
+    base._save(mcp_path, mcp)
+    log.append("  ✓ MCP server registered in ~/.cursor/mcp.json")
+
+    hooks_path = cursor_dir / "hooks.json"
+    cfg = base._load(hooks_path)
+    cfg["version"] = 1
+    hk = cfg.setdefault("hooks", {})
+
+    ss = hk.setdefault("sessionStart", [])
+    if not _has(ss, _HOOK_MARKER_SS):
+        ss.append({"type": "command", "command": _cmd("session_start")})
+
+    bsp = hk.setdefault("beforeSubmitPrompt", [])
+    if not _has(bsp, _HOOK_MARKER_TASK):
+        bsp.append({"type": "command", "command": _cmd("capture_task")})
+    if not _has(bsp, _HOOK_MARKER_CON):
+        bsp.append({"type": "command", "command": _cmd("capture_constraint")})
+
+    base._save(hooks_path, cfg)
+    log.append("  ✓ Hooks registered in ~/.cursor/hooks.json")
+    log.append("  ℹ Cursor hooks require Cursor 1.7+.")
+    return log
+
+
+def uninstall(home: Path) -> list[str]:
+    log: list[str] = []
+    cursor_dir = home / ".cursor"
+
+    mcp_path = cursor_dir / "mcp.json"
+    if mcp_path.exists():
+        mcp = base._load(mcp_path)
+        if mcp.get("mcpServers", {}).pop("contexer", None):
+            base._save(mcp_path, mcp)
+            log.append("  ✓ MCP server removed from ~/.cursor/mcp.json")
+
+    hooks_path = cursor_dir / "hooks.json"
+    if hooks_path.exists():
+        cfg = base._load(hooks_path)
+        hk = cfg.get("hooks", {})
+        changed = False
+        for event, markers in {
+            "sessionStart": [_HOOK_MARKER_SS],
+            "beforeSubmitPrompt": [_HOOK_MARKER_TASK, _HOOK_MARKER_CON],
+        }.items():
+            before = hk.get(event, [])
+            after = [h for h in before
+                     if not any(m in h.get("command", "") for m in markers)]
+            if after != before:
+                changed = True
+                if after:
+                    hk[event] = after
+                else:
+                    hk.pop(event, None)
+        if changed:
+            base._save(hooks_path, cfg)
+            log.append("  ✓ Hooks removed from ~/.cursor/hooks.json")
+    return log
+
+
+def status_lines(home: Path) -> list[str]:
+    cursor_dir = home / ".cursor"
+    mcp = base._load_safe(cursor_dir / "mcp.json").get("mcpServers", {}).get("contexer")
+    hk = base._load_safe(cursor_dir / "hooks.json").get("hooks", {})
+    ss = hk.get("sessionStart", []) if isinstance(hk, dict) else []
+    hooks_ok = any(_HOOK_MARKER_SS in h.get("command", "") for h in ss)
+    return [
+        "  [cursor]",
+        f"    MCP server: {'registered' if mcp else 'NOT registered'}",
+        f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
+    ]
