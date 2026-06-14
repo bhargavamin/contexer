@@ -141,3 +141,31 @@ class TestCursorFormatters:
 
     def test_prompt_passthrough_continue_true(self):
         assert cursor.format_prompt_passthrough() == {"continue": True}
+
+
+class TestCursorEntrypoints:
+    def test_session_start_writes_current_repo_from_workspace_roots(self, tmp_repo, monkeypatch):
+        from contexer import store
+        raw = _json.dumps({"workspace_roots": [tmp_repo], "session_id": "s1"})
+        out = _json.loads(cursor.session_start("", raw))
+        assert "additional_context" in out
+        assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
+
+    def test_capture_task_writes_and_passes_through(self, tmp_repo):
+        from contexer import store
+        raw = _json.dumps({"prompt": "Refactor auth to use JWT tokens", "session_id": "s1",
+                           "workspace_roots": [tmp_repo]})
+        assert _json.loads(cursor.capture_task(tmp_repo, raw)) == {"continue": True}
+        assert "Last task" in store.get_context(tmp_repo)
+
+    def test_capture_constraint_writes_and_passes_through(self, tmp_repo):
+        from contexer import store
+        raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
+        assert _json.loads(cursor.capture_constraint(tmp_repo, raw)) == {"continue": True}
+        assert "conventional commits" in store.get_context(tmp_repo, entry_type="convention").lower() \
+            or "conventional commits" in store.get_context(tmp_repo, entry_type="constraint").lower()
+
+    def test_entrypoints_never_raise(self, tmp_repo):
+        assert _json.loads(cursor.capture_task(tmp_repo, "garbage")) == {"continue": True}
+        assert _json.loads(cursor.capture_constraint(tmp_repo, "garbage")) == {"continue": True}
+        assert _json.loads(cursor.session_start("", "garbage"))  # returns dict, no raise
