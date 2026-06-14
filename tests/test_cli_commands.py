@@ -62,7 +62,7 @@ class TestStatus:
         status()
         out = capsys.readouterr().out
         assert "registered" in out and "NOT registered" not in out
-        assert "hooks:        installed" in out
+        assert "hooks:      installed" in out
         assert "Not fully installed" not in out
 
     def test_counts_store_entries_and_current_repo(self, installed_home, capsys):
@@ -226,7 +226,7 @@ class TestStatusResilience:
         settings_path.write_text(json.dumps(settings))
         status()
         # the real hook groups are still present, so detection still works
-        assert "hooks:        installed" in capsys.readouterr().out
+        assert "hooks:      installed" in capsys.readouterr().out
 
     def test_unreadable_current_repo_does_not_crash(self, installed_home, capsys):
         current = installed_home / ".contexer" / ".current_repo"

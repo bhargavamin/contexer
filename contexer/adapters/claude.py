@@ -357,8 +357,9 @@ def status_lines(home: Path) -> list[str]:
     mcp, hooks_ok = _mcp_and_hooks_ok(home)
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
     return [
-        f"  MCP server:   {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
-        f"  hooks:        {'installed' if hooks_ok else 'missing or partial'}",
+        "  [claude]",
+        f"    MCP server: {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
+        f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
     ]
 
 
