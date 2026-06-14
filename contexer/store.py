@@ -14,7 +14,6 @@ MAX_ENTRIES = 500
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
-_PATTERN_PROMOTION_THRESHOLD = 2  # near-duplicate hits needed to promote architecture → pattern
 
 
 def _current_repo_path() -> str:
@@ -167,11 +166,7 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _find_match(content: str, existing: list) -> dict | None:
-    """Returns an existing entry with >70% token overlap, or None.
-
-    Prefers an architecture-subtype match when several entries qualify, so the
-    promotion path (architecture → pattern) is never starved by an earlier
-    constraint/convention near-duplicate that happens to appear first in the list.
+    """Returns the first existing entry with >70% token overlap, or None.
 
     Cheap size pre-filter before the set intersection: the ratio |A∩B|/max(|A|,|B|)
     can exceed 0.7 only if min(|A|,|B|)/max(|A|,|B|) does (since |A∩B| ≤ min). So a
@@ -183,7 +178,6 @@ def _find_match(content: str, existing: list) -> dict | None:
     if not tokens:
         return None
     n = len(tokens)
-    first_match = None
     for entry in existing:
         other = _tokenize(entry.get("content", ""))
         if not other:
@@ -194,11 +188,8 @@ def _find_match(content: str, existing: list) -> dict | None:
         if lo <= 0.7 * hi:                       # overlap can't clear the bar — skip intersection
             continue
         if len(tokens & other) / hi > 0.7:
-            if entry.get("subtype") == "architecture":
-                return entry                     # architecture wins — promote-eligible
-            if first_match is None:
-                first_match = entry
-    return first_match
+            return entry
+    return None
 
 
 def _is_storable(content: str) -> bool:
@@ -231,26 +222,21 @@ def _session_set(match: dict) -> set[str]:
     return sessions
 
 
-def _try_promote_to_pattern(match: dict, data: dict, session_id: str = "") -> bool:
-    """Record another hit on a matched entry and promote architecture → pattern once
-    it recurs. Increments occurrence_count on every hit — whether the re-application is
-    cross-session (a fresh session rediscovers the approach) or within-session (the
-    same session applies it twice) — and promotes when the count clears the threshold.
+def _record_recurrence(match: dict, session_id: str = "") -> None:
+    """Record another near-duplicate hit on a matched entry: bump occurrence_count and
+    track the distinct session that produced it.
 
-    The distinct session_ids set is tracked alongside the count for auditability (it
-    lets a caller tell a genuine two-session pattern from one chatty session), but the
-    count is the promotion trigger: any re-hit takes a count-1 entry to 2, so distinct
-    sessions never need to be consulted to reach the threshold of 2.
-    Always returns True (caller saves)."""
-    count = match.get("occurrence_count", 1) + 1
-    match["occurrence_count"] = count
+    The count drives display ranking, eviction protection, and the ×N confidence marker
+    — it does NOT change the entry's subtype. A decision's category (architecture,
+    pattern, constraint, convention) is a semantic judgment made when it is captured,
+    never inferred from how often the same text recurs. Recurrence measures repetition,
+    not reuse-across-different-problems, so it cannot tell a genuine pattern from a
+    one-off decision that simply got restated."""
+    match["occurrence_count"] = match.get("occurrence_count", 1) + 1
     sessions = _session_set(match)
     if session_id:
         sessions.add(session_id)
     match["session_ids"] = sorted(sessions)
-    if match.get("subtype") == "architecture" and count >= _PATTERN_PROMOTION_THRESHOLD:
-        match["subtype"] = "pattern"
-    return True
 
 
 def _keep_top(items: list, limit: int, pin_last: bool = False) -> list:
@@ -423,8 +409,6 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
     data = _load(repo_path)
     decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
     # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
-    # Promotion is driven only through update_decision (Claude's update_context channel),
-    # so a constraint phrasing can't quietly flip an architecture entry to a pattern here.
     if _find_match(content, decisions_only) is not None:
         return None, None
     entry = {
@@ -495,7 +479,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
     match = _find_match(content, decisions_only)
     if match is not None:
-        _try_promote_to_pattern(match, data, session_id)
+        _record_recurrence(match, session_id)
         _save(repo_path, data)
         return False, None
     entry = {

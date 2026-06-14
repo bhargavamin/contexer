@@ -780,12 +780,16 @@ class TestPatternPromotion:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry.get("occurrence_count", 1) == 2
 
-    def test_architecture_promoted_to_pattern_at_threshold(self, tmp_repo):
+    def test_architecture_not_auto_promoted_on_recurrence(self, tmp_repo):
+        """Recurrence bumps the count but must NOT change the subtype: a restated
+        architecture decision is still that one decision, not a reusable pattern.
+        Category is a semantic judgment made at capture, never inferred from a count."""
         store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
         store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
-        assert entry["subtype"] == "pattern"
+        assert entry["subtype"] == "architecture"
+        assert entry.get("occurrence_count") == 2
 
     def test_convention_near_duplicate_does_not_promote(self, tmp_repo):
         store.update_decision(tmp_repo, "Use conventional commits for all merges", SESSION, "convention")
@@ -816,23 +820,23 @@ class TestPatternPromotion:
         store.update_decision(tmp_repo, "Redis used for caching decisions", SESSION, "architecture")
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
-        assert entry["subtype"] == "pattern"
         assert entry.get("occurrence_count") == 2
 
-    def test_promoted_pattern_appears_in_session_start_preload(self, tmp_repo):
-        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
-        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
+    def test_explicit_pattern_appears_in_session_start_preload(self, tmp_repo):
+        """A decision explicitly captured as a pattern is pre-loaded inline at SessionStart."""
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "FastAPI" in ctx
+        assert "route boundary" in ctx
 
-    def test_within_session_repeat_promotes(self, tmp_repo):
-        """Two calls with similar content in the same session promote without cross-session."""
+    def test_within_session_repeat_does_not_promote(self, tmp_repo):
+        """Two near-duplicate calls in one session bump the count but must NOT promote:
+        restating a decision in the same conversation is repetition, not reuse."""
         store.update_decision(tmp_repo, "Validate inputs at HTTP boundary with Pydantic", SESSION, "architecture")
         store.update_decision(tmp_repo, "Validate inputs at the HTTP boundary using Pydantic", SESSION, "architecture")
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
-        assert entry["subtype"] == "pattern"
+        assert entry["subtype"] == "architecture"
         assert entry.get("occurrence_count") == 2
 
     def test_bootstrap_scan_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
@@ -854,13 +858,16 @@ class TestPatternPromotion:
         assert set(entry["session_ids"]) == {"s1", "s2"}
         assert entry["occurrence_count"] == 3
 
-    def test_cross_session_rediscovery_promotes(self, tmp_repo):
-        """A second, independent session rediscovering the same approach promotes it."""
+    def test_cross_session_rediscovery_does_not_promote(self, tmp_repo):
+        """Independent rediscovery across sessions is tracked (count + session_ids) but
+        does not change the subtype — recurrence cannot distinguish a reused approach
+        from the same fact restated, so it never auto-promotes."""
         store.update_decision(tmp_repo, "Use Postgres for the persistence layer", "s1", "architecture")
         store.update_decision(tmp_repo, "Postgres used for the persistence layer", "s2", "architecture")
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
-        assert entry["subtype"] == "pattern"
+        assert entry["subtype"] == "architecture"
+        assert set(entry["session_ids"]) == {"s1", "s2"}
 
     def test_legacy_entry_session_id_seeds_distinct_set(self, tmp_repo):
         """Legacy entries with only `session_id` contribute that id to the distinct set."""
@@ -873,32 +880,27 @@ class TestPatternPromotion:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert set(entry["session_ids"]) == {"s1", "s2"}
 
-    def test_architecture_match_preferred_over_constraint(self, tmp_repo):
-        """When both a constraint and an architecture entry near-match, the architecture
-        one is promoted — it must not be starved by an earlier-listed constraint."""
+    def test_recurrence_never_changes_subtype(self, tmp_repo):
+        """No subtype is ever flipped by recurrence — a near-duplicate only bumps the
+        count on whichever entry it matches first, regardless of that entry's subtype."""
         store.update_decision(tmp_repo, "Always validate requests at the API boundary", SESSION, "constraint")
-        store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic models", SESSION, "architecture")
-        # Re-state the architecture approach; the constraint appears first in the list.
-        store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
+        store.update_decision(tmp_repo, "Always validate requests at the API boundary please", SESSION, "constraint")
         data = store._load(tmp_repo)
-        arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
-        assert arch["subtype"] == "pattern"
-        constraint = next(e for e in data["entries"] if e["content"].startswith("Always"))
-        assert constraint["subtype"] == "constraint", "constraint must not be promoted"
+        entry = next(e for e in data["entries"] if e["content"].startswith("Always"))
+        assert entry["subtype"] == "constraint"
+        assert entry.get("occurrence_count") == 2
 
     def test_deferred_breakdown_excludes_preloaded_patterns(self, tmp_repo):
         """The 'load on demand' breakdown must count only architecture — patterns are
         pre-loaded inline, so claiming they are deferred would force a wasted get_context."""
-        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
-        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # → pattern
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
         store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
         ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
         assert "1 decision(s) stored (1 architecture)" in ctx
         assert "pattern)" not in ctx  # no deferred-pattern claim
 
     def test_preloaded_patterns_counted_in_summary(self, tmp_repo):
-        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
-        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # → pattern
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
         summary = store.get_session_start_context(tmp_repo)["systemMessage"]
         assert "1 pattern loaded" in summary
 
@@ -917,8 +919,9 @@ class TestPatternPromotion:
         assert "×" not in out
 
     def test_recurrence_marker_in_session_start_preload(self, tmp_repo):
-        store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
-        store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")  # → pattern ×2
+        # Patterns are pre-loaded inline, so a recurring pattern shows its ×N marker there.
+        store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
+        store.update_decision(tmp_repo, "Validate at the route boundary for all endpoints", SESSION, "pattern")  # ×2
         ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
         assert "×2" in ctx
 
