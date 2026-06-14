@@ -7,6 +7,7 @@ import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
+from contexer import adapters
 from contexer.adapters import claude
 from contexer.adapters.base import _is_corrupt, _load_safe
 
@@ -65,23 +66,46 @@ def _usage(stream=None) -> None:
     print(USAGE, file=stream or sys.stdout)
 
 
-def install() -> None:
+def _resolve_targets(rest: list) -> list:
+    """Parse --target claude|cursor|all from rest; default = auto-detect, falling back to claude."""
+    target = None
+    if "--target" in rest:
+        i = rest.index("--target")
+        if i + 1 < len(rest):
+            target = rest[i + 1]
+    if target:
+        try:
+            return adapters.select(target)
+        except KeyError:
+            print(f"Unknown target: {target} (choose claude, cursor, or all)",
+                  file=sys.stderr)
+            sys.exit(1)
+    detected = adapters.detect()
+    return detected or [adapters.get("claude")]
+
+
+def install(rest: list | None = None) -> None:
     home = Path.home()
     (home / ".contexer").mkdir(exist_ok=True)
-    for line in claude.install(home):
-        print(line)
+    for adapter in _resolve_targets(rest or []):
+        print(f"Installing for {adapter.NAME}...")
+        for line in adapter.install(home):
+            print(line)
     print()
-    print("Done. Restart Claude Code and open any git repo to activate Contexer.")
+    print("Done. Restart your AI assistant and open any git repo to activate Contexer.")
 
 
-def uninstall(purge: bool = False) -> None:
+def uninstall(rest: list | None = None, purge: bool = False) -> None:
     home = Path.home()
-    for line in claude.uninstall(home):
-        print(line)
+    _rest = rest or []
+    _purge = purge or ("--purge" in _rest)
+    for adapter in _resolve_targets(_rest):
+        for line in adapter.uninstall(home):
+            print(line)
 
     store_dir = home / ".contexer"
     print()
-    if purge:
+    if _purge:
         if store_dir.exists():
             shutil.rmtree(store_dir)
             print(f"  ✓ Removed {store_dir} (stored context purged)")
@@ -107,7 +131,7 @@ def reinstall() -> None:
     print("run `uv tool install --reinstall contexer`, then restart Claude Code.")
 
 
-def status() -> None:
+def status(rest: list | None = None) -> None:
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
 
@@ -146,8 +170,9 @@ def status() -> None:
 
     print(f"contexer {installed}")
     print(f"  binary:       {bin_path}")
-    for line in claude.status_lines(home):
-        print(line)
+    for adapter in _resolve_targets(rest or []):
+        for line in adapter.status_lines(home):
+            print(line)
     print(f"  store dir:    {store_dir}{'' if store_dir.exists() else ' (absent)'}")
     print(f"  repo stores:  {len(stores)} ({entries} entries total)")
     if latest_t and installed_t and latest_t > installed_t:
@@ -207,13 +232,13 @@ def main() -> None:
     elif cmd in ("help", "--help", "-h"):
         _usage()
     elif cmd == "install":
-        _run_guarded(install)
+        _run_guarded(lambda: install(rest))
     elif cmd == "uninstall":
-        _run_guarded(lambda: uninstall(purge="--purge" in rest))
+        _run_guarded(lambda: uninstall(rest))
     elif cmd == "reinstall":
         _run_guarded(reinstall)
     elif cmd == "status":
-        status()
+        status(rest)
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)

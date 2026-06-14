@@ -158,3 +158,42 @@ class TestUninstall:
     def test_uninstall_is_idempotent(self, installed_home):
         uninstall()
         uninstall()  # second uninstall should not raise
+
+
+class TestTargetSelection:
+    def test_install_target_cursor_only(self, clean_home, monkeypatch):
+        import contexer.cli as cli
+        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "cursor"])
+        cli.main()
+        assert (clean_home / ".cursor" / "mcp.json").exists()
+        assert not (clean_home / ".claude.json").exists()
+
+    def test_install_target_all(self, clean_home, monkeypatch):
+        import contexer.cli as cli
+        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "all"])
+        cli.main()
+        assert (clean_home / ".cursor" / "mcp.json").exists()
+        assert (clean_home / ".claude.json").exists()
+
+    def test_install_autodetects_present_tools(self, clean_home, monkeypatch):
+        # Only ~/.cursor present -> only Cursor wired.
+        (clean_home / ".cursor").mkdir()
+        import contexer.cli as cli
+        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
+        cli.main()
+        assert (clean_home / ".cursor" / "mcp.json").exists()
+        assert not (clean_home / ".claude.json").exists()
+
+    def test_install_defaults_to_claude_when_none_detected(self, clean_home, monkeypatch):
+        import contexer.cli as cli
+        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
+        cli.main()
+        assert (clean_home / ".claude.json").exists()
+
+    def test_install_unknown_target_exits_1(self, clean_home, monkeypatch, capsys):
+        import contexer.cli as cli
+        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "emacs"])
+        with pytest.raises(SystemExit) as e:
+            cli.main()
+        assert e.value.code == 1
+        assert "unknown target" in capsys.readouterr().err.lower()
