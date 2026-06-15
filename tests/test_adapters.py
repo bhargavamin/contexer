@@ -151,6 +151,26 @@ class TestCursorEntrypoints:
         assert "additional_context" in out
         assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
 
+    def test_session_start_writes_managed_rule_file(self, tmp_repo):
+        from pathlib import Path
+        raw = _json.dumps({"workspace_roots": [tmp_repo], "session_id": "s1"})
+        cursor.session_start("", raw)
+        rule = Path(tmp_repo) / ".cursor" / "rules" / "contexer.mdc"
+        assert rule.exists()
+        body = rule.read_text()
+        assert "alwaysApply: true" in body
+        assert "managed by contexer" in body
+        assert "get_context" in body and "update_context" in body
+
+    def test_session_start_does_not_overwrite_user_rule_file(self, tmp_repo):
+        from pathlib import Path
+        rule = Path(tmp_repo) / ".cursor" / "rules" / "contexer.mdc"
+        rule.parent.mkdir(parents=True)
+        rule.write_text("my own rule, hands off")
+        raw = _json.dumps({"workspace_roots": [tmp_repo], "session_id": "s1"})
+        cursor.session_start("", raw)
+        assert rule.read_text() == "my own rule, hands off"
+
     def test_capture_task_writes_and_passes_through(self, tmp_repo):
         from contexer import store
         raw = _json.dumps({"prompt": "Refactor auth to use JWT tokens", "session_id": "s1",

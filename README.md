@@ -84,13 +84,23 @@ contexer install --target cursor   # or: contexer install (auto-detects ~/.curso
 This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor
 hooks in `~/.cursor/hooks.json`:
 
-- `sessionStart` — injects your stored project rules and a usage nudge into the session.
-- `beforeSubmitPrompt` — silently captures your task and any "always/never" directives.
+- `sessionStart` — injects your stored project rules and a usage nudge, and drops a managed
+  always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
+- `beforeSubmitPrompt` — silently captures your task and any "always / never / don't / create a
+  rule" directives.
 
-**Parity note:** Cursor can only inject context at session start (not per-prompt) and
-exposes no compaction hooks. So per-prompt rationale injection and post-edit reminders
-are delivered as a one-time session-start nudge instead. The core value — automatic
-session-start injection of your stored rules — works identically to Claude Code.
+The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to
+call Contexer's `get_context` before reading files for architecture/"why" questions, and to save
+rules via `update_context` rather than writing native `.cursor/rules` files.
+
+The first time Cursor calls a Contexer tool it asks you to approve it — Contexer does not
+pre-approve its own MCP tools for you.
+
+**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and
+Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the
+session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The
+core value — automatic session-start injection of your stored rules — works identically to Claude
+Code.
 
 ---
 

@@ -31,14 +31,36 @@ Verify the server is connected — open any Claude Code session and run:
 
 ---
 
+## Install for Cursor (1.7+)
+
+```bash
+contexer install --target cursor     # or: contexer install (auto-detects ~/.cursor)
+```
+
+This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires `sessionStart` +
+`beforeSubmitPrompt` hooks in `~/.cursor/hooks.json`. On each session start in a repo, Contexer
+also drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc` (marker-guarded —
+your own rule files are never touched) that steers the agent to call Contexer's `get_context`
+before reading files and to save rules via `update_context` instead of native rule files.
+
+The first time Cursor calls a Contexer MCP tool it will ask you to approve it — approve once and
+Cursor remembers. (Contexer does not silently pre-approve its own tools.)
+
+---
+
 ## Install from source (development)
 
 ```bash
 git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/scripts/install.sh
+bash ~/tools/contexer/scripts/install.sh                 # auto-detect Claude Code / Cursor
+bash ~/tools/contexer/scripts/install.sh --target cursor # one tool
+bash ~/tools/contexer/scripts/install.sh --target all    # both
 ```
 
-The script detects that the `contexer` binary is not available from a PyPI install and wires Claude Code to run the server directly from the cloned directory using `uv run`. This is the right choice when you want to edit the source.
+The script builds the `contexer` binary from your clone (`uv tool install --from <clone>`) and
+then delegates to `contexer install`, so it wires whichever tools you target through the exact
+code path end users run. Re-run the script after editing source to rebuild. To remove:
+`bash ~/tools/contexer/scripts/uninstall.sh [--target …] [--purge]`.
 
 ---
 

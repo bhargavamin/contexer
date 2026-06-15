@@ -291,7 +291,27 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|henceforth"                   # henceforth
     r"|ensure\s+(?:you\s+|that\s+you\s+)"       # ensure you / ensure that you
     r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
+    r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
+    r"|^\s*rule(?=\s*[:\-])"        # "rule: never X" / "rule - …" at the start
+    r"|do\s*n['’]?t"                # don't (prohibition)
+    r"|do\s+not"                    # do not
+    r"|avoid"                       # avoid
+    r"|no\s+longer"                 # no longer
+    r"|stop\s+\w+ing"              # stop doing / stop using
     r")\b",
+    re.IGNORECASE,
+)
+
+# Soft conversational prose that contains "don't/do not/avoid" but is NOT a directive:
+# "don't worry about the tests", "I don't know why", "don't hesitate to ask". These are
+# excluded so the broadened prohibition triggers above don't generate false constraints.
+_SOFT_PROSE_EXCLUDE = re.compile(
+    r"\b(?:"
+    r"do\s*n['’]?t\s+(?:worry|hesitate|bother|forget|mind|know|think|see|want|like|"
+    r"have\s+to|need\s+to|get|understand)\b"
+    r"|do\s+not\s+(?:worry|hesitate|bother|forget|mind|know|think|see|understand)\b"
+    r"|i\s+do\s*n['’]?t\b"     # "I don't ..." — speaking about self, not a rule
+    r")",
     re.IGNORECASE,
 )
 
@@ -385,14 +405,21 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
         return False, ""
     if not _CONSTRAINT_TRIGGER.search(text):
         return False, ""
+    # Strip soft conversational prose ("don't worry", "I don't know"); if a broadened
+    # prohibition trigger only matched inside that prose, it was not a directive.
+    deprosed = _SOFT_PROSE_EXCLUDE.sub("", text)
+    if not _CONSTRAINT_TRIGGER.search(deprosed):
+        return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive
-    cleaned = _PERSONAL_DESCRIPTOR.sub("", text)
+    cleaned = _PERSONAL_DESCRIPTOR.sub("", deprosed)
     if not _CONSTRAINT_TRIGGER.search(cleaned):
         return False, ""
     # Pure forward-looking practice signals (no always/never) → convention
     # Everything else (mandatory requirements, prohibitions) → constraint
     is_soft = bool(_CONVENTION_SIGNALS.search(cleaned))
-    has_hard = bool(re.search(r"\b(?:al+w(?:ay|ya)s|never|must|should)\b", cleaned, re.IGNORECASE))
+    has_hard = bool(re.search(
+        r"\b(?:al+w(?:ay|ya)s|never|must|should|do\s*n['’]?t|do\s+not|avoid|no\s+longer|stop)\b",
+        cleaned, re.IGNORECASE))
     subtype = "convention" if (is_soft and not has_hard) else "constraint"
     return True, subtype
 
