@@ -8,6 +8,53 @@ from contexer import store
 
 
 
+# ── repo resolution: sanity guard + session-repo binding ──────────────────────
+
+class TestRepoResolution:
+    def test_config_dirs_rejected(self):
+        home = Path.home()
+        for bad in (str(home), str(home / ".claude"), str(home / ".cursor"),
+                    str(home / ".contexer")):
+            assert store._is_sane_repo(bad) is False, bad
+
+    def test_real_repo_accepted(self, tmp_path):
+        assert store._is_sane_repo(str(tmp_path / "myproject")) is True
+
+    def test_relative_and_empty_rejected(self):
+        assert store._is_sane_repo("") is False
+        assert store._is_sane_repo("relative/path") is False
+
+    def test_explicit_repo_wins(self, tmp_repo):
+        assert store._resolve_repo(tmp_repo) == tmp_repo
+
+    def test_explicit_config_dir_never_honored(self, tmp_path, monkeypatch):
+        # A caller passing ~/.claude must NOT resolve to it — falls back to safe sources.
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        assert store._resolve_repo(str(Path.home() / ".claude")) == ""
+
+    def test_session_repo_preferred_over_pointer(self, tmp_path, monkeypatch):
+        # The clobber scenario: pointer poisoned to ~/.claude, but the server is bound to
+        # its own cwd repo — decisions must resolve to the real project, not the config dir.
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir()
+        (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".claude"))
+        monkeypatch.setattr(store, "_SESSION_REPO", str(tmp_path / "realproject"))
+        assert store._resolve_repo("") == str(tmp_path / "realproject")
+
+    def test_poisoned_pointer_read_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir()
+        (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".cursor"))
+        assert store._current_repo_path() == ""
+
+    def test_set_session_repo_rejects_config_dir(self, monkeypatch):
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+        store.set_session_repo(str(Path.home() / ".claude"))
+        assert store._SESSION_REPO == ""
+        store.set_session_repo("")  # reset
+
+
 # ── _is_task ──────────────────────────────────────────────────────────────────
 
 class TestIsTask:

@@ -112,8 +112,9 @@ def session_start(repo_path: str, raw: str) -> str:
     Never raises."""
     try:
         repo = _repo_from(raw, repo_path)
-        if repo:
+        if repo and store._is_sane_repo(repo):
             store.STORE_DIR.mkdir(exist_ok=True)
+            # Never poison the shared pointer with a config/home dir (see store._is_sane_repo).
             (store.STORE_DIR / ".current_repo").write_text(repo)
             _ensure_rule_file(repo)
             payload = store.session_start_payload(repo)
