@@ -75,14 +75,6 @@ def _in_groups(groups: list, marker: str) -> bool:
     return any(marker in str(h) for grp in groups for h in grp.get("hooks", []))
 
 
-def _has_mcp_tool(groups: list, tool: str) -> bool:
-    return any(
-        any(h.get("type") == "mcp_tool" and h.get("tool") == tool
-            for h in grp.get("hooks", []))
-        for grp in groups
-    )
-
-
 # ── 1. Install — hook and permission registration ─────────────────────────────
 
 class TestInstall:
@@ -111,30 +103,25 @@ class TestInstall:
                        if ".current_repo" in str(h)]
         assert any(".pending_capture" in c for c in anchor_cmds)
 
-    def test_capture_user_constraint_hook_registered(self, tmp_home):
+    def test_capture_constraint_command_hook_registered(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
-        assert _has_mcp_tool(ups, "capture_user_constraint")
+        assert _in_groups(ups, "claude.capture_constraint")
+        # capture is a command hook now, never an mcp_tool
+        assert not any(h.get("type") == "mcp_tool" for g in ups for h in g.get("hooks", []))
 
-    def test_capture_user_constraint_hook_receives_prompt(self, tmp_home):
+    def test_capture_task_command_hook_registered_once(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
         hooks = [h for g in ups for h in g.get("hooks", [])
-                 if h.get("tool") == "capture_user_constraint"]
-        assert any(h.get("input", {}).get("prompt") == "${prompt}" for h in hooks)
-
-    def test_capture_context_hook_registered_once(self, tmp_home):
-        cli.install()
-        ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
-        hooks = [h for g in ups for h in g.get("hooks", [])
-                 if h.get("tool") == "capture_context"]
+                 if "claude.capture_task" in h.get("command", "")]
         assert hooks
         assert any(h.get("once") for h in hooks)
 
-    def test_get_context_for_prompt_hook_registered(self, tmp_home):
+    def test_rationale_command_hook_registered(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
-        assert _has_mcp_tool(ups, "get_context_for_prompt")
+        assert _in_groups(ups, "claude.rationale")
 
     def test_bootstrap_command_installed_globally(self, tmp_home):
         """A project-level command file only works inside that repo — end users
@@ -204,10 +191,10 @@ class TestReinstallIdempotency:
         put = hooks.get("PostToolUse", [])
         return {
             "anchor": sum(1 for g in ups for h in g.get("hooks", []) if ".current_repo" in str(h)),
-            "capture_user_constraint": sum(1 for g in ups for h in g.get("hooks", [])
-                                           if h.get("tool") == "capture_user_constraint"),
-            "capture_context": sum(1 for g in ups for h in g.get("hooks", [])
-                                   if h.get("tool") == "capture_context"),
+            "capture_constraint": sum(1 for g in ups for h in g.get("hooks", [])
+                                      if "claude.capture_constraint" in h.get("command", "")),
+            "capture_task": sum(1 for g in ups for h in g.get("hooks", [])
+                                if "claude.capture_task" in h.get("command", "")),
             "pending_capture": sum(1 for g in put for h in g.get("hooks", [])
                                    if ".pending_capture" in str(h)),
         }
@@ -218,8 +205,8 @@ class TestReinstallIdempotency:
         cli.install()
         counts = self._counts(tmp_home)
         assert counts["anchor"] == 1
-        assert counts["capture_user_constraint"] == 1
-        assert counts["capture_context"] == 1
+        assert counts["capture_constraint"] == 1
+        assert counts["capture_task"] == 1
         assert counts["pending_capture"] == 1
 
     def test_old_anchor_hook_replaced(self, tmp_home):

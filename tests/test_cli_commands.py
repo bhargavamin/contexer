@@ -62,7 +62,7 @@ class TestStatus:
         status()
         out = capsys.readouterr().out
         assert "registered" in out and "NOT registered" not in out
-        assert "hooks:        installed" in out
+        assert "hooks:      installed" in out
         assert "Not fully installed" not in out
 
     def test_counts_store_entries_and_current_repo(self, installed_home, capsys):
@@ -226,7 +226,7 @@ class TestStatusResilience:
         settings_path.write_text(json.dumps(settings))
         status()
         # the real hook groups are still present, so detection still works
-        assert "hooks:        installed" in capsys.readouterr().out
+        assert "hooks:      installed" in capsys.readouterr().out
 
     def test_unreadable_current_repo_does_not_crash(self, installed_home, capsys):
         current = installed_home / ".contexer" / ".current_repo"
@@ -294,9 +294,11 @@ class TestPermissionDeniedGuidance:
             claude_dir.chmod(0o700)
 
     def test_uninstall_permission_error_guarded(self, installed_home, monkeypatch, capsys):
+        from contexer.adapters import claude
+
         def boom(path, data):
             raise PermissionError(13, "Permission denied", str(path))
-        monkeypatch.setattr(cli, "_save", boom)
+        monkeypatch.setattr(claude, "_save", boom)
         monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
         with pytest.raises(SystemExit) as exc:
             cli.main()
@@ -363,3 +365,34 @@ class TestUpdateCheck:
         assert cli._version_tuple("0.5.4") == (0, 5, 4)
         assert cli._version_tuple("0.5.x") is None
         assert cli._version_tuple("unknown (not installed as a package)") is None
+
+
+# ── multi-target status ───────────────────────────────────────────────────────
+
+class TestStatusMultiTarget:
+    """status() with --target cursor (and the target-aware installed_ok check)."""
+
+    @pytest.fixture
+    def cursor_installed_home(self, clean_home, monkeypatch):
+        """Install only for cursor via cli.main() with monkeypatched argv."""
+        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "cursor"])
+        cli.main()
+        return clean_home
+
+    def test_status_shows_cursor_when_installed(self, cursor_installed_home, capsys):
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "[cursor]" in out
+
+    def test_cursor_only_install_not_reported_missing(self, cursor_installed_home, capsys):
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "Not fully installed" not in out
+
+    def test_clean_home_default_target_still_reports_not_fully_installed(self, clean_home, capsys):
+        # Regression guard: default target (no --target flag) on a clean home
+        # must still show "Not fully installed" — _resolve_targets([]) falls back
+        # to [claude], claude.is_installed(clean_home) is False.
+        status()
+        out = capsys.readouterr().out
+        assert "Not fully installed" in out

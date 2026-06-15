@@ -19,7 +19,7 @@ Every Claude Code session starts fresh. No memory of what was decided last week.
 
 The result: developers re-explain the same rules every session. Claude re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
 
-**Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.**
+**Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.** It works with Claude Code and Cursor.
 
 ---
 
@@ -67,9 +67,40 @@ uv tool install contexer
 contexer install
 ```
 
-Step 3 — restart Claude Code and open any git repo. Contexer runs silently from here.
+`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor) and wires both. Pass `--target claude`, `--target cursor`, or `--target all` to override.
+
+Restart your AI assistant and open any git repo. Contexer runs silently from here.
 
 See **[docs/install.md](docs/install.md)** for verification, update, and uninstall steps.
+
+---
+
+## Use with Cursor (1.7+)
+
+```bash
+contexer install --target cursor   # or: contexer install (auto-detects ~/.cursor)
+```
+
+This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor
+hooks in `~/.cursor/hooks.json`:
+
+- `sessionStart` — injects your stored project rules and a usage nudge, and drops a managed
+  always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
+- `beforeSubmitPrompt` — silently captures your task and any "always / never / don't / create a
+  rule" directives.
+
+The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to
+call Contexer's `get_context` before reading files for architecture/"why" questions, and to save
+rules via `update_context` rather than writing native `.cursor/rules` files.
+
+The first time Cursor calls a Contexer tool it asks you to approve it — Contexer does not
+pre-approve its own MCP tools for you.
+
+**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and
+Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the
+session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The
+core value — automatic session-start injection of your stored rules — works identically to Claude
+Code.
 
 ---
 
@@ -214,9 +245,10 @@ On prompts unrelated to stored decisions, Contexer skips entirely — no read, n
 
 | Command | Description |
 |---|---|
-| `contexer install` | Connect Contexer to Claude Code |
+| `contexer install` | Connect Contexer (auto-detects Claude Code and/or Cursor) |
+| `contexer install --target claude\|cursor\|all` | Install for a specific tool only, or both |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
-| `contexer reinstall` | Re-sync after a Claude Code update |
+| `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
 | `contexer uninstall --purge` | Remove everything including `~/.contexer/` |
 | `contexer version` | Print installed version |

@@ -16,16 +16,70 @@ _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter appl
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
 
 
+# Directories that must never be treated as a repo. A poisoned .current_repo pointing at
+# a tool's config dir (e.g. ~/.claude) would otherwise slug into its own store file and
+# silently swallow decisions made in the real project. Guarded on both read and write.
+def _config_dirs() -> set[str]:
+    home = Path.home()
+    return {str(home), str(home / ".claude"), str(home / ".cursor"),
+            str(home / ".contexer"), str(home / ".config")}
+
+
+def _is_sane_repo(path: str) -> bool:
+    """A usable repo path: non-empty, absolute, and not a tool config / home directory."""
+    if not path:
+        return False
+    p = path.strip()
+    if not p or not os.path.isabs(p):
+        return False
+    return os.path.normpath(p) not in _config_dirs()
+
+
+def _git_root(start: str) -> str:
+    """git toplevel for `start`, or "" if it isn't inside a git work tree. Never raises."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", start, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+# Repo bound to the running MCP server process, captured once at startup from its own cwd
+# (set by server.main via set_session_repo). Each host session spawns its own server with
+# cwd = that session's project, so this is immune to the shared .current_repo being
+# clobbered by a different tool or session. "" outside a running server (tests, hooks).
+_SESSION_REPO = ""
+
+
+def set_session_repo(path: str) -> None:
+    """Bind the current MCP-server process to a repo (its startup cwd's git root)."""
+    global _SESSION_REPO
+    _SESSION_REPO = path if _is_sane_repo(path) else ""
+
+
 def _current_repo_path() -> str:
     path = STORE_DIR / ".current_repo"
     if path.exists():
-        return path.read_text().strip()
+        val = path.read_text().strip()
+        return val if _is_sane_repo(val) else ""
     return ""
 
 
 def _resolve_repo(repo_path: str) -> str:
-    if repo_path:
+    # Precedence: an explicit caller argument always wins; then the repo bound to this
+    # server process (cwd-derived, per-session — cannot be cross-contaminated); then the
+    # shared .current_repo pointer as a last resort. Each is sanity-checked.
+    if _is_sane_repo(repo_path):
         return repo_path
+    if repo_path:  # caller passed something non-sane (e.g. ~/.claude) — never honor it
+        return _SESSION_REPO or _current_repo_path()
+    if _SESSION_REPO:
+        return _SESSION_REPO
     return _current_repo_path()
 
 def _slug(repo_path: str) -> str:
@@ -291,7 +345,27 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|henceforth"                   # henceforth
     r"|ensure\s+(?:you\s+|that\s+you\s+)"       # ensure you / ensure that you
     r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
+    r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
+    r"|^\s*rule(?=\s*[:\-])"        # "rule: never X" / "rule - …" at the start
+    r"|do\s*n['’]?t"                # don't (prohibition)
+    r"|do\s+not"                    # do not
+    r"|avoid"                       # avoid
+    r"|no\s+longer"                 # no longer
+    r"|stop\s+\w+ing"              # stop doing / stop using
     r")\b",
+    re.IGNORECASE,
+)
+
+# Soft conversational prose that contains "don't/do not/avoid" but is NOT a directive:
+# "don't worry about the tests", "I don't know why", "don't hesitate to ask". These are
+# excluded so the broadened prohibition triggers above don't generate false constraints.
+_SOFT_PROSE_EXCLUDE = re.compile(
+    r"\b(?:"
+    r"do\s*n['’]?t\s+(?:worry|hesitate|bother|forget|mind|know|think|see|want|like|"
+    r"have\s+to|need\s+to|get|understand)\b"
+    r"|do\s+not\s+(?:worry|hesitate|bother|forget|mind|know|think|see|understand)\b"
+    r"|i\s+do\s*n['’]?t\b"     # "I don't ..." — speaking about self, not a rule
+    r")",
     re.IGNORECASE,
 )
 
@@ -385,14 +459,21 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
         return False, ""
     if not _CONSTRAINT_TRIGGER.search(text):
         return False, ""
+    # Strip soft conversational prose ("don't worry", "I don't know"); if a broadened
+    # prohibition trigger only matched inside that prose, it was not a directive.
+    deprosed = _SOFT_PROSE_EXCLUDE.sub("", text)
+    if not _CONSTRAINT_TRIGGER.search(deprosed):
+        return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive
-    cleaned = _PERSONAL_DESCRIPTOR.sub("", text)
+    cleaned = _PERSONAL_DESCRIPTOR.sub("", deprosed)
     if not _CONSTRAINT_TRIGGER.search(cleaned):
         return False, ""
     # Pure forward-looking practice signals (no always/never) → convention
     # Everything else (mandatory requirements, prohibitions) → constraint
     is_soft = bool(_CONVENTION_SIGNALS.search(cleaned))
-    has_hard = bool(re.search(r"\b(?:al+w(?:ay|ya)s|never|must|should)\b", cleaned, re.IGNORECASE))
+    has_hard = bool(re.search(
+        r"\b(?:al+w(?:ay|ya)s|never|must|should|do\s*n['’]?t|do\s+not|avoid|no\s+longer|stop)\b",
+        cleaned, re.IGNORECASE))
     subtype = "convention" if (is_soft and not has_hard) else "constraint"
     return True, subtype
 
@@ -675,23 +756,24 @@ def _build_resume_mining_context(repo_path: str) -> list[str]:
     ]
 
 
-def get_session_start_context(repo_path: str, source: str = "") -> dict:
+def session_start_payload(repo_path: str, source: str = "") -> dict:
+    """Provider-neutral session-start content. Returns {"status": str, "context": str}:
+    `status` is the short human-facing line, `context` is the text to inject into the
+    conversation. Empty `context` means "inject nothing". All filtering/promotion logic
+    is unchanged from the original get_session_start_context."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
-    global_rules = get_global_decisions()  # always constraint or convention
+    global_rules = get_global_decisions()
     resume_flag = STORE_DIR / ".resume_mining"
 
     if source == "resume":
         if decisions:
-            # The conversation already contains the original session-start injection —
-            # re-injecting would duplicate ~1k tokens for nothing.
-            return {"systemMessage":
-                    f"Contexer: session resumed — {_pl(len(decisions), 'decision')} already loaded in conversation"}
-        # Fresh install mid-conversation: the transcript is the best decision source
-        # there will ever be. Mine it in the first turn instead of offering a menu —
-        # no human round-trip, so decisions are banked even if the session dies early.
+            return {
+                "status": f"Contexer: session resumed — {_pl(len(decisions), 'decision')} already loaded in conversation",
+                "context": "",
+            }
         STORE_DIR.mkdir(exist_ok=True)
-        resume_flag.write_text(repo_path)  # suppresses the UserPromptSubmit menu fallback
+        resume_flag.write_text(repo_path)
         sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
@@ -699,20 +781,15 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         return {
-            "systemMessage": "Contexer: resumed with no stored context — mining this conversation for decisions",
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(sys_parts),
-            },
+            "status": "Contexer: resumed with no stored context — mining this conversation for decisions",
+            "context": "\n".join(sys_parts),
         }
 
-    resume_flag.unlink(missing_ok=True)  # stale flag from a resume that never got a prompt
+    resume_flag.unlink(missing_ok=True)
 
     if not decisions:
-        # No repo context — bootstrap. Inject global rules above the STOP directive
-        # so Claude follows them even during the bootstrap conversation.
         lines = _build_bootstrap_context(repo_path)
-        sys_parts: list[str] = []
+        sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
             for d in global_rules:
@@ -721,11 +798,8 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         sys_parts.extend(lines)
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "systemMessage": f"Contexer: no context stored{global_note} — setup offer on next prompt",
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(sys_parts),
-            },
+            "status": f"Contexer: no context stored{global_note} — setup offer on next prompt",
+            "context": "\n".join(sys_parts),
         }
 
     count = len(decisions)
@@ -742,8 +816,6 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
         for d in pre_loaded:
             sys_parts.append(f"- [{d.get('subtype', '')}]{_recur_suffix(d)} {d['content']}")
     if deferred_count > 0:
-        # Patterns are pre-loaded above, so they are NOT part of the deferred set —
-        # only architecture (and any subtype-less) decisions are fetched on demand.
         arch_count = sum(1 for d in decisions if d.get("subtype") == "architecture")
         breakdown = f" ({arch_count} architecture)" if arch_count else ""
         sys_parts.append(
@@ -756,7 +828,7 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
     patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
 
-    loaded_parts: list[str] = []
+    loaded_parts = []
     if global_rules:
         loaded_parts.append(_pl(len(global_rules), "global rule"))
     if constraints:
@@ -766,21 +838,21 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     if patterns:
         loaded_parts.append(_pl(len(patterns), "pattern"))
 
-    sentences: list[str] = []
+    sentences = []
     if loaded_parts:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
         sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
 
-    user_line = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
+    status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
+    return {"status": status, "context": "\n".join(sys_parts)}
 
-    return {
-        "systemMessage": user_line,
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": "\n".join(sys_parts),
-        },
-    }
+
+def get_session_start_context(repo_path: str, source: str = "") -> dict:
+    """Claude Code SessionStart hook output. Thin envelope over session_start_payload —
+    kept for back-compat with installed hooks and the existing test suite."""
+    from contexer.adapters import claude
+    return claude.format_session_start(session_start_payload(repo_path, source))
 
 
 _NEWCOMER_QUESTION_RE = re.compile(
@@ -821,18 +893,24 @@ def source_from_hook_stdin(raw: str) -> str:
         return ""
 
 
-def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
-    """Fallback for UserPromptSubmit: catches the case where SessionStart bootstrap
-    was skipped (e.g. non-interactive session). Returns empty dict when context exists.
-    When the first prompt is itself a newcomer question, the menu is replaced with a
-    low-insight confirmation — decided deterministically here, not by model judgment,
-    because this is the first thing a user sees after installing."""
+def session_from_hook_stdin(raw: str) -> str:
+    """Extracts the host's session id from a hook's stdin JSON (both Claude Code
+    and Cursor provide `session_id`). Used by command-type capture hooks so stored
+    entries are grouped by session. Safe on any input."""
+    try:
+        data = json.loads(raw)
+        return data.get("session_id", "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
+def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
+    """Neutral UserPromptSubmit bootstrap-fallback content. {"status": "", "context": str}.
+    Empty context => emit nothing. Logic unchanged from get_bootstrap_context_prompt."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
-        return {}
-    # Resumed session: SessionStart already injected mining instructions — a menu
-    # here would contradict them ("ENTIRE response must be ONLY the offer").
+        return {"status": "", "context": ""}
     resume_flag = STORE_DIR / ".resume_mining"
     if resume_flag.exists():
         try:
@@ -841,7 +919,7 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
             flagged = ""
         if flagged == repo_path:
             resume_flag.unlink(missing_ok=True)
-            return {}
+            return {"status": "", "context": ""}
     level, decisive = _detect_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
@@ -863,24 +941,28 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
         ]
     else:
         lines = _build_bootstrap_context(repo_path)
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(lines),
-        }
-    }
+    return {"status": "", "context": "\n".join(lines)}
 
 
-def get_post_compact_context(repo_path: str) -> dict:
-    """Called by PostCompact hook. Re-injects stored context after compaction, or
-    re-offers bootstrap if no context exists — so the offer is not silently lost after compact."""
+def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
+    """Claude UserPromptSubmit bootstrap-fallback output. Back-compat envelope."""
+    from contexer.adapters import claude
+    return claude.format_bootstrap_prompt(bootstrap_prompt_payload(repo_path, prompt))
+
+
+def post_compact_payload(repo_path: str) -> dict:
+    """Neutral PostCompact content. {"status": str, "context": str}."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if not decisions:
-        lines = _build_bootstrap_context(repo_path)
-        return {"systemMessage": "\n".join(lines)}
-    ctx = get_context(repo_path)
-    return {"systemMessage": f"Contexer: context reloaded after compaction\n{ctx}"}
+        return {"status": "", "context": "\n".join(_build_bootstrap_context(repo_path))}
+    return {"status": "Contexer: context reloaded after compaction", "context": get_context(repo_path)}
+
+
+def get_post_compact_context(repo_path: str) -> dict:
+    """Claude PostCompact output. Back-compat envelope."""
+    from contexer.adapters import claude
+    return claude.format_post_compact(post_compact_payload(repo_path))
 
 
 _RATIONALE_WORDS = frozenset({

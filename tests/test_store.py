@@ -1,6 +1,5 @@
 """Tests for core store.py logic — filtering, storage, context output, and bootstrap scan."""
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -8,22 +7,52 @@ import pytest
 from contexer import store
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def tmp_repo(tmp_path, monkeypatch):
-    """Redirects STORE_DIR to a temp path and returns a fake repo path."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
-    return str(tmp_path / "repo")
+# ── repo resolution: sanity guard + session-repo binding ──────────────────────
 
+class TestRepoResolution:
+    def test_config_dirs_rejected(self):
+        home = Path.home()
+        for bad in (str(home), str(home / ".claude"), str(home / ".cursor"),
+                    str(home / ".contexer")):
+            assert store._is_sane_repo(bad) is False, bad
 
-@pytest.fixture
-def populated_repo(tmp_repo):
-    """A repo with one task and two decisions pre-loaded."""
-    store.capture_task(tmp_repo, "implement authentication flow for the API", "sess-1")
-    store.update_decision(tmp_repo, "decided to use JWT instead of sessions — stateless, easier to scale", "sess-1")
-    store.update_decision(tmp_repo, "constraint: never store plaintext passwords, always use bcrypt", "sess-1")
-    return tmp_repo
+    def test_real_repo_accepted(self, tmp_path):
+        assert store._is_sane_repo(str(tmp_path / "myproject")) is True
+
+    def test_relative_and_empty_rejected(self):
+        assert store._is_sane_repo("") is False
+        assert store._is_sane_repo("relative/path") is False
+
+    def test_explicit_repo_wins(self, tmp_repo):
+        assert store._resolve_repo(tmp_repo) == tmp_repo
+
+    def test_explicit_config_dir_never_honored(self, tmp_path, monkeypatch):
+        # A caller passing ~/.claude must NOT resolve to it — falls back to safe sources.
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        assert store._resolve_repo(str(Path.home() / ".claude")) == ""
+
+    def test_session_repo_preferred_over_pointer(self, tmp_path, monkeypatch):
+        # The clobber scenario: pointer poisoned to ~/.claude, but the server is bound to
+        # its own cwd repo — decisions must resolve to the real project, not the config dir.
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir()
+        (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".claude"))
+        monkeypatch.setattr(store, "_SESSION_REPO", str(tmp_path / "realproject"))
+        assert store._resolve_repo("") == str(tmp_path / "realproject")
+
+    def test_poisoned_pointer_read_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir()
+        (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".cursor"))
+        assert store._current_repo_path() == ""
+
+    def test_set_session_repo_rejects_config_dir(self, monkeypatch):
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+        store.set_session_repo(str(Path.home() / ".claude"))
+        assert store._SESSION_REPO == ""
+        store.set_session_repo("")  # reset
 
 
 # ── _is_task ──────────────────────────────────────────────────────────────────
@@ -982,6 +1011,56 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint("always use uv not pip")
         assert is_c is True
 
+    # ── broadened: prohibitions + rule-framing ────────────────────────────────
+    def test_dont_prohibition_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("don't use pip, use uv instead")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_do_not_prohibition_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("do not commit directly to main")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_avoid_prohibition_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("avoid global mutable state in services")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_no_longer_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("no longer support python 3.11 in this repo")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_create_a_rule_framing_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("create a rule to not commit to main without review")
+        assert is_c is True
+
+    def test_make_a_rule_framing_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make a rule that all PRs need two approvals")
+        assert is_c is True
+
+    def test_rule_colon_prefix_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("rule: every endpoint must be authenticated")
+        assert is_c is True
+
+    def test_stop_doing_is_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("stop using deprecated requests, switch to httpx")
+        assert is_c is True
+
+    # ── soft prose must stay non-constraint ───────────────────────────────────
+    def test_dont_worry_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("don't worry about the tests for now")
+        assert is_c is False
+
+    def test_i_dont_know_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("I don't know why the build is failing")
+        assert is_c is False
+
+    def test_dont_hesitate_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("don't hesitate to refactor as you see fit")
+        assert is_c is False
+
 
 class TestSanitizeDirective:
     def test_profanity_stripped(self):
@@ -1183,3 +1262,71 @@ class TestCorruptionRecovery:
         assert ok
         data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
         assert len(data["entries"]) == 1
+
+
+class TestSessionFromHookStdin:
+    def test_extracts_session_id(self):
+        from contexer import store
+        assert store.session_from_hook_stdin('{"session_id": "abc-123"}') == "abc-123"
+
+    def test_missing_session_id_returns_empty(self):
+        from contexer import store
+        assert store.session_from_hook_stdin('{"prompt": "hi"}') == ""
+
+    def test_malformed_stdin_returns_empty(self):
+        from contexer import store
+        assert store.session_from_hook_stdin("not json") == ""
+
+
+class TestSessionStartPayload:
+    def test_empty_repo_payload_has_bootstrap_context(self, tmp_repo):
+        from contexer import store
+        p = store.session_start_payload(tmp_repo)
+        assert "bootstrap" in p["context"].lower()
+        assert "no context stored" in p["status"].lower()
+
+    def test_populated_repo_payload_pointer(self, populated_repo):
+        from contexer import store
+        p = store.session_start_payload(populated_repo)
+        assert "get_context" in p["context"]
+        assert "on demand" in p["status"]
+
+    def test_resume_with_decisions_has_status_no_context(self, populated_repo):
+        from contexer import store
+        p = store.session_start_payload(populated_repo, source="resume")
+        assert p["context"] == ""
+        assert "resumed" in p["status"].lower()
+
+    def test_get_session_start_context_envelope_unchanged(self, tmp_repo):
+        # Back-compat: the Claude dict shape is preserved exactly.
+        from contexer import store
+        result = store.get_session_start_context(tmp_repo)
+        assert "no context stored" in result["systemMessage"].lower()
+        assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
+        assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+
+
+class TestBootstrapPromptPayload:
+    def test_decisions_present_payload_empty(self, populated_repo):
+        from contexer import store
+        p = store.bootstrap_prompt_payload(populated_repo, "anything")
+        assert p == {"status": "", "context": ""}
+
+    def test_empty_repo_payload_has_context(self, tmp_repo):
+        from contexer import store
+        p = store.bootstrap_prompt_payload(tmp_repo, "add a feature")
+        assert p["status"] == ""
+        assert p["context"] != ""
+
+
+class TestPostCompactPayload:
+    def test_empty_repo_reoffers_bootstrap(self, tmp_repo):
+        from contexer import store
+        p = store.post_compact_payload(tmp_repo)
+        assert "bootstrap" in p["context"].lower()
+
+    def test_populated_repo_reloads_context(self, populated_repo):
+        from contexer import store
+        p = store.post_compact_payload(populated_repo)
+        assert "reloaded after compaction" in p["status"].lower()
+        assert p["context"] != ""
