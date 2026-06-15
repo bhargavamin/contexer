@@ -52,6 +52,13 @@ class TestCursorInstall:
         cmds = [h["command"] for h in hooks["hooks"]["beforeSubmitPrompt"]]
         assert sum("cursor.capture_task" in c for c in cmds) == 1
 
+    def test_does_not_auto_approve_mcp_tools(self, home):
+        # Contexer must not silently pre-approve its own MCP tools — Cursor should still
+        # prompt the user on first use.
+        log = cursor.install(home)
+        assert not (home / ".cursor" / "permissions.json").exists()
+        assert any("approve" in line.lower() for line in log)
+
     def test_preserves_existing_cursor_config(self, home):
         mcp_path = home / ".cursor" / "mcp.json"
         mcp_path.parent.mkdir(parents=True)

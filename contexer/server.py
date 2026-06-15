@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from mcp.server.fastmcp import FastMCP
 from contexer import store
@@ -123,6 +124,11 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
 
 
 def main():
+    # Bind this server process to the repo it was spawned in (its cwd's git root). Each host
+    # session launches its own server with cwd = that session's project, so decisions resolve
+    # to the right repo even if the shared ~/.contexer/.current_repo pointer has been clobbered
+    # by a different tool or session. _resolve_repo prefers this over the shared pointer.
+    store.set_session_repo(store._git_root(os.getcwd()))
     mcp.run()
 
 

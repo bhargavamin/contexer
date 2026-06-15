@@ -8,6 +8,53 @@ from contexer import store
 
 
 
+# ── repo resolution: sanity guard + session-repo binding ──────────────────────
+
+class TestRepoResolution:
+    def test_config_dirs_rejected(self):
+        home = Path.home()
+        for bad in (str(home), str(home / ".claude"), str(home / ".cursor"),
+                    str(home / ".contexer")):
+            assert store._is_sane_repo(bad) is False, bad
+
+    def test_real_repo_accepted(self, tmp_path):
+        assert store._is_sane_repo(str(tmp_path / "myproject")) is True
+
+    def test_relative_and_empty_rejected(self):
+        assert store._is_sane_repo("") is False
+        assert store._is_sane_repo("relative/path") is False
+
+    def test_explicit_repo_wins(self, tmp_repo):
+        assert store._resolve_repo(tmp_repo) == tmp_repo
+
+    def test_explicit_config_dir_never_honored(self, tmp_path, monkeypatch):
+        # A caller passing ~/.claude must NOT resolve to it — falls back to safe sources.
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        assert store._resolve_repo(str(Path.home() / ".claude")) == ""
+
+    def test_session_repo_preferred_over_pointer(self, tmp_path, monkeypatch):
+        # The clobber scenario: pointer poisoned to ~/.claude, but the server is bound to
+        # its own cwd repo — decisions must resolve to the real project, not the config dir.
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir()
+        (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".claude"))
+        monkeypatch.setattr(store, "_SESSION_REPO", str(tmp_path / "realproject"))
+        assert store._resolve_repo("") == str(tmp_path / "realproject")
+
+    def test_poisoned_pointer_read_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir()
+        (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".cursor"))
+        assert store._current_repo_path() == ""
+
+    def test_set_session_repo_rejects_config_dir(self, monkeypatch):
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+        store.set_session_repo(str(Path.home() / ".claude"))
+        assert store._SESSION_REPO == ""
+        store.set_session_repo("")  # reset
+
+
 # ── _is_task ──────────────────────────────────────────────────────────────────
 
 class TestIsTask:
@@ -963,6 +1010,56 @@ class TestIsPrescriptiveConstraint:
         # Sarcasm exclusion should not affect real directives
         is_c, _ = store._is_prescriptive_constraint("always use uv not pip")
         assert is_c is True
+
+    # ── broadened: prohibitions + rule-framing ────────────────────────────────
+    def test_dont_prohibition_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("don't use pip, use uv instead")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_do_not_prohibition_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("do not commit directly to main")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_avoid_prohibition_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("avoid global mutable state in services")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_no_longer_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint("no longer support python 3.11 in this repo")
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_create_a_rule_framing_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("create a rule to not commit to main without review")
+        assert is_c is True
+
+    def test_make_a_rule_framing_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("make a rule that all PRs need two approvals")
+        assert is_c is True
+
+    def test_rule_colon_prefix_detected(self):
+        is_c, _ = store._is_prescriptive_constraint("rule: every endpoint must be authenticated")
+        assert is_c is True
+
+    def test_stop_doing_is_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("stop using deprecated requests, switch to httpx")
+        assert is_c is True
+
+    # ── soft prose must stay non-constraint ───────────────────────────────────
+    def test_dont_worry_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("don't worry about the tests for now")
+        assert is_c is False
+
+    def test_i_dont_know_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("I don't know why the build is failing")
+        assert is_c is False
+
+    def test_dont_hesitate_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint("don't hesitate to refactor as you see fit")
+        assert is_c is False
 
 
 class TestSanitizeDirective:

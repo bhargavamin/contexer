@@ -112,9 +112,10 @@ def install(home: Path) -> list[str]:
 
     ss_code = (
         "from contexer import store; import json,sys; "
-        "store.STORE_DIR.mkdir(exist_ok=True); "
-        "(store.STORE_DIR/'.current_repo').write_text(sys.argv[1]); "
-        "print(json.dumps(store.get_session_start_context(sys.argv[1], store.source_from_hook_stdin(sys.stdin.read()))))"
+        "repo=sys.argv[1]; store.STORE_DIR.mkdir(exist_ok=True); "
+        # Only record a sane repo — never poison the pointer with a config/home dir.
+        "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+        "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
@@ -126,12 +127,15 @@ def install(home: Path) -> list[str]:
         "print(json.dumps(store.get_post_compact_context(sys.argv[1])))"
     )
 
+    # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
+    # a git work tree — the old `|| pwd` fallback could write a non-repo dir (e.g. ~/.claude),
+    # poisoning the shared pointer so decisions landed in the wrong store file.
     anchor_cmd = (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && "
-        "printf '%s' \"$REPO\" > ~/.contexer/.current_repo && "
-        "FLAG=\"$HOME/.contexer/.pending_capture\" && "
+        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
+        "if [ -n \"$REPO\" ]; then printf '%s' \"$REPO\" > ~/.contexer/.current_repo; fi; "
+        "FLAG=\"$HOME/.contexer/.pending_capture\"; "
         "if [ -f \"$FLAG\" ]; then "
-        "rm -f \"$FLAG\" && "
+        "rm -f \"$FLAG\"; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
         "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
         "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "

@@ -16,11 +16,46 @@ def is_present(home: Path) -> bool:
 
 # Claude delivers these reminders via per-prompt hooks; Cursor can only inject at
 # session start, so the nudge rides in additional_context (see the spec's parity matrix).
+# It is intentionally prescriptive: Cursor's beforeSubmitPrompt cannot inject per-prompt
+# context, so this once-per-session text is the main lever steering the model to use
+# Contexer instead of reading files blindly or writing native .cursor/rules files.
 _NUDGE = (
-    "Contexer is active. Call get_context BEFORE reading files for any question about "
-    "architecture, design decisions, rationale, patterns, or constraints. Call "
-    "update_context after any significant decision, established pattern, or stated "
-    "constraint (the server deduplicates, so err on the side of calling it)."
+    "Contexer is active for this repo.\n"
+    "- For ANY question about what this repo is, its architecture, design decisions, "
+    "rationale, conventions, patterns, or 'why' something was done: CALL the contexer "
+    "get_context tool FIRST, before reading files. For broad 'what is this repo' / "
+    "overview questions call get_context with NO query (empty) to get the overview; "
+    "use a query only for a specific topic. Only fall back to reading files if "
+    "get_context returns nothing.\n"
+    "- To save a rule, constraint, convention, or decision: CALL contexer update_context "
+    "(or update_global_context for cross-repo rules). Do NOT create a .cursor/rules/*.mdc "
+    "file for these — Contexer is the store. The server deduplicates, so err on the side "
+    "of calling it.\n"
+    "- ALWAYS pass repo_path set to the absolute path of this workspace when calling any "
+    "contexer tool — do not rely on auto-detection."
+)
+
+# Body of the managed always-apply Cursor rule. Cursor injects rules on every prompt
+# natively, which is the only reliable per-prompt steering available (beforeSubmitPrompt
+# cannot inject). Marker-guarded so a user's own rule files are never touched.
+_RULE_FILENAME = "contexer.mdc"
+_RULE_BODY = (
+    "---\n"
+    "description: Use Contexer (MCP) as the source of repo decisions and rules.\n"
+    "alwaysApply: true\n"
+    "---\n"
+    f"<!-- {base._BOOTSTRAP_CMD_MARKER} -->\n"
+    "# Contexer\n\n"
+    "Before answering any question about what this repo is, its architecture, design "
+    "decisions, rationale, conventions, patterns, or why something was done: call the "
+    "contexer `get_context` MCP tool first (no query = overview; a query for a specific "
+    "topic). Only read files if it returns nothing.\n\n"
+    "When the user asks to create/save/remember a rule, constraint, convention, or "
+    "decision: call contexer `update_context` (or `update_global_context` for cross-repo "
+    "rules). Do not create a separate `.cursor/rules/*.mdc` file for it — Contexer is the "
+    "store.\n\n"
+    "Always pass `repo_path` set to the absolute path of this workspace when calling any "
+    "contexer tool — do not rely on auto-detection.\n"
 )
 
 
@@ -51,13 +86,41 @@ def _repo_from(raw: str, repo_path: str) -> str:
     return store._resolve_repo("")
 
 
+def _ensure_rule_file(repo_dir: str) -> None:
+    """Write a Contexer-managed always-apply rule into <workspace>/.cursor/rules/.
+
+    Cursor injects rules on every prompt natively — the only reliable per-prompt steering,
+    since beforeSubmitPrompt cannot inject context. Marker-guarded and idempotent: a user's
+    own rule files are never touched, and we only (re)write our own managed file. Best-effort;
+    never raises — sessionStart must not crash Cursor."""
+    try:
+        if not repo_dir:
+            return
+        rules_dir = Path(repo_dir) / ".cursor" / "rules"
+        rule_path = rules_dir / _RULE_FILENAME
+        if rule_path.exists():
+            current = rule_path.read_text(encoding="utf-8")
+            # Only overwrite a file that is already ours; refresh it if our body changed.
+            if base._BOOTSTRAP_CMD_MARKER not in current:
+                return
+            if current == _RULE_BODY:
+                return
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        rule_path.write_text(_RULE_BODY, encoding="utf-8")
+    except Exception:
+        pass
+
+
 def session_start(repo_path: str, raw: str) -> str:
-    """Cursor sessionStart: write .current_repo, inject rules + nudge. Never raises."""
+    """Cursor sessionStart: write .current_repo, ensure managed rule, inject rules + nudge.
+    Never raises."""
     try:
         repo = _repo_from(raw, repo_path)
-        if repo:
+        if repo and store._is_sane_repo(repo):
             store.STORE_DIR.mkdir(exist_ok=True)
+            # Never poison the shared pointer with a config/home dir (see store._is_sane_repo).
             (store.STORE_DIR / ".current_repo").write_text(repo)
+            _ensure_rule_file(repo)
             payload = store.session_start_payload(repo)
         else:
             payload = {"status": "", "context": ""}
@@ -66,8 +129,25 @@ def session_start(repo_path: str, raw: str) -> str:
         return json.dumps({"additional_context": _NUDGE})
 
 
+def _anchor_current_repo(repo: str) -> None:
+    """Persist the active workspace to ~/.contexer/.current_repo so bare MCP calls (no
+    repo_path) resolve correctly.
+
+    Cursor launches the MCP server outside the project, so the server's cwd-derived
+    _SESSION_REPO is empty — and only sessionStart wrote the pointer, which then went stale
+    or got clobbered. Refreshing it on every prompt from workspace_roots (a base field on
+    all Cursor hooks) mirrors Claude's per-prompt anchor and is what keeps get_context({})
+    working. Guarded by _is_sane_repo + best-effort (hooks must never crash the host)."""
+    try:
+        if repo and store._is_sane_repo(repo):
+            store.STORE_DIR.mkdir(exist_ok=True)
+            (store.STORE_DIR / ".current_repo").write_text(repo)
+    except Exception:
+        pass
+
+
 def capture_task(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: store the prompt as the task (write-only).
+    """beforeSubmitPrompt: anchor the repo pointer + store the prompt as the task.
 
     v1 note: Cursor's beforeSubmitPrompt has no "once" semantics, so this runs on
     every prompt and store.capture_task replaces the task entry each time — Cursor
@@ -76,6 +156,7 @@ def capture_task(repo_path: str, raw: str) -> str:
     try:
         repo = _repo_from(raw, repo_path)
         if repo:
+            _anchor_current_repo(repo)
             store.capture_task(repo, store.prompt_from_hook_stdin(raw),
                                store.session_from_hook_stdin(raw))
     except Exception:
@@ -84,10 +165,11 @@ def capture_task(repo_path: str, raw: str) -> str:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: auto-store 'always/never' directives (write-only; no ack)."""
+    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
     try:
         repo = _repo_from(raw, repo_path)
         if repo:
+            _anchor_current_repo(repo)
             store.capture_user_constraint(repo, store.prompt_from_hook_stdin(raw),
                                           store.session_from_hook_stdin(raw))
     except Exception:
@@ -143,6 +225,7 @@ def install(home: Path) -> list[str]:
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.cursor/hooks.json")
     log.append("  ℹ Cursor hooks require Cursor 1.7+.")
+    log.append("  ℹ Cursor will ask once to approve Contexer's MCP tools — approve to allow.")
     return log
 
 
