@@ -30,7 +30,9 @@ _NUDGE = (
     "- To save a rule, constraint, convention, or decision: CALL contexer update_context "
     "(or update_global_context for cross-repo rules). Do NOT create a .cursor/rules/*.mdc "
     "file for these — Contexer is the store. The server deduplicates, so err on the side "
-    "of calling it."
+    "of calling it.\n"
+    "- ALWAYS pass repo_path set to the absolute path of this workspace when calling any "
+    "contexer tool — do not rely on auto-detection."
 )
 
 # Body of the managed always-apply Cursor rule. Cursor injects rules on every prompt
@@ -51,7 +53,9 @@ _RULE_BODY = (
     "When the user asks to create/save/remember a rule, constraint, convention, or "
     "decision: call contexer `update_context` (or `update_global_context` for cross-repo "
     "rules). Do not create a separate `.cursor/rules/*.mdc` file for it — Contexer is the "
-    "store.\n"
+    "store.\n\n"
+    "Always pass `repo_path` set to the absolute path of this workspace when calling any "
+    "contexer tool — do not rely on auto-detection.\n"
 )
 
 
@@ -125,8 +129,25 @@ def session_start(repo_path: str, raw: str) -> str:
         return json.dumps({"additional_context": _NUDGE})
 
 
+def _anchor_current_repo(repo: str) -> None:
+    """Persist the active workspace to ~/.contexer/.current_repo so bare MCP calls (no
+    repo_path) resolve correctly.
+
+    Cursor launches the MCP server outside the project, so the server's cwd-derived
+    _SESSION_REPO is empty — and only sessionStart wrote the pointer, which then went stale
+    or got clobbered. Refreshing it on every prompt from workspace_roots (a base field on
+    all Cursor hooks) mirrors Claude's per-prompt anchor and is what keeps get_context({})
+    working. Guarded by _is_sane_repo + best-effort (hooks must never crash the host)."""
+    try:
+        if repo and store._is_sane_repo(repo):
+            store.STORE_DIR.mkdir(exist_ok=True)
+            (store.STORE_DIR / ".current_repo").write_text(repo)
+    except Exception:
+        pass
+
+
 def capture_task(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: store the prompt as the task (write-only).
+    """beforeSubmitPrompt: anchor the repo pointer + store the prompt as the task.
 
     v1 note: Cursor's beforeSubmitPrompt has no "once" semantics, so this runs on
     every prompt and store.capture_task replaces the task entry each time — Cursor
@@ -135,6 +156,7 @@ def capture_task(repo_path: str, raw: str) -> str:
     try:
         repo = _repo_from(raw, repo_path)
         if repo:
+            _anchor_current_repo(repo)
             store.capture_task(repo, store.prompt_from_hook_stdin(raw),
                                store.session_from_hook_stdin(raw))
     except Exception:
@@ -143,10 +165,11 @@ def capture_task(repo_path: str, raw: str) -> str:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: auto-store 'always/never' directives (write-only; no ack)."""
+    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
     try:
         repo = _repo_from(raw, repo_path)
         if repo:
+            _anchor_current_repo(repo)
             store.capture_user_constraint(repo, store.prompt_from_hook_stdin(raw),
                                           store.session_from_hook_stdin(raw))
     except Exception:

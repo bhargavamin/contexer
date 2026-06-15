@@ -171,6 +171,24 @@ class TestCursorEntrypoints:
         cursor.session_start("", raw)
         assert rule.read_text() == "my own rule, hands off"
 
+    def test_capture_task_anchors_current_repo(self, tmp_repo):
+        # Every beforeSubmitPrompt must refresh the pointer so bare get_context({}) resolves.
+        from contexer import store
+        raw = _json.dumps({"prompt": "Refactor auth to use JWT tokens", "session_id": "s1",
+                           "workspace_roots": [tmp_repo]})
+        cursor.capture_task("", raw)
+        assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
+
+    def test_capture_does_not_anchor_config_dir(self, tmp_repo, monkeypatch):
+        from pathlib import Path
+        from contexer import store
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        (store.STORE_DIR / ".current_repo").write_text(tmp_repo)  # a sane prior value
+        raw = _json.dumps({"prompt": "hi", "workspace_roots": [str(Path.home() / ".claude")]})
+        cursor.capture_task("", raw)
+        # config-dir workspace must never overwrite the pointer
+        assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
+
     def test_capture_task_writes_and_passes_through(self, tmp_repo):
         from contexer import store
         raw = _json.dumps({"prompt": "Refactor auth to use JWT tokens", "session_id": "s1",
