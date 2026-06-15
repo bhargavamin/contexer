@@ -15,19 +15,19 @@
 
 ---
 
-Every Claude Code session starts fresh. No memory of what was decided last week. No knowledge of the constraints your team spent months establishing. No recollection of the architecture choices that took three PRs to get right.
+Every AI coding session starts fresh. No memory of what was decided last week. No knowledge of the constraints your team spent months establishing. No recollection of the architecture choices that took three PRs to get right.
 
-The result: developers re-explain the same rules every session. Claude re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
+The result: developers re-explain the same rules every session. The agent re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
 
-**Contexer fixes this by capturing decisions as they happen and replaying them before Claude types a single character in your next session.** It works with Claude Code and Cursor.
+**Contexer fixes this by capturing decisions as they happen and replaying them before your AI assistant types a single character in your next session.** It works with Claude Code and Cursor.
 
 ---
 
 ## What changes
 
-**Before Contexer:** You establish "mock at the service boundary, not the DB layer" in session one. Session two, Claude is back to mocking the DB. You correct it. Session three, same thing. Every session pays the re-explanation tax, and every mistake Claude makes because it forgot costs correction turns that run sessions long.
+**Before Contexer:** You establish "mock at the service boundary, not the DB layer" in session one. Session two, the agent is back to mocking the DB. You correct it. Session three, same thing. Every session pays the re-explanation tax, and every mistake the agent makes because it forgot costs correction turns that run sessions long.
 
-**After Contexer:** That rule is stored once as a constraint. Every future session starts with it already injected. Claude never forgets it. You never say it again.
+**After Contexer:** That rule is stored once as a constraint. Every future session starts with it already injected. The agent never forgets it. You never say it again.
 
 The impact compounds across a team. Shared constraints mean every engineer's agent follows the same rules, enforces the same quality standards, and stays within the same architectural boundaries — without anyone managing it manually.
 
@@ -63,7 +63,7 @@ Install takes under two minutes.
 # Step 1 — install
 uv tool install contexer
 
-# Step 2 — wire into Claude Code
+# Step 2 — wire into your AI assistant (Claude Code and/or Cursor)
 contexer install
 ```
 
@@ -109,19 +109,19 @@ Code.
 You work normally. Contexer captures decisions in the background.
 
 - **Session start** — constraints and conventions inject automatically before you type anything
-- **As you work** — Claude captures significant decisions; no manual intervention needed
+- **As you work** — the agent captures significant decisions; no manual intervention needed
 - **"Why" questions** — if you ask about rationale or past decisions, Contexer fetches them automatically
-- **Context window limit** — decisions are saved before compaction and restored after, so nothing is lost
+- **Context window limit** — on Claude Code, decisions are saved before compaction and restored after, so nothing is lost
 
-If Claude misses something, say *"store that decision"* and it is captured immediately.
+If the agent misses something, say *"store that decision"* and it is captured immediately.
 
-**First time in a repo** — Claude includes a brief offer at the top of its first response. The offer adapts to how well you know the repo, judged from its git history:
+**First time in a repo** — the agent includes a brief offer at the top of its first response. The offer adapts to how well you know the repo, judged from its git history:
 
 - The repo has commits from you → pick **quick** (one question) or **full** (guided setup).
 - No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs instead of asking questions you can't answer.
 - Can't tell → it simply asks how well you know the repo.
 
-**Resumed sessions** (`--resume` / `--continue`) don't repeat any of this — the context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes Claude mine that conversation for decisions already made and store them, no questions asked.
+**Resumed sessions** (Claude Code's `--resume` / `--continue`) don't repeat any of this — the context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes the agent mine that conversation for decisions already made and store them, no questions asked.
 
 ---
 
@@ -149,7 +149,7 @@ The saving comes from what that replaces.
 | Without Contexer | With Contexer |
 |---|---|
 | 200–500 tokens re-explaining rules per session through back-and-forth | ~26 tokens per rule at session start, flat and predictable |
-| Claude re-introduces rejected patterns, correction turns follow | Pattern stored once, correction never needed |
+| The agent re-introduces rejected patterns, correction turns follow | Pattern stored once, correction never needed |
 | Developer reworks output that didn't follow established decisions | Decisions enforced from session start |
 | Long sessions from accumulated re-explanation and mistakes | Sessions stay focused, context stays clean |
 
@@ -215,7 +215,7 @@ This is intentional. Every piece of complexity added to a memory system is a pie
 
 ## Token cost reference
 
-Context processing runs before Claude generates a response, not during it. It adds nothing to response time.
+Context processing runs before the agent generates a response, not during it. It adds nothing to response time.
 
 **Session start — pre-loaded rules (constraints + conventions):**
 
@@ -258,7 +258,7 @@ On prompts unrelated to stored decisions, Contexer skips entirely — no read, n
 
 ## Troubleshooting
 
-**Claude isn't storing decisions automatically.** Say *"store that decision"* and it is captured immediately.
+**The agent isn't storing decisions automatically.** Say *"store that decision"* and it is captured immediately.
 
 **A decision was stored but isn't appearing.** Constraints and conventions load at session start. If added mid-session, they appear from the next session onward.
 
@@ -266,7 +266,7 @@ On prompts unrelated to stored decisions, Contexer skips entirely — no read, n
 
 **A new decision wasn't saved — looks like a duplicate.** Content too similar to an existing decision is silently skipped. Rephrase to include what specifically changed.
 
-**No context appeared at session start on a new repo.** Claude will offer bootstrap setup. Complete it once and all future sessions will have context.
+**No context appeared at session start on a new repo.** The agent will offer bootstrap setup. Complete it once and all future sessions will have context.
 
 ---
 
