@@ -1,10 +1,11 @@
 """Claude Code integration adapter."""
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 
-from contexer import store
+from contexer import memory_sync, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -99,6 +100,45 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+def _memory_dir(repo_path: str) -> Path | None:
+    """Locate Claude Code's memory-tool dir for a repo, or None if absent.
+
+    COUPLING POINT: Claude Code encodes a project dir by replacing every
+    non-alphanumeric char in the absolute path with '-'
+    (``/Users/me/repos/x`` -> ``-Users-me-repos-x``). If that encoding ever
+    changes upstream, this silently finds nothing and the whole memory-sync
+    feature no-ops — fail-safe (never wrong data), but it can go quietly dead."""
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", repo_path)
+    d = Path.home() / ".claude" / "projects" / slug / "memory"
+    return d if d.is_dir() else None
+
+
+def sync_memory(repo_path: str) -> int:
+    """Import Claude memory-tool facts into the store. Silent, fail-soft, idempotent.
+
+    Skips the whole import when the memory dir is unchanged since last sync
+    (content fingerprint in ~/.contexer/.memory_synced_<slug>). Returns the count
+    of newly-stored entries (0 on skip/absence/error). Wired to SessionStart,
+    PreCompact, and SessionEnd hooks."""
+    try:
+        repo = store._resolve_repo(repo_path)
+        if not repo:
+            return 0
+        mem = _memory_dir(repo)
+        if mem is None:
+            return 0
+        fingerprint = memory_sync.dir_fingerprint(mem)
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        marker = store.STORE_DIR / f".memory_synced_{store._slug(repo)}"
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == fingerprint:
+            return 0
+        stored = memory_sync.import_dir(mem, repo)
+        marker.write_text(fingerprint, encoding="utf-8")
+        return stored
+    except Exception:
+        return 0
+
+
 def install(home: Path) -> list[str]:
     """Wire the Claude MCP server + hooks + permissions. Returns log lines."""
     log: list[str] = []
@@ -111,10 +151,13 @@ def install(home: Path) -> list[str]:
         )
 
     ss_code = (
-        "from contexer import store; import json,sys; "
+        "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
         "repo=sys.argv[1]; store.STORE_DIR.mkdir(exist_ok=True); "
         # Only record a sane repo — never poison the pointer with a config/home dir.
         "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+        # Import any memory-tool facts before building context (crash-recovery net:
+        # catches facts whose session ended without a clean SessionEnd flush).
+        "_c.sync_memory(repo); "
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
     )
     boot_code = (
@@ -126,6 +169,22 @@ def install(home: Path) -> list[str]:
         "from contexer import store; import json,sys; "
         "print(json.dumps(store.get_post_compact_context(sys.argv[1])))"
     )
+
+    # Memory-tool sync (SessionEnd + PreCompact). Runs claude.sync_memory then emits
+    # `tail` as the hook's stdout JSON. The python call prints nothing — only `tail`
+    # reaches stdout, so the hook output stays valid.
+    def _sync(tail: str) -> str:
+        return (
+            'REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+            f'"{python}" -c "from contexer.adapters import claude; import sys; '
+            'claude.sync_memory(sys.argv[1])" "$REPO"; '
+            f"echo '{tail}'"
+        )
+
+    precompact_cmd = _sync(
+        '{"systemMessage": "Contexer: context compaction starting '
+        '— call update_context for any decisions not yet stored"}')
+    sessionend_cmd = _sync("{}")
 
     # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
     # a git work tree — the old `|| pwd` fallback could write a non-repo dir (e.g. ~/.claude),
@@ -172,14 +231,23 @@ def install(home: Path) -> list[str]:
     hooks = settings.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: old SessionStart hook didn't read the session source from stdin; replace it
-    if _in_groups(ss, "get_session_start_context") and not _in_groups(ss, "source_from_hook_stdin"):
+    # Migrate: old SessionStart hook didn't read the session source from stdin, or
+    # predates memory-tool sync; replace it so the current ss_code (which calls
+    # sync_memory) is installed.
+    if _in_groups(ss, "get_session_start_context") and not (
+            _in_groups(ss, "source_from_hook_stdin") and _in_groups(ss, "sync_memory")):
         ss = _filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...",
             "command": _py(ss_code)}]})
+
+    # SessionEnd: flush memory-tool facts on clean exit (deterministic — needs no model).
+    se = hooks.setdefault("SessionEnd", [])
+    if not _in_groups(se, "sync_memory"):
+        se.append({"hooks": [{"type": "command",
+            "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
 
     # PostToolUse: set a flag after Write/Edit so next prompt reminds Claude to call update_context
     put = hooks.setdefault("PostToolUse", [])
@@ -188,10 +256,15 @@ def install(home: Path) -> list[str]:
             "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
 
     pc = hooks.setdefault("PreCompact", [])
+    # Migrate: old PreCompact only echoed a reminder; replace with the sync variant
+    # that flushes memory-tool facts before the context window collapses.
+    if _in_groups(pc, "compaction starting") and not _in_groups(pc, "sync_memory"):
+        pc = _filter_groups(pc, ["compaction starting"])
+        hooks["PreCompact"] = pc
     if not _in_groups(pc, "compaction starting"):
         pc.append({"hooks": [{"type": "command",
             "statusMessage": "Saving decisions before compact...",
-            "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'"}]})
+            "command": precompact_cmd}]})
 
     poc = hooks.setdefault("PostCompact", [])
     # Migrate: old hook used get_context (no bootstrap offer); replace with get_post_compact_context
@@ -294,6 +367,7 @@ def uninstall(home: Path) -> list[str]:
 
         event_markers = {
             "SessionStart":     ["get_session_start_context"],
+            "SessionEnd":       ["sync_memory"],
             "PostToolUse":      [".pending_capture"],
             "PreCompact":       ["compaction starting"],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context"],

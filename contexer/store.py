@@ -579,6 +579,64 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     return True, entry["id"]
 
 
+def upsert_memory_decision(repo_path: str, content: str, session_id: str,
+                           subtype: str, memory_key: str) -> str:
+    """Store or refresh a memory-imported decision, keyed by stable identity.
+
+    Memory-tool facts evolve in place on disk, so they're keyed by `memory_key`
+    (source file + section) and updated in place rather than routed through the
+    novelty filter — which would otherwise silently drop a reworded fact (<30%
+    change) or accumulate a near-duplicate (>30% change). The novelty filter
+    still gates *first* creation, so a memory fact that merely restates an
+    existing decision is recorded as a recurrence, not double-stored across the
+    two systems. Returns 'created' | 'updated' | 'unchanged' | 'skipped'."""
+    if not _is_storable(content):
+        return "skipped"
+    data = _load(repo_path)
+    entries = data["entries"]
+    # 1. Keyed match — the evolving-fact path: same source+section, refresh in place.
+    match = next((e for e in entries if e.get("memory_key") == memory_key), None)
+    # 2. Migration: adopt a pre-key memory entry whose content is still identical,
+    #    so the first import after upgrade stamps a key instead of duplicating. Gated
+    #    on the [memory ...] tag so a manual decision with identical text is NOT
+    #    silently converted into a memory-managed entry (it falls to the novelty gate).
+    if match is None:
+        match = next((e for e in entries
+                      if not e.get("memory_key") and e["type"] == "decision"
+                      and e["content"] == content and e["content"].startswith("[memory")), None)
+    if match is not None:
+        changed = match["content"] != content or match.get("subtype", "") != subtype
+        match["memory_key"] = memory_key
+        if changed:
+            match["content"] = content
+            match["subtype"] = subtype
+            match["timestamp"] = datetime.now(timezone.utc).isoformat()
+        _save(repo_path, data)
+        return "updated" if changed else "unchanged"
+    # 3. First creation — still novelty-gate so a memory fact identical to an
+    #    existing decision becomes a recurrence, not a cross-system duplicate.
+    decisions_only = [e for e in entries if e["type"] == "decision"]
+    dup = _find_match(content, decisions_only)
+    if dup is not None:
+        _record_recurrence(dup, session_id)
+        _save(repo_path, data)
+        return "skipped"
+    entries.append({
+        "id": str(uuid.uuid4()),
+        "type": "decision",
+        "subtype": subtype,
+        "content": content,
+        "session_id": session_id,
+        "session_ids": [session_id],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "occurrence_count": 1,
+        "memory_key": memory_key,
+    })
+    data["entries"] = _keep_top(entries, MAX_ENTRIES, pin_last=True)
+    _save(repo_path, data)
+    return "created"
+
+
 _INSIGHT_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 _FRESH_CLONE_DAYS = 7

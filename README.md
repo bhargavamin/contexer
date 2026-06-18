@@ -112,6 +112,7 @@ You work normally. Contexer captures decisions in the background.
 - **As you work** — Claude captures significant decisions; no manual intervention needed
 - **"Why" questions** — if you ask about rationale or past decisions, Contexer fetches them automatically
 - **Context window limit** — decisions are saved before compaction and restored after, so nothing is lost
+- **Claude Code memory tool** — if a session records decisions to Claude Code's built-in memory (`~/.claude/projects/.../memory/`) instead of to Contexer, those facts are imported automatically — at session start, around compaction, and on exit — so they're categorised and available to the next session. Two memory systems, one source of truth.
 
 If Claude misses something, say *"store that decision"* and it is captured immediately.
 

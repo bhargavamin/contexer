@@ -44,6 +44,25 @@ class TestInstall:
                 for h in grp["hooks"] if "command" in h]
         assert any("compaction starting" in c for c in cmds)
 
+    def test_pre_compact_flushes_memory(self, installed_home):
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for grp in settings["hooks"]["PreCompact"]
+                for h in grp["hooks"] if "command" in h]
+        # PreCompact must both flush memory and still emit the reminder.
+        assert any("sync_memory" in c and "compaction starting" in c for c in cmds)
+
+    def test_session_start_flushes_memory(self, installed_home):
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for grp in settings["hooks"]["SessionStart"]
+                for h in grp["hooks"] if "command" in h]
+        assert any("sync_memory" in c for c in cmds)
+
+    def test_session_end_hook_registered(self, installed_home):
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for grp in settings["hooks"]["SessionEnd"]
+                for h in grp["hooks"] if "command" in h]
+        assert any("sync_memory" in c for c in cmds)
+
     def test_post_compact_hook_registered(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         cmds = [h["command"] for grp in settings["hooks"]["PostCompact"]
@@ -133,6 +152,11 @@ class TestUninstall:
         cmds = [h.get("command", "") for grp in ss for h in grp.get("hooks", [])]
         assert not any("get_session_start_context" in c for c in cmds)
 
+    def test_removes_session_end_hook(self, installed_home):
+        uninstall()
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        assert "SessionEnd" not in settings.get("hooks", {})
+
     def test_removes_permissions(self, installed_home):
         uninstall()
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
@@ -158,6 +182,38 @@ class TestUninstall:
     def test_uninstall_is_idempotent(self, installed_home):
         uninstall()
         uninstall()  # second uninstall should not raise
+
+
+class TestMemorySyncMigration:
+    """Old installs predate memory-tool sync; reinstall must upgrade them in place."""
+
+    def _write_legacy(self, home):
+        settings_path = home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command",
+                "command": "py -c 'store.get_session_start_context(repo, store.source_from_hook_stdin(x))'"}]}],
+            "PreCompact": [{"hooks": [{"type": "command",
+                "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting\"}'"}]}],
+        }}))
+        return settings_path
+
+    def test_session_start_upgraded_to_flush_memory(self, clean_home):
+        path = self._write_legacy(clean_home)
+        install()
+        cmds = [h["command"] for grp in json.loads(path.read_text())["hooks"]["SessionStart"]
+                for h in grp["hooks"]]
+        assert any("sync_memory" in c for c in cmds)
+        # not duplicated — exactly one SessionStart group
+        assert len(json.loads(path.read_text())["hooks"]["SessionStart"]) == 1
+
+    def test_pre_compact_upgraded_to_flush_memory(self, clean_home):
+        path = self._write_legacy(clean_home)
+        install()
+        cmds = [h["command"] for grp in json.loads(path.read_text())["hooks"]["PreCompact"]
+                for h in grp["hooks"]]
+        assert any("sync_memory" in c for c in cmds)
+        assert len(json.loads(path.read_text())["hooks"]["PreCompact"]) == 1
 
 
 class TestTargetSelection:
