@@ -113,14 +113,20 @@ def _build_entries(fact: dict, source_id: str) -> list[tuple[str, str, str]]:
 
     if len(matches) >= 2:
         entries = []
+        seen: dict[str, int] = {}
         for i, m in enumerate(matches):
             start = m.start()
             stop = matches[i + 1].start() if i + 1 < len(matches) else len(body)
             section = body[start:stop].strip()
             heading = m.group(0).lstrip("# ").strip()
+            # Disambiguate repeated headings so two `## Notes` sections get distinct
+            # keys (else the second would overwrite the first on upsert). Unique
+            # headings keep the bare `source#heading` form — stable across reorders.
+            seen[heading] = seen.get(heading, 0) + 1
+            suffix = "" if seen[heading] == 1 else f"#{seen[heading]}"
             content = f"{_tag(name)}{heading}: {section}"
             entries.append((content, _classify(heading + " " + section, fm_type),
-                            f"{source_id}#{heading}"))
+                            f"{source_id}#{heading}{suffix}"))
         return entries
 
     lead = desc + "\n" if desc else ""
@@ -148,10 +154,12 @@ def import_dir(memory_dir: Path, repo_path: str) -> int:
     """Import every fact file in ``memory_dir`` into the store for ``repo_path``.
 
     Returns the count of newly-*created* entries (in-place updates and dedup-skips
-    don't count). Skips ``MEMORY.md`` (just a link index). Fail-soft per file.
-    Each entry is keyed by ``memory_key`` so a reworded fact updates in place
-    (see ``store.upsert_memory_decision``)."""
-    stored = 0
+    don't count). Skips ``MEMORY.md`` (just a link index). Parsing is fail-soft per
+    file; the whole batch is then committed in a single load+save via
+    ``store.upsert_memory_batch`` (one store rewrite, not one per entry), and a
+    multi-section file imports all-or-nothing. Each entry is keyed by ``memory_key``
+    so a reworded fact updates in place."""
+    items: list[tuple[str, str, str, str]] = []
     for path in sorted(memory_dir.glob("*.md")):
         if path.name == "MEMORY.md":
             continue
@@ -159,8 +167,7 @@ def import_dir(memory_dir: Path, repo_path: str) -> int:
             fact = _parse_fact(path.read_text(encoding="utf-8"))
             sid = fact["origin"] or "memory-sync"
             for content, subtype, key in _build_entries(fact, path.name):
-                if store.upsert_memory_decision(repo_path, content, sid, subtype, key) == "created":
-                    stored += 1
+                items.append((content, sid, subtype, key))
         except Exception:
             continue
-    return stored
+    return store.upsert_memory_batch(repo_path, items)
