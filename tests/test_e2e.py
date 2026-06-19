@@ -715,13 +715,13 @@ class TestConstraintCapture:
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["type"] == "decision"
 
-    def test_long_prompt_truncated_to_600_chars(self, tmp_repo):
+    def test_long_pasted_prompt_is_not_captured(self, tmp_repo):
+        # A long pasted blob containing a directive word is not a clean directive —
+        # it must not be auto-stored as a constraint.
         long_prompt = "always " + "x" * 700
         eid, content = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
-        assert eid is not None
-        data = store._load(tmp_repo)
-        entry = next(e for e in data["entries"] if e["id"] == eid)
-        assert len(entry["content"]) <= 600
+        assert eid is None
+        assert store._load(tmp_repo)["entries"] == []
 
 
 # ── 6. Decision storage — novelty filter ─────────────────────────────────────
