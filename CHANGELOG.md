@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/bhargavamin/contexer/compare/v0.7.0...v0.8.0) (2026-06-19)
+
+
+### Features
+
+* **memory-sync:** import Claude Code memory-tool facts into the store ([#46](https://github.com/bhargavamin/contexer/issues/46)) ([1aa9f77](https://github.com/bhargavamin/contexer/commit/1aa9f77ada6faf8d1d0e975fdefb46f7e411ba6a))
+
+
+### Documentation
+
+* tool-neutral README rewrite + security policy ([#44](https://github.com/bhargavamin/contexer/issues/44)) ([6b7b53e](https://github.com/bhargavamin/contexer/commit/6b7b53ebcae9548438eb54fde75b4f2b72d6cef8))
+
 ## [0.7.0](https://github.com/bhargavamin/contexer/compare/v0.6.3...v0.7.0) (2026-06-15)
 
 
