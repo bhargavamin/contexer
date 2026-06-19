@@ -1062,6 +1062,33 @@ class TestIsPrescriptiveConstraint:
         assert is_c is False
 
 
+class TestConstraintNoiseGuards:
+    """Regression: the constraint hook must not store pasted blobs or system text
+    that merely contain a directive word (the source of store crowding)."""
+
+    def test_long_pasted_task_is_not_a_constraint(self):
+        blob = ("I want you to create another PR to update the readme to improve it. "
+                "Add a section that says every Claude Code session starts fresh, and "
+                "always replays decisions before Claude types. " * 4)
+        assert store._is_prescriptive_constraint(blob)[0] is False
+
+    def test_system_task_notification_is_not_a_constraint(self):
+        text = "<task-notification>\n<task-id>abc</task-id> agent must always finish</task-notification>"
+        assert store._is_prescriptive_constraint(text)[0] is False
+
+    def test_contexer_injected_text_is_not_a_constraint(self):
+        assert store._is_prescriptive_constraint("[Contexer: auto-fetched] always use uv")[0] is False
+
+    def test_fenced_code_dump_is_not_a_constraint(self):
+        text = "I got this issue now ```\nError: you must always set repo_path\n```"
+        assert store._is_prescriptive_constraint(text)[0] is False
+
+    def test_short_genuine_directive_still_captured(self):
+        # the guards must not break real directive capture
+        assert store._is_prescriptive_constraint("always use conventional commits") == (True, "constraint")
+        assert store._is_prescriptive_constraint("never push without bumping the version")[0] is True
+
+
 class TestSanitizeDirective:
     def test_profanity_stripped(self):
         result = store._sanitize_directive("always fucking use uv not pip")
@@ -1181,12 +1208,14 @@ class TestCaptureUserConstraint:
         assert entry["type"] == "decision"
         assert entry["session_id"] == "sess-1"
 
-    def test_long_prompt_truncated_to_600_chars(self, tmp_repo):
+    def test_long_prompt_is_rejected_not_stored(self, tmp_repo):
+        # A long pasted blob that merely contains 'always' is not a clean directive —
+        # it must not be stored (previously it was truncated to 600c and kept, which
+        # crowded the store with pasted prompts).
         long_prompt = "always " + "x" * 700
         entry_id, content = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
-        assert entry_id is not None
-        data = store._load(tmp_repo)
-        assert len(data["entries"][0]["content"]) <= 600
+        assert entry_id is None
+        assert store._load(tmp_repo)["entries"] == []
 
 
 # ── Atomic save & corruption recovery ─────────────────────────────────────────

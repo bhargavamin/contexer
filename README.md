@@ -114,6 +114,7 @@ Contexer is wired in through two mechanisms: **MCP tools** the agent can call (t
 - **As you work** — capture is two-track. Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook. Everything else relies on the agent noticing a decision and calling the store tool — best-effort, and it does miss things. When it does, say *"store that decision"* and it's captured immediately.
 - **"Why" questions** — ask about a past decision or rationale and Contexer fetches the matching entries automatically.
 - **Context window limit** — on Claude Code, decisions are saved before compaction and restored after, so nothing is lost. (Cursor exposes no compaction hook — see the parity note above.)
+- **Claude Code memory tool** — if a session records decisions to Claude Code's built-in memory (`~/.claude/projects/.../memory/`) instead of to Contexer, those facts are imported automatically — at session start, around compaction, and on exit — so they're categorised and available to the next session. Two memory systems, one source of truth.
 
 **Deduplication is not an LLM call.** Before storing, Contexer checks token overlap against existing decisions — >70% overlap is treated as a duplicate and silently dropped. It's deterministic, costs no tokens, and is why you can "over-call" store without bloating anything.
 

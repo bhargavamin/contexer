@@ -449,11 +449,30 @@ _PERSONAL_DESCRIPTOR = re.compile(
 )
 
 
+# A genuine directive is short and standalone ("always use conventional commits").
+# Anything longer is a pasted blob (a README, an issue dump, a multi-step task) that
+# merely *contains* a directive word — storing the whole thing pollutes the store.
+_MAX_DIRECTIVE_LEN = 300
+# Hook/tool-injected text is never a user directive. The constraint hook fires on
+# whatever lands in UserPromptSubmit, including agent-framework notifications and
+# Contexer's own injected context — guard against capturing those as constraints.
+_SYSTEM_TEXT_PREFIXES = (
+    "<task-notification", "<system-reminder", "<persisted-output",
+    "[contexer", "contexer:",
+)
+
+
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
     Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
     and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
-    if text.strip().endswith("?"):
+    t = text.strip()
+    # Pasted blobs and tool/system-injected text are never clean user directives.
+    if not t or len(t) > _MAX_DIRECTIVE_LEN:
+        return False, ""
+    if t.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in t:
+        return False, ""
+    if t.endswith("?"):
         return False, ""
     if _SARCASM_EXCLUDES.search(text.strip()):
         return False, ""
@@ -553,16 +572,10 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
     return entry["id"]
 
 
-def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
-    if not _is_storable(content):
-        return False, None
-    data = _load(repo_path)
-    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-    match = _find_match(content, decisions_only)
-    if match is not None:
-        _record_recurrence(match, session_id)
-        _save(repo_path, data)
-        return False, None
+def _new_decision_entry(content: str, session_id: str, subtype: str,
+                        memory_key: str | None = None) -> dict:
+    """Build a decision entry. Single source of truth for the entry schema —
+    both manual capture (`update_decision`) and memory import use this."""
     entry = {
         "id": str(uuid.uuid4()),
         "type": "decision",
@@ -573,10 +586,97 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "occurrence_count": 1,
     }
+    if memory_key is not None:
+        entry["memory_key"] = memory_key
+    return entry
+
+
+def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+    if not _is_storable(content):
+        return False, None
+    data = _load(repo_path)
+    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+    match = _find_match(content, decisions_only)
+    if match is not None:
+        _record_recurrence(match, session_id)
+        _save(repo_path, data)
+        return False, None
+    entry = _new_decision_entry(content, session_id, subtype)
     data["entries"].append(entry)
     data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
     _save(repo_path, data)
     return True, entry["id"]
+
+
+def _apply_memory_upsert(entries: list, content: str, session_id: str,
+                         subtype: str, memory_key: str) -> str:
+    """In-memory upsert of one memory fact into `entries`. No I/O, no cap — the
+    caller loads, applies one-or-many, caps, and saves once. Mutates `entries`
+    in place; returns 'created' | 'updated' | 'unchanged' | 'skipped'."""
+    if not _is_storable(content):
+        return "skipped"
+    # 1. Keyed match — the evolving-fact path: same source+section, refresh in place.
+    match = next((e for e in entries if e.get("memory_key") == memory_key), None)
+    # 2. Migration: adopt a pre-key memory entry whose content is still identical,
+    #    so the first import after upgrade stamps a key instead of duplicating. Gated
+    #    on the [memory ...] tag so a manual decision with identical text is NOT
+    #    silently converted into a memory-managed entry (it falls to the novelty gate).
+    if match is None:
+        match = next((e for e in entries
+                      if not e.get("memory_key") and e["type"] == "decision"
+                      and e["content"] == content and e["content"].startswith("[memory")), None)
+    if match is not None:
+        changed = match["content"] != content or match.get("subtype", "") != subtype
+        match["memory_key"] = memory_key
+        if changed:
+            match["content"] = content
+            match["subtype"] = subtype
+            match["timestamp"] = datetime.now(timezone.utc).isoformat()
+        return "updated" if changed else "unchanged"
+    # 3. First creation — novelty-gate so a memory fact that merely restates an
+    #    existing decision is dropped rather than double-stored. Deliberately does
+    #    NOT bump recurrence: a static file re-read on every dir change is not a
+    #    genuine reuse signal, and bumping here inflated occurrence_count on each
+    #    re-sync (it leaves the dup untouched, so re-imports stay idempotent).
+    decisions_only = [e for e in entries if e["type"] == "decision"]
+    if _find_match(content, decisions_only) is not None:
+        return "skipped"
+    entries.append(_new_decision_entry(content, session_id, subtype, memory_key))
+    return "created"
+
+
+def upsert_memory_decision(repo_path: str, content: str, session_id: str,
+                           subtype: str, memory_key: str) -> str:
+    """Store or refresh a single memory-imported decision, keyed by stable identity.
+    Convenience wrapper around `_apply_memory_upsert` (load + apply + save). For
+    bulk import use `upsert_memory_batch`. Returns the apply status."""
+    data = _load(repo_path)
+    status = _apply_memory_upsert(data["entries"], content, session_id, subtype, memory_key)
+    if status == "created":
+        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+    if status != "skipped":                  # 'skipped' leaves the store untouched
+        _save(repo_path, data)
+    return status
+
+
+def upsert_memory_batch(repo_path: str, items: list[tuple[str, str, str, str]]) -> int:
+    """Upsert many memory facts in one load + one save (keeps SessionStart off the
+    O(entries × facts) per-entry rewrite path). `items` are
+    (content, session_id, subtype, memory_key). The whole batch is one atomic
+    write, so a multi-section file imports all-or-nothing. Returns newly-created
+    count."""
+    data = _load(repo_path)
+    entries = data["entries"]
+    created = touched = 0
+    for content, session_id, subtype, memory_key in items:
+        status = _apply_memory_upsert(entries, content, session_id, subtype, memory_key)
+        touched += status != "skipped"
+        created += status == "created"
+    if created:
+        data["entries"] = _keep_top(entries, MAX_ENTRIES, pin_last=True)
+    if touched:
+        _save(repo_path, data)
+    return created
 
 
 _INSIGHT_ORDER = {"low": 0, "medium": 1, "high": 2}
