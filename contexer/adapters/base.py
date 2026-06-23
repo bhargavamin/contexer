@@ -28,7 +28,16 @@ def _bootstrap_command_text() -> str:
 
 
 def _load(path: Path) -> dict:
-    return json.loads(path.read_text()) if path.exists() else {}
+    # Strict load for mutating paths (install/uninstall): unparseable JSON raises
+    # JSONDecodeError, and valid-but-non-object JSON ([], null, 42) raises ValueError —
+    # both surface as a clean abort (see cli._run_guarded) instead of an AttributeError
+    # mid-install that could leave the config half-written.
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return data
 
 
 def _load_safe(path: Path) -> dict:
@@ -37,7 +46,7 @@ def _load_safe(path: Path) -> dict:
     _load so a corrupt config fails loudly rather than being silently clobbered."""
     try:
         data = _load(path)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -48,8 +57,9 @@ def _is_corrupt(path: Path) -> bool:
     if not path.exists():
         return False
     try:
-        return not isinstance(_load(path), dict)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        _load(path)          # raises on unparseable JSON or a non-object payload
+        return False
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
         return True
 
 
@@ -76,3 +86,19 @@ def _filter_groups(groups: list, markers: list) -> list:
         grp for grp in groups
         if not any(marker in str(h) for marker in markers for h in _hooks_of(grp))
     ]
+
+
+def _strip_stale(groups: list, ident_markers: list, current_cmd: str) -> list:
+    """Drop any group that is a Contexer hook of this identity (a command containing
+    one of ident_markers) but whose command differs from current_cmd — i.e. a stale
+    version from an older install: different phrasing, a from-source `uv run
+    --directory <clone>` path, or a pre-sentinel command. Keeps the current group and
+    every non-Contexer group, so reinstall converges instead of stacking duplicates."""
+    out = []
+    for grp in groups:
+        cmds = [h.get("command", "") for h in _hooks_of(grp)]
+        is_this_hook = any(m in c for m in ident_markers for c in cmds)
+        if is_this_hook and current_cmd not in cmds:
+            continue
+        out.append(grp)
+    return out

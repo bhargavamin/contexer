@@ -1359,3 +1359,104 @@ class TestPostCompactPayload:
         p = store.post_compact_payload(populated_repo)
         assert "reloaded after compaction" in p["status"].lower()
         assert p["context"] != ""
+
+
+# ── review regression: corruption recovery, slug injectivity, query matching ──
+
+class TestNonDictStoreRecovery:
+    """A store file holding valid JSON that is not an object must read as empty,
+    not crash every tool call for the repo (review finding C3)."""
+
+    @pytest.mark.parametrize("payload", ["[]", "null", '"x"', "42"])
+    def test_non_dict_file_reads_as_empty(self, tmp_repo, payload):
+        store._store_path(tmp_repo).write_text(payload, encoding="utf-8")
+        data = store._load(tmp_repo)
+        assert isinstance(data, dict)
+        assert data["entries"] == []
+
+    def test_non_dict_file_does_not_break_tool_calls(self, tmp_repo):
+        store._store_path(tmp_repo).write_text("[]", encoding="utf-8")
+        # Any of these would raise TypeError/AttributeError on a list/None payload.
+        assert store.get_context(tmp_repo) == "No context stored for this repository."
+        ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
+        assert ok is True
+
+    def test_entries_wrong_type_reads_as_empty(self, tmp_repo):
+        store._store_path(tmp_repo).write_text('{"entries": "oops"}', encoding="utf-8")
+        data = store._load(tmp_repo)
+        assert data["entries"] == []
+
+    @pytest.mark.parametrize("payload", ["[]", "null"])
+    def test_global_non_dict_file_reads_as_empty(self, isolated_store_dir, payload):
+        store._global_path().write_text(payload, encoding="utf-8")
+        data = store._load_global()
+        assert isinstance(data, dict)
+        assert data["entries"] == []
+
+
+@pytest.fixture
+def isolated_store_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    return tmp_path
+
+
+class TestSlugInjectivity:
+    """Paths differing only by a char that maps to '_' must not share a store
+    file (review finding H3)."""
+
+    def test_dot_vs_underscore_paths_do_not_collide(self):
+        assert store._slug("/home/u/my.repo") != store._slug("/home/u/my_repo")
+
+    def test_space_vs_underscore_paths_do_not_collide(self):
+        assert store._slug("/home/u/my repo") != store._slug("/home/u/my_repo")
+
+    def test_colliding_repos_keep_separate_stores(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.update_decision("/home/u/my.repo", "decision A for the dotted repo here", "s1")
+        store.update_decision("/home/u/my_repo", "decision B for the underscore repo here", "s2")
+        a = store.get_context("/home/u/my.repo")
+        b = store.get_context("/home/u/my_repo")
+        assert "decision A" in a and "decision B" not in a
+        assert "decision B" in b and "decision A" not in b
+
+
+class TestQueryNonWordPrefix:
+    """A query starting with a non-word char must still match (review finding H5)."""
+
+    @pytest.mark.parametrize("query,content", [
+        (".env", "store secrets in the .env file, never in git"),
+        ("@auth", "the @auth decorator guards every admin route"),
+        ("#deploy", "tag #deploy in the message to trigger a release"),
+    ])
+    def test_non_word_prefix_query_matches(self, tmp_repo, query, content):
+        store.update_decision(tmp_repo, content, "s1", "convention")
+        out = store.get_context(tmp_repo, query=query)
+        assert "No matching" not in out
+        assert query in out
+
+
+class TestConcurrentWriteIntegrity:
+    """Concurrent writers to one repo's store must not lose each other's appends
+    (review finding H2: lost-update race, ~47% loss measured without a lock)."""
+
+    def test_no_lost_updates_under_concurrency(self, tmp_repo):
+        import threading
+        n_threads, per_thread = 8, 25
+        total = n_threads * per_thread
+        barrier = threading.Barrier(n_threads)
+
+        def worker(t):
+            barrier.wait()  # start together to maximize contention
+            for i in range(per_thread):
+                store.update_decision(
+                    tmp_repo, f"distinct decision t{t} i{i} alpha{t}beta{i}gamma", f"sess-{t}")
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        data = store._load(tmp_repo)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+        assert len(decisions) == total, f"lost updates: kept {len(decisions)} of {total}"

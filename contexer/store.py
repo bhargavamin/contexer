@@ -1,3 +1,5 @@
+import contextlib
+import hashlib
 import json
 import os
 import re
@@ -8,6 +10,11 @@ import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl                       # POSIX advisory file locks (macOS/Linux)
+except ImportError:                    # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
@@ -82,13 +89,33 @@ def _resolve_repo(repo_path: str) -> str:
         return _SESSION_REPO
     return _current_repo_path()
 
-def _slug(repo_path: str) -> str:
+def _legacy_slug(repo_path: str) -> str:
+    # Pre-injective scheme: kept literal `_`/`-`, so `/a/my.repo`, `/a/my_repo`, and
+    # `/a/my repo` all collapsed to the same file. Retained only to migrate old stores.
     return re.sub(r"[^a-zA-Z0-9_-]", "_", repo_path.strip("/"))
+
+
+def _slug(repo_path: str) -> str:
+    # Append a short path hash so the slug is injective: paths that map to the same
+    # readable base (a `.`/space vs a literal `_`) no longer share one store file.
+    digest = hashlib.sha1(repo_path.encode("utf-8")).hexdigest()[:8]
+    return f"{_legacy_slug(repo_path)}-{digest}"
 
 
 def _store_path(repo_path: str) -> Path:
     STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    return STORE_DIR / f"{_slug(repo_path)}.json"
+    path = STORE_DIR / f"{_slug(repo_path)}.json"
+    # Back-compat: migrate a pre-hash store file to the new name on first access so an
+    # upgrade never silently orphans existing context. os.replace is atomic; if a
+    # colliding repo already claimed the legacy file, the loser just starts fresh.
+    if not path.exists():
+        legacy = STORE_DIR / f"{_legacy_slug(repo_path)}.json"
+        if legacy.exists():
+            try:
+                os.replace(legacy, path)
+            except OSError:
+                return legacy if legacy.exists() else path
+    return path
 
 
 def _load(repo_path: str) -> dict:
@@ -96,10 +123,14 @@ def _load(repo_path: str) -> dict:
     if path.exists():
         try:
             # encoding pinned to match _atomic_write — never the locale default
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             # Treat a corrupted or unreadable file as empty — recovers from concurrent-write races.
-            return {"repo_path": repo_path, "entries": []}
+            data = None
+        # Valid-but-non-object JSON ([], null, 42) parses fine but would crash every
+        # downstream data["entries"] access — treat the same as corruption.
+        if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            return data
     return {"repo_path": repo_path, "entries": []}
 
 
@@ -124,6 +155,32 @@ def _save(repo_path: str, data: dict) -> None:
     _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
+@contextlib.contextmanager
+def _store_lock(slug: str):
+    """Serialize a load→mutate→save critical section for one store across processes.
+
+    Atomic writes prevent a *torn* file, but two sessions writing the same store
+    concurrently still race: both read, both append, the second overwrites the first
+    (lost update). An exclusive advisory lock on a per-store `.lock` sidecar makes the
+    read-modify-write atomic so concurrent writers serialize instead of clobbering.
+    Best-effort: if locks are unavailable (non-POSIX), degrade to no serialization
+    rather than fail the write."""
+    if fcntl is None:                  # pragma: no cover - non-POSIX fallback
+        yield
+        return
+    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    lock_path = STORE_DIR / f"{slug}.lock"
+    f = open(lock_path, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
 # ── Global store ───────────────────────────────────────────────────────────────
 
 def _global_path() -> Path:
@@ -135,9 +192,11 @@ def _load_global() -> dict:
     path = _global_path()
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            return {"repo_path": GLOBAL_SLUG, "entries": []}
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            return data
     return {"repo_path": GLOBAL_SLUG, "entries": []}
 
 
@@ -153,21 +212,23 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
     if subtype and subtype not in ("constraint", "convention"):
         return False, None
     subtype = subtype or "convention"
-    data = _load_global()
-    if not _passes_filter(content, data["entries"]):
+    if not _is_storable(content):
         return False, None
-    entry = {
-        "id": str(uuid.uuid4()),
-        "type": "decision",
-        "subtype": subtype,
-        "content": content,
-        "session_id": session_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-    _save_global(data)
-    return True, entry["id"]
+    with _store_lock(GLOBAL_SLUG):
+        data = _load_global()
+        decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+        match = _find_match(content, decisions_only)
+        if match is not None:
+            # Mirror the repo path: a restated global rule records a recurrence (×N
+            # confidence + eviction protection) instead of being silently dropped.
+            _record_recurrence(match, session_id)
+            _save_global(data)
+            return False, None
+        entry = _new_decision_entry(content, session_id, subtype)
+        data["entries"].append(entry)
+        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+        _save_global(data)
+        return True, entry["id"]
 
 
 def get_global_decisions(entry_type: str = "") -> list:
@@ -192,7 +253,7 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
     if entry_type:
         decisions = [d for d in decisions if d.get("subtype") == entry_type]
     if query:
-        pat = re.compile(r"\b" + re.escape(query.lower()), re.IGNORECASE)
+        pat = _query_pattern(query)
         decisions = [d for d in decisions if pat.search(d.get("content", ""))]
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
@@ -217,6 +278,15 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 def _tokenize(text: str) -> set[str]:
     """Lowercase, strip punctuation, split on whitespace. Fixes comma-attached tokens."""
     return set(_PUNCT_RE.sub("", text.lower()).split())
+
+
+def _query_pattern(query: str) -> "re.Pattern":
+    """Case-insensitive search pattern for a user query. A leading `\\b` is added only
+    when the query starts with a word char — prepending it before `.`, `@`, `#` would
+    never fire, so queries like `.env` / `@auth` / `#deploy` silently matched nothing."""
+    q = query.lower()
+    prefix = r"\b" if q[:1].isalnum() else ""
+    return re.compile(prefix + re.escape(q), re.IGNORECASE)
 
 
 def _find_match(content: str, existing: list) -> dict | None:
@@ -506,25 +576,26 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
     content = _sanitize_directive(prompt.strip())[:600]
     if not _is_storable(content):
         return None, None
-    data = _load(repo_path)
-    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-    # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
-    if _find_match(content, decisions_only) is not None:
-        return None, None
-    entry = {
-        "id": str(uuid.uuid4()),
-        "type": "decision",
-        "subtype": subtype,
-        "content": content,
-        "session_id": session_id,
-        "session_ids": [session_id],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "occurrence_count": 1,
-    }
-    data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-    _save(repo_path, data)
-    return entry["id"], content
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+        # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
+        if _find_match(content, decisions_only) is not None:
+            return None, None
+        entry = {
+            "id": str(uuid.uuid4()),
+            "type": "decision",
+            "subtype": subtype,
+            "content": content,
+            "session_id": session_id,
+            "session_ids": [session_id],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "occurrence_count": 1,
+        }
+        data["entries"].append(entry)
+        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+        _save(repo_path, data)
+        return entry["id"], content
 
 
 _QUESTION_STARTS = {
@@ -556,20 +627,21 @@ def _is_task(content: str) -> bool:
 def capture_task(repo_path: str, description: str, session_id: str) -> str | None:
     if not _is_task(description):
         return None
-    data = _load(repo_path)
-    # keep only decisions — one task slot is enough for "last task" context
-    data["entries"] = [e for e in data["entries"] if e["type"] != "task"]
-    entry = {
-        "id": str(uuid.uuid4()),
-        "type": "task",
-        "content": description,
-        "session_id": session_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-    _save(repo_path, data)
-    return entry["id"]
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        # keep only decisions — one task slot is enough for "last task" context
+        data["entries"] = [e for e in data["entries"] if e["type"] != "task"]
+        entry = {
+            "id": str(uuid.uuid4()),
+            "type": "task",
+            "content": description,
+            "session_id": session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        data["entries"].append(entry)
+        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+        _save(repo_path, data)
+        return entry["id"]
 
 
 def _new_decision_entry(content: str, session_id: str, subtype: str,
@@ -594,18 +666,19 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
     if not _is_storable(content):
         return False, None
-    data = _load(repo_path)
-    decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-    match = _find_match(content, decisions_only)
-    if match is not None:
-        _record_recurrence(match, session_id)
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
+        match = _find_match(content, decisions_only)
+        if match is not None:
+            _record_recurrence(match, session_id)
+            _save(repo_path, data)
+            return False, None
+        entry = _new_decision_entry(content, session_id, subtype)
+        data["entries"].append(entry)
+        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
-        return False, None
-    entry = _new_decision_entry(content, session_id, subtype)
-    data["entries"].append(entry)
-    data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-    _save(repo_path, data)
-    return True, entry["id"]
+        return True, entry["id"]
 
 
 def _apply_memory_upsert(entries: list, content: str, session_id: str,
@@ -650,13 +723,14 @@ def upsert_memory_decision(repo_path: str, content: str, session_id: str,
     """Store or refresh a single memory-imported decision, keyed by stable identity.
     Convenience wrapper around `_apply_memory_upsert` (load + apply + save). For
     bulk import use `upsert_memory_batch`. Returns the apply status."""
-    data = _load(repo_path)
-    status = _apply_memory_upsert(data["entries"], content, session_id, subtype, memory_key)
-    if status == "created":
-        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-    if status != "skipped":                  # 'skipped' leaves the store untouched
-        _save(repo_path, data)
-    return status
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        status = _apply_memory_upsert(data["entries"], content, session_id, subtype, memory_key)
+        if status == "created":
+            data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+        if status != "skipped":              # 'skipped' leaves the store untouched
+            _save(repo_path, data)
+        return status
 
 
 def upsert_memory_batch(repo_path: str, items: list[tuple[str, str, str, str]]) -> int:
@@ -665,18 +739,19 @@ def upsert_memory_batch(repo_path: str, items: list[tuple[str, str, str, str]]) 
     (content, session_id, subtype, memory_key). The whole batch is one atomic
     write, so a multi-section file imports all-or-nothing. Returns newly-created
     count."""
-    data = _load(repo_path)
-    entries = data["entries"]
-    created = touched = 0
-    for content, session_id, subtype, memory_key in items:
-        status = _apply_memory_upsert(entries, content, session_id, subtype, memory_key)
-        touched += status != "skipped"
-        created += status == "created"
-    if created:
-        data["entries"] = _keep_top(entries, MAX_ENTRIES, pin_last=True)
-    if touched:
-        _save(repo_path, data)
-    return created
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        entries = data["entries"]
+        created = touched = 0
+        for content, session_id, subtype, memory_key in items:
+            status = _apply_memory_upsert(entries, content, session_id, subtype, memory_key)
+            touched += status != "skipped"
+            created += status == "created"
+        if created:
+            data["entries"] = _keep_top(entries, MAX_ENTRIES, pin_last=True)
+        if touched:
+            _save(repo_path, data)
+        return created
 
 
 _INSIGHT_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -1174,7 +1249,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
 
     if query:
-        pat = re.compile(r"\b" + re.escape(query.lower()), re.IGNORECASE)
+        pat = _query_pattern(query)
         decisions = [d for d in decisions if pat.search(d.get("content", ""))]
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)

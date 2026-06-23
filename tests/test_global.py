@@ -307,3 +307,23 @@ class TestContextForPromptGlobalFallback:
     def test_silent_when_no_entries_anywhere(self):
         result = store.get_context_for_prompt(REPO, "why did we use postgres?")
         assert result == ""
+
+
+class TestGlobalRecurrence:
+    """A restated global rule must record a recurrence (bump count + track session),
+    mirroring the repo path — not vanish silently (review finding H4)."""
+
+    def test_new_global_entry_has_recurrence_fields(self):
+        store.update_global_decision("always sign commits with a gpg key", "s1", "convention")
+        entry = store._load_global()["entries"][0]
+        assert entry["occurrence_count"] == 1
+        assert entry["session_ids"] == ["s1"]
+
+    def test_restated_global_rule_bumps_count_and_session(self):
+        store.update_global_decision("always sign every commit with a gpg key", "s1", "convention")
+        ok, _ = store.update_global_decision("always sign every commit with a gpg key", "s2", "convention")
+        assert ok is False  # duplicate, not stored as new
+        entries = store._load_global()["entries"]
+        assert len(entries) == 1
+        assert entries[0]["occurrence_count"] == 2
+        assert set(entries[0]["session_ids"]) == {"s1", "s2"}
