@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/bhargavamin/contexer/compare/v0.8.0...v0.9.0) (2026-06-23)
+
+
+### Features
+
+* **adapters:** add Codex integration with near-full Claude parity ([#48](https://github.com/bhargavamin/contexer/issues/48)) ([4352f22](https://github.com/bhargavamin/contexer/commit/4352f228d5320b16be7fe2aaed5a121ea21a758c))
+
+
+### Bug Fixes
+
+* resolve critical + high-severity review findings (store, hooks, plugin) ([#47](https://github.com/bhargavamin/contexer/issues/47)) ([59614b2](https://github.com/bhargavamin/contexer/commit/59614b2117bafa151a751240bcba153795a49f5f))
+
 ## [0.8.0](https://github.com/bhargavamin/contexer/compare/v0.7.0...v0.8.0) (2026-06-19)
 
 
