@@ -218,6 +218,14 @@ def _run_guarded(fn) -> None:
         print('  sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.contexer', file=sys.stderr)
         print("then re-run this command without sudo.", file=sys.stderr)
         sys.exit(1)
+    except (json.JSONDecodeError, ValueError) as e:
+        # A corrupt or non-object config (~/.claude.json or settings.json). Abort cleanly
+        # and leave the file untouched for the user to fix — never overwrite it.
+        print(f"Corrupt config: {e}", file=sys.stderr)
+        print("A Claude config file is not valid JSON (or not a JSON object). "
+              "contexer won't overwrite it.", file=sys.stderr)
+        print("Fix or remove the offending file, then re-run this command.", file=sys.stderr)
+        sys.exit(1)
 
 
 def main() -> None:

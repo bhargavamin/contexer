@@ -14,9 +14,15 @@ from contexer.adapters.base import (
     _load,
     _load_safe,
     _save,
+    _strip_stale,
 )
 
 NAME = "claude"
+
+# Embedded as a trailing shell comment in every hook command we generate, so a hook's
+# Contexer identity survives any change to its command text. Lets reinstall/uninstall
+# recognize and replace stale hooks (e.g. a dead from-source `uv run --directory`).
+_HOOK_SENTINEL = "contexer-managed-hook"
 
 
 def is_present(home: Path) -> bool:
@@ -145,9 +151,12 @@ def install(home: Path) -> list[str]:
     python = sys.executable
 
     def _py(code: str) -> str:
+        # `|| true` (not `|| pwd`): outside a git work tree REPO is empty, and the
+        # entrypoints treat "" as "no repo" (resolve via session binding / pointer).
+        # A `pwd` fallback could write a non-repo dir into the shared .current_repo.
         return (
-            f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-            f'"{python}" -c "{code}" "$REPO"'
+            f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+            f'"{python}" -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
         )
 
     ss_code = (
@@ -175,10 +184,10 @@ def install(home: Path) -> list[str]:
     # reaches stdout, so the hook output stays valid.
     def _sync(tail: str) -> str:
         return (
-            'REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+            'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
             f'"{python}" -c "from contexer.adapters import claude; import sys; '
             'claude.sync_memory(sys.argv[1])" "$REPO"; '
-            f"echo '{tail}'"
+            f"echo '{tail}' # {_HOOK_SENTINEL}"
         )
 
     precompact_cmd = _sync(
@@ -201,17 +210,18 @@ def install(home: Path) -> list[str]:
         "(2) any EXISTING approach you applied again (same or similar content is fine — "
         "the server deduplicates and tracks repetition without storing a duplicate).\"}}'; "
         "else echo '{}'; fi"
+        f" # {_HOOK_SENTINEL}"
     )
 
-    cap_task = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+    cap_task = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
-                'print(claude.capture_task(sys.argv[1], sys.stdin.read()))" "$REPO"')
-    cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+                f'print(claude.capture_task(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
+    cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
-               'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO"')
-    cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+               f'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
+    cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
-               'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
+               f'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     contexer_bin = shutil.which("contexer") or "contexer"
 
@@ -253,7 +263,7 @@ def install(home: Path) -> list[str]:
     put = hooks.setdefault("PostToolUse", [])
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+            "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
 
     pc = hooks.setdefault("PreCompact", [])
     # Migrate: old PreCompact only echoed a reminder; replace with the sync variant
@@ -267,14 +277,21 @@ def install(home: Path) -> list[str]:
             "command": precompact_cmd}]})
 
     poc = hooks.setdefault("PostCompact", [])
-    # Migrate: old hook used get_context (no bootstrap offer); replace with get_post_compact_context
-    if _in_groups(poc, "reloaded after compaction") and not _in_groups(poc, "get_post_compact_context"):
-        hooks["PostCompact"] = _filter_groups(poc, ["reloaded after compaction"])
-        poc = hooks["PostCompact"]
+    # Heal stale PostCompact hooks. A from-source install wrote a `uv run --directory
+    # <clone>` count-pointer whose path dies the instant the clone moves; older installs
+    # used get_context / a "reloaded after compaction" echo. The previous migration only
+    # matched one of those phrasings, so the dead from-source hook survived reinstall and
+    # ran alongside the new one. Strip any PostCompact hook that isn't the current command
+    # (matched by identity marker or the sentinel), then add the current one if absent.
+    desired_poc = _py(post_code)
+    poc = _strip_stale(poc, [
+        "get_post_compact_context", "reloaded after compaction",
+        "decision(s) available", _HOOK_SENTINEL], desired_poc)
+    hooks["PostCompact"] = poc
     if not _in_groups(poc, "get_post_compact_context"):
         poc.append({"hooks": [{"type": "command",
             "statusMessage": "Reloading context after compact...",
-            "command": _py(post_code)}]})
+            "command": desired_poc}]})
 
     ups = hooks.setdefault("UserPromptSubmit", [])
 
@@ -365,14 +382,20 @@ def uninstall(home: Path) -> list[str]:
         hooks = settings.get("hooks", {})
         changed = False
 
+        # _HOOK_SENTINEL is a catch-all: every command we generate carries it, so even a
+        # hook whose text changed across versions is recognized and removed. The explicit
+        # markers also remove pre-sentinel installs (including the dead from-source
+        # `uv run --directory` / "decision(s) available" PostCompact count-pointer).
         event_markers = {
-            "SessionStart":     ["get_session_start_context"],
-            "SessionEnd":       ["sync_memory"],
-            "PostToolUse":      [".pending_capture"],
-            "PreCompact":       ["compaction starting"],
-            "PostCompact":      ["reloaded after compaction", "get_post_compact_context"],
+            "SessionStart":     ["get_session_start_context", _HOOK_SENTINEL],
+            "SessionEnd":       ["sync_memory", _HOOK_SENTINEL],
+            "PostToolUse":      [".pending_capture", _HOOK_SENTINEL],
+            "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
+            "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
+                                 "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
             "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
-                                 "claude.capture_task", "claude.capture_constraint", "claude.rationale"],
+                                 "claude.capture_task", "claude.capture_constraint", "claude.rationale",
+                                 _HOOK_SENTINEL],
         }
         for event, markers in event_markers.items():
             before = hooks.get(event, [])

@@ -396,3 +396,32 @@ class TestStatusMultiTarget:
         status()
         out = capsys.readouterr().out
         assert "Not fully installed" in out
+
+
+class TestInstallOnCorruptConfig:
+    """install must fail with clear, actionable advice on a corrupt config — not crash
+    with an AttributeError/traceback, and not partially write (review finding C3)."""
+
+    @pytest.mark.parametrize("payload", ["[]", "null", '"x"', "not json at all"])
+    def test_install_aborts_cleanly_on_non_object_claude_json(self, clean_home, capsys, payload):
+        (clean_home / ".claude.json").write_text(payload)
+        with pytest.raises(SystemExit) as exc:
+            cli._run_guarded(lambda: install([]))
+        assert exc.value.code == 1
+        err = capsys.readouterr().err.lower()
+        assert "corrupt" in err or "json" in err
+
+    def test_install_does_not_clobber_corrupt_claude_json(self, clean_home):
+        (clean_home / ".claude.json").write_text("[]")
+        with pytest.raises(SystemExit):
+            cli._run_guarded(lambda: install([]))
+        # original left intact for the user to fix — not overwritten
+        assert (clean_home / ".claude.json").read_text() == "[]"
+
+    def test_install_aborts_on_non_object_settings_json(self, clean_home, capsys):
+        settings = clean_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("[]")
+        with pytest.raises(SystemExit) as exc:
+            cli._run_guarded(lambda: install([]))
+        assert exc.value.code == 1

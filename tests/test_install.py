@@ -253,3 +253,60 @@ class TestTargetSelection:
             cli.main()
         assert e.value.code == 1
         assert "unknown target" in capsys.readouterr().err.lower()
+
+
+class TestStaleHookHealing:
+    """Reinstall must remove a from-source hook (the dead `uv run --directory <clone>`
+    variant) rather than leaving it alongside the current one (review finding C1)."""
+
+    _LEGACY_POC = (
+        'REPO=/clone && uv run --directory /clone python -c '
+        '"import store; print(\'Contexer: 3 decision(s) available — run get_context\')" ""'
+    )
+
+    def _seed_from_source(self, home):
+        settings_path = home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"hooks": {
+            "PostCompact": [{"hooks": [{"type": "command", "command": self._LEGACY_POC}]}],
+        }}))
+        return settings_path
+
+    def test_legacy_postcompact_removed_on_install(self, clean_home):
+        path = self._seed_from_source(clean_home)
+        install()
+        poc = json.loads(path.read_text())["hooks"]["PostCompact"]
+        cmds = [h.get("command", "") for grp in poc for h in grp["hooks"]]
+        assert not any("uv run --directory" in c for c in cmds), \
+            "dead from-source PostCompact hook must be removed"
+        assert sum("get_post_compact_context" in c for c in cmds) == 1
+        assert len(poc) == 1
+
+    def test_legacy_postcompact_removed_on_uninstall(self, clean_home):
+        path = self._seed_from_source(clean_home)
+        install()
+        uninstall()
+        poc = json.loads(path.read_text()).get("hooks", {}).get("PostCompact", [])
+        cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
+        assert not any("uv run --directory" in c for c in cmds)
+
+
+class TestRepoPointerNotPoisoned:
+    """No hook may fall back to `pwd` for the repo — that writes a non-repo dir into
+    the shared .current_repo pointer (review finding H1)."""
+
+    def test_no_pwd_fallback_in_any_hook(self, installed_home):
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        cmds = [h.get("command", "") for event in settings["hooks"].values()
+                for grp in event for h in grp.get("hooks", [])]
+        assert cmds, "expected hook commands"
+        offenders = [c for c in cmds if "|| pwd" in c]
+        assert not offenders, f"hooks must not fall back to pwd: {offenders}"
+
+    def test_git_hooks_use_true_fallback(self, installed_home):
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        cmds = [h.get("command", "") for event in settings["hooks"].values()
+                for grp in event for h in grp.get("hooks", [])]
+        git_cmds = [c for c in cmds if "git rev-parse" in c]
+        assert git_cmds
+        assert all("|| true" in c for c in git_cmds)
