@@ -13,13 +13,14 @@ from contexer.adapters.base import _is_corrupt, _load_safe
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
 
-USAGE = """contexer — persistent context for Claude Code
+USAGE = """contexer — persistent context for Claude Code, Cursor, and Codex
 
 Usage: contexer [command]
 
 Commands:
-  (no args)     Run the MCP server over stdio (how Claude Code launches it).
-  install       Register the MCP server + hooks in your global Claude config.
+  (no args)     Run the MCP server over stdio (how your AI assistant launches it).
+  install       Register the MCP server + hooks. Auto-detects Claude Code / Cursor / Codex;
+                use --target claude|cursor|codex|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -29,6 +30,7 @@ Commands:
 Flags:
   -V, --version   Same as `version`.
   -h, --help      Same as `help`.
+  --target NAME   With install/uninstall/status: claude, cursor, codex, or all.
   --purge         With `uninstall`: also delete ~/.contexer/ (stored context).
 
 To upgrade the program itself (rebuild the binary):
@@ -77,7 +79,7 @@ def _resolve_targets(rest: list) -> list:
         try:
             return adapters.select(target)
         except KeyError:
-            print(f"Unknown target: {target} (choose claude, cursor, or all)",
+            print(f"Unknown target: {target} (choose claude, cursor, codex, or all)",
                   file=sys.stderr)
             sys.exit(1)
     detected = adapters.detect()

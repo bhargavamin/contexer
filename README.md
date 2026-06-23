@@ -19,7 +19,7 @@ Every AI coding session starts fresh. No memory of what was decided last week. N
 
 The result: developers re-explain the same rules every session. The agent re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
 
-**Contexer fixes this by capturing decisions as they happen and replaying them at the start of your next session.** It works with Claude Code and Cursor.
+**Contexer fixes this by capturing decisions as they happen and replaying them at the start of your next session.** It works with Claude Code, Cursor, and Codex.
 
 **What it is, concretely:** a local MCP server plus a few editor hooks. Your decisions live as plain JSON in `~/.contexer/` on your own machine — nothing about your code or decisions is sent anywhere (the only network call Contexer makes is an optional version check against PyPI, which you can turn off).
 
@@ -65,11 +65,11 @@ Requires **Python 3.12+** and **[uv](https://docs.astral.sh/uv/getting-started/i
 # Step 1 — install
 uv tool install contexer
 
-# Step 2 — wire into your AI assistant (Claude Code and/or Cursor)
+# Step 2 — wire into your AI assistant
 contexer install
 ```
 
-`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor) and wires both. Pass `--target claude`, `--target cursor`, or `--target all` to override.
+`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor, `~/.codex` → Codex) and wires all of them. Pass `--target claude`, `--target cursor`, `--target codex`, or `--target all` to override.
 
 Restart your AI assistant and open any git repo. Contexer runs silently from here.
 
@@ -103,6 +103,27 @@ Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on C
 session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The
 core value — automatic session-start injection of your stored rules — works identically to Claude
 Code.
+
+---
+
+## Use with Codex
+
+```bash
+contexer install --target codex   # or: contexer install (auto-detects ~/.codex)
+```
+
+This registers Contexer's MCP server in `~/.codex/config.toml` (under `[mcp_servers.contexer]`)
+and wires hooks in `~/.codex/hooks.json`. The `config.toml` edit is surgical — only the contexer
+stanza is added or removed, so your existing servers, plugins, projects, and secrets are left
+untouched.
+
+Codex's hooks use the same events as Claude Code (`SessionStart`, `PostToolUse`, `PreCompact`,
+`PostCompact`, `UserPromptSubmit`), so Contexer runs at **full Claude parity** there: automatic
+session-start injection, per-prompt rationale and constraint capture, post-edit reminders, and
+context reload after compaction all work.
+
+The first time Codex calls a Contexer tool it asks you to approve it — Contexer does not
+pre-approve its own MCP tools for you.
 
 ---
 
@@ -234,8 +255,8 @@ Honest about what it does *not* do today:
 
 | Command | Description |
 |---|---|
-| `contexer install` | Connect Contexer (auto-detects Claude Code and/or Cursor) |
-| `contexer install --target claude\|cursor\|all` | Install for a specific tool only, or both |
+| `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, and/or Codex) |
+| `contexer install --target claude\|cursor\|codex\|all` | Install for a specific tool only, or all |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
