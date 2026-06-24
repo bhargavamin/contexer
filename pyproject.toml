@@ -1,14 +1,14 @@
 [project]
 name = "contexer"
 version = "0.9.0"
-description = "MCP server that captures and retrieves architectural decisions and context for Claude Code sessions"
+description = "MCP server that preserves decisions and context across AI coding sessions"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
     {name = "Bhargav Amin", email = "devops.techpro@gmail.com"},
 ]
-keywords = ["mcp", "claude", "context", "decisions", "ai", "llm"]
+keywords = ["mcp", "claude", "codex", "gemini", "cursor", "context", "decisions", "ai", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

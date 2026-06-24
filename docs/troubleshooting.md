@@ -13,28 +13,28 @@ It reports the installed version, binary path, MCP registration, hook state, and
 ## `contexer` doesn't show up in `/mcp`
 
 1. `contexer status` — does it say `MCP server: registered`?
-   - **NOT registered** → run `contexer install`, restart Claude Code.
-   - **registered** but still missing in `/mcp` → restart Claude Code. The MCP server is spawned once at session start; config changes are not picked up mid-session.
+   - **NOT registered** → run `contexer install`, then restart your AI assistant.
+   - **registered** but still missing in `/mcp` → restart your AI assistant. The MCP server is spawned once at session start; config changes are not picked up mid-session.
 2. Check the binary path printed by `status` exists: `ls -l ~/.local/bin/contexer`. If missing, `uv tool install contexer` first.
 
 ## `Permission denied` during `contexer install` / `uninstall` / `reinstall`
 
-contexer writes only to files in your own home directory (`~/.claude.json`, `~/.claude/settings.json`, `~/.contexer/`) — being an administrator is not required, and **sudo is not the fix**. A permission error here almost always means a previous run *with* sudo left those files owned by root (Claude Code itself then can't update its own config either). Restore ownership and re-run without sudo:
+Contexer writes only to assistant config files and `~/.contexer/` in your home directory — being an administrator is not required, and **sudo is not the fix**. A permission error usually means a previous sudo run left those files owned by root. Restore ownership and re-run without sudo:
 
 ```bash
-sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.contexer
+sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.cursor ~/.codex ~/.gemini ~/.contexer
 contexer install
 ```
 
-If your home directory itself is read-only (some managed/corporate setups), sudo won't help either — the files must be writable by the user Claude Code runs as; talk to whoever manages the machine.
+If your home directory itself is read-only (some managed/corporate setups), sudo won't help either — the files must be writable by the user running the assistant; talk to whoever manages the machine.
 
 ## `status` says `hooks: missing or partial`
 
-Run `contexer install` (it is idempotent — re-running never duplicates hooks), then restart Claude Code.
+Run `contexer install` (it is idempotent — re-running never duplicates hooks), then restart your AI assistant.
 
 ## `status` prints `WARNING: … is not valid JSON`
 
-Your `~/.claude.json` or `~/.claude/settings.json` is corrupt — usually a hand-edit gone wrong. **Fix or remove the file before running `contexer install`**: install deliberately refuses to overwrite a corrupt config (it fails loudly rather than destroy whatever else was in it). Restore from a backup, fix the JSON, or — if you accept losing its contents — delete the file and re-run `contexer install`.
+One of the assistant JSON config files named in the warning is corrupt — usually a hand-edit gone wrong. **Fix or remove the file before running `contexer install`**: install deliberately refuses to overwrite a corrupt config. Restore from a backup, fix the JSON, or — if you accept losing its contents — delete the file and re-run `contexer install`.
 
 ## I upgraded but the version didn't change
 
@@ -45,7 +45,7 @@ uv tool install --reinstall --refresh contexer
 contexer reinstall          # re-sync hooks if they changed
 ```
 
-Then restart Claude Code — a running session keeps the old server process.
+Then restart your AI assistant — a running session keeps the old server process.
 
 `contexer status` checks PyPI (2-second timeout, silent when offline) and prints an
 `update:` line when a newer version exists. Set `CONTEXER_NO_UPDATE_CHECK=1` to skip

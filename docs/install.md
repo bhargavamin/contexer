@@ -17,9 +17,9 @@ uv tool install contexer
 contexer install
 ```
 
-> Do **not** run `contexer install` with `sudo` — it writes to *your* `~/.claude.json` and `~/.claude/settings.json`. Under `sudo` it would target root's home directory instead and Claude Code would never see the config.
+> Do **not** run `contexer install` with `sudo` — it writes to config files in *your* home directory. Under `sudo` it would target root's home directory and your assistant would never see the config.
 
-That's it. The second command registers the MCP server and all hooks with Claude Code automatically.
+That's it. The second command auto-detects supported assistants and registers the MCP server and hooks.
 
 Verify the server is connected — open any Claude Code session and run:
 
@@ -48,13 +48,29 @@ Cursor remembers. (Contexer does not silently pre-approve its own tools.)
 
 ---
 
+## Install for Gemini CLI
+
+```bash
+contexer install --target gemini     # or: contexer install (auto-detects ~/.gemini)
+```
+
+This registers the MCP server and managed `SessionStart`, `BeforeAgent`, `AfterTool`,
+`PreCompress`, and `SessionEnd` hooks in `~/.gemini/settings.json`. Existing settings,
+servers, and user hooks are preserved. Gemini CLI asks you to trust the managed hooks after
+installation.
+
+Gemini has no `PostCompress` event, so Contexer restores stored context on the first prompt
+after compression instead of immediately after compression.
+
+---
+
 ## Install from source (development)
 
 ```bash
 git clone git@github.com:bhargavamin/contexer.git ~/tools/contexer
-bash ~/tools/contexer/scripts/install.sh                 # auto-detect Claude Code / Cursor
+bash ~/tools/contexer/scripts/install.sh                 # auto-detect supported assistants
 bash ~/tools/contexer/scripts/install.sh --target cursor # one tool
-bash ~/tools/contexer/scripts/install.sh --target all    # both
+bash ~/tools/contexer/scripts/install.sh --target all    # all supported tools
 ```
 
 The script builds the `contexer` binary from your clone (`uv tool install --from <clone>`) and
@@ -119,7 +135,7 @@ uv tool upgrade contexer
 contexer reinstall
 ```
 
-Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed. Then restart Claude Code: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
+Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed. Then restart your AI assistant: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
 
 > If `uv tool upgrade` doesn't pick up a release published minutes ago, force past the cache: `uv tool install --reinstall --refresh contexer`.
 

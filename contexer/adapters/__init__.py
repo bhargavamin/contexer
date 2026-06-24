@@ -1,9 +1,14 @@
 """Registry of integration adapters. Add a module here to support a new tool."""
 from pathlib import Path
 
-from contexer.adapters import claude, cursor, codex
+from contexer.adapters import claude, cursor, codex, gemini
 
-_ADAPTERS = {claude.NAME: claude, cursor.NAME: cursor, codex.NAME: codex}
+_ADAPTERS = {
+    claude.NAME: claude,
+    cursor.NAME: cursor,
+    codex.NAME: codex,
+    gemini.NAME: gemini,
+}
 
 
 def all_adapters() -> list:

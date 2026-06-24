@@ -19,7 +19,7 @@ Every AI coding session starts fresh. No memory of what was decided last week. N
 
 The result: developers re-explain the same rules every session. The agent re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
 
-**Contexer fixes this by capturing decisions as they happen and replaying them at the start of your next session.** It works with Claude Code, Cursor, and Codex.
+**Contexer fixes this by capturing decisions as they happen and replaying them at the start of your next session.** It works with Claude Code, Cursor, Codex, and Gemini CLI.
 
 **What it is, concretely:** a local MCP server plus a few editor hooks. Your decisions live as plain JSON in `~/.contexer/` on your own machine — nothing about your code or decisions is sent anywhere (the only network call Contexer makes is an optional version check against PyPI, which you can turn off).
 
@@ -69,7 +69,7 @@ uv tool install contexer
 contexer install
 ```
 
-`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor, `~/.codex` → Codex) and wires all of them. Pass `--target claude`, `--target cursor`, `--target codex`, or `--target all` to override.
+`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor, `~/.codex` → Codex, `~/.gemini` → Gemini CLI) and wires all of them. Pass `--target claude`, `--target cursor`, `--target codex`, `--target gemini`, or `--target all` to override.
 
 Restart your AI assistant and open any git repo. Contexer runs silently from here.
 
@@ -127,6 +127,28 @@ pre-approve its own MCP tools for you.
 
 ---
 
+## Use with Gemini CLI
+
+```bash
+contexer install --target gemini   # or: contexer install (auto-detects ~/.gemini)
+```
+
+This adds Contexer's MCP server and managed hooks to `~/.gemini/settings.json`, preserving
+all existing settings, MCP servers, and user hooks. Gemini CLI will ask you to trust the new
+hooks after installation.
+
+The adapter uses Gemini's native `SessionStart`, `BeforeAgent`, `AfterTool`, `PreCompress`,
+and `SessionEnd` events. Session rules, first-prompt task capture, deterministic constraint
+capture, rationale lookup, and post-edit reminders are supported. The `AfterTool` hook matches
+Gemini's `write_file` and `replace` tools.
+
+**Parity note:** Gemini's `PreCompress` hook is asynchronous and advisory, and Gemini has no
+`PostCompress` event. Contexer therefore flags the compression and re-injects full context at
+the next `BeforeAgent` event. This restores context on the next turn, but cannot force Gemini
+to save an unsaved decision immediately before compression.
+
+---
+
 ## How it works
 
 Contexer is wired in through two mechanisms: **MCP tools** the agent can call (to store and fetch decisions) and **editor hooks** the host runs around your session (to inject context and capture directives). You work normally; most of it is invisible.
@@ -134,7 +156,7 @@ Contexer is wired in through two mechanisms: **MCP tools** the agent can call (t
 - **Session start** — a hook injects your stored constraints and conventions before you type anything.
 - **As you work** — capture is two-track. Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook. Everything else relies on the agent noticing a decision and calling the store tool — best-effort, and it does miss things. When it does, say *"store that decision"* and it's captured immediately.
 - **"Why" questions** — ask about a past decision or rationale and Contexer fetches the matching entries automatically.
-- **Context window limit** — on Claude Code, decisions are saved before compaction and restored after, so nothing is lost. (Cursor exposes no compaction hook — see the parity note above.)
+- **Context window limit** — Claude Code and Codex save before compaction and restore afterward. Gemini CLI restores stored context on the next turn because its compression hook is advisory. Cursor exposes no usable compaction hook.
 - **Claude Code memory tool** — if a session records decisions to Claude Code's built-in memory (`~/.claude/projects/.../memory/`) instead of to Contexer, those facts are imported automatically — at session start, around compaction, and on exit — so they're categorised and available to the next session. Two memory systems, one source of truth.
 
 **Deduplication is not an LLM call.** Before storing, Contexer checks token overlap against existing decisions — >70% overlap is treated as a duplicate and silently dropped. It's deterministic, costs no tokens, and is why you can "over-call" store without bloating anything.
@@ -244,7 +266,8 @@ This is intentional. Every piece of complexity added to a memory system is a pie
 Honest about what it does *not* do today:
 
 - **Personal, not team.** The store is per-user, per-machine. There's no team sync yet — shared rules don't propagate between developers. (It's on the roadmap.)
-- **Cursor parity is partial.** Cursor's `beforeSubmitPrompt` hook can't inject context (only allow/block) and it has no usable compaction hook, so per-prompt rationale injection and compaction save/restore are Claude Code-only. On Cursor, steering rides on the session-start nudge plus an always-apply rule file.
+- **Cursor parity is partial.** Cursor's `beforeSubmitPrompt` hook can't inject context (only allow/block) and it has no usable compaction hook, so per-prompt rationale injection and compaction save/restore are unavailable there. Cursor steering rides on the session-start nudge plus an always-apply rule file.
+- **Gemini compression is deferred.** Gemini CLI has `PreCompress` but no `PostCompress`; Contexer re-injects stored context at the next prompt rather than immediately after compression.
 - **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things — hence the *"store that decision"* escape hatch.
 - **Soft storage cap.** Up to 500 entries per repo; beyond that, the least-reinforced decisions are evicted. There's no automatic staleness pruning — outdated decisions stay until you remove them.
 - **One network call.** `contexer status` checks PyPI for a newer version. Disable with `CONTEXER_NO_UPDATE_CHECK=1`. Nothing else leaves your machine.
@@ -255,8 +278,8 @@ Honest about what it does *not* do today:
 
 | Command | Description |
 |---|---|
-| `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, and/or Codex) |
-| `contexer install --target claude\|cursor\|codex\|all` | Install for a specific tool only, or all |
+| `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, Codex, and/or Gemini CLI) |
+| `contexer install --target claude\|cursor\|codex\|gemini\|all` | Install for a specific tool only, or all |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |

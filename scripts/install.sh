@@ -3,9 +3,9 @@
 # your AI assistant(s) via the same code path end users run.
 #
 # Usage:
-#   bash scripts/install.sh                 # auto-detect Claude Code / Cursor
+#   bash scripts/install.sh                 # auto-detect supported assistants
 #   bash scripts/install.sh --target cursor # Cursor only
-#   bash scripts/install.sh --target all    # both
+#   bash scripts/install.sh --target all    # all supported tools
 #
 # This delegates all per-tool wiring to `contexer install` (contexer/adapters/*), so a
 # single source of truth supports every target. It (re)builds the `contexer` binary from

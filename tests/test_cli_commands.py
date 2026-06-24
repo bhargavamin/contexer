@@ -397,6 +397,16 @@ class TestStatusMultiTarget:
         out = capsys.readouterr().out
         assert "Not fully installed" in out
 
+    def test_corrupt_gemini_settings_warns_instead_of_advising_install(
+            self, clean_home, capsys):
+        settings = clean_home / ".gemini" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{ not json")
+        status(["--target", "gemini"])
+        out = capsys.readouterr().out
+        assert "not valid JSON" in out
+        assert "run `contexer install`" not in out
+
 
 class TestInstallOnCorruptConfig:
     """install must fail with clear, actionable advice on a corrupt config — not crash

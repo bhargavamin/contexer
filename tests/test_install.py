@@ -224,11 +224,19 @@ class TestTargetSelection:
         assert (clean_home / ".cursor" / "mcp.json").exists()
         assert not (clean_home / ".claude.json").exists()
 
+    def test_install_target_gemini_only(self, clean_home, monkeypatch):
+        import contexer.cli as cli
+        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "gemini"])
+        cli.main()
+        assert (clean_home / ".gemini" / "settings.json").exists()
+        assert not (clean_home / ".claude.json").exists()
+
     def test_install_target_all(self, clean_home, monkeypatch):
         import contexer.cli as cli
         monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "all"])
         cli.main()
         assert (clean_home / ".cursor" / "mcp.json").exists()
+        assert (clean_home / ".gemini" / "settings.json").exists()
         assert (clean_home / ".claude.json").exists()
 
     def test_install_autodetects_present_tools(self, clean_home, monkeypatch):
