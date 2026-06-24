@@ -10,7 +10,8 @@ from contexer.adapters import base
 
 NAME = "gemini"
 
-_PENDING_CAPTURE = ".pending_capture"
+# Fix 1: namespaced so it doesn't collide with Claude's ~/.contexer/.pending_capture flag.
+_PENDING_CAPTURE = ".gemini_pending_capture"
 _PENDING_RELOAD = ".gemini_pending_reload"
 _REMINDER = (
     "Contexer: you wrote or edited files last turn — call update_context for: "
@@ -36,12 +37,17 @@ def _output(event: str, contexts: list[str]) -> str:
     })
 
 
-def _session_marker(raw: str) -> Path:
+def _session_marker(raw: str) -> Path | None:
+    # Fix 5: return None when no stable session identity is available so callers
+    # know to skip the first-prompt gate rather than all sessions colliding on one
+    # shared "unknown" marker file.
     try:
         data = json.loads(raw)
-        identity = data.get("session_id") or data.get("transcript_path") or "unknown"
+        identity = data.get("session_id") or data.get("transcript_path")
     except Exception:
-        identity = "unknown"
+        identity = None
+    if not identity:
+        return None
     digest = hashlib.sha256(str(identity).encode()).hexdigest()[:24]
     return store.STORE_DIR / f".gemini_first_prompt_{digest}"
 
@@ -59,8 +65,15 @@ def session_start(repo_path: str, raw: str) -> str:
         if not repo:
             return _output("SessionStart", [])
         _anchor(repo)
-        _session_marker(raw).unlink(missing_ok=True)
-        payload = store.session_start_payload(repo, store.source_from_hook_stdin(raw))
+        # Fix 7: only reset the first-prompt marker on a genuinely new session.
+        # Resume and /clear continue an existing session — preserve the marker so
+        # before_agent does not re-run bootstrap and task capture on the next prompt.
+        source = store.source_from_hook_stdin(raw)
+        if source not in ("resume", "clear"):
+            marker = _session_marker(raw)
+            if marker is not None:
+                marker.unlink(missing_ok=True)
+        payload = store.session_start_payload(repo, source)
         return _output("SessionStart", [payload.get("context", "")])
     except Exception:
         return _output("SessionStart", [])
@@ -77,24 +90,32 @@ def before_agent(repo_path: str, raw: str) -> str:
         session_id = store.session_from_hook_stdin(raw)
         contexts: list[str] = []
 
+        # Fix 3: check reload FIRST. A full post-compression reload makes the
+        # "you edited files last turn" reminder redundant and misleading — the
+        # write happened before compression, not on the immediately preceding turn.
+        # When both flags are present, consume the capture flag silently.
+        reload_flag = store.STORE_DIR / _PENDING_RELOAD
         pending = store.STORE_DIR / _PENDING_CAPTURE
-        if pending.exists():
+        if reload_flag.exists():
+            reload_flag.unlink(missing_ok=True)
+            pending.unlink(missing_ok=True)
+            payload = store.post_compact_payload(repo)
+            contexts.extend(part for part in (payload.get("status"), payload.get("context")) if part)
+        elif pending.exists():
             pending.unlink(missing_ok=True)
             contexts.append(_REMINDER)
 
-        reload_flag = store.STORE_DIR / _PENDING_RELOAD
-        if reload_flag.exists():
-            reload_flag.unlink(missing_ok=True)
-            payload = store.post_compact_payload(repo)
-            contexts.extend(part for part in (payload.get("status"), payload.get("context")) if part)
-
+        # Fix 5: when no stable session identity exists, always run bootstrap
+        # (idempotent — returns empty when context already stored) but skip
+        # capture_task since we cannot reliably gate it to the first prompt only.
         marker = _session_marker(raw)
-        if not marker.exists():
+        if marker is None or not marker.exists():
             payload = store.bootstrap_prompt_payload(repo, prompt)
             contexts.append(payload.get("context", ""))
-            store.capture_task(repo, prompt, session_id)
-            marker.parent.mkdir(mode=0o700, exist_ok=True)
-            marker.touch()
+            if marker is not None:
+                store.capture_task(repo, prompt, session_id)
+                marker.parent.mkdir(mode=0o700, exist_ok=True)
+                marker.touch()
 
         entry_id, content = store.capture_user_constraint(repo, prompt, session_id)
         if entry_id is not None:
@@ -121,10 +142,12 @@ def after_write(repo_path: str, raw: str) -> str:
 
 
 def pre_compress(repo_path: str, raw: str) -> str:
-    """Defer capture reminder and full reload to the first turn after compression."""
+    """Defer full context reload to the first turn after compression."""
+    # Fix 3: only set the reload flag here. Compression is not a file write, so
+    # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
+    # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
     try:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        (store.STORE_DIR / _PENDING_CAPTURE).touch()
         (store.STORE_DIR / _PENDING_RELOAD).touch()
     except Exception:
         pass
@@ -134,7 +157,9 @@ def pre_compress(repo_path: str, raw: str) -> str:
 def session_end(repo_path: str, raw: str) -> str:
     """Best-effort cleanup of the per-session first-prompt marker."""
     try:
-        _session_marker(raw).unlink(missing_ok=True)
+        marker = _session_marker(raw)
+        if marker is not None:
+            marker.unlink(missing_ok=True)
     except Exception:
         pass
     return json.dumps({"suppressOutput": True})
@@ -191,7 +216,12 @@ def install(home: Path) -> list[str]:
     }
     for event, group in desired.items():
         groups = hooks.setdefault(event, [])
-        if not base._in_groups(groups, _EVENT_MARKERS[event][0]):
+        markers = _EVENT_MARKERS[event]
+        current_cmd = group["hooks"][0]["command"]
+        # Fix 2: strip stale hooks (e.g. after a Python path change) before checking
+        # presence, otherwise _in_groups matches the old command and reinstall is a no-op.
+        groups[:] = base._strip_stale(groups, markers, current_cmd)
+        if not base._in_groups(groups, markers[0]):
             groups.append(group)
 
     base._save(settings_path, settings)
@@ -208,23 +238,27 @@ def uninstall(home: Path) -> list[str]:
         return []
     settings = base._load(settings_path)
     log: list[str] = []
-    if settings.get("mcpServers", {}).pop("contexer", None):
+    mcp_removed = bool(settings.get("mcpServers", {}).pop("contexer", None))
+    if mcp_removed:
         log.append("  ✓ MCP server removed from ~/.gemini/settings.json")
     hooks = settings.get("hooks", {})
-    changed = False
+    hooks_changed = False
     if isinstance(hooks, dict):
         for event, markers in _EVENT_MARKERS.items():
             before = hooks.get(event, [])
             after = base._filter_groups(before, markers)
             if after != before:
-                changed = True
+                hooks_changed = True
                 if after:
                     hooks[event] = after
                 else:
                     hooks.pop(event, None)
-    if changed:
+    if hooks_changed:
         log.append("  ✓ Hooks removed from ~/.gemini/settings.json")
-    base._save(settings_path, settings)
+    # Fix 6: only write back when something actually changed, consistent with
+    # claude/cursor/codex adapters which all guard _save behind a changed flag.
+    if mcp_removed or hooks_changed:
+        base._save(settings_path, settings)
     return log
 
 
@@ -238,10 +272,13 @@ def _mcp_and_hooks_ok(home: Path) -> tuple:
         value = hooks.get(event, [])
         return value if isinstance(value, list) else []
 
+    # Fix 4: include PreCompress — it is load-bearing for post-compression context
+    # re-injection. A partial install that drops it silently breaks that mechanism.
     hooks_ok = (
         base._in_groups(groups("SessionStart"), "gemini.session_start")
         and base._in_groups(groups("BeforeAgent"), "gemini.before_agent")
         and base._in_groups(groups("AfterTool"), "gemini.after_write")
+        and base._in_groups(groups("PreCompress"), "gemini.pre_compress")
     )
     return mcp, hooks_ok
 
