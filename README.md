@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <em>You keep your session open all day because starting a new one loses everything. Contexer fixes that.</em>
+  <em>Your sessions are disposable. Your decisions aren't.</em>
 </p>
 
 <p align="center">
@@ -32,10 +32,11 @@
 
 ---
 
-Every session starts with what you decided before.
-Close it. Open a new one. Nothing is lost.
+Every session you've ever had made a decision.
+Contexer kept it.
+Your next session starts with all of them.
 
-**Sessions are cheap again.**
+**Close the session. Keep the decisions.**
 
 ---
 
