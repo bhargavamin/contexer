@@ -29,6 +29,7 @@ _FILTERED_DISPLAY = 25            # entries shown when a filter is active
 def _config_dirs() -> set[str]:
     home = Path.home()
     return {str(home), str(home / ".claude"), str(home / ".cursor"),
+            str(home / ".codex"), str(home / ".gemini"),
             str(home / ".contexer"), str(home / ".config")}
 
 

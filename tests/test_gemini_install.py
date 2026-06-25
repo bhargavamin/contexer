@@ -1,0 +1,216 @@
+"""Tests for the Gemini CLI adapter install, runtime hooks, and uninstall."""
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from contexer import store
+from contexer.adapters import gemini
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    return tmp_path
+
+
+def _settings(home: Path) -> dict:
+    return json.loads((home / ".gemini" / "settings.json").read_text())
+
+
+def _commands(home: Path, event: str) -> list[str]:
+    return [
+        hook["command"]
+        for group in _settings(home)["hooks"][event]
+        for hook in group["hooks"]
+    ]
+
+
+class TestGeminiInstall:
+    def test_registers_mcp_and_preserves_user_settings(self, home):
+        path = home / ".gemini" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"theme": "Dracula", "mcpServers": {"mine": {"command": "x"}}}))
+        gemini.install(home)
+        settings = _settings(home)
+        assert settings["theme"] == "Dracula"
+        assert settings["mcpServers"]["mine"] == {"command": "x"}
+        assert "contexer" in settings["mcpServers"]["contexer"]["command"]
+
+    def test_wires_supported_hook_events(self, home):
+        gemini.install(home)
+        assert set(_settings(home)["hooks"]) >= {
+            "SessionStart", "BeforeAgent", "AfterTool", "PreCompress", "SessionEnd"
+        }
+        assert "gemini.session_start" in "\n".join(_commands(home, "SessionStart"))
+        assert "gemini.before_agent" in "\n".join(_commands(home, "BeforeAgent"))
+
+    def test_write_hook_matches_official_edit_tools(self, home):
+        gemini.install(home)
+        group = _settings(home)["hooks"]["AfterTool"][0]
+        assert group["matcher"] == "write_file|replace"
+
+    def test_hooks_use_current_python_and_suppress_output(self, home):
+        gemini.install(home)
+        assert sys.executable in _commands(home, "BeforeAgent")[0]
+        raw = json.dumps({"session_id": "s1", "prompt": "hello"})
+        assert json.loads(gemini.after_write("", raw)) == {"suppressOutput": True}
+
+    def test_install_is_idempotent(self, home):
+        gemini.install(home)
+        gemini.install(home)
+        for event in ("SessionStart", "BeforeAgent", "AfterTool", "PreCompress", "SessionEnd"):
+            assert len(_settings(home)["hooks"][event]) == 1
+
+
+class TestGeminiRuntime:
+    def test_session_start_injects_context_and_anchors_repo(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        store.update_decision(repo, "always use uv for dependency management", "s1", "convention")
+        raw = json.dumps({"session_id": "s1", "source": "startup"})
+        out = json.loads(gemini.session_start(repo, raw))
+        assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert "always use uv" in out["hookSpecificOutput"]["additionalContext"]
+        assert (store.STORE_DIR / ".current_repo").read_text() == repo
+
+    def test_before_agent_captures_task_only_once_per_session(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        first = json.dumps({
+            "session_id": "s1", "prompt": "Implement OAuth login support for the web application"
+        })
+        second = json.dumps({
+            "session_id": "s1", "prompt": "Now add logout support for every authenticated user"
+        })
+        gemini.before_agent(repo, first)
+        gemini.before_agent(repo, second)
+        assert "Implement OAuth login support" in store.get_context(repo)
+        assert "Now add logout support" not in store.get_context(repo)
+
+    def test_before_agent_captures_constraint_and_injects_ack(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "always use conventional commits"})
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "Auto-stored as constraint" in context
+        assert "always use conventional commits" in store.get_context(repo).lower()
+
+    def test_write_flag_injects_reminder_when_no_compress(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        gemini.after_write(repo, raw)
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "wrote or edited files" in context
+        assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
+
+    def test_compress_flag_reloads_context_without_edit_reminder(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        store.update_decision(repo, "always run tests before committing", "s1", "constraint")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        gemini.after_write(repo, raw)
+        gemini.pre_compress(repo, raw)
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        # Reload takes priority; the edit reminder is suppressed (write happened
+        # before compression, not on the immediately preceding turn).
+        assert "wrote or edited files" not in context
+        assert "always run tests before committing" in context
+        assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
+        assert not (store.STORE_DIR / ".gemini_pending_reload").exists()
+
+    def test_clear_does_not_retrigger_bootstrap(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        startup = json.dumps({"session_id": "s1", "source": "startup",
+                               "prompt": "Implement OAuth login support for users"})
+        clear = json.dumps({"session_id": "s1", "source": "clear"})
+        followup = json.dumps({"session_id": "s1", "prompt": "Now add logout support for authenticated users"})
+        gemini.session_start(repo, startup)
+        gemini.before_agent(repo, startup)
+        gemini.session_start(repo, clear)  # /clear — must NOT reset the marker
+        gemini.before_agent(repo, followup)
+        # Task should be the first prompt only; /clear must not re-capture the followup.
+        assert "Implement OAuth login" in store.get_context(repo)
+        assert "Now add logout" not in store.get_context(repo)
+
+    def test_no_session_id_skips_task_capture_but_runs_bootstrap(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        # No session_id → _session_marker returns None → task capture is skipped.
+        raw = json.dumps({"prompt": "build the feature"})
+        gemini.before_agent(repo, raw)
+        gemini.before_agent(repo, raw)
+        # bootstrap ran (no error), but no task stored
+        assert "build the feature" not in store.get_context(repo)
+
+    @pytest.mark.parametrize("entry", [
+        gemini.session_start, gemini.before_agent, gemini.after_write,
+        gemini.pre_compress, gemini.session_end,
+    ])
+    def test_entrypoints_never_raise_on_bad_stdin(self, home, entry):
+        assert isinstance(entry("", "garbage"), str)
+
+
+class TestGeminiUninstallAndStatus:
+    def test_uninstall_removes_only_managed_entries(self, home):
+        path = home / ".gemini" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "mcpServers": {"mine": {"command": "x"}},
+            "hooks": {"BeforeAgent": [{
+                "matcher": "*", "hooks": [{"type": "command", "command": "./mine.sh"}]
+            }]},
+        }))
+        gemini.install(home)
+        gemini.uninstall(home)
+        settings = _settings(home)
+        assert settings["mcpServers"] == {"mine": {"command": "x"}}
+        assert settings["hooks"]["BeforeAgent"][0]["hooks"][0]["command"] == "./mine.sh"
+
+    def test_status_and_presence(self, home):
+        assert gemini.is_present(home) is False
+        assert gemini.is_installed(home) is False
+        gemini.install(home)
+        assert gemini.is_present(home) is True
+        assert gemini.is_installed(home) is True
+        assert "installed" in "\n".join(gemini.status_lines(home))
+
+    def test_uninstall_does_not_write_when_nothing_to_remove(self, home):
+        path = home / ".gemini" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"theme": "dark"}))
+        mtime_before = path.stat().st_mtime
+        gemini.uninstall(home)
+        assert path.stat().st_mtime == mtime_before
+
+    def test_reinstall_updates_stale_python_path(self, home):
+        gemini.install(home)
+        settings = _settings(home)
+        # Simulate a stale install: command still contains the marker so _strip_stale
+        # recognises it as a Contexer hook, but the Python path has changed.
+        old_cmd = (
+            'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+            '"/old/python" -c "from contexer.adapters import gemini; import sys; '
+            'print(gemini.before_agent(sys.argv[1], sys.stdin.read()))" "$REPO"'
+        )
+        settings["hooks"]["BeforeAgent"][0]["hooks"][0]["command"] = old_cmd
+        path = home / ".gemini" / "settings.json"
+        path.write_text(json.dumps(settings))
+        gemini.install(home)
+        cmds = _commands(home, "BeforeAgent")
+        assert not any(c == old_cmd for c in cmds), "stale hook should have been replaced"
+        assert any("gemini.before_agent" in c for c in cmds)
+
+    def test_status_reports_partial_when_pre_compress_missing(self, home):
+        gemini.install(home)
+        settings = _settings(home)
+        settings["hooks"].pop("PreCompress")
+        (home / ".gemini" / "settings.json").write_text(json.dumps(settings))
+        assert gemini.is_installed(home) is False
+        assert "missing or partial" in "\n".join(gemini.status_lines(home))
+
+    def test_status_tolerates_corrupt_settings(self, home):
+        path = home / ".gemini" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{ not json")
+        assert gemini.is_installed(home) is False

@@ -13,14 +13,14 @@ from contexer.adapters.base import _is_corrupt, _load_safe
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
 
-USAGE = """contexer — persistent context for Claude Code, Cursor, and Codex
+USAGE = """contexer — persistent context for Claude Code, Cursor, Codex, and Gemini CLI
 
 Usage: contexer [command]
 
 Commands:
   (no args)     Run the MCP server over stdio (how your AI assistant launches it).
-  install       Register the MCP server + hooks. Auto-detects Claude Code / Cursor / Codex;
-                use --target claude|cursor|codex|all to override.
+  install       Register the MCP server + hooks. Auto-detects supported AI assistants;
+                use --target claude|cursor|codex|gemini|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -30,7 +30,7 @@ Commands:
 Flags:
   -V, --version   Same as `version`.
   -h, --help      Same as `help`.
-  --target NAME   With install/uninstall/status: claude, cursor, codex, or all.
+  --target NAME   With install/uninstall/status: claude, cursor, codex, gemini, or all.
   --purge         With `uninstall`: also delete ~/.contexer/ (stored context).
 
 To upgrade the program itself (rebuild the binary):
@@ -69,7 +69,7 @@ def _usage(stream=None) -> None:
 
 
 def _resolve_targets(rest: list) -> list:
-    """Parse --target claude|cursor|all from rest; default = auto-detect, falling back to claude."""
+    """Parse --target or auto-detect installed assistants, falling back to Claude."""
     target = None
     if "--target" in rest:
         i = rest.index("--target")
@@ -79,7 +79,7 @@ def _resolve_targets(rest: list) -> list:
         try:
             return adapters.select(target)
         except KeyError:
-            print(f"Unknown target: {target} (choose claude, cursor, codex, or all)",
+            print(f"Unknown target: {target} (choose claude, cursor, codex, gemini, or all)",
                   file=sys.stderr)
             sys.exit(1)
     detected = adapters.detect()
@@ -130,7 +130,7 @@ def reinstall() -> None:
     install()
     print()
     print("Note: this only re-synced the MCP/hook config. To upgrade the program itself,")
-    print("run `uv tool install --reinstall contexer`, then restart Claude Code.")
+    print("run `uv tool install --reinstall contexer`, then restart your AI assistant.")
 
 
 def status(rest: list | None = None) -> None:
@@ -181,7 +181,7 @@ def status(rest: list | None = None) -> None:
     print(f"  repo stores:  {len(stores)} ({entries} entries total)")
     if latest_t and installed_t and latest_t > installed_t:
         print(f"  update:       {latest} available — run `uv tool upgrade contexer`, "
-              f"then restart Claude Code")
+              f"then restart your AI assistant")
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     if current.exists():
@@ -190,7 +190,15 @@ def status(rest: list | None = None) -> None:
         except OSError:
             print("  current repo: (unreadable)")
 
-    corrupt = [p for p in (home / ".claude.json", home / ".claude" / "settings.json")
+    config_paths = (
+        home / ".claude.json",
+        home / ".claude" / "settings.json",
+        home / ".cursor" / "mcp.json",
+        home / ".cursor" / "hooks.json",
+        home / ".codex" / "hooks.json",
+        home / ".gemini" / "settings.json",
+    )
+    corrupt = [p for p in config_paths
                if _is_corrupt(p)]
     if corrupt:
         for p in corrupt:
@@ -203,8 +211,8 @@ def status(rest: list | None = None) -> None:
 def _run_guarded(fn) -> None:
     """Run a mutating command; turn a PermissionError into actionable advice.
 
-    contexer only ever writes inside the user's own home (~/.claude.json,
-    ~/.claude/settings.json, ~/.contexer/), so permission errors almost always
+    contexer only ever writes inside the user's own home (assistant config directories
+    and ~/.contexer/), so permission errors almost always
     mean a previous `sudo` run left those files owned by root — the fix is to
     restore ownership, never to escalate."""
     try:
@@ -213,18 +221,19 @@ def _run_guarded(fn) -> None:
         target = e.filename or "a config file"
         print(f"Permission denied: {target}", file=sys.stderr)
         print("contexer writes only to files in your own home directory "
-              "(~/.claude.json, ~/.claude/settings.json, ~/.contexer/) — "
+              "(~/.claude*, ~/.cursor, ~/.codex, ~/.gemini, ~/.contexer) — "
               "it never needs sudo.", file=sys.stderr)
         print("A previous run with sudo can leave those files owned by root. "
               "Restore ownership:", file=sys.stderr)
-        print('  sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.contexer', file=sys.stderr)
+        print('  sudo chown -R "$USER" ~/.claude.json ~/.claude ~/.cursor ~/.codex '
+              '~/.gemini ~/.contexer', file=sys.stderr)
         print("then re-run this command without sudo.", file=sys.stderr)
         sys.exit(1)
     except (json.JSONDecodeError, ValueError) as e:
-        # A corrupt or non-object config (~/.claude.json or settings.json). Abort cleanly
+        # A corrupt or non-object assistant config. Abort cleanly
         # and leave the file untouched for the user to fix — never overwrite it.
         print(f"Corrupt config: {e}", file=sys.stderr)
-        print("A Claude config file is not valid JSON (or not a JSON object). "
+        print("An assistant config file is not valid JSON (or not a JSON object). "
               "contexer won't overwrite it.", file=sys.stderr)
         print("Fix or remove the offending file, then re-run this command.", file=sys.stderr)
         sys.exit(1)

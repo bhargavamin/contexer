@@ -10,12 +10,13 @@ from contexer import adapters, store
 class TestRegistry:
     def test_all_returns_known_adapters(self):
         names = {a.NAME for a in adapters.all_adapters()}
-        assert names == {"claude", "cursor", "codex"}
+        assert names == {"claude", "cursor", "codex", "gemini"}
 
     def test_get_by_name(self):
         assert adapters.get("claude").NAME == "claude"
         assert adapters.get("cursor").NAME == "cursor"
         assert adapters.get("codex").NAME == "codex"
+        assert adapters.get("gemini").NAME == "gemini"
 
     def test_get_unknown_raises(self):
         with pytest.raises(KeyError):
@@ -41,6 +42,12 @@ class TestDetect:
         detected = {a.NAME for a in adapters.detect()}
         assert detected == {"codex"}
 
+    def test_detects_gemini_when_dot_gemini_present(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".gemini").mkdir()
+        detected = {a.NAME for a in adapters.detect()}
+        assert detected == {"gemini"}
+
     def test_detects_both(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         (tmp_path / ".claude").mkdir()
@@ -54,7 +61,9 @@ class TestDetect:
 
 class TestSelect:
     def test_select_all(self):
-        assert {a.NAME for a in adapters.select("all")} == {"claude", "cursor", "codex"}
+        assert {a.NAME for a in adapters.select("all")} == {
+            "claude", "cursor", "codex", "gemini"
+        }
 
     def test_select_one(self):
         assert [a.NAME for a in adapters.select("cursor")] == ["cursor"]

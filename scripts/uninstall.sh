@@ -3,7 +3,7 @@
 # Context store (~/.contexer/) is preserved unless you pass --purge.
 #
 # Usage:
-#   bash scripts/uninstall.sh                  # auto-detect Claude Code / Cursor
+#   bash scripts/uninstall.sh                  # auto-detect supported assistants
 #   bash scripts/uninstall.sh --target cursor  # Cursor only
 #   bash scripts/uninstall.sh --purge          # also delete ~/.contexer/
 #

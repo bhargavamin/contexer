@@ -14,6 +14,7 @@ class TestRepoResolution:
     def test_config_dirs_rejected(self):
         home = Path.home()
         for bad in (str(home), str(home / ".claude"), str(home / ".cursor"),
+                    str(home / ".codex"), str(home / ".gemini"),
                     str(home / ".contexer")):
             assert store._is_sane_repo(bad) is False, bad
 

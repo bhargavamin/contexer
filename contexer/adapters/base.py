@@ -2,7 +2,7 @@
 
 An adapter is a *module* (duck-typed, no class needed) that exposes:
 
-  NAME: str                       # "claude" | "cursor"
+  NAME: str                       # "claude" | "cursor" | "codex" | "gemini"
   is_present(home: Path) -> bool  # does this tool look installed for the user?
   install(home: Path) -> list[str]    # wire MCP + hooks; return human-facing log lines
   uninstall(home: Path) -> list[str]  # remove MCP + hooks; return log lines
