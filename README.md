@@ -360,6 +360,14 @@ This is intentional. Every piece of complexity added to a memory system is a pie
 
 ---
 
+## Star history
+
+If Contexer saves you re-explanation time, a star helps others find it. It takes one second.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=bhargavamin/contexer&type=Date)](https://star-history.com/#bhargavamin/contexer&Date)
+
+---
+
 ## Contributing
 
 Bug reports, fixes, and documentation improvements are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, code style, and the PR process.
