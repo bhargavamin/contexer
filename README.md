@@ -2,8 +2,8 @@
   <a href="https://contexer.ai">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="assets/logo-horizontal-light.svg">
-      <img alt="Contexer" src="assets/logo-horizontal-light.svg" height="60">
+      <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+      <img alt="Contexer" src="assets/logo-light.svg" height="60">
     </picture>
   </a>
 </p>
@@ -21,22 +21,26 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#the-problem">The problem</a> ·
   <a href="#what-changes">What changes</a> ·
   <a href="#vs-claudemd-agentsmd-cursorrules">vs. CLAUDE.md</a> ·
+  <a href="#vs-claude-mem">vs. claude-mem</a> ·
   <a href="#how-it-works">How it works</a> ·
+  <a href="#what-contexer-stores">What it stores</a> ·
   <a href="#cost">Cost</a> ·
+  <a href="#managing-decisions">Managing decisions</a> ·
   <a href="docs/install.md">Docs</a> ·
   <a href="https://discord.gg/Fk6JSaW4p">Discord</a>
 </p>
 
 ---
 
-Every session you've ever had made a decision.
-Contexer kept it.
+<p align="center">
+Every session you've ever had made a decision.<br>
+Contexer kept it.<br>
 Your next session starts with all of them.
+</p>
 
-**Close the session. Keep the decisions.**
+<p align="center"><strong>Close the session. Keep the decisions.</strong></p>
 
 ---
 
@@ -44,11 +48,6 @@ Your next session starts with all of them.
 
 A session with 40 exchanges, six file reads, and three architecture decisions costs thousands of tokens to maintain.
 You keep it running anyway — because starting fresh means re-explaining the stack, the constraints, and the patterns the agent already broke once.
-
-You established "mock at the service boundary, not the DB layer" in session one.
-Session two, the agent is back to mocking the DB.
-You correct it.
-Session three, same thing.
 
 Every session pays the re-explanation tax.
 Every mistake the agent makes because it forgot costs correction turns.
@@ -85,9 +84,11 @@ See **[docs/install.md](docs/install.md)** for verification, update, and uninsta
 
 <table>
 <tr>
-<td width="50%">
-
-### Without Contexer
+<th width="50%">Without Contexer</th>
+<th width="50%">With Contexer</th>
+</tr>
+<tr>
+<td>
 
 You say "always use uv, not pip" in Monday's session.
 
@@ -98,9 +99,7 @@ Wednesday, same thing.
 You are not the bottleneck — the session boundary is.
 
 </td>
-<td width="50%">
-
-### With Contexer
+<td>
 
 That rule is stored once.
 
@@ -148,7 +147,7 @@ The rules that matter most — the ones that emerge from real work, real mistake
 |---|---|---|
 | **Source** | Written manually, when you think of it | Captured automatically as decisions are made |
 | **Freshness** | As current as the last time someone edited the file | Updated continuously; novelty filter prevents drift |
-| **Token cost** | Entire file on every prompt | Only constraints/conventions at session start; architecture/patterns fetched on demand when you ask a rationale question |
+| **Token cost** | Entire file on every prompt | Only constraints/conventions/patterns at session start; architecture fetched on demand when you ask a rationale question |
 | **New repo** | Blank — you start from scratch | Bootstrap scans git history and code to infer initial decisions |
 | **Scope** | One file, one repo | Per-repo decisions + global rules that follow you across every repo |
 
@@ -170,7 +169,7 @@ Today Contexer is a personal decision store — private by default, per-user, pe
 |---|---|---|
 | **What it stores** | Full session observations and tool activity | Only decisions that affect future work |
 | **Infrastructure** | Worker service, SQLite, optional Chroma vector DB, Bun | Single Python file, plain JSON |
-| **Loading** | Compressed session summaries injected at start | Constraints/conventions always; architecture/patterns fetched on demand when you ask a rationale question |
+| **Loading** | Compressed session summaries injected at start | Constraints/conventions/patterns always; architecture fetched on demand when you ask a rationale question |
 | **Tools supported** | Claude Code, Gemini CLI | Claude Code, Cursor, Codex, Gemini CLI |
 | **Cross-repo rules** | Per-project | Per-repo + global rules that follow you across all repos |
 | **Deduplication** | Semantic (AI-generated summaries) | Deterministic token-overlap check — no LLM cost |
@@ -183,7 +182,7 @@ They solve adjacent problems and can coexist. If you want a full record of what 
 
 Contexer is wired in through two mechanisms: **MCP tools** the agent can call (to store and fetch decisions) and **editor hooks** the host runs around your session (to inject context and capture directives). You work normally; most of it is invisible.
 
-- **Session start** — a hook injects your stored constraints and conventions before you type anything.
+- **Session start** — a hook injects your stored constraints, conventions, and patterns before you type anything.
 - **As you work** — capture is two-track. Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook. Everything else relies on the agent noticing a decision and calling the store tool — best-effort, and it does miss things. When it does, say *"store that decision"* and it's captured immediately.
 - **"Why" questions** — ask about a past decision or rationale and Contexer fetches the matching entries automatically.
 - **Context window limit** — Claude Code and Codex save before compaction and restore afterward. Gemini CLI restores stored context on the next turn because its compression hook is advisory. Cursor exposes no usable compaction hook.
@@ -221,18 +220,18 @@ Not all context is equal. Contexer distinguishes between what must always apply 
 |---|---|---|
 | `constraint` | Rules that must always apply — "never merge untested code" | Yes — always |
 | `convention` | Team or project standards — "use uv not pip", "conventional commits" | Yes — always |
+| `pattern` | Recurring implementation approaches | Yes — always |
 | `architecture` | Structural decisions — "chose REST over GraphQL" | No — fetched on demand |
-| `pattern` | Recurring implementation approaches | No — fetched on demand |
 
-Constraints and conventions load every session because they apply to every task.
+Constraints, conventions, and patterns load every session because they apply to every task.
 
-Architecture and pattern decisions are fetched on demand: when you ask a question about rationale, design, or past decisions ("why did we pick REST?", "how did we structure the auth layer?"), Contexer detects the question and pulls the matching decisions automatically — before the agent responds. They cost zero tokens at session start and only appear when actually needed.
+Architecture decisions are fetched on demand: when you ask a question about rationale, design, or past decisions ("why did we pick REST?", "how did we structure the auth layer?"), Contexer detects the question and pulls the matching decisions automatically — before the agent responds. They cost zero tokens at session start and only appear when actually needed.
 
 ---
 
 ## Cost
 
-Contexer's cost is fixed and predictable: roughly **26 tokens per rule** at session start, paid only for constraints and conventions. Architecture and pattern decisions cost nothing until something actually needs them.
+Contexer's cost is fixed and predictable: roughly **25 tokens per rule** at session start, paid for constraints, conventions, and patterns. Architecture decisions cost nothing until something actually needs them.
 
 | Pre-loaded rules | Approx. tokens at session start |
 |---|---|
