@@ -148,7 +148,7 @@ The rules that matter most — the ones that emerge from real work, real mistake
 |---|---|---|
 | **Source** | Written manually, when you think of it | Captured automatically as decisions are made |
 | **Freshness** | As current as the last time someone edited the file | Updated continuously; novelty filter prevents drift |
-| **Token cost** | Entire file on every prompt | Only constraints/conventions at session start; architecture fetched when relevant |
+| **Token cost** | Entire file on every prompt | Only constraints/conventions at session start; architecture/patterns fetched on demand when you ask a rationale question |
 | **New repo** | Blank — you start from scratch | Bootstrap scans git history and code to infer initial decisions |
 | **Scope** | One file, one repo | Per-repo decisions + global rules that follow you across every repo |
 
@@ -170,7 +170,7 @@ Today Contexer is a personal decision store — private by default, per-user, pe
 |---|---|---|
 | **What it stores** | Full session observations and tool activity | Only decisions that affect future work |
 | **Infrastructure** | Worker service, SQLite, optional Chroma vector DB, Bun | Single Python file, plain JSON |
-| **Loading** | Compressed session summaries injected at start | Constraints/conventions always; architecture/patterns fetched when relevant |
+| **Loading** | Compressed session summaries injected at start | Constraints/conventions always; architecture/patterns fetched on demand when you ask a rationale question |
 | **Tools supported** | Claude Code, Gemini CLI | Claude Code, Cursor, Codex, Gemini CLI |
 | **Cross-repo rules** | Per-project | Per-repo + global rules that follow you across all repos |
 | **Deduplication** | Semantic (AI-generated summaries) | Deterministic token-overlap check — no LLM cost |
@@ -221,10 +221,12 @@ Not all context is equal. Contexer distinguishes between what must always apply 
 |---|---|---|
 | `constraint` | Rules that must always apply — "never merge untested code" | Yes — always |
 | `convention` | Team or project standards — "use uv not pip", "conventional commits" | Yes — always |
-| `architecture` | Structural decisions — "chose REST over GraphQL" | No — fetched when relevant |
-| `pattern` | Recurring implementation approaches | No — fetched when relevant |
+| `architecture` | Structural decisions — "chose REST over GraphQL" | No — fetched on demand |
+| `pattern` | Recurring implementation approaches | No — fetched on demand |
 
-Constraints and conventions load every session because they apply to every task. Architecture and pattern decisions cost zero tokens at session start — they are retrieved only when the work requires them.
+Constraints and conventions load every session because they apply to every task.
+
+Architecture and pattern decisions are fetched on demand: when you ask a question about rationale, design, or past decisions ("why did we pick REST?", "how did we structure the auth layer?"), Contexer detects the question and pulls the matching decisions automatically — before the agent responds. They cost zero tokens at session start and only appear when actually needed.
 
 ---
 
