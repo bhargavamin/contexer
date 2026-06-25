@@ -158,6 +158,27 @@ Today Contexer is a personal decision store — private by default, per-user, pe
 
 ---
 
+## vs. claude-mem
+
+[claude-mem](https://github.com/thedotmack/claude-mem) is a solid tool and worth knowing about. The difference is what each one stores.
+
+**claude-mem stores what happened.** It records tool calls, observations, and session activity, compresses them into summaries, and surfaces them to future sessions. The mental model is a session recorder — a searchable log of agent activity.
+
+**Contexer stores what you decided.** It captures only the things that should change how future sessions behave: constraints ("never merge untested code"), conventions ("use uv not pip"), architecture choices ("REST over GraphQL"), patterns. The mental model is a decision record — curated signal, not a transcript.
+
+| | claude-mem | Contexer |
+|---|---|---|
+| **What it stores** | Full session observations and tool activity | Only decisions that affect future work |
+| **Infrastructure** | Worker service, SQLite, optional Chroma vector DB, Bun | Single Python file, plain JSON |
+| **Loading** | Compressed session summaries injected at start | Constraints/conventions always; architecture/patterns fetched when relevant |
+| **Tools supported** | Claude Code, Gemini CLI | Claude Code, Cursor, Codex, Gemini CLI |
+| **Cross-repo rules** | Per-project | Per-repo + global rules that follow you across all repos |
+| **Deduplication** | Semantic (AI-generated summaries) | Deterministic token-overlap check — no LLM cost |
+
+They solve adjacent problems and can coexist. If you want a full record of what your agent did across sessions, claude-mem. If you want a curated set of rules that make every future session smarter without storing noise, Contexer.
+
+---
+
 ## How it works
 
 Contexer is wired in through two mechanisms: **MCP tools** the agent can call (to store and fetch decisions) and **editor hooks** the host runs around your session (to inject context and capture directives). You work normally; most of it is invisible.
