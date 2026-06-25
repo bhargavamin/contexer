@@ -1,30 +1,41 @@
-<a href="https://contexer.ai">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo-horizontal-light.svg">
-    <img alt="Contexer" src="assets/logo-horizontal-light.svg" height="60">
-  </picture>
-</a>
+<p align="center">
+  <a href="https://contexer.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="assets/logo-horizontal-light.svg">
+      <img alt="Contexer" src="assets/logo-horizontal-light.svg" height="60">
+    </picture>
+  </a>
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/contexer)](https://pypi.org/project/contexer/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/Fk6JSaW4p)
+<p align="center">
+  <em>You keep your session open all day because starting a new one loses everything. Contexer fixes that.</em>
+</p>
 
-**[contexer.ai](https://contexer.ai)** · [Discord](https://discord.gg/Fk6JSaW4p) · [Docs](docs/install.md)
+<p align="center">
+  <a href="https://pypi.org/project/contexer/"><img src="https://img.shields.io/pypi/v/contexer" alt="PyPI version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="Python 3.12+"></a>
+  <a href="https://discord.gg/Fk6JSaW4p"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#the-problem">The problem</a> ·
+  <a href="#what-changes">What changes</a> ·
+  <a href="#vs-claudemd-agentsmd-cursorrules">vs. CLAUDE.md</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#cost">Cost</a> ·
+  <a href="docs/install.md">Docs</a> ·
+  <a href="https://discord.gg/Fk6JSaW4p">Discord</a>
+</p>
 
 ---
-
-You keep your Claude Code session open all day.
-Not because you want to.
-Because starting a new one means losing everything.
-
-**Contexer fixes that.**
 
 Every session starts with what you decided before.
 Close it. Open a new one. Nothing is lost.
 
-Sessions are cheap again.
+**Sessions are cheap again.**
 
 ---
 
@@ -71,9 +82,52 @@ See **[docs/install.md](docs/install.md)** for verification, update, and uninsta
 
 ## What changes
 
-**Before:** You say "always use uv, not pip" in Monday's session. Tuesday, the agent writes a `pip install` command. You correct it. Wednesday, same thing. You are not the bottleneck — the session boundary is.
+<table>
+<tr>
+<td width="50%">
 
-**After:** That rule is stored once. Every future session opens with it already injected. The agent follows it without being reminded. You move faster.
+### Without Contexer
+
+You say "always use uv, not pip" in Monday's session.
+
+Tuesday, the agent writes a `pip install` command. You correct it.
+
+Wednesday, same thing.
+
+You are not the bottleneck — the session boundary is.
+
+</td>
+<td width="50%">
+
+### With Contexer
+
+That rule is stored once.
+
+Every future session opens with it already injected. The agent follows it without being reminded.
+
+You move faster. You never say it again.
+
+</td>
+</tr>
+<tr>
+<td>
+
+You established "mock at the service boundary, not the DB layer."
+
+Next session: the agent mocks the DB. You correct it.
+
+Session after: same thing. Every session pays the re-explanation tax.
+
+</td>
+<td>
+
+Stored once as a constraint. Injected at the start of every future session.
+
+The agent never forgets it.
+
+</td>
+</tr>
+</table>
 
 The impact compounds across a team. Shared constraints mean every engineer's agent follows the same rules, enforces the same quality standards, and stays within the same architectural limits — without anyone maintaining a file to make it happen.
 
