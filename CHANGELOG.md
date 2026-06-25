@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.0](https://github.com/bhargavamin/contexer/compare/v0.9.0...v0.10.0) (2026-06-25)
+
+
+### Features
+
+* **adapters:** add Gemini CLI integration ([#50](https://github.com/bhargavamin/contexer/issues/50)) ([6b39991](https://github.com/bhargavamin/contexer/commit/6b3999164a92786e5885c87fc5d1fe5242afeea2))
+
+
+### Documentation
+
+* logo updates, formatting fixes, and factual corrections ([#53](https://github.com/bhargavamin/contexer/issues/53)) ([0307a07](https://github.com/bhargavamin/contexer/commit/0307a07eef2ddda69f467c58d5c6c7c9d65573f9))
+* marketing-first README rewrite ([#52](https://github.com/bhargavamin/contexer/issues/52)) ([5eb78c2](https://github.com/bhargavamin/contexer/commit/5eb78c2b3f7ba5bbc1e57e34e35ede69803c01fb))
+
 ## [0.9.0](https://github.com/bhargavamin/contexer/compare/v0.8.0...v0.9.0) (2026-06-23)
 
 
