@@ -15,51 +15,43 @@
 
 ---
 
-Every AI coding session starts fresh. No memory of what was decided last week. No knowledge of the constraints your team spent months establishing. No recollection of the architecture choices that took three PRs to get right.
+You keep your Claude Code session open all day.
+Not because you want to.
+Because starting a new one means losing everything.
 
-The result: developers re-explain the same rules every session. The agent re-introduces patterns already rejected. Work gets redone. Sessions run long. Budgets overrun.
+**Contexer fixes that.**
 
-**Contexer fixes this by capturing decisions as they happen and replaying them at the start of your next session.** It works with Claude Code, Cursor, Codex, and Gemini CLI.
+Every session starts with what you decided before.
+Close it. Open a new one. Nothing is lost.
 
-**What it is, concretely:** a local MCP server plus a few editor hooks. Your decisions live as plain JSON in `~/.contexer/` on your own machine — nothing about your code or decisions is sent anywhere (the only network call Contexer makes is an optional version check against PyPI, which you can turn off).
-
----
-
-## What changes
-
-**Before Contexer:** You establish "mock at the service boundary, not the DB layer" in session one. Session two, the agent is back to mocking the DB. You correct it. Session three, same thing. Every session pays the re-explanation tax, and every mistake the agent makes because it forgot costs correction turns that run sessions long.
-
-**After Contexer:** That rule is stored once as a constraint. Every future session starts with it already injected. The agent never forgets it. You never say it again.
-
-The impact compounds across a team. Shared constraints mean every engineer's agent follows the same rules, enforces the same quality standards, and stays within the same architectural boundaries — without anyone managing it manually.
+Sessions are cheap again.
 
 ---
 
-## vs. `CLAUDE.md`, `AGENTS.md`, `.cursorrules`
+## The problem
 
-`CLAUDE.md`, `AGENTS.md`, and `.cursorrules` are worth having. They work well for stable project context — setup notes, architecture overviews, things you know before you start working.
+A session with 40 exchanges, six file reads, and three architecture decisions costs thousands of tokens to maintain.
+You keep it running anyway — because starting fresh means re-explaining the stack, the constraints, and the patterns the agent already broke once.
 
-The gap they don't cover is decisions made during development.
+You established "mock at the service boundary, not the DB layer" in session one.
+Session two, the agent is back to mocking the DB.
+You correct it.
+Session three, same thing.
 
-You can't write a `CLAUDE.md` entry for a constraint you haven't established yet. The rules that matter most — the ones that emerge from real work, real mistakes, real conversations — get established mid-session and disappear when it ends. `CLAUDE.md` captures what you remember to write down. Contexer captures what actually happened.
+Every session pays the re-explanation tax.
+Every mistake the agent makes because it forgot costs correction turns.
+Sessions run long. Budgets overrun. And still, nothing is ever retained.
 
-| | `CLAUDE.md` / `AGENTS.md` / `.cursorrules` | Contexer |
-|---|---|---|
-| **Source** | Written manually, when you think of it | Captured automatically as decisions are made |
-| **Freshness** | As current as the last time someone edited the file | Updated continuously; novelty filter prevents drift |
-| **Token cost** | Entire file on every prompt | Only constraints/conventions at session start; architecture fetched when relevant |
-| **New repo** | Blank — you start from scratch | Bootstrap scans git history and code to infer initial decisions |
-| **Scope** | One file, one repo | Per-repo decisions + global rules that follow you across every repo |
+**Contexer stores your decisions as they happen and replays them at the start of your next session.**
+The agent never forgets. You never say it again.
 
-Today Contexer is a personal decision store — private by default, per-user, per-machine. Team sharing is next.
-
-**Use both.** `CLAUDE.md` is the right place for onboarding context and stable project notes. Contexer is where the decisions made *during development* live — automatically, without discipline to maintain a file.
+Works with Claude Code, Cursor, Codex, and Gemini CLI.
 
 ---
 
 ## Quick start
 
-Requires **Python 3.12+** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**. Install takes under two minutes.
+Requires **Python 3.12+** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**. Under two minutes.
 
 ```bash
 # Step 1 — install
@@ -77,75 +69,37 @@ See **[docs/install.md](docs/install.md)** for verification, update, and uninsta
 
 ---
 
-## Use with Cursor (1.7+)
+## What changes
 
-```bash
-contexer install --target cursor   # or: contexer install (auto-detects ~/.cursor)
-```
+**Before:** You say "always use uv, not pip" in Monday's session. Tuesday, the agent writes a `pip install` command. You correct it. Wednesday, same thing. You are not the bottleneck — the session boundary is.
 
-This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor
-hook events in `~/.cursor/hooks.json`:
+**After:** That rule is stored once. Every future session opens with it already injected. The agent follows it without being reminded. You move faster.
 
-- `sessionStart` — injects your stored project rules and a usage nudge, and drops a managed
-  always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
-- `beforeSubmitPrompt` — silently captures your task and any "always / never / don't / create a
-  rule" directives.
-
-The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to
-call Contexer's `get_context` before reading files for architecture/"why" questions, and to save
-rules via `update_context` rather than writing native `.cursor/rules` files.
-
-The first time Cursor calls a Contexer tool it asks you to approve it — Contexer does not
-pre-approve its own MCP tools for you.
-
-**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and
-Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the
-session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The
-core value — automatic session-start injection of your stored rules — works identically to Claude
-Code.
+The impact compounds across a team. Shared constraints mean every engineer's agent follows the same rules, enforces the same quality standards, and stays within the same architectural limits — without anyone maintaining a file to make it happen.
 
 ---
 
-## Use with Codex
+## vs. `CLAUDE.md`, `AGENTS.md`, `.cursorrules`
 
-```bash
-contexer install --target codex   # or: contexer install (auto-detects ~/.codex)
-```
+These files are worth having — they work well for stable project context: setup notes, architecture overviews, things you know before you start.
 
-This registers Contexer's MCP server in `~/.codex/config.toml` (under `[mcp_servers.contexer]`)
-and wires hooks in `~/.codex/hooks.json`. The `config.toml` edit is surgical — only the contexer
-stanza is added or removed, so your existing servers, plugins, projects, and secrets are left
-untouched.
+The gap they don't cover is decisions made *during* development.
 
-Codex's hooks use the same events as Claude Code (`SessionStart`, `PostToolUse`, `PreCompact`,
-`PostCompact`, `UserPromptSubmit`), so Contexer runs at **full Claude parity** there: automatic
-session-start injection, per-prompt rationale and constraint capture, post-edit reminders, and
-context reload after compaction all work.
+You can't write a `CLAUDE.md` entry for a constraint you haven't established yet.
+The rules that matter most — the ones that emerge from real work, real mistakes, real conversations — get established mid-session and disappear when it ends.
+`CLAUDE.md` captures what you remember to write down. Contexer captures what actually happened.
 
-The first time Codex calls a Contexer tool it asks you to approve it — Contexer does not
-pre-approve its own MCP tools for you.
+| | `CLAUDE.md` / `AGENTS.md` / `.cursorrules` | Contexer |
+|---|---|---|
+| **Source** | Written manually, when you think of it | Captured automatically as decisions are made |
+| **Freshness** | As current as the last time someone edited the file | Updated continuously; novelty filter prevents drift |
+| **Token cost** | Entire file on every prompt | Only constraints/conventions at session start; architecture fetched when relevant |
+| **New repo** | Blank — you start from scratch | Bootstrap scans git history and code to infer initial decisions |
+| **Scope** | One file, one repo | Per-repo decisions + global rules that follow you across every repo |
 
----
+Today Contexer is a personal decision store — private by default, per-user, per-machine. Team sharing is next.
 
-## Use with Gemini CLI
-
-```bash
-contexer install --target gemini   # or: contexer install (auto-detects ~/.gemini)
-```
-
-This adds Contexer's MCP server and managed hooks to `~/.gemini/settings.json`, preserving
-all existing settings, MCP servers, and user hooks. Gemini CLI will ask you to trust the new
-hooks after installation.
-
-The adapter uses Gemini's native `SessionStart`, `BeforeAgent`, `AfterTool`, `PreCompress`,
-and `SessionEnd` events. Session rules, first-prompt task capture, deterministic constraint
-capture, rationale lookup, and post-edit reminders are supported. The `AfterTool` hook matches
-Gemini's `write_file` and `replace` tools.
-
-**Parity note:** Gemini's `PreCompress` hook is asynchronous and advisory, and Gemini has no
-`PostCompress` event. Contexer therefore flags the compression and re-injects full context at
-the next `BeforeAgent` event. This restores context on the next turn, but cannot force Gemini
-to save an unsaved decision immediately before compression.
+**Use both.** `CLAUDE.md` is the right place for onboarding context and stable project notes. Contexer is where the decisions made *during development* live — automatically, without discipline to maintain a file.
 
 ---
 
@@ -181,7 +135,9 @@ for questions about architecture, design, or rationale.
 
 ---
 
-## Decision types
+## What Contexer stores
+
+**Local. Private. Yours.** Everything lives as plain JSON in `~/.contexer/` on your own machine. Nothing about your code or decisions leaves your machine — the only network call Contexer makes is an optional version check against PyPI, which you can turn off.
 
 Not all context is equal. Contexer distinguishes between what must always apply and what is only relevant sometimes — and only loads what the current task actually needs.
 
@@ -198,7 +154,7 @@ Constraints and conventions load every session because they apply to every task.
 
 ## Cost
 
-Contexer's cost is fixed and predictable: in our testing it injects roughly **26 tokens per rule** at session start, paid only for constraints and conventions. Architecture and pattern decisions cost nothing until something actually needs them.
+Contexer's cost is fixed and predictable: roughly **26 tokens per rule** at session start, paid only for constraints and conventions. Architecture and pattern decisions cost nothing until something actually needs them.
 
 | Pre-loaded rules | Approx. tokens at session start |
 |---|---|
@@ -206,9 +162,11 @@ Contexer's cost is fixed and predictable: in our testing it injects roughly **26
 | 10 | ~250 |
 | 25 | ~625 |
 
-It's paid once per session — every later prompt in that session adds nothing, since the rules are already in context. On prompts unrelated to anything stored, Contexer skips entirely: no read, no tokens. Store lookups are sub-millisecond and run before the response is generated, so they add nothing to response time.
+Paid once per session. Every later prompt adds nothing. On prompts unrelated to anything stored, Contexer skips entirely: no read, no tokens. Store lookups are sub-millisecond and run before the response is generated, so they add nothing to response time.
 
 The point isn't token compression — it's **eliminated rework across sessions**. The recurring, unpredictable cost of re-explaining rules and correcting re-introduced patterns is replaced by a small, flat, session-start cost.
+
+Shorter sessions. Lower cost. No lost context.
 
 ---
 
@@ -253,6 +211,53 @@ The store is plain JSON at `~/.contexer/` — edit it directly if you prefer.
 
 ---
 
+## Use with Cursor (1.7+)
+
+```bash
+contexer install --target cursor   # or: contexer install (auto-detects ~/.cursor)
+```
+
+This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor hook events in `~/.cursor/hooks.json`:
+
+- `sessionStart` — injects your stored project rules and a usage nudge, and drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
+- `beforeSubmitPrompt` — silently captures your task and any "always / never / don't / create a rule" directives.
+
+The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to call Contexer's `get_context` before reading files for architecture/"why" questions, and to save rules via `update_context` rather than writing native `.cursor/rules` files.
+
+The first time Cursor calls a Contexer tool it asks you to approve it — Contexer does not pre-approve its own MCP tools for you.
+
+**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The core value — automatic session-start injection of your stored rules — works identically to Claude Code.
+
+---
+
+## Use with Codex
+
+```bash
+contexer install --target codex   # or: contexer install (auto-detects ~/.codex)
+```
+
+This registers Contexer's MCP server in `~/.codex/config.toml` (under `[mcp_servers.contexer]`) and wires hooks in `~/.codex/hooks.json`. The `config.toml` edit is surgical — only the contexer stanza is added or removed, so your existing servers, plugins, projects, and secrets are left untouched.
+
+Codex's hooks use the same events as Claude Code (`SessionStart`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`), so Contexer runs at **full Claude parity** there: automatic session-start injection, per-prompt rationale and constraint capture, post-edit reminders, and context reload after compaction all work.
+
+The first time Codex calls a Contexer tool it asks you to approve it — Contexer does not pre-approve its own MCP tools for you.
+
+---
+
+## Use with Gemini CLI
+
+```bash
+contexer install --target gemini   # or: contexer install (auto-detects ~/.gemini)
+```
+
+This adds Contexer's MCP server and managed hooks to `~/.gemini/settings.json`, preserving all existing settings, MCP servers, and user hooks. Gemini CLI will ask you to trust the new hooks after installation.
+
+The adapter uses Gemini's native `SessionStart`, `BeforeAgent`, `AfterTool`, `PreCompress`, and `SessionEnd` events. Session rules, first-prompt task capture, deterministic constraint capture, rationale lookup, and post-edit reminders are supported. The `AfterTool` hook matches Gemini's `write_file` and `replace` tools.
+
+**Parity note:** Gemini's `PreCompress` hook is asynchronous and advisory, and Gemini has no `PostCompress` event. Contexer therefore flags the compression and re-injects full context at the next `BeforeAgent` event. This restores context on the next turn, but cannot force Gemini to save an unsaved decision immediately before compression.
+
+---
+
 ## Why it stays lightweight
 
 Contexer is a single Python MCP server with a plain JSON store. No background worker. No vector database. No port listening. No infrastructure to maintain.
@@ -262,8 +267,6 @@ This is intentional. Every piece of complexity added to a memory system is a pie
 ---
 
 ## Limitations
-
-Honest about what it does *not* do today:
 
 - **Personal, not team.** The store is per-user, per-machine. There's no team sync yet — shared rules don't propagate between developers. (It's on the roadmap.)
 - **Cursor parity is partial.** Cursor's `beforeSubmitPrompt` hook can't inject context (only allow/block) and it has no usable compaction hook, so per-prompt rationale injection and compaction save/restore are unavailable there. Cursor steering rides on the session-start nudge plus an always-apply rule file.
