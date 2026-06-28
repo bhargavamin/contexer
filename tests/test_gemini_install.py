@@ -56,7 +56,9 @@ class TestGeminiInstall:
         gemini.install(home)
         assert sys.executable in _commands(home, "BeforeAgent")[0]
         raw = json.dumps({"session_id": "s1", "prompt": "hello"})
-        assert json.loads(gemini.after_write("", raw)) == {"suppressOutput": True}
+        out = json.loads(gemini.after_write("", raw))
+        assert "hookSpecificOutput" in out
+        assert "additionalContext" in out["hookSpecificOutput"]
 
     def test_install_is_idempotent(self, home):
         gemini.install(home)

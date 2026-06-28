@@ -168,7 +168,15 @@ def install(home: Path) -> list[str]:
     put = hooks.setdefault("PostToolUse", [])
     if not base._in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+            "command": (
+                "touch ~/.contexer/.pending_capture && "
+                "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", "
+                "\"additionalContext\": \"Contexer: if this edit involved an architectural, "
+                "design, or engineering decision (a tech choice, a naming change, a constraint, "
+                "a pattern) \\u2014 tell the user what decision was made and call update_context to "
+                "store it. If unsure whether it qualifies, surface it anyway and let the user "
+                "confirm.\"}}'"
+            )}]})
 
     pc = hooks.setdefault("PreCompact", [])
     if not base._in_groups(pc, "compaction starting"):

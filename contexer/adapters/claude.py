@@ -259,11 +259,20 @@ def install(home: Path) -> list[str]:
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
 
-    # PostToolUse: set a flag after Write/Edit so next prompt reminds Claude to call update_context
+    # PostToolUse: immediately remind Claude to confirm and store any decision made in this edit.
+    # Also sets .pending_capture as a next-turn fallback in case the immediate output is missed.
     put = hooks.setdefault("PostToolUse", [])
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
+            "command": (
+                f"touch ~/.contexer/.pending_capture && "
+                f"echo '{{\"hookSpecificOutput\": {{\"hookEventName\": \"PostToolUse\", "
+                f"\"additionalContext\": \"Contexer: if this edit involved an architectural, "
+                f"design, or engineering decision (a tech choice, a naming change, a constraint, "
+                f"a pattern) — tell the user what decision was made and call update_context to "
+                f"store it. If unsure whether it qualifies, surface it anyway and let the user "
+                f"confirm.\"}}}}' # {_HOOK_SENTINEL}"
+            )}]})
 
     pc = hooks.setdefault("PreCompact", [])
     # Migrate: old PreCompact only echoed a reminder; replace with the sync variant

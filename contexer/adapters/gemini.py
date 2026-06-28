@@ -132,13 +132,23 @@ def before_agent(repo_path: str, raw: str) -> str:
 
 
 def after_write(repo_path: str, raw: str) -> str:
-    """AfterTool(write_file|replace): flag a reminder for the next user prompt."""
+    """AfterTool(write_file|replace): immediately remind the AI to surface and store any decision."""
     try:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         (store.STORE_DIR / _PENDING_CAPTURE).touch()
     except Exception:
         pass
-    return json.dumps({"suppressOutput": True})
+    return json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "AfterTool",
+            "additionalContext": (
+                "Contexer: if this edit involved an architectural, design, or engineering decision "
+                "(a tech choice, a naming change, a constraint, a pattern) — tell the user "
+                "what decision was made and call update_context to store it. If unsure whether it "
+                "qualifies, surface it anyway and let the user confirm."
+            ),
+        }
+    })
 
 
 def pre_compress(repo_path: str, raw: str) -> str:
