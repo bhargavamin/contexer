@@ -192,7 +192,9 @@ def install(home: Path) -> list[str]:
 
     precompact_cmd = _sync(
         '{"systemMessage": "Contexer: context compaction starting '
-        '— call update_context for any decisions not yet stored"}')
+        '\\u2014 call update_context for any decisions not yet stored. '
+        'If update_context appears as a deferred tool, first call: '
+        'ToolSearch(query=\'select:mcp__contexer__update_context\')"}')
     sessionend_cmd = _sync("{}")
 
     # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
@@ -208,7 +210,9 @@ def install(home: Path) -> list[str]:
         "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
         "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
         "(2) any EXISTING approach you applied again (same or similar content is fine — "
-        "the server deduplicates and tracks repetition without storing a duplicate).\"}}'; "
+        "the server deduplicates and tracks repetition without storing a duplicate). "
+        "If update_context appears as a deferred tool, first call: "
+        "ToolSearch(query='select:mcp__contexer__update_context')\"}}'; "
         "else echo '{}'; fi"
         f" # {_HOOK_SENTINEL}"
     )
@@ -271,7 +275,8 @@ def install(home: Path) -> list[str]:
                 f"design, or engineering decision (a tech choice, a naming change, a constraint, "
                 f"a pattern) — tell the user what decision was made and call update_context to "
                 f"store it. If unsure whether it qualifies, surface it anyway and let the user "
-                f"confirm.\"}}}}' # {_HOOK_SENTINEL}"
+                f"confirm. If update_context appears as a deferred tool, first call: "
+                f"ToolSearch(query='select:mcp__contexer__update_context')\"}}}}' # {_HOOK_SENTINEL}"
             )}]})
 
     pc = hooks.setdefault("PreCompact", [])

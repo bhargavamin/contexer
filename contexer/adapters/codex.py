@@ -128,7 +128,9 @@ def install(home: Path) -> list[str]:
         "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
         "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
         "(2) any EXISTING approach you applied again (same or similar content is fine — "
-        "the server deduplicates and tracks repetition without storing a duplicate).\"}}'; "
+        "the server deduplicates and tracks repetition without storing a duplicate). "
+        "If update_context appears as a deferred tool, first call: "
+        "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")\"}}'; "
         "else echo '{}'; fi"
     )
     cap_task = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
@@ -175,7 +177,8 @@ def install(home: Path) -> list[str]:
                 "design, or engineering decision (a tech choice, a naming change, a constraint, "
                 "a pattern) \\u2014 tell the user what decision was made and call update_context to "
                 "store it. If unsure whether it qualifies, surface it anyway and let the user "
-                "confirm.\"}}'"
+                "confirm. If update_context appears as a deferred tool, first call: "
+                "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")\"}}'"
             )}]})
 
     pc = hooks.setdefault("PreCompact", [])
