@@ -785,11 +785,28 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
-                    created_by: str = "ai") -> tuple[bool, str | None]:
+                    created_by: str = "ai", replace_id: str = "") -> tuple[bool, str | None]:
+    content = _normalize_content(content)
     if not _is_storable(content):
         return False, None
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
+        # Explicit correction: caller knows which entry is wrong and wants to replace it.
+        # Bypasses the similarity filter; preserves history fields on the existing entry.
+        if replace_id:
+            target = next((e for e in data["entries"] if e.get("id") == replace_id), None)
+            if target is not None:
+                target["content"] = content
+                if subtype:
+                    target["subtype"] = subtype
+                target["timestamp"] = datetime.now(timezone.utc).isoformat()
+                score, factors = _compute_confidence(target)
+                target["confidence"] = score
+                if factors:
+                    target["confidence_factors"] = factors
+                _save(repo_path, data)
+                return True, target["id"]
+            # replace_id not found — fall through to normal storage
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
         match = _find_match(content, decisions_only)
         if match is not None:

@@ -1647,6 +1647,52 @@ class TestNewDecisionEntryFields:
         assert store._entry_status(old_entry) == "approved"
 
 
+# ── update_decision replace_id ────────────────────────────────────────────────
+
+class TestUpdateDecisionReplaceId:
+    def test_replace_id_updates_content_in_place(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Route53 points api.xyz.com to gateway", "s1", "architecture")
+        ok, _ = store.update_decision(tmp_repo, "Route53 points api1.xyz.com to gateway", "s1",
+                                      "architecture", replace_id=eid)
+        assert ok is True
+        data = store._load(tmp_repo)
+        entries = [e for e in data["entries"] if e["type"] == "decision"]
+        assert len(entries) == 1
+        assert entries[0]["content"] == "Route53 points api1.xyz.com to gateway"
+        assert entries[0]["id"] == eid
+
+    def test_replace_id_bypasses_similarity_filter(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use postgres for primary storage", "s1", "architecture")
+        # Near-duplicate would normally be filtered; replace_id forces the update.
+        ok, _ = store.update_decision(tmp_repo, "Use postgres for primary storage v2", "s1",
+                                      "architecture", replace_id=eid)
+        assert ok is True
+
+    def test_replace_id_preserves_history(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use FastAPI for HTTP layer", "s1", "architecture")
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP layer", "s2", "architecture")
+        store.update_decision(tmp_repo, "Use FastAPI for HTTP endpoint handling", "s1",
+                              "architecture", replace_id=eid)
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("id") == eid)
+        assert entry["occurrence_count"] >= 1
+        assert "session_ids" in entry
+
+    def test_replace_id_not_found_falls_through_to_normal_store(self, tmp_repo):
+        ok, new_id = store.update_decision(tmp_repo, "Use Redis for caching layer here", "s1",
+                                           "architecture", replace_id="nonexistent-id")
+        assert ok is True
+        assert new_id is not None
+
+    def test_replace_id_updates_subtype_when_provided(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Always run lint before pushing code", "s1", "convention")
+        store.update_decision(tmp_repo, "Always run lint before pushing code updated", "s1",
+                              "constraint", replace_id=eid)
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("id") == eid)
+        assert entry["subtype"] == "constraint"
+
+
 # ── approve_decision ──────────────────────────────────────────────────────────
 
 class TestApproveDecision:

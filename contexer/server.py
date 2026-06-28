@@ -22,11 +22,14 @@ def capture_context(description: str, repo_path: str = "") -> str:
 
 @mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
-                   created_by: str = "ai") -> str:
+                   created_by: str = "ai", replace_id: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
     created_by: 'ai' (default) | 'bootstrap' (when storing bootstrap_context results) | 'scan' (low-insight repo facts)
+    replace_id: ID of an existing entry to correct in place. Bypasses similarity filtering — use when
+                the new content is a correction to a previously stored decision (e.g. a typo fix or
+                a value that changed). The entry's history is preserved; only content is updated.
 
     IMPORTANT: If this returns an 'Engineering Decision Detected' approval prompt, show it to
     the developer immediately and wait for their response before continuing. Do NOT ignore it.
@@ -35,7 +38,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     if not resolved:
         return "Skipped — repo path not detected."
     stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
-                                             created_by=created_by)
+                                             created_by=created_by, replace_id=replace_id)
     if not stored:
         return "Filtered — did not meet storage criteria."
     prompt = store.get_pending_approval_prompt(resolved, entry_id)
