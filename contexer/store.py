@@ -1533,7 +1533,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(d)} {d['content']}")
+            entry_id = d.get("id", "")[:8]
+            id_tag = f" (id={entry_id})" if entry_id else ""
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(d)} {d['content']}{id_tag}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
