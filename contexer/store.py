@@ -1192,6 +1192,11 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
             sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{_recur_suffix(d)} {d['content']}")
+    if global_rules or pre_loaded:
+        sys_parts.append(
+            "If the current task conflicts with any of these decisions, "
+            "surface the conflict and confirm with the developer before proceeding."
+        )
     if deferred_count > 0:
         arch_count = sum(1 for d in trusted if d.get("subtype") == "architecture")
         breakdown = f" ({arch_count} architecture)" if arch_count else ""
@@ -1504,6 +1509,10 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
             lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(d)} {d['content']}")
+        lines.append(
+            "\nIf the current task conflicts with any of these decisions, "
+            "surface the conflict and confirm with the developer before proceeding."
+        )
         lines.append("")
     elif is_filtered:
         parts = []
