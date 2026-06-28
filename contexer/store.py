@@ -747,12 +747,19 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
         return entry["id"]
 
 
+def _normalize_content(content: str) -> str:
+    """Strip whitespace, collapse internal runs, capitalize first character."""
+    normalized = " ".join(content.split())
+    return normalized[:1].upper() + normalized[1:] if normalized else normalized
+
+
 def _new_decision_entry(content: str, session_id: str, subtype: str,
                         memory_key: str | None = None,
                         created_by: str = "ai",
                         status: str = "") -> dict:
     """Build a decision entry. Single source of truth for the entry schema —
     both manual capture (`update_decision`) and memory import use this."""
+    content = _normalize_content(content)
     if not status:
         level = _classify_level(content, subtype, created_by)
         status = _level_to_status(level)
@@ -881,6 +888,7 @@ def _apply_memory_upsert(entries: list, content: str, session_id: str,
     """In-memory upsert of one memory fact into `entries`. No I/O, no cap — the
     caller loads, applies one-or-many, caps, and saves once. Mutates `entries`
     in place; returns 'created' | 'updated' | 'unchanged' | 'skipped'."""
+    content = _normalize_content(content)
     if not _is_storable(content):
         return "skipped"
     # 1. Keyed match — the evolving-fact path: same source+section, refresh in place.

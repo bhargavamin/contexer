@@ -72,7 +72,7 @@ class TestGeminiRuntime:
         raw = json.dumps({"session_id": "s1", "source": "startup"})
         out = json.loads(gemini.session_start(repo, raw))
         assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-        assert "always use uv" in out["hookSpecificOutput"]["additionalContext"]
+        assert "Always use uv" in out["hookSpecificOutput"]["additionalContext"]
         assert (store.STORE_DIR / ".current_repo").read_text() == repo
 
     def test_before_agent_captures_task_only_once_per_session(self, home, tmp_path):
@@ -116,7 +116,7 @@ class TestGeminiRuntime:
         # Reload takes priority; the edit reminder is suppressed (write happened
         # before compression, not on the immediately preceding turn).
         assert "wrote or edited files" not in context
-        assert "always run tests before committing" in context
+        assert "Always run tests before committing" in context
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
         assert not (store.STORE_DIR / ".gemini_pending_reload").exists()
 

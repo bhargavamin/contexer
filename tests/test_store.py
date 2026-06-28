@@ -1417,8 +1417,8 @@ class TestSlugInjectivity:
         store.update_decision("/home/u/my_repo", "decision B for the underscore repo here", "s2")
         a = store.get_context("/home/u/my.repo")
         b = store.get_context("/home/u/my_repo")
-        assert "decision A" in a and "decision B" not in a
-        assert "decision B" in b and "decision A" not in b
+        assert "Decision A" in a and "Decision B" not in a
+        assert "Decision B" in b and "Decision A" not in b
 
 
 class TestQueryNonWordPrefix:

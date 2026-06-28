@@ -169,7 +169,7 @@ class TestUpdateInPlace:
         assert (r1, r2, r3) == ("created", "unchanged", "updated")
         assert self._count(tmp_repo) == 1                       # never duplicated
         entry = json.loads(store._store_path(tmp_repo).read_text())["entries"][0]
-        assert entry["content"] == "completely different v2 prose"
+        assert entry["content"] == "Completely different v2 prose"
         assert entry["subtype"] == "architecture"              # subtype refreshed too
 
     def test_reworded_fact_updates_in_place_via_import(self, tmp_repo, tmp_path):
