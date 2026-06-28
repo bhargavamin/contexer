@@ -253,18 +253,22 @@ class TestSessionStart:
         assert "setup" in result["systemMessage"] or "no context" in result["systemMessage"].lower()
 
     def test_with_decisions_injects_project_rules(self, tmp_repo):
+        # Constraints start as pending_approval and surface in the pending notice,
+        # not as pre-loaded project rules. Only after approval do they appear as rules.
         store.update_decision(tmp_repo, "Always write tests before committing", SESSION, "constraint")
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "Project rules" in ctx
-        assert "Always write tests" in ctx
+        assert "pending" in ctx.lower()
+        assert "constraint" in ctx.lower()
 
     def test_constraints_injected_eagerly(self, tmp_repo):
+        # Constraints require approval before injection; they appear in the pending notice.
         store.update_decision(tmp_repo, "Never commit plaintext secrets", SESSION, "constraint")
         store.update_decision(tmp_repo, "Use FastAPI for HTTP", SESSION, "architecture")
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "Never commit plaintext secrets" in ctx
+        assert "pending" in ctx.lower()
+        assert "constraint" in ctx.lower()
 
     def test_architecture_deferred_not_in_session_start(self, tmp_repo):
         store.update_decision(tmp_repo, "Use FastAPI for HTTP", SESSION, "architecture")

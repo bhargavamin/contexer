@@ -1461,3 +1461,425 @@ class TestConcurrentWriteIntegrity:
         data = store._load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == total, f"lost updates: kept {len(decisions)} of {total}"
+
+
+# ── _classify_level ────────────────────────────────────────────────────────────
+
+class TestClassifyLevel:
+    def test_scan_created_is_auto(self):
+        assert store._classify_level("Package manager: uv", "convention", "scan") == "auto"
+
+    def test_human_created_is_auto(self):
+        assert store._classify_level("Always use uv not pip", "constraint", "human") == "auto"
+
+    def test_constraint_subtype_is_approval_required(self):
+        assert store._classify_level("Never commit plaintext secrets", "constraint", "ai") == "approval_required"
+
+    def test_bootstrap_convention_is_auto(self):
+        assert store._classify_level("Test framework: pytest", "convention", "bootstrap") == "auto"
+
+    def test_bootstrap_pattern_is_auto(self):
+        assert store._classify_level("Route handlers in src/routes/", "pattern", "bootstrap") == "auto"
+
+    def test_bootstrap_architecture_is_suggested(self):
+        assert store._classify_level("Use PostgreSQL for storage", "architecture", "bootstrap") == "suggested"
+
+    def test_scan_fact_pattern_match_is_auto(self):
+        assert store._classify_level("CI/CD: GitHub Actions (3 workflow files)", "", "ai") == "auto"
+        assert store._classify_level("Package manager: pnpm", "convention", "ai") == "auto"
+        assert store._classify_level("Python project \"myapp\", requires-python >=3.11", "", "ai") == "auto"
+
+    def test_l3_instead_of_signal(self):
+        assert store._classify_level("We use RabbitMQ instead of Kafka for messaging", "architecture", "ai") == "approval_required"
+
+    def test_l3_intentionally_signal(self):
+        assert store._classify_level("Intentionally uses polling over webhooks for simplicity", "architecture", "ai") == "approval_required"
+
+    def test_l3_standardize_on_signal(self):
+        assert store._classify_level("We standardize on PostgreSQL for all transactional storage", "architecture", "ai") == "approval_required"
+
+    def test_l3_prohibited_signal(self):
+        assert store._classify_level("Use of Lambda is prohibited in our stack", "architecture", "ai") == "approval_required"
+
+    def test_l3_mandatory_signal(self):
+        assert store._classify_level("Helm is mandatory for all Kubernetes deployments", "architecture", "ai") == "approval_required"
+
+    def test_l3_team_owns_signal(self):
+        assert store._classify_level("Platform team owns all Terraform modules", "architecture", "ai") == "approval_required"
+
+    def test_l3_all_services_must_signal(self):
+        assert store._classify_level("All services must emit OpenTelemetry traces", "architecture", "ai") == "approval_required"
+
+    def test_ai_architecture_without_l3_signals_is_suggested(self):
+        assert store._classify_level("Use PostgreSQL for the main data store", "architecture", "ai") == "suggested"
+
+    def test_ai_convention_is_suggested(self):
+        assert store._classify_level("Conventional commits for all PRs", "convention", "ai") == "suggested"
+
+    def test_ai_pattern_is_suggested(self):
+        assert store._classify_level("Route handlers delegate to service layer", "pattern", "ai") == "suggested"
+
+    def test_memory_convention_is_suggested(self):
+        assert store._classify_level("Always use uv not pip", "convention", "memory") == "suggested"
+
+
+# ── _compute_confidence ────────────────────────────────────────────────────────
+
+class TestComputeConfidence:
+    def test_new_ai_entry_has_base_score(self):
+        entry = {"status": "suggested", "created_by": "ai", "occurrence_count": 1, "session_ids": ["s1"]}
+        score, factors = store._compute_confidence(entry)
+        assert score == 30
+        assert factors == []
+
+    def test_bootstrap_entry_gets_repo_bonus(self):
+        entry = {"status": "approved", "created_by": "bootstrap", "occurrence_count": 1, "session_ids": ["s1"]}
+        score, factors = store._compute_confidence(entry)
+        assert score == 45
+        assert "Observed in repository" in factors
+
+    def test_scan_entry_gets_repo_bonus(self):
+        entry = {"status": "approved", "created_by": "scan", "occurrence_count": 1, "session_ids": ["s1"]}
+        score, factors = store._compute_confidence(entry)
+        assert score == 45
+
+    def test_human_entry_gets_stated_bonus(self):
+        entry = {"status": "approved", "created_by": "human", "occurrence_count": 1, "session_ids": ["s1"]}
+        score, factors = store._compute_confidence(entry)
+        assert score == 50
+        assert "Stated by developer" in factors
+
+    def test_human_approval_adds_large_bonus(self):
+        entry = {"status": "approved", "created_by": "ai", "approved_by": "human",
+                 "occurrence_count": 1, "session_ids": ["s1"]}
+        score, factors = store._compute_confidence(entry)
+        assert score == 70
+        assert "Approved by developer" in factors
+
+    def test_multiple_sessions_adds_bonus(self):
+        entry = {"status": "suggested", "created_by": "ai", "occurrence_count": 3,
+                 "session_ids": ["s1", "s2", "s3"]}
+        score, factors = store._compute_confidence(entry)
+        assert score == 50  # 30 base + 20 for >=3 occurrences
+        assert any("Referenced in" in f for f in factors)
+
+    def test_score_capped_at_100(self):
+        entry = {"status": "approved", "created_by": "bootstrap", "approved_by": "human",
+                 "occurrence_count": 5, "session_ids": ["s1", "s2", "s3", "s4", "s5"],
+                 "memory_key": "some-key"}
+        score, _ = store._compute_confidence(entry)
+        assert score == 100
+
+    def test_memory_key_adds_small_bonus(self):
+        base_entry = {"status": "approved", "created_by": "ai", "occurrence_count": 1, "session_ids": ["s1"]}
+        score_without, _ = store._compute_confidence(base_entry)
+        memory_entry = {**base_entry, "memory_key": "some/file.md##section"}
+        score_with, factors = store._compute_confidence(memory_entry)
+        assert score_with == score_without + 5
+        assert "Persisted to memory tool" in factors
+
+
+# ── _new_decision_entry with new fields ───────────────────────────────────────
+
+class TestNewDecisionEntryFields:
+    def test_status_and_created_by_stored(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use pytest for all unit tests", "s1", subtype="convention")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert "status" in entry
+        assert "created_by" in entry
+        assert "confidence" in entry
+
+    def test_constraint_subtype_stored_as_pending(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never expose internal stack traces to clients", "s1", subtype="constraint")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "pending_approval"
+        assert entry["created_by"] == "ai"
+
+    def test_convention_subtype_stored_as_suggested(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use conventional commits for all pull requests", "s1", subtype="convention")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "suggested"
+
+    def test_l3_content_stored_as_pending(self, tmp_repo):
+        store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka by design", "s1", subtype="architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "pending_approval"
+
+    def test_scan_created_by_stored_as_approved(self, tmp_repo):
+        store.update_decision(tmp_repo, "CI/CD: GitHub Actions (2 workflow files)", "s1",
+                              subtype="convention", created_by="scan")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "scan"
+
+    def test_human_created_by_stored_as_approved(self, tmp_repo):
+        store.update_decision(tmp_repo, "Always write tests before committing code", "s1",
+                              subtype="constraint", created_by="human")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "human"
+
+    def test_backward_compat_entry_without_status_treated_as_approved(self, tmp_repo):
+        # Simulate an old entry written before the status field existed
+        store.STORE_DIR.mkdir(exist_ok=True)
+        path = store._store_path(tmp_repo)
+        old_entry = {
+            "id": "abc123",
+            "type": "decision",
+            "subtype": "convention",
+            "content": "Old decision without status field",
+            "session_id": "s1",
+            "session_ids": ["s1"],
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "occurrence_count": 1,
+        }
+        import json
+        path.write_text(json.dumps({"repo_path": tmp_repo, "entries": [old_entry]}))
+        # get_context should still show it (treated as approved)
+        result = store.get_context(tmp_repo)
+        assert "Old decision without status field" in result
+        assert store._entry_status(old_entry) == "approved"
+
+
+# ── approve_decision ──────────────────────────────────────────────────────────
+
+class TestApproveDecision:
+    def _store_pending(self, repo: str, content: str = "We use RabbitMQ instead of Kafka") -> str:
+        """Store a decision that will land as pending_approval and return its id."""
+        store.update_decision(repo, content, "s1", subtype="architecture")
+        data = store._load(repo)
+        entry = next(
+            e for e in data["entries"]
+            if e.get("type") == "decision" and e.get("status") == "pending_approval"
+        )
+        return entry["id"]
+
+    def test_approve_action_sets_approved_status(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok is True
+        assert "approved" in msg.lower() or "trusted" in msg.lower()
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("id") == eid)
+        assert entry["status"] == "approved"
+        assert entry.get("approved_by") == "human"
+        assert "approved_at" in entry
+
+    def test_ignore_action_sets_ignored_status(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "ignore")
+        assert ok is True
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("id") == eid)
+        assert entry["status"] == "ignored"
+
+    def test_edit_action_updates_content_and_approves(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "edit",
+                                         content="We use Kafka instead of RabbitMQ for throughput")
+        assert ok is True
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("id") == eid)
+        assert entry["status"] == "approved"
+        assert "Kafka" in entry["content"]
+        assert entry.get("approved_by") == "human"
+
+    def test_approve_boosts_confidence(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        data_before = store._load(tmp_repo)
+        conf_before = next(e for e in data_before["entries"] if e.get("id") == eid)["confidence"]
+        store.approve_decision(tmp_repo, eid, "approve")
+        data_after = store._load(tmp_repo)
+        conf_after = next(e for e in data_after["entries"] if e.get("id") == eid)["confidence"]
+        assert conf_after > conf_before
+
+    def test_invalid_action_returns_false(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "accept")
+        assert ok is False
+        assert "Invalid" in msg
+
+    def test_edit_without_content_returns_false(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "edit", content="")
+        assert ok is False
+
+    def test_unknown_entry_id_returns_false(self, tmp_repo):
+        ok, msg = store.approve_decision(tmp_repo, "nonexistent-id-abc", "approve")
+        assert ok is False
+        assert "not found" in msg
+
+    def test_approved_decisions_appear_in_context_without_pending_tag(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        store.approve_decision(tmp_repo, eid, "approve")
+        result = store.get_context(tmp_repo)
+        assert "[pending]" not in result
+        assert "RabbitMQ" in result
+
+    def test_ignored_decisions_excluded_from_context(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        store.approve_decision(tmp_repo, eid, "ignore")
+        result = store.get_context(tmp_repo)
+        assert "RabbitMQ" not in result
+
+
+# ── get_pending_decisions ──────────────────────────────────────────────────────
+
+class TestGetPendingDecisions:
+    def test_returns_pending_entries(self, tmp_repo):
+        store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka", "s1", subtype="architecture")
+        pending = store.get_pending_decisions(tmp_repo)
+        assert len(pending) == 1
+        assert "RabbitMQ" in pending[0]["content"]
+
+    def test_excludes_approved_entries(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use pytest for testing", "s1", subtype="convention")
+        pending = store.get_pending_decisions(tmp_repo)
+        assert len(pending) == 0
+
+    def test_excludes_constraint_after_approval(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never create public S3 buckets", "s1", subtype="constraint")
+        data = store._load(tmp_repo)
+        eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
+        store.approve_decision(tmp_repo, eid, "approve")
+        pending = store.get_pending_decisions(tmp_repo)
+        assert len(pending) == 0
+
+    def test_empty_repo_returns_empty_list(self, tmp_repo):
+        assert store.get_pending_decisions(tmp_repo) == []
+
+
+# ── get_pending_approval_prompt ────────────────────────────────────────────────
+
+class TestGetPendingApprovalPrompt:
+    def test_returns_formatted_prompt_for_pending_entry(self, tmp_repo):
+        store.update_decision(tmp_repo, "We deploy only to AWS — all other clouds prohibited", "s1",
+                              subtype="architecture")
+        data = store._load(tmp_repo)
+        eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
+        prompt = store.get_pending_approval_prompt(tmp_repo, eid)
+        assert "Engineering Decision Detected" in prompt
+        assert "AWS" in prompt
+        assert "Confidence:" in prompt
+        assert "approve_decision" in prompt
+        assert "[Y] Approve" in prompt
+        assert "[N] Ignore" in prompt
+
+    def test_returns_empty_for_approved_entry(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use pytest for unit tests", "s1", subtype="convention")
+        data = store._load(tmp_repo)
+        eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
+        assert store.get_pending_approval_prompt(tmp_repo, eid) == ""
+
+    def test_returns_empty_for_none_id(self, tmp_repo):
+        assert store.get_pending_approval_prompt(tmp_repo, None) == ""
+
+    def test_returns_empty_for_unknown_id(self, tmp_repo):
+        assert store.get_pending_approval_prompt(tmp_repo, "nonexistent") == ""
+
+
+# ── get_context with status tags ──────────────────────────────────────────────
+
+class TestGetContextStatusTags:
+    def test_suggested_entries_show_suggested_tag(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for the main data store", "s1", subtype="architecture")
+        result = store.get_context(tmp_repo)
+        assert "[suggested]" in result
+
+    def test_pending_entries_show_pending_tag(self, tmp_repo):
+        store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka", "s1", subtype="architecture")
+        result = store.get_context(tmp_repo)
+        assert "[pending]" in result
+
+    def test_approved_entries_show_no_status_tag(self, tmp_repo):
+        store.update_decision(tmp_repo, "Package manager: uv", "s1", subtype="convention", created_by="scan")
+        result = store.get_context(tmp_repo)
+        assert "[suggested]" not in result
+        assert "[pending]" not in result
+
+    def test_ignored_entries_excluded_from_context(self, tmp_repo):
+        store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka", "s1", subtype="architecture")
+        data = store._load(tmp_repo)
+        eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
+        store.approve_decision(tmp_repo, eid, "ignore")
+        result = store.get_context(tmp_repo)
+        assert "RabbitMQ" not in result
+
+    def test_active_only_excludes_pending(self, tmp_repo):
+        # The _active_only flag is used by session injection — not the MCP tool.
+        # Pending decisions are excluded from active-only queries.
+        store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka", "s1", subtype="architecture")
+        result_full = store.get_context(tmp_repo)
+        result_active = store.get_context(tmp_repo, _active_only=True)
+        assert "RabbitMQ" in result_full   # visible in full mode
+        assert "RabbitMQ" not in result_active  # excluded in active-only
+
+    def test_active_only_includes_suggested(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for the main data store", "s1", subtype="architecture")
+        result = store.get_context(tmp_repo, _active_only=True)
+        assert "Postgres" in result
+
+
+# ── session_start with pending decisions ──────────────────────────────────────
+
+SESSION_ID_CONF = "test-confidence-session"
+
+
+class TestSessionStartWithPending:
+    def test_pending_constraint_appears_in_status(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never create public S3 buckets anywhere", SESSION_ID_CONF, "constraint")
+        result = store.get_session_start_context(tmp_repo)
+        msg = result["systemMessage"]
+        assert "constraint" in msg
+        assert "pending" in msg.lower()
+
+    def test_pending_decisions_excluded_from_project_rules_injection(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never create public S3 buckets anywhere", SESSION_ID_CONF, "constraint")
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        # Pending constraints must NOT appear as trusted rules
+        assert "Never create public S3 buckets" not in ctx.split("## Project rules")[1] if "## Project rules" in ctx else True
+
+    def test_approved_constraint_appears_in_project_rules(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never create public S3 buckets anywhere", SESSION_ID_CONF, "constraint")
+        data = store._load(tmp_repo)
+        eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
+        store.approve_decision(tmp_repo, eid, "approve")
+        result = store.get_session_start_context(tmp_repo)
+        msg = result["systemMessage"]
+        # After approval, constraint shows up in loaded count
+        assert "constraint" in msg
+        assert "pending" not in msg.lower()
+
+    def test_suggested_convention_injected_with_tag(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use conventional commits for all pull requests",
+                              SESSION_ID_CONF, "convention")
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "conventional commits" in ctx
+        assert "[suggested]" in ctx
+
+    def test_pending_review_reminder_in_context(self, tmp_repo):
+        store.update_decision(tmp_repo, "We standardize on PostgreSQL for all relational data",
+                              SESSION_ID_CONF, "architecture")
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "pending" in ctx.lower()
+        assert "contexer review" in ctx or "approve_decision" in ctx
+
+
+# ── capture_user_constraint with new fields ────────────────────────────────────
+
+class TestCaptureUserConstraintFields:
+    def test_human_constraint_stored_as_approved(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, "always use uv not pip", "s1")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "human"

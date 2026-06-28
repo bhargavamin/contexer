@@ -225,7 +225,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
             _record_recurrence(match, session_id)
             _save_global(data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype)
+        entry = _new_decision_entry(content, session_id, subtype, status="approved")
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save_global(data)
@@ -394,6 +394,116 @@ def _recur_suffix(d: dict) -> str:
     """' ×N' confidence marker for a decision seen more than once; '' for a one-off."""
     count = d.get("occurrence_count", 1)
     return f" ×{count}" if count > 1 else ""
+
+
+# ── Confidence levels and classification ───────────────────────────────────────
+
+# Patterns that identify bootstrap-scan-generated facts (Level 1 — auto approved).
+# These match the exact output formats that bootstrap_scan produces; AI decisions
+# that happen to start with the same prefix are still treated as Level 1.
+_SCAN_FACT_PATTERNS = re.compile(
+    r"^(?:"
+    r"Python project|Node\.js project|Go module|Go version|Rust project"
+    r"|Package manager:|Test framework:|Linting(?:/formatting)?:|Formatting:|Type checking:"
+    r"|CI/CD:|Containerized|Local dev:|Infrastructure as code:|Deployment:"
+    r"|Monorepo:|Data store(?:s)?:|ORM / query builder:|Auth:|Cloud:|Payments:"
+    r"|Email:|Messaging:|AI:|Task queue:|Search:|Architecture:"
+    r")",
+    re.IGNORECASE,
+)
+
+# Content signals that indicate a Level 3 (approval-required) engineering decision:
+# intentional alternatives, org-level mandates, ownership, and explicit prohibitions.
+_L3_CONTENT_SIGNALS = re.compile(
+    r"\b(?:"
+    r"instead\s+of|rather\s+than"                      # competing alternatives
+    r"|intentionally|deliberately|by\s+design"          # conscious choices
+    r"|prohibit(?:ed)?|forbidden|banned"                # prohibitions
+    r"|mandatory|mandated"                              # mandates
+    r"|standardize(?:d)?\s+on|standardizing\s+on"      # org-level standards
+    r"|we\s+(?:standardize|require|adopted)"            # "we standardize/require/adopted X"
+    r"|must\s+(?:use|not\s+use|never|always)"          # explicit musts
+    r"|only\s+(?:aws|gcp|azure|postgres|mysql|kafka|rabbitmq|redis|mongodb|s3|lambda)\b"  # tech lock-in
+    r"|(?:team|platform|service)\s+owns"               # ownership
+    r"|all\s+services\s+must"                          # cross-cutting mandate
+    r"|deploy\s+only\s+to"                             # deployment constraint
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Confidence threshold for injecting 'suggested' decisions at session start.
+_SUGGESTED_INJECT_THRESHOLD = 0
+
+
+def _entry_status(entry: dict) -> str:
+    """Returns the effective status of an entry, defaulting to 'approved' for old entries."""
+    return entry.get("status", "approved")
+
+
+def _classify_level(content: str, subtype: str, created_by: str) -> str:
+    """Classify a decision into one of three confidence levels.
+    Returns 'auto' | 'suggested' | 'approval_required'.
+
+    Level 1 (auto): scan-detected repo facts, human-stated rules (already confirmed).
+    Level 2 (suggested): AI-captured patterns and non-constraining architecture.
+    Level 3 (approval_required): all constraints, plus arch decisions with L3 signals.
+    """
+    if created_by in ("scan", "human"):
+        return "auto"
+    if subtype == "constraint":
+        return "approval_required"
+    if created_by == "bootstrap" and subtype in ("convention", "pattern"):
+        return "auto"
+    if _SCAN_FACT_PATTERNS.match(content):
+        return "auto"
+    if _L3_CONTENT_SIGNALS.search(content):
+        return "approval_required"
+    return "suggested"
+
+
+def _level_to_status(level: str) -> str:
+    return {"auto": "approved", "suggested": "suggested", "approval_required": "pending_approval"}.get(level, "suggested")
+
+
+def _compute_confidence(entry: dict) -> tuple[int, list[str]]:
+    """Compute a confidence score (0-100) and evidence factors from an entry's metadata.
+    Confidence reflects available evidence, NOT AI certainty."""
+    score = 30
+    factors: list[str] = []
+
+    if entry.get("approved_by") == "human":
+        score += 40
+        factors.append("Approved by developer")
+
+    created_by = entry.get("created_by", "ai")
+    if created_by in ("scan", "bootstrap"):
+        score += 15
+        factors.append("Observed in repository")
+    elif created_by == "human":
+        score += 20
+        factors.append("Stated by developer")
+
+    occ = entry.get("occurrence_count", 1)
+    if occ >= 3:
+        score += 20
+        factors.append(f"Referenced in {occ} sessions")
+    elif occ >= 2:
+        score += 10
+        factors.append("Mentioned multiple times")
+
+    sessions = entry.get("session_ids", [])
+    if len(sessions) >= 3 and occ < 3:
+        score += 10
+        factors.append("Confirmed across multiple sessions")
+    elif len(sessions) >= 2 and occ < 2:
+        score += 5
+        factors.append("Seen in multiple sessions")
+
+    if entry.get("memory_key"):
+        score += 5
+        factors.append("Persisted to memory tool")
+
+    return min(score, 100), factors
 
 
 # Prescriptive constraint/convention signals in user prompts.
@@ -583,16 +693,8 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
         if _find_match(content, decisions_only) is not None:
             return None, None
-        entry = {
-            "id": str(uuid.uuid4()),
-            "type": "decision",
-            "subtype": subtype,
-            "content": content,
-            "session_id": session_id,
-            "session_ids": [session_id],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "occurrence_count": 1,
-        }
+        entry = _new_decision_entry(content, session_id, subtype,
+                                    created_by="human", status="approved")
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -646,10 +748,15 @@ def capture_task(repo_path: str, description: str, session_id: str) -> str | Non
 
 
 def _new_decision_entry(content: str, session_id: str, subtype: str,
-                        memory_key: str | None = None) -> dict:
+                        memory_key: str | None = None,
+                        created_by: str = "ai",
+                        status: str = "") -> dict:
     """Build a decision entry. Single source of truth for the entry schema —
     both manual capture (`update_decision`) and memory import use this."""
-    entry = {
+    if not status:
+        level = _classify_level(content, subtype, created_by)
+        status = _level_to_status(level)
+    entry: dict = {
         "id": str(uuid.uuid4()),
         "type": "decision",
         "subtype": subtype,
@@ -658,13 +765,20 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
         "session_ids": [session_id],
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "occurrence_count": 1,
+        "status": status,
+        "created_by": created_by,
     }
+    score, factors = _compute_confidence(entry)
+    entry["confidence"] = score
+    if factors:
+        entry["confidence_factors"] = factors
     if memory_key is not None:
         entry["memory_key"] = memory_key
     return entry
 
 
-def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
+                    created_by: str = "ai") -> tuple[bool, str | None]:
     if not _is_storable(content):
         return False, None
     with _store_lock(_slug(repo_path)):
@@ -675,11 +789,91 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             _record_recurrence(match, session_id)
             _save(repo_path, data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype)
+        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
         return True, entry["id"]
+
+
+def approve_decision(repo_path: str, entry_id: str, action: str,
+                     content: str = "") -> tuple[bool, str]:
+    """Approve, ignore, or edit a pending decision.
+
+    action: 'approve' | 'ignore' | 'edit'
+    content: the corrected decision text, required when action='edit'
+    Returns (success, message).
+    """
+    if action not in ("approve", "ignore", "edit"):
+        return False, f"Invalid action '{action}'. Use: approve, ignore, or edit."
+    if action == "edit" and not content.strip():
+        return False, "Action 'edit' requires content — provide the corrected decision text."
+
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
+        if entry is None:
+            return False, f"Decision {entry_id!r} not found."
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        if action == "ignore":
+            entry["status"] = "ignored"
+            _save(repo_path, data)
+            return True, "Ignored. This decision will not surface again."
+
+        if action == "edit":
+            entry["content"] = content.strip()
+
+        entry["status"] = "approved"
+        entry["approved_at"] = now
+        entry["approved_by"] = "human"
+        score, factors = _compute_confidence(entry)
+        entry["confidence"] = score
+        if factors:
+            entry["confidence_factors"] = factors
+        _save(repo_path, data)
+
+        stored_content = entry["content"]
+        preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
+        verb = "Updated and approved" if action == "edit" else "Approved"
+        return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\""
+
+
+def get_pending_decisions(repo_path: str) -> list[dict]:
+    """Returns all decisions with status 'pending_approval' for the given repo."""
+    data = _load(repo_path)
+    return [
+        e for e in data.get("entries", [])
+        if e.get("type") == "decision" and _entry_status(e) == "pending_approval"
+    ]
+
+
+def get_pending_approval_prompt(repo_path: str, entry_id: str | None) -> str:
+    """Generate a formatted approval prompt for a pending decision.
+    Returns '' if the entry is not in pending_approval state."""
+    if not entry_id:
+        return ""
+    data = _load(repo_path)
+    entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
+    if not entry or _entry_status(entry) != "pending_approval":
+        return ""
+    score, factors = _compute_confidence(entry)
+    factor_lines = "\n".join(f"  - {f}" for f in factors) if factors else "  - Initial capture"
+    content = entry.get("content", "")
+    eid = entry["id"]
+    return (
+        f"Engineering Decision Detected — pending your approval\n\n"
+        f"\"{content}\"\n\n"
+        f"Confidence: {score}%\n"
+        f"Evidence:\n{factor_lines}\n\n"
+        f"IMPORTANT: Show this to the developer and wait for their response:\n\n"
+        f"  [Y] Approve — call approve_decision(entry_id=\"{eid}\", action=\"approve\")\n"
+        f"  [E] Edit    — call approve_decision(entry_id=\"{eid}\", action=\"edit\","
+        f" content=\"<corrected text>\")\n"
+        f"  [N] Ignore  — call approve_decision(entry_id=\"{eid}\", action=\"ignore\")\n\n"
+        f"Or the developer can run `contexer review` in their terminal to review later."
+    )
 
 
 def _apply_memory_upsert(entries: list, content: str, session_id: str,
@@ -715,7 +909,8 @@ def _apply_memory_upsert(entries: list, content: str, session_id: str,
     decisions_only = [e for e in entries if e["type"] == "decision"]
     if _find_match(content, decisions_only) is not None:
         return "skipped"
-    entries.append(_new_decision_entry(content, session_id, subtype, memory_key))
+    entries.append(_new_decision_entry(content, session_id, subtype, memory_key,
+                                       created_by="memory", status="approved"))
     return "created"
 
 
@@ -978,9 +1173,13 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
             "context": "\n".join(sys_parts),
         }
 
-    count = len(decisions)
-    pre_loaded = [d for d in decisions if d.get("subtype") in ("convention", "constraint", "pattern")]
-    deferred_count = count - len(pre_loaded)
+    # Separate decisions by status for injection and summary.
+    # pending_approval and ignored decisions are never auto-injected — they must
+    # be explicitly approved before becoming trusted engineering knowledge.
+    pending = [d for d in decisions if _entry_status(d) == "pending_approval"]
+    trusted = [d for d in decisions if _entry_status(d) in ("approved", "suggested")]
+    pre_loaded = [d for d in trusted if d.get("subtype") in ("convention", "constraint", "pattern")]
+    deferred_count = len(trusted) - len(pre_loaded)
 
     sys_parts = []
     if global_rules:
@@ -990,14 +1189,27 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
-            sys_parts.append(f"- [{d.get('subtype', '')}]{_recur_suffix(d)} {d['content']}")
+            st = _entry_status(d)
+            status_tag = " [suggested]" if st == "suggested" else ""
+            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{_recur_suffix(d)} {d['content']}")
     if deferred_count > 0:
-        arch_count = sum(1 for d in decisions if d.get("subtype") == "architecture")
+        arch_count = sum(1 for d in trusted if d.get("subtype") == "architecture")
         breakdown = f" ({arch_count} architecture)" if arch_count else ""
         sys_parts.append(
             f"{deferred_count} decision(s) stored{breakdown}. "
             "Call get_context BEFORE reading files for any question about architecture, "
             "design decisions, rationale, or patterns."
+        )
+    if pending:
+        pending_by_type: dict[str, int] = {}
+        for d in pending:
+            st = d.get("subtype") or "decision"
+            pending_by_type[st] = pending_by_type.get(st, 0) + 1
+        pending_parts = [_pl(cnt, st) for st, cnt in sorted(pending_by_type.items())]
+        sys_parts.append(
+            f"{', '.join(pending_parts)} pending your approval. "
+            "Run `contexer review` in your terminal or call approve_decision() "
+            "after reviewing each with the developer."
         )
 
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
@@ -1019,6 +1231,11 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
         sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
+    if pending:
+        pending_by_type_str = ", ".join(
+            _pl(cnt, st) for st, cnt in sorted(pending_by_type.items())
+        )
+        sentences.append(f"{pending_by_type_str} pending approval — run `contexer review`")
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
     return {"status": status, "context": "\n".join(sys_parts)}
@@ -1196,7 +1413,10 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     ]
     ordered_kws = sorted(set(keywords), key=len, reverse=True)[:3]
 
-    # Search repo decisions first (longest keyword = most specific match)
+    # Search repo decisions first (longest keyword = most specific match).
+    # Rationale questions use the default (non-active-only) mode: the AI should see
+    # pending decisions too (with [pending] tag) so it can answer "why" questions even
+    # for decisions not yet approved. Only session-start injection restricts to active.
     data = _load(repo_path)
     if data.get("entries"):
         for kw in ordered_kws:
@@ -1227,7 +1447,13 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     return ""
 
 
-def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0) -> str:
+def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
+                _active_only: bool = False) -> str:
+    """Returns stored context for the given repo.
+
+    _active_only: internal flag — when True, exclude pending_approval and ignored entries
+    (used by auto-injection paths so only trusted decisions reach the AI automatically).
+    """
     data = _load(repo_path)
     entries = data.get("entries", [])
     if not entries:
@@ -1244,6 +1470,10 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             lines.append("")
 
     decisions = [e for e in entries if e["type"] == "decision"]
+    # Always exclude ignored decisions — they are permanently suppressed.
+    decisions = [d for d in decisions if _entry_status(d) != "ignored"]
+    if _active_only:
+        decisions = [d for d in decisions if _entry_status(d) in ("approved", "suggested")]
 
     is_filtered = bool(query or entry_type)
     if entry_type:
@@ -1271,7 +1501,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         lines.append(f"## Decisions and context{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
+            st = _entry_status(d)
+            status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(d)} {d['content']}")
         lines.append("")
     elif is_filtered:
         parts = []

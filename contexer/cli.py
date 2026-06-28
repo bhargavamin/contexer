@@ -23,6 +23,7 @@ Commands:
                 use --target claude|cursor|codex|gemini|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
+  review        Interactively approve, edit, or ignore pending engineering decisions.
   status        Show install state: version, binary path, MCP/hooks, store summary.
   version       Print the installed version.
   help          Show this message.
@@ -121,6 +122,87 @@ def uninstall(rest: list | None = None, purge: bool = False) -> None:
 
 def version() -> None:
     print(f"contexer {_version()}")
+
+
+def review() -> None:
+    """Interactively review and approve/ignore/edit pending engineering decisions."""
+    from contexer import store
+
+    repo_path = store._git_root(os.getcwd())
+    if not repo_path:
+        print("Not inside a git repository.", file=sys.stderr)
+        sys.exit(1)
+
+    pending = store.get_pending_decisions(repo_path)
+    if not pending:
+        print("No decisions pending approval.")
+        return
+
+    print(f"\n{len(pending)} decision(s) pending approval for {Path(repo_path).name}\n")
+
+    approved = ignored = edited = skipped = 0
+    for i, entry in enumerate(pending, 1):
+        score, factors = store._compute_confidence(entry)
+
+        print("─" * 60)
+        print(f"Decision {i} of {len(pending)}\n")
+        subtype = entry.get("subtype") or "decision"
+        print(f"[{subtype}] \"{entry['content']}\"\n")
+        print(f"Confidence: {score}%")
+        if factors:
+            print("Evidence:")
+            for f in factors:
+                print(f"  - {f}")
+        print()
+        print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip")
+
+        try:
+            choice = input("Choice: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            break
+
+        if choice in ("Y", "YES"):
+            ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
+            if ok:
+                approved += 1
+                print(f"Approved.")
+        elif choice in ("N", "NO"):
+            ok, msg = store.approve_decision(repo_path, entry["id"], "ignore")
+            if ok:
+                ignored += 1
+                print("Ignored.")
+        elif choice in ("E", "EDIT"):
+            print(f'Current: "{entry["content"]}"')
+            try:
+                new_content = input("Edit: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nSkipped.")
+                skipped += 1
+                continue
+            if new_content:
+                ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content)
+                if ok:
+                    edited += 1
+                    print("Approved with edits.")
+            else:
+                print("No changes made, skipping.")
+                skipped += 1
+        else:
+            skipped += 1
+            print("Skipped.")
+
+    print("\n" + "─" * 60)
+    parts = []
+    if approved:
+        parts.append(f"{approved} approved")
+    if edited:
+        parts.append(f"{edited} edited and approved")
+    if ignored:
+        parts.append(f"{ignored} ignored")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    print(f"Review complete: {', '.join(parts) if parts else 'nothing changed'}.")
 
 
 def reinstall() -> None:
@@ -258,6 +340,8 @@ def main() -> None:
         _run_guarded(lambda: uninstall(rest))
     elif cmd == "reinstall":
         _run_guarded(reinstall)
+    elif cmd == "review":
+        review()
     elif cmd == "status":
         status(rest)
     else:

@@ -21,18 +21,42 @@ def capture_context(description: str, repo_path: str = "") -> str:
 
 
 @mcp.tool()
-def update_context(content: str, repo_path: str = "", subtype: str = "") -> str:
+def update_context(content: str, repo_path: str = "", subtype: str = "",
+                   created_by: str = "ai") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
+    created_by: 'ai' (default) | 'bootstrap' (when storing bootstrap_context results) | 'scan' (low-insight repo facts)
+
+    IMPORTANT: If this returns an 'Engineering Decision Detected' approval prompt, show it to
+    the developer immediately and wait for their response before continuing. Do NOT ignore it.
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype)
-    if stored:
-        return f"Stored. id={entry_id}"
-    return "Filtered — did not meet storage criteria."
+    stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
+                                             created_by=created_by)
+    if not stored:
+        return "Filtered — did not meet storage criteria."
+    prompt = store.get_pending_approval_prompt(resolved, entry_id)
+    if prompt:
+        return prompt
+    return f"Stored. id={entry_id}"
+
+
+@mcp.tool()
+def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
+    """Approve, ignore, or edit a decision that is pending developer approval.
+
+    entry_id: the ID returned by update_context when a decision required approval
+    action: 'approve' — mark as trusted | 'ignore' — suppress permanently | 'edit' — correct and approve
+    content: required when action='edit' — the corrected decision text
+    """
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    ok, msg = store.approve_decision(resolved, entry_id, action, content)
+    return msg
 
 
 @mcp.tool()
