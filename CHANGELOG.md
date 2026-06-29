@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/bhargavamin/contexer/compare/v0.10.0...v0.11.0) (2026-06-29)
+
+
+### Features
+
+* trusted, versioned decision model with human review ([#56](https://github.com/bhargavamin/contexer/issues/56)) ([431b095](https://github.com/bhargavamin/contexer/commit/431b09515498470c0cdca80a7c7805f98c2fc696))
+
+
+### Documentation
+
+* reposition README as the engineering decision layer ([#55](https://github.com/bhargavamin/contexer/issues/55)) ([8095cbd](https://github.com/bhargavamin/contexer/commit/8095cbd615bf0beaf64bbeba84ba06a63e5a1d50))
+
 ## [0.10.0](https://github.com/bhargavamin/contexer/compare/v0.9.0...v0.10.0) (2026-06-25)
 
 
