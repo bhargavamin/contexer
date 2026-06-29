@@ -192,7 +192,9 @@ def install(home: Path) -> list[str]:
 
     precompact_cmd = _sync(
         '{"systemMessage": "Contexer: context compaction starting '
-        '— call update_context for any decisions not yet stored"}')
+        '\\u2014 call update_context for any decisions not yet stored. '
+        'If update_context appears as a deferred tool, first call: '
+        'ToolSearch(query=\'select:mcp__contexer__update_context\')"}')
     sessionend_cmd = _sync("{}")
 
     # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
@@ -208,7 +210,9 @@ def install(home: Path) -> list[str]:
         "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
         "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
         "(2) any EXISTING approach you applied again (same or similar content is fine — "
-        "the server deduplicates and tracks repetition without storing a duplicate).\"}}'; "
+        "the server deduplicates and tracks repetition without storing a duplicate). "
+        "If update_context appears as a deferred tool, first call: "
+        "ToolSearch(query='select:mcp__contexer__update_context')\"}}'; "
         "else echo '{}'; fi"
         f" # {_HOOK_SENTINEL}"
     )
@@ -259,11 +263,27 @@ def install(home: Path) -> list[str]:
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
 
-    # PostToolUse: set a flag after Write/Edit so next prompt reminds Claude to call update_context
+    # PostToolUse: set the .pending_capture flag after any Write/Edit. This is the single
+    # deterministic "files changed this turn" signal. It is consumed by the next
+    # UserPromptSubmit (anchor_cmd), which injects the capture reminder at the start of the
+    # next prompt - a non-interrupting moment. No Stop hook: end-of-turn prompting added
+    # latency + tokens and depended on model behavior for no functional gain (the anchor
+    # already delivers the same reminder deterministically).
     put = hooks.setdefault("PostToolUse", [])
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
+
+    # Retire any previously-installed Stop hook: end-of-turn prompting is replaced by the
+    # deterministic PostToolUse flag + next-prompt anchor reminder. The Stop entry remains
+    # in the uninstall marker table so reinstall strips an old Stop hook from settings.json.
+    st = hooks.get("Stop", [])
+    new_st = _filter_groups(st, [".pending_capture", _HOOK_SENTINEL])
+    if new_st != st:
+        if new_st:
+            hooks["Stop"] = new_st
+        else:
+            hooks.pop("Stop", None)
 
     pc = hooks.setdefault("PreCompact", [])
     # Migrate: old PreCompact only echoed a reminder; replace with the sync variant
@@ -390,6 +410,7 @@ def uninstall(home: Path) -> list[str]:
             "SessionStart":     ["get_session_start_context", _HOOK_SENTINEL],
             "SessionEnd":       ["sync_memory", _HOOK_SENTINEL],
             "PostToolUse":      [".pending_capture", _HOOK_SENTINEL],
+            "Stop":             [".pending_capture", _HOOK_SENTINEL],
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],

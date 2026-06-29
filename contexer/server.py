@@ -21,18 +21,52 @@ def capture_context(description: str, repo_path: str = "") -> str:
 
 
 @mcp.tool()
-def update_context(content: str, repo_path: str = "", subtype: str = "") -> str:
+def update_context(content: str, repo_path: str = "", subtype: str = "",
+                   created_by: str = "ai", replace_id: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
+    created_by: 'ai' (default) | 'bootstrap' (when storing bootstrap_context results) | 'scan' (low-insight repo facts)
+    replace_id: ID (full UUID or 8-char short id) of an existing decision this content changes.
+                Bypasses similarity filtering. Decisions are versioned, never overwritten:
+                - a trivial change (typo/formatting, or a pattern/convention) is applied in
+                  place as a new revision, with the prior revision kept in history;
+                - a significant change (architecture/constraint) becomes a Suggested Update
+                  attached to the live decision and returns an approval prompt - the current
+                  revision stays trusted until the developer approves.
+
+    IMPORTANT: If this returns an 'Engineering Decision Detected/Updated' approval prompt, show
+    it to the developer immediately and wait for their response before continuing. Do NOT ignore it.
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype)
-    if stored:
-        return f"Stored. id={entry_id}"
-    return "Filtered — did not meet storage criteria."
+    stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
+                                             created_by=created_by, replace_id=replace_id)
+    if not stored:
+        return "Filtered — did not meet storage criteria."
+    prompt = store.get_pending_approval_prompt(resolved, entry_id)
+    if prompt:
+        return prompt
+    return f"Stored. id={entry_id}"
+
+
+@mcp.tool()
+def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
+    """Approve, edit, skip, ignore, or dismiss a decision pending developer approval.
+
+    entry_id: the ID returned by update_context when a decision required approval
+    action: 'approve' - accept (a Suggested Update is promoted to a new revision, history kept)
+            | 'edit' - correct and approve | 'skip' - keep pending for later
+            | 'dismiss' - discard a Suggested Update, keep the current revision
+            | 'ignore' - suppress a new decision permanently
+    content: required when action='edit' — the corrected decision text
+    """
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    ok, msg = store.approve_decision(resolved, entry_id, action, content)
+    return msg
 
 
 @mcp.tool()

@@ -128,7 +128,9 @@ def install(home: Path) -> list[str]:
         "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
         "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
         "(2) any EXISTING approach you applied again (same or similar content is fine — "
-        "the server deduplicates and tracks repetition without storing a duplicate).\"}}'; "
+        "the server deduplicates and tracks repetition without storing a duplicate). "
+        "If update_context appears as a deferred tool, first call: "
+        "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")\"}}'; "
         "else echo '{}'; fi"
     )
     cap_task = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
@@ -165,10 +167,23 @@ def install(home: Path) -> list[str]:
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...", "command": _py(ss_code)}]})
 
+    # PostToolUse sets the deterministic .pending_capture flag; the next UserPromptSubmit
+    # (anchor_cmd) consumes it and injects the capture reminder. No Stop hook - end-of-turn
+    # prompting added latency/tokens with no functional gain over the next-prompt anchor.
     put = hooks.setdefault("PostToolUse", [])
     if not base._in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+
+    # Retire any previously-installed Stop hook. The Stop entry stays in _EVENT_MARKERS so
+    # uninstall/reinstall strips an old Stop hook from hooks.json.
+    st = hooks.get("Stop", [])
+    new_st = base._filter_groups(st, [".pending_capture"])
+    if new_st != st:
+        if new_st:
+            hooks["Stop"] = new_st
+        else:
+            hooks.pop("Stop", None)
 
     pc = hooks.setdefault("PreCompact", [])
     if not base._in_groups(pc, "compaction starting"):
@@ -209,6 +224,7 @@ def install(home: Path) -> list[str]:
 _EVENT_MARKERS = {
     "SessionStart":     ["get_session_start_context"],
     "PostToolUse":      [".pending_capture"],
+    "Stop":             [".pending_capture"],
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],
     "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",

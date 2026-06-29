@@ -198,11 +198,12 @@ class TestSessionStartPermutations:
         assert "setup" in msg or "no context" in msg.lower()
 
     def test_no_global_repo_has_decisions_injects_project_rules(self):
+        # Constraints start as pending_approval; they appear in the pending notice, not as rules.
         _add_repo("Never commit without tests", "constraint")
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "Project rules" in ctx
-        assert "Never commit without tests" in ctx
+        assert "pending" in ctx.lower()
+        assert "constraint" in ctx.lower()
         assert "Global rules" not in ctx
 
     def test_no_global_repo_has_decisions_status_line(self):
@@ -213,23 +214,25 @@ class TestSessionStartPermutations:
         assert "global rule" not in msg
 
     def test_both_global_and_repo_injects_both_sections(self):
+        # Global conventions (approved) appear as "Global rules"; repo constraints (pending) appear in pending notice.
         _add_global("Always use conventional commits", "convention")
         _add_repo("Never commit without tests", "constraint")
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "Global rules" in ctx
         assert "conventional commits" in ctx
-        assert "Project rules" in ctx
-        assert "Never commit without tests" in ctx
+        assert "pending" in ctx.lower()
+        assert "constraint" in ctx.lower()
 
     def test_both_global_and_repo_global_comes_first(self):
+        # Global rules section should appear before the pending notice.
         _add_global("Always use conventional commits", "convention")
         _add_repo("Never commit without tests", "constraint")
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         global_pos = ctx.index("Global rules")
-        project_pos = ctx.index("Project rules")
-        assert global_pos < project_pos
+        pending_pos = ctx.lower().index("pending")
+        assert global_pos < pending_pos
 
     def test_both_global_and_repo_status_line_shows_both(self):
         _add_global("Always use conventional commits", "convention")

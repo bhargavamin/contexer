@@ -17,6 +17,11 @@ wheels/
 # IDEs / editors
 .idea/
 .vscode/
+.cursor/
+*.code-workspace
+
+# Local demo recording script (VHS)
+assets/demo.tape
 
 # macOS
 .DS_Store

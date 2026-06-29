@@ -87,15 +87,16 @@ Contexer is **not** a replacement for README.md, CLAUDE.md, AGENTS.md, Cursor Me
 |---|---|---|
 | README.md | Human documentation | Project overview, setup instructions, architecture documentation |
 | CLAUDE.md / AGENTS.md | Static AI instructions | Coding guidelines, workflows, commands, project rules |
-| Contexer | Living engineering knowledge | Capturing, approving and replaying engineering decisions across AI coding sessions |
+| Contexer | Living engineering knowledge | Capturing, approving, versioning and replaying engineering decisions across AI coding sessions |
 
 ### Engineering decisions, not conversations
 
 | | AI Memory | Contexer |
 |---|---|---|
 | **What it stores** | Conversations | Engineering decisions |
-| **Scope** | Personal | Team knowledge |
+| **Scope** | Personal | Project decisions (team sync on the roadmap) |
 | **Persistence** | Session history | Cross-session |
+| **History** | n/a | Versioned - full history preserved, latest approved replayed |
 | **Focus** | Chat focused | Human approved |
 | **Awareness** | n/a | Architecture aware |
 | **Reach** | Single tool | Works across repositories |
@@ -283,6 +284,18 @@ Only `constraint` and `convention` types can be stored globally. Architecture an
 "show everything stored for this repo"
 ```
 
+### Review pending decisions
+
+AI-proposed architecture and constraint decisions - and any change to a decision you have already approved - are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them. Review them whenever you like:
+
+```bash
+contexer review
+```
+
+For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
+
+Approved decisions are versioned: a change never overwrites the previous value - it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
+
 ### Update or remove
 
 ```
@@ -375,6 +388,7 @@ Every approved architecture decision becomes reusable organizational knowledge t
 |---|---|
 | `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, Codex, and/or Gemini CLI) |
 | `contexer install --target claude\|cursor\|codex\|gemini\|all` | Install for a specific tool only, or all |
+| `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
