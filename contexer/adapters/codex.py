@@ -170,15 +170,25 @@ def install(home: Path) -> list[str]:
     put = hooks.setdefault("PostToolUse", [])
     if not base._in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
+            "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+
+    st = hooks.setdefault("Stop", [])
+    if not base._in_groups(st, ".pending_capture"):
+        stop_reminder = (
+            "Contexer: you wrote or edited files this turn "
+            "\\u2014 call update_context NOW for any architecture/pattern/constraint/convention "
+            "decisions before finishing this turn. "
+            "If update_context is a deferred tool, first call: "
+            "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")"
+        )
+        st.append({"hooks": [{"type": "command",
             "command": (
-                "touch ~/.contexer/.pending_capture && "
-                "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", "
-                "\"additionalContext\": \"Contexer: if this edit involved an architectural, "
-                "design, or engineering decision (a tech choice, a naming change, a constraint, "
-                "a pattern) \\u2014 tell the user what decision was made and call update_context to "
-                "store it. If unsure whether it qualifies, surface it anyway and let the user "
-                "confirm. If update_context appears as a deferred tool, first call: "
-                "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")\"}}'"
+                "FLAG=\"$HOME/.contexer/.pending_capture\"; "
+                "if [ -f \"$FLAG\" ]; then "
+                "rm -f \"$FLAG\"; "
+                f"echo '{{\"hookSpecificOutput\": {{\"hookEventName\": \"Stop\", "
+                f"\"additionalContext\": \"{stop_reminder}\"}}}}'; "
+                "else echo '{}'; fi"
             )}]})
 
     pc = hooks.setdefault("PreCompact", [])
@@ -220,6 +230,7 @@ def install(home: Path) -> list[str]:
 _EVENT_MARKERS = {
     "SessionStart":     ["get_session_start_context"],
     "PostToolUse":      [".pending_capture"],
+    "Stop":             [".pending_capture"],
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],
     "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",

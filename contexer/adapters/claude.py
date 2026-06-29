@@ -263,20 +263,33 @@ def install(home: Path) -> list[str]:
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
 
-    # PostToolUse: immediately remind Claude to confirm and store any decision made in this edit.
-    # Also sets .pending_capture as a next-turn fallback in case the immediate output is missed.
+    # PostToolUse: set the .pending_capture flag after any Write/Edit so the Stop hook
+    # (end-of-turn) knows files were written this turn and should remind Claude to store decisions.
     put = hooks.setdefault("PostToolUse", [])
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
+            "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
+
+    # Stop hook: fires at end of turn while Claude can still call tools. If files were written
+    # this turn (.pending_capture flag set by PostToolUse), inject a reminder to store decisions
+    # now — before the turn closes. Clears the flag so the UserPromptSubmit fallback stays silent.
+    st = hooks.setdefault("Stop", [])
+    if not _in_groups(st, ".pending_capture"):
+        stop_reminder = (
+            "Contexer: you wrote or edited files this turn "
+            "\\u2014 call update_context NOW for any architecture/pattern/constraint/convention "
+            "decisions before finishing this turn. "
+            "If update_context is a deferred tool, first call: "
+            "ToolSearch(query='select:mcp__contexer__update_context')"
+        )
+        st.append({"hooks": [{"type": "command",
             "command": (
-                f"touch ~/.contexer/.pending_capture && "
-                f"echo '{{\"hookSpecificOutput\": {{\"hookEventName\": \"PostToolUse\", "
-                f"\"additionalContext\": \"Contexer: if this edit involved an architectural, "
-                f"design, or engineering decision (a tech choice, a naming change, a constraint, "
-                f"a pattern) — tell the user what decision was made and call update_context to "
-                f"store it. If unsure whether it qualifies, surface it anyway and let the user "
-                f"confirm. If update_context appears as a deferred tool, first call: "
-                f"ToolSearch(query='select:mcp__contexer__update_context')\"}}}}' # {_HOOK_SENTINEL}"
+                f"FLAG=\"$HOME/.contexer/.pending_capture\"; "
+                f"if [ -f \"$FLAG\" ]; then "
+                f"rm -f \"$FLAG\"; "
+                f"echo '{{\"hookSpecificOutput\": {{\"hookEventName\": \"Stop\", "
+                f"\"additionalContext\": \"{stop_reminder}\"}}}}'; "
+                f"else echo '{{}}'; fi # {_HOOK_SENTINEL}"
             )}]})
 
     pc = hooks.setdefault("PreCompact", [])
@@ -404,6 +417,7 @@ def uninstall(home: Path) -> list[str]:
             "SessionStart":     ["get_session_start_context", _HOOK_SENTINEL],
             "SessionEnd":       ["sync_memory", _HOOK_SENTINEL],
             "PostToolUse":      [".pending_capture", _HOOK_SENTINEL],
+            "Stop":             [".pending_capture", _HOOK_SENTINEL],
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
