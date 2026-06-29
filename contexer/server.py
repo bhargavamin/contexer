@@ -9,18 +9,6 @@ mcp = FastMCP("contexer")
 
 
 @mcp.tool()
-def capture_context(description: str, repo_path: str = "") -> str:
-    """Called at the start of every task. Captures the developer's task description for the given repo."""
-    resolved = store._resolve_repo(repo_path)
-    if not resolved:
-        return "Skipped — repo path not detected."
-    entry_id = store.capture_task(resolved, description, SESSION_ID)
-    if entry_id is None:
-        return "Skipped — does not look like a task description."
-    return f"Captured. id={entry_id}"
-
-
-@mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
                    created_by: str = "ai", replace_id: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.

@@ -61,18 +61,6 @@ def format_post_compact(payload: dict) -> dict:
     return {"systemMessage": "\n".join(parts)} if parts else {}
 
 
-def capture_task(repo_path: str, raw: str) -> str:
-    """UserPromptSubmit (once): store the first prompt as the task. Silent."""
-    try:
-        repo = store._resolve_repo(repo_path)
-        if repo:
-            store.capture_task(repo, store.prompt_from_hook_stdin(raw),
-                               store.session_from_hook_stdin(raw))
-    except Exception:
-        pass
-    return "{}"
-
-
 def capture_constraint(repo_path: str, raw: str) -> str:
     """UserPromptSubmit (every prompt): auto-store 'always/never/from now on' directives."""
     try:
@@ -217,9 +205,6 @@ def install(home: Path) -> list[str]:
         f" # {_HOOK_SENTINEL}"
     )
 
-    cap_task = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                f'"{python}" -c "from contexer.adapters import claude; import sys; '
-                f'print(claude.capture_task(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
     cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                f'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
@@ -343,9 +328,11 @@ def install(home: Path) -> list[str]:
             "statusMessage": "Checking bootstrap context...",
             "command": _py(boot_code)}]})
 
-    if not _in_groups(ups, "claude.capture_task"):
-        ups.append({"hooks": [{"type": "command", "once": True,
-            "statusMessage": "Capturing task...", "command": cap_task}]})
+    # Retire any previously-installed task-capture hook (the feature was removed).
+    if _in_groups(ups, "claude.capture_task"):
+        ups = _filter_groups(ups, ["claude.capture_task"])
+        hooks["UserPromptSubmit"] = ups
+
     if not _in_groups(ups, "claude.capture_constraint"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for constraint directives...", "command": cap_con}]})
@@ -355,7 +342,7 @@ def install(home: Path) -> list[str]:
 
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for p in [
-        "mcp__contexer__capture_context", "mcp__contexer__update_context",
+        "mcp__contexer__update_context",
         "mcp__contexer__get_context", "mcp__contexer__bootstrap_context",
         "mcp__contexer__get_context_for_prompt",
         "mcp__contexer__update_global_context", "mcp__contexer__get_global_context",

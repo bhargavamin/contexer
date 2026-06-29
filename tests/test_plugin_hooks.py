@@ -68,6 +68,5 @@ def test_event_present(plugin_hooks, event):
 
 def test_capture_hooks_present(plugin_hooks):
     cmds = _all_commands({"UserPromptSubmit": plugin_hooks["UserPromptSubmit"]})
-    assert any("capture_task" in c for c in cmds)
     assert any("capture_constraint" in c for c in cmds)
     assert any("rationale" in c for c in cmds)

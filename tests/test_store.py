@@ -56,39 +56,6 @@ class TestRepoResolution:
         store.set_session_repo("")  # reset
 
 
-# ── _is_task ──────────────────────────────────────────────────────────────────
-
-class TestIsTask:
-    def test_real_task_passes(self):
-        assert store._is_task("implement authentication flow for the login endpoint") is True
-
-    def test_short_input_rejected(self):
-        assert store._is_task("fix bug") is False
-
-    def test_question_rejected(self):
-        assert store._is_task("what is the best approach here?") is False
-
-    def test_long_question_passes(self):
-        # Long questions (>20 words) are treated as task descriptions, not queries
-        assert store._is_task(
-            "what should we do about the authentication flow given the constraints "
-            "of the existing session management system and the new API requirements"
-        ) is True
-
-    def test_short_question_start_rejected(self):
-        assert store._is_task("how does this work with the API?") is False
-
-    def test_bootstrap_answer_negation_rejected(self):
-        # "no where is just documentation nothing else" is a Q&A answer, not a task
-        assert store._is_task("no where is just documentation nothing else") is False
-
-    def test_bootstrap_answer_yes_rejected(self):
-        assert store._is_task("yes that sounds correct to me") is False
-
-    def test_bootstrap_answer_none_rejected(self):
-        assert store._is_task("none of those apply to this repo") is False
-
-
 # ── _is_novel ─────────────────────────────────────────────────────────────────
 
 class TestIsNovel:
@@ -131,39 +98,6 @@ class TestPassesFilter:
         # task entries must NOT trigger the duplicate veto for decisions
         tasks = [{"type": "task", "content": "add jwt authentication to the api endpoints"}]
         assert store._passes_filter("decided to use jwt for authentication — stateless and scalable", tasks) is True
-
-
-# ── capture_task ──────────────────────────────────────────────────────────────
-
-class TestCaptureTask:
-    def test_stores_task(self, tmp_repo):
-        entry_id = store.capture_task(tmp_repo, "refactor the authentication module for the new api", "sess-1")
-        assert entry_id is not None
-        data = store._load(tmp_repo)
-        tasks = [e for e in data["entries"] if e["type"] == "task"]
-        assert len(tasks) == 1
-        assert tasks[0]["content"] == "refactor the authentication module for the new api"
-
-    def test_replaces_previous_task(self, tmp_repo):
-        store.capture_task(tmp_repo, "first task description for the authentication module", "sess-1")
-        store.capture_task(tmp_repo, "second task description for the deployment pipeline setup", "sess-2")
-        data = store._load(tmp_repo)
-        tasks = [e for e in data["entries"] if e["type"] == "task"]
-        assert len(tasks) == 1
-        assert tasks[0]["content"] == "second task description for the deployment pipeline setup"
-
-    def test_skips_question(self, tmp_repo):
-        result = store.capture_task(tmp_repo, "what should we do here?", "sess-1")
-        assert result is None
-        data = store._load(tmp_repo)
-        assert data["entries"] == []
-
-    def test_does_not_replace_decisions(self, tmp_repo):
-        store.update_decision(tmp_repo, "decided to use postgres for primary data storage", "sess-1")
-        store.capture_task(tmp_repo, "new task to implement the user registration flow", "sess-2")
-        data = store._load(tmp_repo)
-        decisions = [e for e in data["entries"] if e["type"] == "decision"]
-        assert len(decisions) == 1
 
 
 # ── update_decision ───────────────────────────────────────────────────────────
@@ -225,10 +159,6 @@ class TestGetContext:
     def test_empty_repo_message(self, tmp_repo):
         result = store.get_context(tmp_repo)
         assert "No context stored" in result
-
-    def test_includes_last_task(self, populated_repo):
-        result = store.get_context(populated_repo)
-        assert "implement authentication flow" in result
 
     def test_includes_decisions(self, populated_repo):
         result = store.get_context(populated_repo)

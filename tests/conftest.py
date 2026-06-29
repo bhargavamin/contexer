@@ -13,8 +13,7 @@ def tmp_repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def populated_repo(tmp_repo):
-    """A repo with one task and two decisions pre-loaded."""
-    store.capture_task(tmp_repo, "implement authentication flow for the API", "sess-1")
+    """A repo with two decisions pre-loaded."""
     store.update_decision(tmp_repo, "decided to use JWT instead of sessions — stateless, easier to scale", "sess-1")
     store.update_decision(tmp_repo, "constraint: never store plaintext passwords, always use bcrypt", "sess-1")
     return tmp_repo

@@ -87,26 +87,19 @@ class TestInstall:
         cmds = [h["command"] for grp in ups for h in grp["hooks"] if "command" in h]
         assert any("get_bootstrap_context_prompt" in c for c in cmds)
 
-    def test_capture_context_command_hook_registered(self, installed_home):
-        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
-        ups = settings["hooks"]["UserPromptSubmit"]
-        cmds = [h["command"] for grp in ups for h in grp["hooks"] if "command" in h]
-        # capture is now a command hook calling the adapter entrypoint
-        assert any("claude.capture_task" in c for c in cmds)
-        # and it must not be an mcp_tool anymore
-        assert not any(h.get("type") == "mcp_tool" for grp in ups for h in grp["hooks"])
-
     def test_constraint_and_rationale_command_hooks_registered(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         ups = settings["hooks"]["UserPromptSubmit"]
         cmds = [h["command"] for grp in ups for h in grp["hooks"] if "command" in h]
         assert any("claude.capture_constraint" in c for c in cmds)
         assert any("claude.rationale" in c for c in cmds)
+        # capture hooks are command hooks now, never mcp_tool
+        assert not any(h.get("type") == "mcp_tool" for grp in ups for h in grp["hooks"])
 
     def test_permissions_added(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         allow = settings["permissions"]["allow"]
-        for p in ["mcp__contexer__capture_context", "mcp__contexer__update_context",
+        for p in ["mcp__contexer__update_context",
                   "mcp__contexer__get_context", "mcp__contexer__bootstrap_context"]:
             assert p in allow
 
@@ -119,8 +112,8 @@ class TestInstall:
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         ups = settings["hooks"]["UserPromptSubmit"]
         cmds = [h.get("command", "") for grp in ups for h in grp["hooks"]]
-        assert sum("claude.capture_task" in c for c in cmds) == 1, \
-            "capture_task hook must not be duplicated"
+        assert sum("claude.capture_constraint" in c for c in cmds) == 1, \
+            "capture_constraint hook must not be duplicated"
         allow = settings["permissions"]["allow"]
         assert allow.count("mcp__contexer__update_context") == 1
 

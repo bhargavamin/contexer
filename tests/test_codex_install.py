@@ -49,7 +49,7 @@ class TestCodexInstall:
         cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
                 for h in g["hooks"]]
         joined = "\n".join(cmds)
-        for marker in ("get_bootstrap_context_prompt", "claude.capture_task",
+        for marker in ("get_bootstrap_context_prompt",
                        "claude.capture_constraint", "claude.rationale", ".pending_capture"):
             assert marker in joined
 
@@ -95,7 +95,7 @@ class TestCodexInstall:
         codex.install(home)
         cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
                 for h in g["hooks"]]
-        assert sum("claude.capture_task" in c for c in cmds) == 1
+        assert sum("claude.capture_constraint" in c for c in cmds) == 1
         # the stanza must appear exactly once too
         assert _config(home).count("[mcp_servers.contexer]") == 1
 
