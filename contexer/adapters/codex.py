@@ -174,22 +174,20 @@ def install(home: Path) -> list[str]:
 
     st = hooks.setdefault("Stop", [])
     if not base._in_groups(st, ".pending_capture"):
-        stop_reminder = (
-            "Contexer: you wrote or edited files this turn. "
+        stop_cmd = (
+            "FLAG=\"$HOME/.contexer/.pending_capture\"; "
+            "if [ -f \"$FLAG\" ]; then "
+            "rm -f \"$FLAG\"; "
+            "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"Stop\", "
+            "\"additionalContext\": \"Contexer: you wrote or edited files this turn. "
             "Before finishing: (1) call get_context to check if a related decision already "
-            "exists — if it does, use its short id as replace_id to update it in place; "
+            "exists - if it does, use its short id as replace_id to update it in place; "
             "(2) if no related decision exists, call update_context without replace_id. "
             "If update_context is deferred, first call "
-            "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")."
+            "ToolSearch(query='select:mcp__contexer__update_context').\"}}'; "
+            "else echo '{}'; fi"
         )
-        st.append({"hooks": [{"type": "command",
-            "command": (
-                "FLAG=\"$HOME/.contexer/.pending_capture\"; "
-                "if [ -f \"$FLAG\" ]; then "
-                "rm -f \"$FLAG\"; "
-                f"echo '{{\"systemMessage\": \"{stop_reminder}\"}}'; "
-                "else echo '{}'; fi"
-            )}]})
+        st.append({"hooks": [{"type": "command", "command": stop_cmd}]})
 
     pc = hooks.setdefault("PreCompact", [])
     if not base._in_groups(pc, "compaction starting"):
