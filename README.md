@@ -87,15 +87,16 @@ Contexer is **not** a replacement for README.md, CLAUDE.md, AGENTS.md, Cursor Me
 |---|---|---|
 | README.md | Human documentation | Project overview, setup instructions, architecture documentation |
 | CLAUDE.md / AGENTS.md | Static AI instructions | Coding guidelines, workflows, commands, project rules |
-| Contexer | Living engineering knowledge | Capturing, approving and replaying engineering decisions across AI coding sessions |
+| Contexer | Living engineering knowledge | Capturing, approving, versioning and replaying engineering decisions across AI coding sessions |
 
 ### Engineering decisions, not conversations
 
 | | AI Memory | Contexer |
 |---|---|---|
 | **What it stores** | Conversations | Engineering decisions |
-| **Scope** | Personal | Team knowledge |
+| **Scope** | Personal | Project decisions (team sync on the roadmap) |
 | **Persistence** | Session history | Cross-session |
+| **History** | n/a | Versioned - full history preserved, latest approved replayed |
 | **Focus** | Chat focused | Human approved |
 | **Awareness** | n/a | Architecture aware |
 | **Reach** | Single tool | Works across repositories |
