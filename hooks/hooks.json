@@ -80,16 +80,6 @@
         "hooks": [
           {
             "type": "command",
-            "once": true,
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.capture_task(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
-            "statusMessage": "Capturing task..."
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
             "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
             "statusMessage": "Checking for constraint directives..."
           }

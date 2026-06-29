@@ -77,19 +77,6 @@ class TestGeminiRuntime:
         assert "Always use uv" in out["hookSpecificOutput"]["additionalContext"]
         assert (store.STORE_DIR / ".current_repo").read_text() == repo
 
-    def test_before_agent_captures_task_only_once_per_session(self, home, tmp_path):
-        repo = str(tmp_path / "repo")
-        first = json.dumps({
-            "session_id": "s1", "prompt": "Implement OAuth login support for the web application"
-        })
-        second = json.dumps({
-            "session_id": "s1", "prompt": "Now add logout support for every authenticated user"
-        })
-        gemini.before_agent(repo, first)
-        gemini.before_agent(repo, second)
-        assert "Implement OAuth login support" in store.get_context(repo)
-        assert "Now add logout support" not in store.get_context(repo)
-
     def test_before_agent_captures_constraint_and_injects_ack(self, home, tmp_path):
         repo = str(tmp_path / "repo")
         raw = json.dumps({"session_id": "s1", "prompt": "always use conventional commits"})
@@ -122,28 +109,26 @@ class TestGeminiRuntime:
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
         assert not (store.STORE_DIR / ".gemini_pending_reload").exists()
 
-    def test_clear_does_not_retrigger_bootstrap(self, home, tmp_path):
+    def test_clear_does_not_reset_first_prompt_marker(self, home, tmp_path):
+        # The first-prompt marker gates the once-per-session bootstrap offer; /clear must
+        # not delete it, or bootstrap would be re-offered mid-session.
         repo = str(tmp_path / "repo")
         startup = json.dumps({"session_id": "s1", "source": "startup",
-                               "prompt": "Implement OAuth login support for users"})
+                              "prompt": "build the new feature now"})
         clear = json.dumps({"session_id": "s1", "source": "clear"})
-        followup = json.dumps({"session_id": "s1", "prompt": "Now add logout support for authenticated users"})
         gemini.session_start(repo, startup)
-        gemini.before_agent(repo, startup)
-        gemini.session_start(repo, clear)  # /clear — must NOT reset the marker
-        gemini.before_agent(repo, followup)
-        # Task should be the first prompt only; /clear must not re-capture the followup.
-        assert "Implement OAuth login" in store.get_context(repo)
-        assert "Now add logout" not in store.get_context(repo)
+        gemini.before_agent(repo, startup)        # first prompt sets the marker
+        marker = gemini._session_marker(startup)
+        assert marker is not None and marker.exists()
+        gemini.session_start(repo, clear)         # /clear must NOT delete the marker
+        assert marker.exists()
 
-    def test_no_session_id_skips_task_capture_but_runs_bootstrap(self, home, tmp_path):
+    def test_no_session_id_runs_bootstrap_without_error(self, home, tmp_path):
         repo = str(tmp_path / "repo")
-        # No session_id → _session_marker returns None → task capture is skipped.
+        # No session_id → _session_marker returns None; before_agent must still run safely.
         raw = json.dumps({"prompt": "build the feature"})
-        gemini.before_agent(repo, raw)
-        gemini.before_agent(repo, raw)
-        # bootstrap ran (no error), but no task stored
-        assert "build the feature" not in store.get_context(repo)
+        assert isinstance(gemini.before_agent(repo, raw), str)
+        assert isinstance(gemini.before_agent(repo, raw), str)
 
     @pytest.mark.parametrize("entry", [
         gemini.session_start, gemini.before_agent, gemini.after_write,

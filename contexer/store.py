@@ -721,50 +721,169 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         return entry["id"], content
 
 
-_QUESTION_STARTS = {
-    "what", "how", "why", "when", "where", "who", "which",
-    "is", "are", "can", "does", "do", "will", "would", "could", "should",
-}
+def _normalize_content(content: str) -> str:
+    """Strip whitespace, collapse internal runs, capitalize first character."""
+    normalized = " ".join(content.split())
+    return normalized[:1].upper() + normalized[1:] if normalized else normalized
 
-# Prompts starting with these are answers to questions or acknowledgements, not task descriptions
-_ANSWER_STARTS = {
-    "no", "yes", "nope", "yep", "yeah", "nah", "ok", "okay",
-    "not", "none", "never", "nope", "sure", "correct", "right",
-    "nowhere", "nothing", "neither",
-}
 
-def _is_task(content: str) -> bool:
-    stripped = content.strip()
-    words = stripped.lower().split()
-    if len(words) < 5:
+# ── Decision / Revision model (Git-like: revisions are immutable commits, the decision
+# ── carries an explicit current_revision_id pointer = HEAD). Storage preserves every
+# ── revision; replay exposes only the current one. The decision-level content / revision /
+# ── confidence / confidence_factors fields are a synced HEAD-cache of the current revision,
+# ── kept so the many read sites stay simple and replay is O(1). The revisions are the
+# ── source of truth; the cache is always rewritten from them on any change.
+
+def _new_revision(decision_id: str, version_number: int, content: str, source: str,
+                  confidence_score: int = 0, evidence: list | None = None,
+                  approved_at: str | None = None, created_at: str | None = None,
+                  normalize: bool = True) -> dict:
+    """Build one immutable revision object. `source` is the provenance
+    (ai | human | scan | bootstrap | memory) and maps to the upstream push contract.
+
+    normalize=False preserves content byte-for-byte - used by migration, which must be
+    lossless and must never rewrite (e.g. re-capitalize) an existing stored value."""
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "revision_id": str(uuid.uuid4()),
+        "decision_id": decision_id,
+        "version_number": version_number,
+        "content": _normalize_content(content) if normalize else content,
+        "confidence_score": confidence_score,
+        "evidence": list(evidence or []),
+        "created_at": created_at or now,
+        "approved_at": approved_at,
+        "source": source,
+    }
+
+
+def _current_revision(entry: dict) -> dict | None:
+    """The active revision an entry points at via current_revision_id; falls back to the
+    last revision, then None. This is the only revision replay ever exposes."""
+    revs = entry.get("revisions") or []
+    cid = entry.get("current_revision_id")
+    if cid:
+        for r in revs:
+            if r.get("revision_id") == cid:
+                return r
+    return revs[-1] if revs else None
+
+
+def _current_content(entry: dict) -> str:
+    """Content of the entry's current revision (the only value replay should inject)."""
+    rev = _current_revision(entry)
+    if rev is not None:
+        return rev.get("content", "")
+    return entry.get("content", "")
+
+
+def _sync_decision_cache(entry: dict) -> None:
+    """Mirror the current revision onto the decision-level HEAD-cache fields so the read
+    sites (get_context display, replay) stay O(1). Revisions remain the source of truth."""
+    rev = _current_revision(entry)
+    if rev is None:
+        return
+    entry["content"] = rev.get("content", "")
+    entry["revision"] = rev.get("version_number", 1)
+    entry["confidence"] = rev.get("confidence_score", entry.get("confidence", 0))
+    evidence = rev.get("evidence") or []
+    if evidence:
+        entry["confidence_factors"] = evidence
+    else:
+        entry.pop("confidence_factors", None)
+
+
+def _append_revision(entry: dict, content: str, source: str,
+                     approved_at: str | None = None) -> dict:
+    """Create the next revision for a decision, make it current, and resync the cache.
+    Confidence is computed from the decision's aggregate evidence at this moment and
+    snapshotted onto the revision. Returns the new revision."""
+    revs = entry.setdefault("revisions", [])
+    next_version = (revs[-1]["version_number"] + 1) if revs else 1
+    score, factors = _compute_confidence(entry)
+    rev = _new_revision(
+        entry.get("id", ""), next_version, content,
+        source=source, confidence_score=score, evidence=factors,
+        approved_at=approved_at,
+    )
+    revs.append(rev)
+    entry["current_revision_id"] = rev["revision_id"]
+    entry["updated_at"] = rev["created_at"]
+    _sync_decision_cache(entry)
+    return rev
+
+
+def _migrate_decision(entry: dict) -> bool:
+    """Transparently upgrade a legacy decision entry to the revision model. Idempotent.
+    Builds full revision objects from the legacy historical snapshots (`revisions[]`, which
+    held only prior versions) plus the current head (legacy `content`/`revision`), and sets
+    `current_revision_id`. Returns True if the entry was changed."""
+    if entry.get("type") != "decision":
         return False
-    if stripped.endswith("?") and len(words) < 20:
+    revs = entry.get("revisions")
+    already = (
+        entry.get("current_revision_id")
+        and isinstance(revs, list) and revs
+        and all(isinstance(r, dict) and "revision_id" in r for r in revs)
+    )
+    if already:
+        # Heal a divergent HEAD-cache: if the current revision's content drifted from the
+        # decision-level content cache (e.g. an earlier buggy migration that re-capitalized
+        # the revision), restore the revision to the cached value - that is the value replay
+        # has always shown, so it is the original-of-record. No-op when consistent.
+        cur = _current_revision(entry)
+        cached = entry.get("content")
+        if cur is not None and cached is not None and cur.get("content") != cached:
+            cur["content"] = cached
+            return True
         return False
-    if words[0] in _QUESTION_STARTS and len(words) < 12:
-        return False
-    if words[0] in _ANSWER_STARTS:
-        return False
+
+    did = entry.get("id", "")
+    created_by = entry.get("created_by", "ai")
+    legacy = revs if isinstance(revs, list) else []
+    full: list[dict] = []
+    for snap in legacy:
+        if isinstance(snap, dict) and "revision_id" in snap:
+            full.append(snap)
+            continue
+        full.append(_new_revision(
+            did, snap.get("revision", len(full) + 1), snap.get("content", ""),
+            source=snap.get("source") or created_by,
+            confidence_score=snap.get("confidence", 0),
+            evidence=snap.get("evidence") or snap.get("confidence_factors") or [],
+            created_at=snap.get("timestamp") or entry.get("timestamp", ""),
+            approved_at=snap.get("replaced_at"),
+            normalize=False,  # migration is lossless - preserve stored content verbatim
+        ))
+    current_version = entry.get("revision", (full[-1]["version_number"] + 1) if full else 1)
+    if not any(r.get("version_number") == current_version for r in full):
+        full.append(_new_revision(
+            did, current_version, entry.get("content", ""),
+            source=created_by,
+            confidence_score=entry.get("confidence", 0),
+            evidence=entry.get("confidence_factors") or [],
+            created_at=entry.get("updated_at") or entry.get("timestamp", ""),
+            approved_at=entry.get("approved_at"),
+            normalize=False,  # migration is lossless - preserve stored content verbatim
+        ))
+    current = next((r for r in full if r.get("version_number") == current_version), full[-1])
+    entry["revisions"] = full
+    entry["current_revision_id"] = current["revision_id"]
+    entry["revision"] = current["version_number"]
     return True
 
 
-def capture_task(repo_path: str, description: str, session_id: str) -> str | None:
-    if not _is_task(description):
-        return None
-    with _store_lock(_slug(repo_path)):
-        data = _load(repo_path)
-        # keep only decisions — one task slot is enough for "last task" context
-        data["entries"] = [e for e in data["entries"] if e["type"] != "task"]
-        entry = {
-            "id": str(uuid.uuid4()),
-            "type": "task",
-            "content": description,
-            "session_id": session_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        data["entries"].append(entry)
-        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-        _save(repo_path, data)
-        return entry["id"]
+def _migrate_entries(data: dict) -> None:
+    """Migrate every decision entry in a loaded store to the revision model, in place.
+
+    Stamped with `schema_version` so an already-migrated store short-circuits on the next
+    load instead of re-scanning every entry on every read/write (the hot path). The stamp
+    is set in memory here and persisted by the next _save."""
+    if data.get("schema_version") == _SCHEMA_VERSION:
+        return
+    for entry in data.get("entries", []):
+        _migrate_decision(entry)
+    data["schema_version"] = _SCHEMA_VERSION
 
 
 def _normalize_content(content: str) -> str:
@@ -1842,14 +1961,6 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         return "No context stored for this repository."
 
     lines = [f"# Context for {repo_path}\n"]
-
-    if not entry_type:
-        tasks = [e for e in entries if e["type"] == "task"]
-        if tasks:
-            last = tasks[-1]
-            lines.append(f"## Last task ({last['timestamp'][:10]})")
-            lines.append(last["content"])
-            lines.append("")
 
     decisions = [e for e in entries if e["type"] == "decision"]
     # Always exclude ignored decisions — they are permanently suppressed.

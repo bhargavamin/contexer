@@ -110,14 +110,6 @@ class TestInstall:
         # capture is a command hook now, never an mcp_tool
         assert not any(h.get("type") == "mcp_tool" for g in ups for h in g.get("hooks", []))
 
-    def test_capture_task_command_hook_registered_once(self, tmp_home):
-        cli.install()
-        ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
-        hooks = [h for g in ups for h in g.get("hooks", [])
-                 if "claude.capture_task" in h.get("command", "")]
-        assert hooks
-        assert any(h.get("once") for h in hooks)
-
     def test_rationale_command_hook_registered(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
@@ -163,7 +155,6 @@ class TestInstall:
         assert _in_groups(poc, "get_post_compact_context")
 
     @pytest.mark.parametrize("perm", [
-        "mcp__contexer__capture_context",
         "mcp__contexer__update_context",
         "mcp__contexer__get_context",
         "mcp__contexer__bootstrap_context",
@@ -193,8 +184,6 @@ class TestReinstallIdempotency:
             "anchor": sum(1 for g in ups for h in g.get("hooks", []) if ".current_repo" in str(h)),
             "capture_constraint": sum(1 for g in ups for h in g.get("hooks", [])
                                       if "claude.capture_constraint" in h.get("command", "")),
-            "capture_task": sum(1 for g in ups for h in g.get("hooks", [])
-                                if "claude.capture_task" in h.get("command", "")),
             "pending_capture": sum(1 for g in put for h in g.get("hooks", [])
                                    if ".pending_capture" in str(h)),
         }
@@ -206,7 +195,6 @@ class TestReinstallIdempotency:
         counts = self._counts(tmp_home)
         assert counts["anchor"] == 1
         assert counts["capture_constraint"] == 1
-        assert counts["capture_task"] == 1
         assert counts["pending_capture"] == 1
 
     def test_old_anchor_hook_replaced(self, tmp_home):
@@ -1066,25 +1054,6 @@ class TestRationaleInjection:
     def test_task_prompt_is_silent(self, prompt):
         result = store.get_context_for_prompt(self.repo, prompt)
         assert result == "", f"Expected silence for: {prompt!r}"
-
-
-# ── 9. Task capture ───────────────────────────────────────────────────────────
-
-class TestTaskCapture:
-    def test_real_task_stored(self, tmp_repo):
-        eid = store.capture_task(tmp_repo, "Add OAuth2 authentication to the API", SESSION)
-        assert eid is not None
-
-    def test_noise_rejected(self, tmp_repo):
-        for noise in ["yes", "ok", "sure", "no"]:
-            assert store.capture_task(tmp_repo, noise, SESSION) is None
-
-    def test_only_task_type_entries_created(self, tmp_repo):
-        store.capture_task(tmp_repo, "Add OAuth2 authentication to the API", SESSION)
-        store.capture_task(tmp_repo, "yes", SESSION)
-        data = store._load(tmp_repo)
-        task_entries = [e for e in data["entries"] if e["type"] == "task"]
-        assert len(task_entries) == 1
 
 
 # ── 10. Bootstrap scan ────────────────────────────────────────────────────────

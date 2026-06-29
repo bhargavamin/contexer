@@ -154,24 +154,6 @@ def _anchor_current_repo(repo: str) -> None:
         pass
 
 
-def capture_task(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: anchor the repo pointer + store the prompt as the task.
-
-    v1 note: Cursor's beforeSubmitPrompt has no "once" semantics, so this runs on
-    every prompt and store.capture_task replaces the task entry each time — Cursor
-    tracks the *latest* prompt-as-task, not just the first. Acceptable for v1.
-    """
-    try:
-        repo = _repo_from(raw, repo_path)
-        if repo:
-            _anchor_current_repo(repo)
-            store.capture_task(repo, store.prompt_from_hook_stdin(raw),
-                               store.session_from_hook_stdin(raw))
-    except Exception:
-        pass
-    return json.dumps(format_prompt_passthrough())
-
-
 def capture_constraint(repo_path: str, raw: str) -> str:
     """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
     try:
@@ -225,8 +207,8 @@ def install(home: Path) -> list[str]:
         ss.append({"type": "command", "command": _cmd("session_start")})
 
     bsp = hk.setdefault("beforeSubmitPrompt", [])
-    if not _has(bsp, _HOOK_MARKER_TASK):
-        bsp.append({"type": "command", "command": _cmd("capture_task")})
+    # Retire any previously-installed task-capture hook (the feature was removed).
+    bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in h.get("command", "")]
     if not _has(bsp, _HOOK_MARKER_CON):
         bsp.append({"type": "command", "command": _cmd("capture_constraint")})
 
