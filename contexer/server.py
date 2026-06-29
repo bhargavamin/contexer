@@ -27,12 +27,16 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
     created_by: 'ai' (default) | 'bootstrap' (when storing bootstrap_context results) | 'scan' (low-insight repo facts)
-    replace_id: ID of an existing entry to correct in place. Bypasses similarity filtering — use when
-                the new content is a correction to a previously stored decision (e.g. a typo fix or
-                a value that changed). The entry's history is preserved; only content is updated.
+    replace_id: ID (full UUID or 8-char short id) of an existing decision this content changes.
+                Bypasses similarity filtering. Decisions are versioned, never overwritten:
+                - a trivial change (typo/formatting, or a pattern/convention) is applied in
+                  place as a new revision, with the prior revision kept in history;
+                - a significant change (architecture/constraint) becomes a Suggested Update
+                  attached to the live decision and returns an approval prompt - the current
+                  revision stays trusted until the developer approves.
 
-    IMPORTANT: If this returns an 'Engineering Decision Detected' approval prompt, show it to
-    the developer immediately and wait for their response before continuing. Do NOT ignore it.
+    IMPORTANT: If this returns an 'Engineering Decision Detected/Updated' approval prompt, show
+    it to the developer immediately and wait for their response before continuing. Do NOT ignore it.
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
@@ -49,10 +53,13 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
 @mcp.tool()
 def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
-    """Approve, ignore, or edit a decision that is pending developer approval.
+    """Approve, edit, skip, ignore, or dismiss a decision pending developer approval.
 
     entry_id: the ID returned by update_context when a decision required approval
-    action: 'approve' — mark as trusted | 'ignore' — suppress permanently | 'edit' — correct and approve
+    action: 'approve' - accept (a Suggested Update is promoted to a new revision, history kept)
+            | 'edit' - correct and approve | 'skip' - keep pending for later
+            | 'dismiss' - discard a Suggested Update, keep the current revision
+            | 'ignore' - suppress a new decision permanently
     content: required when action='edit' — the corrected decision text
     """
     resolved = store._resolve_repo(repo_path)

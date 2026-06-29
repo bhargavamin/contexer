@@ -1650,47 +1650,367 @@ class TestNewDecisionEntryFields:
 # ── update_decision replace_id ────────────────────────────────────────────────
 
 class TestUpdateDecisionReplaceId:
+    """replace_id on a TRIVIAL category (pattern/convention) updates in place as a new
+    revision; the significant-category path (architecture/constraint) is covered by
+    TestSuggestedUpdate."""
+
     def test_replace_id_updates_content_in_place(self, tmp_repo):
-        _, eid = store.update_decision(tmp_repo, "Route53 points api.xyz.com to gateway", "s1", "architecture")
-        ok, _ = store.update_decision(tmp_repo, "Route53 points api1.xyz.com to gateway", "s1",
-                                      "architecture", replace_id=eid)
+        _, eid = store.update_decision(tmp_repo, "Name test files test_*.py by convention", "s1",
+                                       "convention")
+        ok, _ = store.update_decision(tmp_repo, "Name test files *_test.py by convention", "s1",
+                                      "convention", replace_id=eid)
         assert ok is True
         data = store._load(tmp_repo)
         entries = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(entries) == 1
-        assert entries[0]["content"] == "Route53 points api1.xyz.com to gateway"
+        assert entries[0]["content"] == "Name test files *_test.py by convention"
         assert entries[0]["id"] == eid
 
     def test_replace_id_bypasses_similarity_filter(self, tmp_repo):
-        _, eid = store.update_decision(tmp_repo, "Use postgres for primary storage", "s1", "architecture")
+        _, eid = store.update_decision(tmp_repo, "Group modules by feature folder", "s1", "pattern")
         # Near-duplicate would normally be filtered; replace_id forces the update.
-        ok, _ = store.update_decision(tmp_repo, "Use postgres for primary storage v2", "s1",
-                                      "architecture", replace_id=eid)
+        ok, _ = store.update_decision(tmp_repo, "Group modules by feature folder v2", "s1",
+                                      "pattern", replace_id=eid)
         assert ok is True
 
-    def test_replace_id_preserves_history(self, tmp_repo):
-        _, eid = store.update_decision(tmp_repo, "Use FastAPI for HTTP layer", "s1", "architecture")
-        store.update_decision(tmp_repo, "Use FastAPI for HTTP layer", "s2", "architecture")
-        store.update_decision(tmp_repo, "Use FastAPI for HTTP endpoint handling", "s1",
-                              "architecture", replace_id=eid)
-        data = store._load(tmp_repo)
-        entry = next(e for e in data["entries"] if e.get("id") == eid)
-        assert entry["occurrence_count"] >= 1
-        assert "session_ids" in entry
+    def test_replace_id_snapshots_prior_revision(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Lint runs in the pre-commit hook", "s1",
+                                       "convention")
+        store.update_decision(tmp_repo, "Lint runs in CI and the pre-commit hook", "s1",
+                              "convention", replace_id=eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        # current revision bumped, prior value preserved in history (never overwritten away).
+        # revisions[] now holds ALL versions (incl current); current_revision_id is the pointer.
+        assert entry["revision"] == 2
+        assert entry["content"] == "Lint runs in CI and the pre-commit hook"
+        assert len(entry["revisions"]) == 2
+        v1, v2 = entry["revisions"]
+        assert v1["version_number"] == 1
+        assert v1["content"] == "Lint runs in the pre-commit hook"
+        assert v2["version_number"] == 2
+        assert entry["current_revision_id"] == v2["revision_id"]
+        # current revision content == decision HEAD-cache
+        assert store._current_content(entry) == entry["content"]
+
+    def test_replace_id_accumulates_multiple_revisions(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Deploy via script v1", "s1", "convention")
+        store.update_decision(tmp_repo, "Deploy via script v2", "s1", "convention", replace_id=eid)
+        store.update_decision(tmp_repo, "Deploy via script v3", "s1", "convention", replace_id=eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["revision"] == 3
+        # all three versions retained, in order; current pointer is v3
+        assert [r["content"] for r in entry["revisions"]] == [
+            "Deploy via script v1", "Deploy via script v2", "Deploy via script v3",
+        ]
+        assert [r["version_number"] for r in entry["revisions"]] == [1, 2, 3]
+        assert store._current_content(entry) == "Deploy via script v3"
+
+    def test_new_entry_has_revision_one_and_updated_at(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use uv for dependency management here", "s1",
+                                       "convention")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["revision"] == 1
+        assert entry["updated_at"] == entry["timestamp"]
+        # A new decision is born with exactly one revision, pointed at by current_revision_id.
+        assert len(entry["revisions"]) == 1
+        rev = entry["revisions"][0]
+        assert rev["version_number"] == 1
+        assert rev["decision_id"] == eid
+        assert rev["source"] == "ai"  # update_decision default created_by
+        assert entry["current_revision_id"] == rev["revision_id"]
 
     def test_replace_id_not_found_falls_through_to_normal_store(self, tmp_repo):
         ok, new_id = store.update_decision(tmp_repo, "Use Redis for caching layer here", "s1",
-                                           "architecture", replace_id="nonexistent-id")
+                                           "convention", replace_id="nonexistent-id")
         assert ok is True
         assert new_id is not None
 
     def test_replace_id_updates_subtype_when_provided(self, tmp_repo):
-        _, eid = store.update_decision(tmp_repo, "Always run lint before pushing code", "s1", "convention")
-        store.update_decision(tmp_repo, "Always run lint before pushing code updated", "s1",
-                              "constraint", replace_id=eid)
+        # convention -> pattern: both trivial categories, so it applies in place.
+        _, eid = store.update_decision(tmp_repo, "Group helpers in a utils module", "s1", "convention")
+        store.update_decision(tmp_repo, "Group helpers in a utils package", "s1",
+                              "pattern", replace_id=eid)
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("id") == eid)
-        assert entry["subtype"] == "constraint"
+        assert entry["subtype"] == "pattern"
+
+
+class TestSuggestedUpdate:
+    """Significant changes (architecture/constraint) become a Suggested Update that
+    preserves the live decision until the developer approves - never overwritten."""
+
+    def _approved(self, repo: str, content: str, subtype: str = "architecture") -> str:
+        """Create a decision and force it to approved/live so a change becomes a proposal."""
+        store.update_decision(repo, content, "s1", subtype)
+        data = store._load(repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        entry["status"] = "approved"
+        store._save(repo, data)
+        return entry["id"]
+
+    def test_significant_change_creates_proposal_not_overwrite(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        ok, rid = store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                                        "architecture", replace_id=eid)
+        assert ok is True and rid == eid
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        # live decision is UNCHANGED; the change is parked as a proposal awaiting approval
+        assert entry["content"] == "Rollback endpoint is /api/v1/rollback"
+        assert entry["revision"] == 1
+        assert entry["proposed_revision"]["content"] == "Rollback endpoint is /api/v2/rollback"
+        assert "confidence" in entry["proposed_revision"]
+
+    def test_constraint_change_is_significant(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Never log secrets to stdout", "constraint")
+        store.update_decision(tmp_repo, "Never log secrets or tokens to stdout", "s2",
+                              "constraint", replace_id=eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry.get("proposed_revision") is not None
+
+    def test_recategorising_constraint_is_significant(self, tmp_repo):
+        # Downgrading a constraint to a convention still changes a constraint → approval.
+        eid = self._approved(tmp_repo, "Always pin dependency versions", "constraint")
+        store.update_decision(tmp_repo, "Prefer pinning dependency versions", "s2",
+                              "convention", replace_id=eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry.get("proposed_revision") is not None
+
+    def test_human_stated_change_applies_without_approval(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Use postgres for primary storage")
+        store.update_decision(tmp_repo, "Use sqlite for primary storage", "s2",
+                              "architecture", created_by="human", replace_id=eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["content"] == "Use sqlite for primary storage"
+        assert entry["revision"] == 2
+        assert "proposed_revision" not in entry
+
+    def test_approve_promotes_proposal_to_new_revision(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok is True
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["content"] == "Rollback endpoint is /api/v2/rollback"
+        assert entry["revision"] == 2
+        assert entry["revisions"][0]["content"] == "Rollback endpoint is /api/v1/rollback"
+        assert "proposed_revision" not in entry
+        assert entry["approved_by"] == "human"
+
+    def test_dismiss_keeps_current_revision(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Use postgres for primary storage")
+        store.update_decision(tmp_repo, "Use sqlite for primary storage", "s2",
+                              "architecture", replace_id=eid)
+        ok, msg = store.approve_decision(tmp_repo, eid, "dismiss")
+        assert ok is True
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["content"] == "Use postgres for primary storage"
+        assert entry["revision"] == 1
+        assert "proposed_revision" not in entry
+
+    def test_skip_keeps_proposal_pending(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Use postgres for primary storage")
+        store.update_decision(tmp_repo, "Use sqlite for primary storage", "s2",
+                              "architecture", replace_id=eid)
+        store.approve_decision(tmp_repo, eid, "skip")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry.get("proposed_revision") is not None
+
+    def test_edit_promotes_with_corrected_content(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Use postgres for primary storage")
+        store.update_decision(tmp_repo, "Use sqlite for primary storage", "s2",
+                              "architecture", replace_id=eid)
+        store.approve_decision(tmp_repo, eid, "edit",
+                               content="Use sqlite for local primary storage")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["content"] == "Use sqlite for local primary storage"
+        assert entry["revision"] == 2
+        assert "proposed_revision" not in entry
+
+    def test_proposal_surfaces_in_pending_and_prompt(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid)
+        pending_ids = [e["id"] for e in store.get_pending_decisions(tmp_repo)]
+        assert eid in pending_ids
+        prompt = store.get_pending_approval_prompt(tmp_repo, eid)
+        assert "Engineering Decision Updated" in prompt
+        assert "/api/v2/rollback" in prompt
+        assert "Dismiss" in prompt
+
+    def test_blank_content_rejected_on_replace_id_path(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Use postgres for primary storage")
+        ok, rid = store.update_decision(tmp_repo, "   ", "s2", "convention", replace_id=eid)
+        assert ok is False
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["content"] == "Use postgres for primary storage"
+
+    def test_identical_content_is_noop_on_replace_id(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Use postgres for primary storage")
+        ok, rid = store.update_decision(tmp_repo, "Use postgres for primary storage", "s2",
+                                        "architecture", replace_id=eid)
+        assert ok is True and rid == eid
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["revision"] == 1
+        assert "proposed_revision" not in entry
+        # no-op: still exactly the original single revision, no new version appended
+        assert len(entry["revisions"]) == 1
+
+    def test_proposal_not_attached_to_pending_approval_base(self, tmp_repo):
+        # A pending_approval base has not been approved yet; attaching a proposal
+        # would let approve_decision silently bless never-reviewed content.
+        # Use an L3-signal content to guarantee pending_approval status.
+        store.update_decision(tmp_repo,
+                              "Use Kafka instead of RabbitMQ for event streaming", "s1",
+                              "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        assert entry.get("status") == "pending_approval", (
+            f"Expected pending_approval but got {entry.get('status')!r}")
+        eid = entry["id"]
+        ok, rid = store.update_decision(tmp_repo,
+                                        "Use RabbitMQ instead of Kafka for event streaming", "s2",
+                                        "architecture", replace_id=eid)
+        assert ok is True
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert "proposed_revision" not in entry
+
+    def test_identical_proposal_not_duplicated(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid)
+        # Second call with identical proposed content must not overwrite the proposal.
+        ok, rid = store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s3",
+                                        "architecture", replace_id=eid)
+        assert ok is True
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        # Proposal should still exist and be from s2 (not silently replaced by s3).
+        assert entry["proposed_revision"]["session_id"] == "s2"
+
+    def test_approve_merges_proposing_session_into_session_ids(self, tmp_repo):
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid)
+        store.approve_decision(tmp_repo, eid, "approve")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert "s2" in entry.get("session_ids", [])
+        assert entry.get("occurrence_count", 1) >= 2
+
+
+# ── Decision / Revision model (Git-like: storage preserves history, replay = current) ──
+
+class TestRevisionModel:
+    """The refactored model: revisions are immutable first-class objects, the decision
+    carries an explicit current_revision_id pointer, replay exposes only the current one."""
+
+    def test_new_decision_has_first_revision_object(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use feature-folder module layout", "s1", "pattern")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        rev = store._current_revision(entry)
+        assert rev is not None
+        # full revision object per the forward-ready schema
+        for field in ("revision_id", "decision_id", "version_number", "content",
+                      "confidence_score", "evidence", "created_at", "approved_at", "source"):
+            assert field in rev, field
+        assert rev["decision_id"] == eid
+        assert rev["version_number"] == 1
+        assert entry["current_revision_id"] == rev["revision_id"]
+
+    def test_approval_moves_pointer_and_preserves_history(self, tmp_repo):
+        # Build an approved architecture decision, then propose + approve a change.
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+        eid = entry["id"]
+        v1_rev_id = entry["current_revision_id"]
+
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid)
+        store.approve_decision(tmp_repo, eid, "approve")
+
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        # pointer advanced; both revisions preserved; precedence is the pointer, not time
+        assert entry["current_revision_id"] != v1_rev_id
+        assert len(entry["revisions"]) == 2
+        assert store._current_content(entry) == "Rollback endpoint is /api/v2/rollback"
+        assert any(r["revision_id"] == v1_rev_id and r["content"] == "Rollback endpoint is /api/v1/rollback"
+                   for r in entry["revisions"])
+
+    def test_replay_exposes_only_current_revision(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Deploy with blue-green v1", "s1", "convention")
+        store.update_decision(tmp_repo, "Deploy with blue-green v2", "s1", "convention", replace_id=eid)
+        out = store.get_context(tmp_repo)
+        assert "v2" in out
+        assert "v1" not in out  # historical revision never reaches replay
+
+    def test_pending_update_does_not_change_current_revision(self, tmp_repo):
+        store.update_decision(tmp_repo, "Primary store is postgres", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+        eid = entry["id"]
+        before = entry["current_revision_id"]
+        store.update_decision(tmp_repo, "Primary store is mysql", "s2", "architecture", replace_id=eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        # proposal parked; current revision unchanged until approval
+        assert entry["current_revision_id"] == before
+        assert store._current_content(entry) == "Primary store is postgres"
+        assert entry.get("proposed_revision")
+
+    def test_legacy_entry_migrates_on_load(self, tmp_repo):
+        # Hand-write a pre-refactor store file (old shape: content + revision + historical
+        # snapshots, no current_revision_id / no revision objects).
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        legacy = {
+            "repo_path": tmp_repo,
+            "entries": [{
+                "id": "legacy-1",
+                "type": "decision",
+                "subtype": "architecture",
+                "content": "Rollback endpoint is /api/v3",
+                "session_id": "s1",
+                "session_ids": ["s1"],
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-03-01T00:00:00+00:00",
+                "revision": 3,
+                "status": "approved",
+                "created_by": "ai",
+                "confidence": 70,
+                "revisions": [
+                    {"revision": 1, "content": "Rollback endpoint is /api/v1",
+                     "subtype": "architecture", "status": "approved",
+                     "timestamp": "2026-01-01T00:00:00+00:00", "replaced_at": "2026-02-01T00:00:00+00:00"},
+                    {"revision": 2, "content": "Rollback endpoint is /api/v2",
+                     "subtype": "architecture", "status": "approved",
+                     "timestamp": "2026-02-01T00:00:00+00:00", "replaced_at": "2026-03-01T00:00:00+00:00"},
+                ],
+            }],
+        }
+        store._save(tmp_repo, legacy)
+
+        data = store._load(tmp_repo)
+        entry = data["entries"][0]
+        # migrated: full revision objects incl current, pointer set, current content preserved
+        assert entry.get("current_revision_id")
+        assert len(entry["revisions"]) == 3
+        assert [r["version_number"] for r in entry["revisions"]] == [1, 2, 3]
+        assert all("revision_id" in r for r in entry["revisions"])
+        assert store._current_content(entry) == "Rollback endpoint is /api/v3"
+        # replay still shows only the current value
+        out = store.get_context(tmp_repo)
+        assert "/api/v3" in out and "/api/v1" not in out and "/api/v2" not in out
+
+    def test_migration_is_idempotent(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Use uv for deps", "s1", "convention")
+        first = store._load(tmp_repo)["entries"][0]
+        rid = first["current_revision_id"]
+        # a second load must not rebuild revisions or change the pointer
+        second = store._load(tmp_repo)["entries"][0]
+        assert second["current_revision_id"] == rid
+        assert len(second["revisions"]) == 1
 
 
 # ── approve_decision ──────────────────────────────────────────────────────────

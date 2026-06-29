@@ -131,6 +131,9 @@ def _load(repo_path: str) -> dict:
         # Valid-but-non-object JSON ([], null, 42) parses fine but would crash every
         # downstream data["entries"] access — treat the same as corruption.
         if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            # Transparently upgrade legacy entries to the revision model so every reader
+            # sees the normalized shape. Idempotent + in-memory; persisted on next _save.
+            _migrate_entries(data)
             return data
     return {"repo_path": repo_path, "entries": []}
 
@@ -382,7 +385,7 @@ def _keep_top(items: list, limit: int, pin_last: bool = False) -> list:
     pool = items[:-1] if pinned else items
     ranked = sorted(
         pool,
-        key=lambda x: (x.get("occurrence_count", 1), x.get("timestamp", "")),
+        key=lambda x: (x.get("occurrence_count", 1), x.get("updated_at") or x.get("timestamp", "")),
         reverse=True,
     )
     kept = ranked[: limit - len(pinned)] + pinned
@@ -463,6 +466,22 @@ def _classify_level(content: str, subtype: str, created_by: str) -> str:
 
 def _level_to_status(level: str) -> str:
     return {"auto": "approved", "suggested": "suggested", "approval_required": "pending_approval"}.get(level, "suggested")
+
+
+# Categories whose CHANGE is high-stakes enough to warrant developer approval (the plan's
+# "only ask for approval when: architecture / constraints / ownership / deployment /
+# technology standards change"). Pattern/convention updates apply in place silently.
+_SIGNIFICANT_UPDATE_SUBTYPES = frozenset({"architecture", "constraint"})
+
+
+def _update_needs_approval(subtype: str, created_by: str) -> bool:
+    """A change to an existing decision becomes a Suggested Update (needs approval) only
+    when it is AI-inferred AND touches a high-stakes category. Human-stated changes and
+    trusted sources (scan/bootstrap) apply directly; trivial categories (pattern/
+    convention) update in place silently. This is the trivial-vs-significant split."""
+    if created_by in ("human", "scan", "bootstrap"):
+        return False
+    return subtype in _SIGNIFICANT_UPDATE_SUBTYPES
 
 
 def _compute_confidence(entry: dict) -> tuple[int, list[str]]:
@@ -753,35 +772,241 @@ def _normalize_content(content: str) -> str:
     return normalized[:1].upper() + normalized[1:] if normalized else normalized
 
 
+# ── Decision / Revision model (Git-like: revisions are immutable commits, the decision
+# ── carries an explicit current_revision_id pointer = HEAD). Storage preserves every
+# ── revision; replay exposes only the current one. The decision-level content / revision /
+# ── confidence / confidence_factors fields are a synced HEAD-cache of the current revision,
+# ── kept so the many read sites stay simple and replay is O(1). The revisions are the
+# ── source of truth; the cache is always rewritten from them on any change.
+
+def _new_revision(decision_id: str, version_number: int, content: str, source: str,
+                  confidence_score: int = 0, evidence: list | None = None,
+                  approved_at: str | None = None, created_at: str | None = None,
+                  normalize: bool = True) -> dict:
+    """Build one immutable revision object. `source` is the provenance
+    (ai | human | scan | bootstrap | memory) and maps to the upstream push contract.
+
+    normalize=False preserves content byte-for-byte - used by migration, which must be
+    lossless and must never rewrite (e.g. re-capitalize) an existing stored value."""
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "revision_id": str(uuid.uuid4()),
+        "decision_id": decision_id,
+        "version_number": version_number,
+        "content": _normalize_content(content) if normalize else content,
+        "confidence_score": confidence_score,
+        "evidence": list(evidence or []),
+        "created_at": created_at or now,
+        "approved_at": approved_at,
+        "source": source,
+    }
+
+
+def _current_revision(entry: dict) -> dict | None:
+    """The active revision an entry points at via current_revision_id; falls back to the
+    last revision, then None. This is the only revision replay ever exposes."""
+    revs = entry.get("revisions") or []
+    cid = entry.get("current_revision_id")
+    if cid:
+        for r in revs:
+            if r.get("revision_id") == cid:
+                return r
+    return revs[-1] if revs else None
+
+
+def _current_content(entry: dict) -> str:
+    """Content of the entry's current revision (the only value replay should inject)."""
+    rev = _current_revision(entry)
+    if rev is not None:
+        return rev.get("content", "")
+    return entry.get("content", "")
+
+
+def _sync_decision_cache(entry: dict) -> None:
+    """Mirror the current revision onto the decision-level HEAD-cache fields so the read
+    sites (get_context display, replay) stay O(1). Revisions remain the source of truth."""
+    rev = _current_revision(entry)
+    if rev is None:
+        return
+    entry["content"] = rev.get("content", "")
+    entry["revision"] = rev.get("version_number", 1)
+    entry["confidence"] = rev.get("confidence_score", entry.get("confidence", 0))
+    evidence = rev.get("evidence") or []
+    if evidence:
+        entry["confidence_factors"] = evidence
+    else:
+        entry.pop("confidence_factors", None)
+
+
+def _append_revision(entry: dict, content: str, source: str,
+                     approved_at: str | None = None) -> dict:
+    """Create the next revision for a decision, make it current, and resync the cache.
+    Confidence is computed from the decision's aggregate evidence at this moment and
+    snapshotted onto the revision. Returns the new revision."""
+    revs = entry.setdefault("revisions", [])
+    next_version = (revs[-1]["version_number"] + 1) if revs else 1
+    score, factors = _compute_confidence(entry)
+    rev = _new_revision(
+        entry.get("id", ""), next_version, content,
+        source=source, confidence_score=score, evidence=factors,
+        approved_at=approved_at,
+    )
+    revs.append(rev)
+    entry["current_revision_id"] = rev["revision_id"]
+    entry["updated_at"] = rev["created_at"]
+    _sync_decision_cache(entry)
+    return rev
+
+
+def _migrate_decision(entry: dict) -> bool:
+    """Transparently upgrade a legacy decision entry to the revision model. Idempotent.
+    Builds full revision objects from the legacy historical snapshots (`revisions[]`, which
+    held only prior versions) plus the current head (legacy `content`/`revision`), and sets
+    `current_revision_id`. Returns True if the entry was changed."""
+    if entry.get("type") != "decision":
+        return False
+    revs = entry.get("revisions")
+    already = (
+        entry.get("current_revision_id")
+        and isinstance(revs, list) and revs
+        and all(isinstance(r, dict) and "revision_id" in r for r in revs)
+    )
+    if already:
+        # Heal a divergent HEAD-cache: if the current revision's content drifted from the
+        # decision-level content cache (e.g. an earlier buggy migration that re-capitalized
+        # the revision), restore the revision to the cached value - that is the value replay
+        # has always shown, so it is the original-of-record. No-op when consistent.
+        cur = _current_revision(entry)
+        cached = entry.get("content")
+        if cur is not None and cached is not None and cur.get("content") != cached:
+            cur["content"] = cached
+            return True
+        return False
+
+    did = entry.get("id", "")
+    created_by = entry.get("created_by", "ai")
+    legacy = revs if isinstance(revs, list) else []
+    full: list[dict] = []
+    for snap in legacy:
+        if isinstance(snap, dict) and "revision_id" in snap:
+            full.append(snap)
+            continue
+        full.append(_new_revision(
+            did, snap.get("revision", len(full) + 1), snap.get("content", ""),
+            source=snap.get("source") or created_by,
+            confidence_score=snap.get("confidence", 0),
+            evidence=snap.get("evidence") or snap.get("confidence_factors") or [],
+            created_at=snap.get("timestamp") or entry.get("timestamp", ""),
+            approved_at=snap.get("replaced_at"),
+            normalize=False,  # migration is lossless - preserve stored content verbatim
+        ))
+    current_version = entry.get("revision", (full[-1]["version_number"] + 1) if full else 1)
+    if not any(r.get("version_number") == current_version for r in full):
+        full.append(_new_revision(
+            did, current_version, entry.get("content", ""),
+            source=created_by,
+            confidence_score=entry.get("confidence", 0),
+            evidence=entry.get("confidence_factors") or [],
+            created_at=entry.get("updated_at") or entry.get("timestamp", ""),
+            approved_at=entry.get("approved_at"),
+            normalize=False,  # migration is lossless - preserve stored content verbatim
+        ))
+    current = next((r for r in full if r.get("version_number") == current_version), full[-1])
+    entry["revisions"] = full
+    entry["current_revision_id"] = current["revision_id"]
+    entry["revision"] = current["version_number"]
+    return True
+
+
+def _migrate_entries(data: dict) -> None:
+    """Migrate every decision entry in a loaded store to the revision model, in place."""
+    for entry in data.get("entries", []):
+        _migrate_decision(entry)
+
+
 def _new_decision_entry(content: str, session_id: str, subtype: str,
                         memory_key: str | None = None,
                         created_by: str = "ai",
                         status: str = "") -> dict:
-    """Build a decision entry. Single source of truth for the entry schema —
-    both manual capture (`update_decision`) and memory import use this."""
+    """Build a decision entry with its first revision. Single source of truth for the
+    entry schema - both manual capture (`update_decision`) and memory import use this."""
     content = _normalize_content(content)
     if not status:
         level = _classify_level(content, subtype, created_by)
         status = _level_to_status(level)
+    now = datetime.now(timezone.utc).isoformat()
+    decision_id = str(uuid.uuid4())
     entry: dict = {
-        "id": str(uuid.uuid4()),
+        "id": decision_id,
         "type": "decision",
         "subtype": subtype,
-        "content": content,
+        "content": content,         # HEAD-cache of the current revision (see _sync_decision_cache)
         "session_id": session_id,
         "session_ids": [session_id],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now,           # Created At - immutable
+        "updated_at": now,          # Updated At - bumped on each revision
+        "revision": 1,              # current version_number (cache); revisions[] is canonical
+        "current_revision_id": None,
         "occurrence_count": 1,
         "status": status,
         "created_by": created_by,
     }
-    score, factors = _compute_confidence(entry)
-    entry["confidence"] = score
-    if factors:
-        entry["confidence_factors"] = factors
     if memory_key is not None:
         entry["memory_key"] = memory_key
+    # First revision. approved_at is set only when the decision is born trusted (not pending).
+    approved_at = now if status in ("approved", "suggested") else None
+    score, factors = _compute_confidence(entry)
+    rev = _new_revision(decision_id, 1, content, source=created_by,
+                        confidence_score=score, evidence=factors,
+                        approved_at=approved_at, created_at=now)
+    entry["revisions"] = [rev]
+    entry["current_revision_id"] = rev["revision_id"]
+    _sync_decision_cache(entry)
     return entry
+
+
+def _build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
+                    source: str = "ai") -> dict:
+    """A Suggested Update (pending revision) attached to a live decision: the detected new
+    value, its confidence/evidence, and provenance. The live decision is NOT modified - this
+    proposal waits for developer approval, at which point it is promoted to a new revision."""
+    sessions = sorted({s for s in (*(target.get("session_ids") or []), session_id) if s})
+    score, factors = _compute_confidence({
+        "created_by": "ai",
+        "occurrence_count": target.get("occurrence_count", 1),
+        "session_ids": sessions,
+        "memory_key": target.get("memory_key"),
+    })
+    return {
+        "content": _normalize_content(content),
+        "subtype": subtype or target.get("subtype", ""),
+        "session_id": session_id,
+        "source": source,
+        "created_at": now,
+        "confidence": score,
+        "confidence_factors": factors,
+    }
+
+
+def _promote_proposal(entry: dict, content: str | None = None) -> None:
+    """Approve a pending proposed_revision: append it as a new immutable revision and move
+    current_revision_id forward. Prior revisions are preserved (never overwritten). `content`
+    (an edited value) overrides the proposal's content when given."""
+    prop = entry.get("proposed_revision") or {}
+    if prop.get("subtype"):
+        entry["subtype"] = prop["subtype"]
+    # Merge the proposing session FIRST so the new revision's confidence reflects the
+    # session that drove the change (not only the original creation sessions).
+    prop_session = prop.get("session_id", "")
+    if prop_session:
+        sessions = set(entry.get("session_ids") or [])
+        sessions.add(prop_session)
+        entry["session_ids"] = sorted(sessions)
+        entry["occurrence_count"] = entry.get("occurrence_count", 1) + 1
+    new_content = content if content else prop.get("content", _current_content(entry))
+    now = datetime.now(timezone.utc).isoformat()
+    _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now)
+    entry.pop("proposed_revision", None)
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
@@ -789,7 +1014,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
-        # Explicit correction: caller knows which entry is wrong and wants to replace it.
+        # Explicit correction: caller knows which entry is wrong and wants to change it.
         # Runs before _is_storable — an explicit correction always writes.
         # Accepts both full UUIDs and the 8-char short IDs shown in get_context output.
         if replace_id:
@@ -798,14 +1023,43 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 None,
             )
             if target is not None:
-                target["content"] = content
+                # Fix: validate content before any mutation - replace_id bypasses the
+                # downstream _is_storable check, so guard here to prevent blank content
+                # from wiping a trusted decision.
+                if not _is_storable(content):
+                    return False, None
+                # Fix: no-op guard - identical content creates no revision and no proposal.
+                if content == target.get("content", ""):
+                    return True, target["id"]
+                now = datetime.now(timezone.utc).isoformat()
+                new_subtype = subtype or target.get("subtype", "")
+                old_subtype = target.get("subtype", "")
+                # Significant change -> Suggested Update: the live (approved) revision is left
+                # untouched and a proposal is attached, awaiting developer approval. The
+                # decision is only versioned forward once the developer approves. Significance
+                # considers BOTH subtypes - re-categorising a constraint to a convention is
+                # still a change to a constraint.
+                if (_update_needs_approval(new_subtype, created_by)
+                        or _update_needs_approval(old_subtype, created_by)):
+                    # Fix: don't attach a proposal to an entry that isn't approved yet -
+                    # the developer needs to review the base first.
+                    if _entry_status(target) == "pending_approval":
+                        return True, target["id"]
+                    # Fix: don't overwrite an existing proposal if the new content is
+                    # identical - the proposal is already pending for the same change.
+                    existing_prop = target.get("proposed_revision")
+                    if existing_prop and existing_prop.get("content", "") == content:
+                        return True, target["id"]
+                    target["proposed_revision"] = _build_proposal(
+                        target, content, subtype, session_id, now)
+                    _save(repo_path, data)
+                    return True, target["id"]
+                # Trivial change (pattern/convention, or any human/scan/bootstrap change) →
+                # apply immediately as a new approved revision. History is preserved: the
+                # prior revision stays in revisions[]; current_revision_id moves forward.
                 if subtype:
                     target["subtype"] = subtype
-                target["timestamp"] = datetime.now(timezone.utc).isoformat()
-                score, factors = _compute_confidence(target)
-                target["confidence"] = score
-                if factors:
-                    target["confidence_factors"] = factors
+                _append_revision(target, content, source=created_by, approved_at=now)
                 _save(repo_path, data)
                 return True, target["id"]
             # replace_id not found — fall through to normal storage
@@ -826,14 +1080,20 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 
 def approve_decision(repo_path: str, entry_id: str, action: str,
                      content: str = "") -> tuple[bool, str]:
-    """Approve, ignore, or edit a pending decision.
+    """Approve, edit, skip, ignore, or dismiss a decision awaiting the developer.
 
-    action: 'approve' | 'ignore' | 'edit'
+    Handles two cases:
+      - a Suggested Update (the entry carries a `proposed_revision`): approve/edit promotes
+        it to a new revision (history preserved), skip keeps it for later, dismiss/ignore
+        discards the proposal and keeps the current revision.
+      - a brand-new pending_approval decision: approve/edit trusts it, ignore/dismiss
+        suppresses it, skip leaves it pending.
+
     content: the corrected decision text, required when action='edit'
     Returns (success, message).
     """
-    if action not in ("approve", "ignore", "edit"):
-        return False, f"Invalid action '{action}'. Use: approve, ignore, or edit."
+    if action not in ("approve", "ignore", "edit", "skip", "dismiss"):
+        return False, f"Invalid action '{action}'. Use: approve, edit, skip, ignore, or dismiss."
     if action == "edit" and not content.strip():
         return False, "Action 'edit' requires content — provide the corrected decision text."
 
@@ -845,46 +1105,110 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
         now = datetime.now(timezone.utc).isoformat()
 
-        if action == "ignore":
+        # Suggested Update flow: the live decision stays trusted; we act on the proposal.
+        if entry.get("proposed_revision"):
+            if action == "skip":
+                return True, "Skipped - the suggested update is kept for later review."
+            if action in ("dismiss", "ignore"):
+                rev = entry.get("revision", 1)
+                entry.pop("proposed_revision", None)
+                _save(repo_path, data)
+                return True, f"Dismissed - kept current revision {rev}."
+            # approve or edit → promote the proposal to a new revision (history preserved).
+            # Set the approval fields FIRST so the new revision's snapshotted confidence
+            # reflects the developer approval; _promote_proposal computes + syncs the cache.
+            entry["status"] = "approved"
+            entry["approved_at"] = now
+            entry["approved_by"] = "human"
+            _promote_proposal(entry, content if action == "edit" else None)
+            _save(repo_path, data)
+            stored = _current_content(entry)
+            preview = stored[:80] + ("..." if len(stored) > 80 else "")
+            verb = "Updated and approved" if action == "edit" else "Approved"
+            return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\""
+
+        # New-decision pending_approval flow. The decision already has revision 1; approval
+        # blesses it in place (no new revision - there is no prior version to preserve yet).
+        if action == "skip":
+            return True, "Skipped."
+
+        if action in ("ignore", "dismiss"):
             entry["status"] = "ignored"
             _save(repo_path, data)
             return True, "Ignored. This decision will not surface again."
 
-        if action == "edit":
-            entry["content"] = content.strip()
+        cur = _current_revision(entry)
+        if action == "edit" and cur is not None:
+            cur["content"] = _normalize_content(content)
 
         entry["status"] = "approved"
         entry["approved_at"] = now
         entry["approved_by"] = "human"
-        score, factors = _compute_confidence(entry)
-        entry["confidence"] = score
-        if factors:
-            entry["confidence_factors"] = factors
+        if cur is not None:
+            cur["approved_at"] = now
+            score, factors = _compute_confidence(entry)
+            cur["confidence_score"] = score
+            cur["evidence"] = factors
+        _sync_decision_cache(entry)
         _save(repo_path, data)
 
-        stored_content = entry["content"]
+        stored_content = _current_content(entry)
         preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
         return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\""
 
 
 def get_pending_decisions(repo_path: str) -> list[dict]:
-    """Returns all decisions with status 'pending_approval' for the given repo."""
+    """Returns all decisions awaiting the developer: brand-new pending_approval entries
+    AND live decisions carrying a Suggested Update (proposed_revision)."""
     data = _load(repo_path)
     return [
         e for e in data.get("entries", [])
-        if e.get("type") == "decision" and _entry_status(e) == "pending_approval"
+        if e.get("type") == "decision"
+        and (_entry_status(e) == "pending_approval" or e.get("proposed_revision"))
     ]
 
 
+def _format_update_approval(entry: dict) -> str:
+    """Approval prompt for a Suggested Update - current revision vs the detected change."""
+    prop = entry.get("proposed_revision") or {}
+    score = prop.get("confidence", 0)
+    factors = prop.get("confidence_factors") or []
+    factor_lines = "\n".join(f"  - {f}" for f in factors) if factors else "  - Detected this session"
+    eid = entry["id"]
+    rev = entry.get("revision", 1)
+    return (
+        f"Engineering Decision Updated - pending your approval\n\n"
+        f"Current (revision {rev}):\n  \"{entry.get('content', '')}\"\n\n"
+        f"Detected:\n  \"{prop.get('content', '')}\"\n\n"
+        f"Confidence: {score}%\n"
+        f"Evidence:\n{factor_lines}\n\n"
+        f"IMPORTANT: Show this to the developer and wait for their response:\n\n"
+        f"  [Y] Approve - call approve_decision(entry_id=\"{eid}\", action=\"approve\")"
+        f"  (creates revision {rev + 1}, preserves history)\n"
+        f"  [E] Edit    - call approve_decision(entry_id=\"{eid}\", action=\"edit\","
+        f" content=\"<corrected text>\")\n"
+        f"  [S] Skip    - call approve_decision(entry_id=\"{eid}\", action=\"skip\")"
+        f"  (keep the suggestion for later)\n"
+        f"  [D] Dismiss - call approve_decision(entry_id=\"{eid}\", action=\"dismiss\")"
+        f"  (discard, keep current)\n\n"
+        f"Or the developer can run `contexer review` in their terminal to review later."
+    )
+
+
 def get_pending_approval_prompt(repo_path: str, entry_id: str | None) -> str:
-    """Generate a formatted approval prompt for a pending decision.
-    Returns '' if the entry is not in pending_approval state."""
+    """Generate a formatted approval prompt for a decision awaiting the developer.
+    Renders the Suggested Update prompt when a proposal is attached, otherwise the
+    new-decision prompt. Returns '' if nothing is pending for this entry."""
     if not entry_id:
         return ""
     data = _load(repo_path)
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
-    if not entry or _entry_status(entry) != "pending_approval":
+    if not entry:
+        return ""
+    if entry.get("proposed_revision"):
+        return _format_update_approval(entry)
+    if _entry_status(entry) != "pending_approval":
         return ""
     score, factors = _compute_confidence(entry)
     factor_lines = "\n".join(f"  - {f}" for f in factors) if factors else "  - Initial capture"
@@ -923,12 +1247,15 @@ def _apply_memory_upsert(entries: list, content: str, session_id: str,
                       if not e.get("memory_key") and e["type"] == "decision"
                       and e["content"] == content and e["content"].startswith("[memory")), None)
     if match is not None:
-        changed = match["content"] != content or match.get("subtype", "") != subtype
+        changed = _current_content(match) != content or match.get("subtype", "") != subtype
         match["memory_key"] = memory_key
         if changed:
-            match["content"] = content
+            # Append a new approved revision (history preserved, never clobbered). Clear any
+            # pending proposal - memory sync is authoritative for memory-managed entries.
             match["subtype"] = subtype
-            match["timestamp"] = datetime.now(timezone.utc).isoformat()
+            _append_revision(match, content, source="memory",
+                             approved_at=datetime.now(timezone.utc).isoformat())
+            match.pop("proposed_revision", None)
         return "updated" if changed else "unchanged"
     # 3. First creation — novelty-gate so a memory fact that merely restates an
     #    existing decision is dropped rather than double-stored. Deliberately does
@@ -1203,9 +1530,11 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
         }
 
     # Separate decisions by status for injection and summary.
-    # pending_approval and ignored decisions are never auto-injected — they must
+    # pending_approval and ignored decisions are never auto-injected - they must
     # be explicitly approved before becoming trusted engineering knowledge.
     pending = [d for d in decisions if _entry_status(d) == "pending_approval"]
+    with_proposals = [d for d in decisions
+                      if d.get("proposed_revision") and _entry_status(d) != "pending_approval"]
     trusted = [d for d in decisions if _entry_status(d) in ("approved", "suggested")]
     pre_loaded = [d for d in trusted if d.get("subtype") in ("convention", "constraint", "pattern")]
     deferred_count = len(trusted) - len(pre_loaded)
@@ -1220,7 +1549,8 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
         for d in pre_loaded:
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
-            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{_recur_suffix(d)} {d['content']}")
+            update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
+            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {d['content']}")
     if global_rules or pre_loaded:
         sys_parts.append(
             "If the current task conflicts with any of these decisions, "
@@ -1234,14 +1564,19 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
             "Call get_context BEFORE reading files for any question about architecture, "
             "design decisions, rationale, or patterns."
         )
-    if pending:
+    if pending or with_proposals:
         pending_by_type: dict[str, int] = {}
         for d in pending:
             st = d.get("subtype") or "decision"
             pending_by_type[st] = pending_by_type.get(st, 0) + 1
         pending_parts = [_pl(cnt, st) for st, cnt in sorted(pending_by_type.items())]
+        notice_parts = []
+        if pending_parts:
+            notice_parts.append(f"{', '.join(pending_parts)} pending your approval")
+        if with_proposals:
+            notice_parts.append(f"{_pl(len(with_proposals), 'suggested update')} awaiting review")
         sys_parts.append(
-            f"{', '.join(pending_parts)} pending your approval. "
+            f"{'; '.join(notice_parts)}. "
             "Run `contexer review` in your terminal or call approve_decision() "
             "after reviewing each with the developer."
         )
@@ -1265,11 +1600,16 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
         sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
-    if pending:
-        pending_by_type_str = ", ".join(
-            _pl(cnt, st) for st, cnt in sorted(pending_by_type.items())
-        )
-        sentences.append(f"{pending_by_type_str} pending approval — run `contexer review`")
+    if pending or with_proposals:
+        review_parts = []
+        if pending:
+            pending_by_type_str = ", ".join(
+                _pl(cnt, st) for st, cnt in sorted(pending_by_type.items())
+            )
+            review_parts.append(f"{pending_by_type_str} pending approval")
+        if with_proposals:
+            review_parts.append(f"{_pl(len(with_proposals), 'suggested update')} awaiting review")
+        sentences.append(f"{'; '.join(review_parts)} - run `contexer review`")
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
     return {"status": status, "context": "\n".join(sys_parts)}
@@ -1537,9 +1877,10 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
+            update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(d)} {d['content']}{id_tag}")
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {d['content']}{id_tag}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."

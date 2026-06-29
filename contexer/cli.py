@@ -140,21 +140,33 @@ def review() -> None:
 
     print(f"\n{len(pending)} decision(s) pending approval for {Path(repo_path).name}\n")
 
-    approved = ignored = edited = skipped = 0
+    approved = ignored = dismissed = edited = skipped = 0
     for i, entry in enumerate(pending, 1):
-        score, factors = store._compute_confidence(entry)
-
+        prop = entry.get("proposed_revision")
         print("─" * 60)
         print(f"Decision {i} of {len(pending)}\n")
         subtype = entry.get("subtype") or "decision"
-        print(f"[{subtype}] \"{entry['content']}\"\n")
+        if prop:
+            # Suggested Update: show the current revision and the detected change.
+            score = prop.get("confidence", 0)
+            factors = prop.get("confidence_factors") or []
+            rev = entry.get("revision", 1)
+            print(f"[{subtype}] Suggested update")
+            print(f'  Current (revision {rev}): "{entry["content"]}"')
+            print(f'  Detected:                "{prop.get("content", "")}"\n')
+        else:
+            score, factors = store._compute_confidence(entry)
+            print(f"[{subtype}] \"{entry['content']}\"\n")
         print(f"Confidence: {score}%")
         if factors:
             print("Evidence:")
             for f in factors:
                 print(f"  - {f}")
         print()
-        print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip")
+        if prop:
+            print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip")
+        else:
+            print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip")
 
         try:
             choice = input("Choice: ").strip().upper()
@@ -167,11 +179,16 @@ def review() -> None:
             if ok:
                 approved += 1
                 print(f"Approved.")
+        elif choice in ("D", "DISMISS"):
+            ok, msg = store.approve_decision(repo_path, entry["id"], "dismiss")
+            if ok:
+                dismissed += 1
+                print(msg)
         elif choice in ("N", "NO"):
             ok, msg = store.approve_decision(repo_path, entry["id"], "ignore")
             if ok:
                 ignored += 1
-                print("Ignored.")
+                print(msg)
         elif choice in ("E", "EDIT"):
             print(f'Current: "{entry["content"]}"')
             try:
@@ -198,6 +215,8 @@ def review() -> None:
         parts.append(f"{approved} approved")
     if edited:
         parts.append(f"{edited} edited and approved")
+    if dismissed:
+        parts.append(f"{dismissed} dismissed")
     if ignored:
         parts.append(f"{ignored} ignored")
     if skipped:
