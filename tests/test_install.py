@@ -136,6 +136,52 @@ class TestInstall:
         assert settings["agentPushNotifEnabled"] is True
         assert "hooks" in settings
 
+    def test_no_stop_hook_installed(self, installed_home):
+        # The Stop hook was removed: end-of-turn prompting is replaced by the deterministic
+        # PostToolUse flag + next-prompt anchor reminder.
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        stop_groups = settings["hooks"].get("Stop", [])
+        cmds = [h.get("command", "") for grp in stop_groups for h in grp.get("hooks", [])]
+        assert not any(".pending_capture" in c for c in cmds), \
+            "Contexer must not install a Stop hook"
+
+    def test_post_tool_use_flag_hook_still_registered(self, installed_home):
+        # The deterministic write/edit signal must survive Stop-hook removal.
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for grp in settings["hooks"]["PostToolUse"]
+                for h in grp["hooks"] if "command" in h]
+        assert any(".pending_capture" in c for c in cmds)
+
+    def test_install_removes_preexisting_contexer_stop_hook(self, clean_home):
+        # A user upgrading from a version that installed the Stop hook: reinstall must strip it.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"hooks": {"Stop": [
+            {"hooks": [{"type": "command",
+                        "command": "rm -f $HOME/.contexer/.pending_capture; echo '{}'"}]}]}}))
+
+        install()
+
+        settings = json.loads(settings_path.read_text())
+        stop_groups = settings["hooks"].get("Stop", [])
+        cmds = [h.get("command", "") for grp in stop_groups for h in grp.get("hooks", [])]
+        assert not any(".pending_capture" in c for c in cmds), \
+            "reinstall must remove a previously-installed Contexer Stop hook"
+
+    def test_install_preserves_foreign_stop_hook(self, clean_home):
+        # A user's own Stop hook (not Contexer's) must be left untouched.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": "./my-own-stop.sh"}]}]}}))
+
+        install()
+
+        settings = json.loads(settings_path.read_text())
+        cmds = [h.get("command", "") for grp in settings["hooks"]["Stop"]
+                for h in grp.get("hooks", [])]
+        assert "./my-own-stop.sh" in cmds
+
 
 # ── uninstall ─────────────────────────────────────────────────────────────────
 

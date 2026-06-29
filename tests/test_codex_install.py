@@ -58,6 +58,33 @@ class TestCodexInstall:
         put = _hooks(home)["hooks"]["PostToolUse"]
         assert any(g.get("matcher") == "Write|Edit" for g in put)
 
+    def test_no_stop_hook_installed(self, home):
+        codex.install(home)
+        stop = _hooks(home)["hooks"].get("Stop", [])
+        cmds = [h.get("command", "") for g in stop for h in g.get("hooks", [])]
+        assert not any(".pending_capture" in c for c in cmds)
+
+    def test_install_removes_preexisting_contexer_stop_hook(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(json.dumps({"hooks": {"Stop": [
+            {"hooks": [{"type": "command",
+                        "command": "rm -f $HOME/.contexer/.pending_capture; echo '{}'"}]}]}}))
+        codex.install(home)
+        stop = _hooks(home)["hooks"].get("Stop", [])
+        cmds = [h.get("command", "") for g in stop for h in g.get("hooks", [])]
+        assert not any(".pending_capture" in c for c in cmds)
+
+    def test_install_preserves_foreign_stop_hook(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(json.dumps({"hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": "./mine.sh"}]}]}}))
+        codex.install(home)
+        cmds = [h.get("command", "") for g in _hooks(home)["hooks"]["Stop"]
+                for h in g.get("hooks", [])]
+        assert "./mine.sh" in cmds
+
     def test_uses_current_python(self, home):
         codex.install(home)
         cmds = [g["hooks"][0]["command"] for g in _hooks(home)["hooks"]["SessionStart"]]

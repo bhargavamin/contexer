@@ -167,27 +167,23 @@ def install(home: Path) -> list[str]:
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...", "command": _py(ss_code)}]})
 
+    # PostToolUse sets the deterministic .pending_capture flag; the next UserPromptSubmit
+    # (anchor_cmd) consumes it and injects the capture reminder. No Stop hook - end-of-turn
+    # prompting added latency/tokens with no functional gain over the next-prompt anchor.
     put = hooks.setdefault("PostToolUse", [])
     if not base._in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
 
-    st = hooks.setdefault("Stop", [])
-    if not base._in_groups(st, ".pending_capture"):
-        stop_cmd = (
-            "FLAG=\"$HOME/.contexer/.pending_capture\"; "
-            "if [ -f \"$FLAG\" ]; then "
-            "rm -f \"$FLAG\"; "
-            "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"Stop\", "
-            "\"additionalContext\": \"Contexer: you wrote or edited files this turn. "
-            "Before finishing: (1) call get_context to check if a related decision already "
-            "exists - if it does, use its short id as replace_id to update it in place; "
-            "(2) if no related decision exists, call update_context without replace_id. "
-            "If update_context is deferred, first call "
-            "ToolSearch(query='select:mcp__contexer__update_context').\"}}'; "
-            "else echo '{}'; fi"
-        )
-        st.append({"hooks": [{"type": "command", "command": stop_cmd}]})
+    # Retire any previously-installed Stop hook. The Stop entry stays in _EVENT_MARKERS so
+    # uninstall/reinstall strips an old Stop hook from hooks.json.
+    st = hooks.get("Stop", [])
+    new_st = base._filter_groups(st, [".pending_capture"])
+    if new_st != st:
+        if new_st:
+            hooks["Stop"] = new_st
+        else:
+            hooks.pop("Stop", None)
 
     pc = hooks.setdefault("PreCompact", [])
     if not base._in_groups(pc, "compaction starting"):

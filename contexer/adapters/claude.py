@@ -263,34 +263,27 @@ def install(home: Path) -> list[str]:
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
 
-    # PostToolUse: set the .pending_capture flag after any Write/Edit so the Stop hook
-    # (end-of-turn) knows files were written this turn and should remind Claude to store decisions.
+    # PostToolUse: set the .pending_capture flag after any Write/Edit. This is the single
+    # deterministic "files changed this turn" signal. It is consumed by the next
+    # UserPromptSubmit (anchor_cmd), which injects the capture reminder at the start of the
+    # next prompt - a non-interrupting moment. No Stop hook: end-of-turn prompting added
+    # latency + tokens and depended on model behavior for no functional gain (the anchor
+    # already delivers the same reminder deterministically).
     put = hooks.setdefault("PostToolUse", [])
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
 
-    # Stop hook: fires at end of turn while Claude can still call tools. Uses
-    # hookSpecificOutput.additionalContext so the turn continues and Claude can
-    # actually call update_context/get_context before finishing.
-    # Clears the flag so the UserPromptSubmit fallback stays silent.
-    st = hooks.setdefault("Stop", [])
-    if not _in_groups(st, ".pending_capture"):
-        stop_cmd = (
-            "FLAG=\"$HOME/.contexer/.pending_capture\"; "
-            "if [ -f \"$FLAG\" ]; then "
-            "rm -f \"$FLAG\"; "
-            "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"Stop\", "
-            "\"additionalContext\": \"Contexer: you wrote or edited files this turn. "
-            "Before finishing: (1) call get_context to check if a related decision already "
-            "exists - if it does, use its short id as replace_id to update it in place; "
-            "(2) if no related decision exists, call update_context without replace_id. "
-            "If update_context is deferred, first call "
-            "ToolSearch(query='select:mcp__contexer__update_context').\"}}'; "
-            "else echo '{}'; fi"
-            f" # {_HOOK_SENTINEL}"
-        )
-        st.append({"hooks": [{"type": "command", "command": stop_cmd}]})
+    # Retire any previously-installed Stop hook: end-of-turn prompting is replaced by the
+    # deterministic PostToolUse flag + next-prompt anchor reminder. The Stop entry remains
+    # in the uninstall marker table so reinstall strips an old Stop hook from settings.json.
+    st = hooks.get("Stop", [])
+    new_st = _filter_groups(st, [".pending_capture", _HOOK_SENTINEL])
+    if new_st != st:
+        if new_st:
+            hooks["Stop"] = new_st
+        else:
+            hooks.pop("Stop", None)
 
     pc = hooks.setdefault("PreCompact", [])
     # Migrate: old PreCompact only echoed a reminder; replace with the sync variant
