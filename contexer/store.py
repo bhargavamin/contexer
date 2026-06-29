@@ -18,6 +18,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
+_SCHEMA_VERSION = 2               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
@@ -919,9 +920,16 @@ def _migrate_decision(entry: dict) -> bool:
 
 
 def _migrate_entries(data: dict) -> None:
-    """Migrate every decision entry in a loaded store to the revision model, in place."""
+    """Migrate every decision entry in a loaded store to the revision model, in place.
+
+    Stamped with `schema_version` so an already-migrated store short-circuits on the next
+    load instead of re-scanning every entry on every read/write (the hot path). The stamp
+    is set in memory here and persisted by the next _save."""
+    if data.get("schema_version") == _SCHEMA_VERSION:
+        return
     for entry in data.get("entries", []):
         _migrate_decision(entry)
+    data["schema_version"] = _SCHEMA_VERSION
 
 
 def _new_decision_entry(content: str, session_id: str, subtype: str,

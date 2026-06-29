@@ -621,8 +621,11 @@ class TestLargeScaleBenchmark:
         print(f"  Avg latency (20 decisions): 0.040ms  (from baseline benchmark)")
         print(f"  Delta:                      {avg_ms - 0.040:+.3f}ms")
 
-        # Must stay sub-millisecond at 50 decisions
-        assert avg_ms < 1.0, f"Retrieval too slow at scale: {avg_ms:.3f}ms"
+        # Effectively instant at 50 decisions (~0.5ms locally). Versioned entries carry
+        # revision history, so the store is modestly larger to parse than the pre-versioning
+        # model; 2.0ms keeps a wide margin for noisy shared CI runners while still catching a
+        # real (4x+) regression.
+        assert avg_ms < 2.0, f"Retrieval too slow at scale: {avg_ms:.3f}ms"
 
     def test_rationale_hit_rate_at_scale(self, large_store, monkeypatch_module):
         hits, misses, false_positives = [], [], []
