@@ -271,24 +271,26 @@ def install(home: Path) -> list[str]:
             "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
 
     # Stop hook: fires at end of turn while Claude can still call tools. If files were written
-    # this turn (.pending_capture flag set by PostToolUse), inject a reminder to store decisions
-    # now — before the turn closes. Clears the flag so the UserPromptSubmit fallback stays silent.
+    # this turn (.pending_capture flag set by PostToolUse), inject a silent systemMessage
+    # reminding Claude to store decisions — before the turn closes. Uses systemMessage (not
+    # additionalContext) to avoid a visible banner in the Claude Code UI.
+    # Clears the flag so the UserPromptSubmit fallback stays silent.
     st = hooks.setdefault("Stop", [])
     if not _in_groups(st, ".pending_capture"):
         stop_reminder = (
-            "Contexer: you wrote or edited files this turn "
-            "\\u2014 call update_context NOW for any architecture/pattern/constraint/convention "
-            "decisions before finishing this turn. "
-            "If update_context is a deferred tool, first call: "
-            "ToolSearch(query='select:mcp__contexer__update_context')"
+            "Contexer: you wrote or edited files this turn. "
+            "Before finishing: (1) call get_context to check if a related decision already "
+            "exists — if it does, use its short id as replace_id to update it in place; "
+            "(2) if no related decision exists, call update_context without replace_id. "
+            "If update_context is deferred, first call "
+            "ToolSearch(query='select:mcp__contexer__update_context')."
         )
         st.append({"hooks": [{"type": "command",
             "command": (
                 f"FLAG=\"$HOME/.contexer/.pending_capture\"; "
                 f"if [ -f \"$FLAG\" ]; then "
                 f"rm -f \"$FLAG\"; "
-                f"echo '{{\"hookSpecificOutput\": {{\"hookEventName\": \"Stop\", "
-                f"\"additionalContext\": \"{stop_reminder}\"}}}}'; "
+                f"echo '{{\"systemMessage\": \"{stop_reminder}\"}}'; "
                 f"else echo '{{}}'; fi # {_HOOK_SENTINEL}"
             )}]})
 
