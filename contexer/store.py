@@ -721,52 +721,6 @@ def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tup
         return entry["id"], content
 
 
-_QUESTION_STARTS = {
-    "what", "how", "why", "when", "where", "who", "which",
-    "is", "are", "can", "does", "do", "will", "would", "could", "should",
-}
-
-# Prompts starting with these are answers to questions or acknowledgements, not task descriptions
-_ANSWER_STARTS = {
-    "no", "yes", "nope", "yep", "yeah", "nah", "ok", "okay",
-    "not", "none", "never", "nope", "sure", "correct", "right",
-    "nowhere", "nothing", "neither",
-}
-
-def _is_task(content: str) -> bool:
-    stripped = content.strip()
-    words = stripped.lower().split()
-    if len(words) < 5:
-        return False
-    if stripped.endswith("?") and len(words) < 20:
-        return False
-    if words[0] in _QUESTION_STARTS and len(words) < 12:
-        return False
-    if words[0] in _ANSWER_STARTS:
-        return False
-    return True
-
-
-def capture_task(repo_path: str, description: str, session_id: str) -> str | None:
-    if not _is_task(description):
-        return None
-    with _store_lock(_slug(repo_path)):
-        data = _load(repo_path)
-        # keep only decisions — one task slot is enough for "last task" context
-        data["entries"] = [e for e in data["entries"] if e["type"] != "task"]
-        entry = {
-            "id": str(uuid.uuid4()),
-            "type": "task",
-            "content": description,
-            "session_id": session_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        data["entries"].append(entry)
-        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-        _save(repo_path, data)
-        return entry["id"]
-
-
 def _normalize_content(content: str) -> str:
     """Strip whitespace, collapse internal runs, capitalize first character."""
     normalized = " ".join(content.split())
@@ -1842,14 +1796,6 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         return "No context stored for this repository."
 
     lines = [f"# Context for {repo_path}\n"]
-
-    if not entry_type:
-        tasks = [e for e in entries if e["type"] == "task"]
-        if tasks:
-            last = tasks[-1]
-            lines.append(f"## Last task ({last['timestamp'][:10]})")
-            lines.append(last["content"])
-            lines.append("")
 
     decisions = [e for e in entries if e["type"] == "decision"]
     # Always exclude ignored decisions — they are permanently suppressed.

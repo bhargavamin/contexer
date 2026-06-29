@@ -133,9 +133,6 @@ def install(home: Path) -> list[str]:
         "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")\"}}'; "
         "else echo '{}'; fi"
     )
-    cap_task = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-                f'"{python}" -c "from contexer.adapters import claude; import sys; '
-                'print(claude.capture_task(sys.argv[1], sys.stdin.read()))" "$REPO"')
     cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO"')
@@ -200,14 +197,15 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, ".pending_capture"):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...", "command": anchor_cmd}]})
-    # `once` mirrors Claude. If Codex ignores it these degrade gracefully: the bootstrap
-    # offer is a silent {} once context exists, and capture_task just tracks the latest prompt.
+    # `once` mirrors Claude. If Codex ignores it the bootstrap offer degrades gracefully
+    # to a silent {} once context exists.
     if not base._in_groups(ups, "get_bootstrap_context_prompt"):
         ups.append({"hooks": [{"type": "command", "once": True,
             "statusMessage": "Checking bootstrap context...", "command": _py(boot_code)}]})
-    if not base._in_groups(ups, "claude.capture_task"):
-        ups.append({"hooks": [{"type": "command", "once": True,
-            "statusMessage": "Capturing task...", "command": cap_task}]})
+    # Retire any previously-installed task-capture hook (the feature was removed).
+    if base._in_groups(ups, "claude.capture_task"):
+        ups = base._filter_groups(ups, ["claude.capture_task"])
+        hooks["UserPromptSubmit"] = ups
     if not base._in_groups(ups, "claude.capture_constraint"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for constraint directives...", "command": cap_con}]})

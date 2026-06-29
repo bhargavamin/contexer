@@ -106,14 +106,12 @@ def before_agent(repo_path: str, raw: str) -> str:
             contexts.append(_REMINDER)
 
         # Fix 5: when no stable session identity exists, always run bootstrap
-        # (idempotent — returns empty when context already stored) but skip
-        # capture_task since we cannot reliably gate it to the first prompt only.
+        # (idempotent - returns empty when context already stored).
         marker = _session_marker(raw)
         if marker is None or not marker.exists():
             payload = store.bootstrap_prompt_payload(repo, prompt)
             contexts.append(payload.get("context", ""))
             if marker is not None:
-                store.capture_task(repo, prompt, session_id)
                 marker.parent.mkdir(mode=0o700, exist_ok=True)
                 marker.touch()
 

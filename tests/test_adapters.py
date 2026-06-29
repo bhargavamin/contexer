@@ -105,15 +105,6 @@ class TestClaudeFormatters:
 
 
 class TestClaudeCaptureEntrypoints:
-    def test_capture_task_stores_and_prints_empty(self, tmp_repo):
-        raw = _json.dumps({"prompt": "Refactor the auth module to use JWT", "session_id": "s1"})
-        assert claude.capture_task(tmp_repo, raw) == "{}"
-        assert "Last task" in store.get_context(tmp_repo)
-
-    def test_capture_task_ignores_question(self, tmp_repo):
-        raw = _json.dumps({"prompt": "what is this repo?", "session_id": "s1"})
-        assert claude.capture_task(tmp_repo, raw) == "{}"
-
     def test_capture_constraint_stores_and_acks(self, tmp_repo):
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         out = _json.loads(claude.capture_constraint(tmp_repo, raw))
@@ -134,7 +125,6 @@ class TestClaudeCaptureEntrypoints:
         assert claude.rationale(populated_repo, raw) == "{}"
 
     def test_entrypoints_never_raise_on_bad_stdin(self, tmp_repo):
-        assert claude.capture_task(tmp_repo, "garbage") == "{}"
         assert claude.capture_constraint(tmp_repo, "garbage") == "{}"
         assert claude.rationale(tmp_repo, "garbage") == "{}"
 
@@ -187,12 +177,12 @@ class TestCursorEntrypoints:
         cursor.session_start("", raw)
         assert rule.read_text() == "my own rule, hands off"
 
-    def test_capture_task_anchors_current_repo(self, tmp_repo):
+    def test_capture_anchors_current_repo(self, tmp_repo):
         # Every beforeSubmitPrompt must refresh the pointer so bare get_context({}) resolves.
         from contexer import store
-        raw = _json.dumps({"prompt": "Refactor auth to use JWT tokens", "session_id": "s1",
+        raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1",
                            "workspace_roots": [tmp_repo]})
-        cursor.capture_task("", raw)
+        cursor.capture_constraint("", raw)
         assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
 
     def test_capture_does_not_anchor_config_dir(self, tmp_repo, monkeypatch):
@@ -201,16 +191,9 @@ class TestCursorEntrypoints:
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
         (store.STORE_DIR / ".current_repo").write_text(tmp_repo)  # a sane prior value
         raw = _json.dumps({"prompt": "hi", "workspace_roots": [str(Path.home() / ".claude")]})
-        cursor.capture_task("", raw)
+        cursor.capture_constraint("", raw)
         # config-dir workspace must never overwrite the pointer
         assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
-
-    def test_capture_task_writes_and_passes_through(self, tmp_repo):
-        from contexer import store
-        raw = _json.dumps({"prompt": "Refactor auth to use JWT tokens", "session_id": "s1",
-                           "workspace_roots": [tmp_repo]})
-        assert _json.loads(cursor.capture_task(tmp_repo, raw)) == {"continue": True}
-        assert "Last task" in store.get_context(tmp_repo)
 
     def test_capture_constraint_writes_and_passes_through(self, tmp_repo):
         from contexer import store
@@ -220,6 +203,5 @@ class TestCursorEntrypoints:
             or "conventional commits" in store.get_context(tmp_repo, entry_type="constraint").lower()
 
     def test_entrypoints_never_raise(self, tmp_repo):
-        assert _json.loads(cursor.capture_task(tmp_repo, "garbage")) == {"continue": True}
         assert _json.loads(cursor.capture_constraint(tmp_repo, "garbage")) == {"continue": True}
         assert _json.loads(cursor.session_start("", "garbage"))  # returns dict, no raise

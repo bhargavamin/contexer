@@ -41,7 +41,6 @@ Run in this order when verifying a significant change:
 
 **`test_store.py`** — unit tests for every function in `store.py`:
 - `_is_novel`, `_passes_filter` — novelty filter (70% token overlap)
-- `_is_task`, `capture_task` — task capture and bootstrap-answer rejection
 - `_is_prescriptive_constraint` — directive detection (always/never/ensure/make sure/from now on)
 - `_sanitize_directive` — profanity stripping, frustration opener removal, trailing filler, caps normalisation, sarcasm exclusion
 - `capture_user_constraint` — full pipeline: detect → sanitize → store (returns tuple)

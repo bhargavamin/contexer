@@ -36,7 +36,6 @@ class TestCursorInstall:
         cursor.install(home)
         hooks = json.loads((home / ".cursor" / "hooks.json").read_text())
         cmds = [h["command"] for h in hooks["hooks"]["beforeSubmitPrompt"]]
-        assert any("cursor.capture_task" in c for c in cmds)
         assert any("cursor.capture_constraint" in c for c in cmds)
 
     def test_uses_current_python(self, home):
@@ -50,7 +49,7 @@ class TestCursorInstall:
         cursor.install(home)
         hooks = json.loads((home / ".cursor" / "hooks.json").read_text())
         cmds = [h["command"] for h in hooks["hooks"]["beforeSubmitPrompt"]]
-        assert sum("cursor.capture_task" in c for c in cmds) == 1
+        assert sum("cursor.capture_constraint" in c for c in cmds) == 1
 
     def test_does_not_auto_approve_mcp_tools(self, home):
         # Contexer must not silently pre-approve its own MCP tools — Cursor should still
