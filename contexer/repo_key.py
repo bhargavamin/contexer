@@ -1,0 +1,64 @@
+"""Canonical repo-key derivation.
+
+Shared byte-for-byte with the TypeScript sibling (packages/db/src/repoKey.ts):
+the same remote URL must map to the same key in both languages so a decision
+pushed from the local Python store and one pushed from the TS teams app collide
+on the same repo. Never falls back to a filesystem path - a missing/blank
+remote yields None.
+"""
+
+_SCHEMES = ("https://", "http://", "git://", "ssh://")
+
+
+def canonical_repo_key(remote: str | None) -> str | None:
+    """Normalize a git remote URL to "host/owner/repo" (or None).
+
+    None / empty / whitespace-only returns None. Mirrors the TS reference:
+    strips scheme + userinfo, parses scp-like ``host:path`` (including the
+    user-less ``github.com:owner/repo`` shorthand), drops a trailing ``.git``
+    and slash, and lowercases host + final result. Subgroup paths (>2 segments)
+    are preserved.
+    """
+    if remote is None:
+        return None
+    remote = remote.strip()
+    if not remote:
+        return None
+
+    lowered = remote.lower()
+    scheme = next((s for s in _SCHEMES if lowered.startswith(s)), None)
+    if scheme is not None:
+        # scheme://[userinfo@]host/path - host/path split on the first '/'.
+        rest = _strip_userinfo(remote[len(scheme):], "/")
+        host, _, path = rest.partition("/")
+    else:
+        # scp-like: [userinfo@]host:path - host/path split on the first ':'.
+        # Covers git@host:owner/repo AND the user-less github.com:owner/repo.
+        rest = _strip_userinfo(remote, ":")
+        host, _, path = rest.partition(":")
+
+    host = host.lower()
+    path = path.lstrip("/")
+    result = host if path == "" else host + "/" + path
+
+    if result.lower().endswith(".git"):
+        result = result[: -len(".git")]
+    result = result.rstrip("/")
+
+    return result.lower()
+
+
+def _strip_userinfo(s: str, delim: str) -> str:
+    """Drop a leading "user[:secret]@" credential that precedes the host.
+
+    The '@' counts as userinfo only when it appears before ``delim`` (the
+    host/path boundary), matching the TS reference exactly. This also removes
+    the ``git@`` in ``git@host:...`` / ``ssh://git@host/...``.
+    """
+    at = s.find("@")
+    if at == -1:
+        return s
+    boundary = s.find(delim)
+    if boundary == -1 or at < boundary:
+        return s[at + 1:]
+    return s
