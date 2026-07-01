@@ -33,6 +33,8 @@ Flags:
   -h, --help      Same as `help`.
   --target NAME   With install/uninstall/status: claude, cursor, codex, gemini, or all.
   --purge         With `uninstall`: also delete ~/.contexer/ (stored context).
+                  Prompts for confirmation unless --yes is given.
+  -y, --yes       Skip the --purge confirmation prompt (for unattended use).
 
 To upgrade the program itself (rebuild the binary):
   uv tool install --reinstall contexer
@@ -98,10 +100,27 @@ def install(rest: list | None = None) -> None:
     print("Done. Restart your AI assistant and open any git repo to activate Contexer.")
 
 
-def uninstall(rest: list | None = None, purge: bool = False) -> None:
+def _confirm_purge(store_dir: Path) -> bool:
+    """Guard the destructive --purge: require an explicit 'yes'. In a non-interactive
+    context (no TTY) refuse rather than risk an accidental delete of stored context —
+    use --yes to purge unattended."""
+    if not sys.stdin.isatty():
+        print("  Refusing to purge non-interactively — re-run with --yes to confirm.")
+        return False
+    print(f"  WARNING: this permanently deletes {store_dir} and ALL stored context.")
+    try:
+        reply = input("  Type 'yes' to confirm, anything else to cancel: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return reply in ("yes", "y")
+
+
+def uninstall(rest: list | None = None, purge: bool = False, assume_yes: bool = False) -> None:
     home = Path.home()
     _rest = rest or []
     _purge = purge or ("--purge" in _rest)
+    _assume_yes = assume_yes or ("--yes" in _rest) or ("-y" in _rest)
     for adapter in _resolve_targets(_rest):
         for line in adapter.uninstall(home):
             print(line)
@@ -109,12 +128,15 @@ def uninstall(rest: list | None = None, purge: bool = False) -> None:
     store_dir = home / ".contexer"
     print()
     if _purge:
-        if store_dir.exists():
+        if not store_dir.exists():
+            print(f"  - No store to purge ({store_dir} absent)")
+            print("Uninstall complete.")
+        elif _assume_yes or _confirm_purge(store_dir):
             shutil.rmtree(store_dir)
             print(f"  ✓ Removed {store_dir} (stored context purged)")
+            print("Uninstall complete.")
         else:
-            print(f"  - No store to purge ({store_dir} absent)")
-        print("Uninstall complete.")
+            print("Uninstall complete. Context store (~/.contexer/) was not removed.")
     else:
         print("Uninstall complete. Context store (~/.contexer/) was not removed.")
         print("To delete stored context too: contexer uninstall --purge")
