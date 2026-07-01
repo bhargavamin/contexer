@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/bhargavamin/contexer/compare/v0.11.0...v0.12.0) (2026-06-30)
+
+
+### Features
+
+* **sync:** config.toml profile loader + canonical repo-key ([#60](https://github.com/bhargavamin/contexer/issues/60)) ([26851eb](https://github.com/bhargavamin/contexer/commit/26851eb363c02c173cd82d6d890b487b24166eaa))
+
 ## [0.11.0](https://github.com/bhargavamin/contexer/compare/v0.10.0...v0.11.0) (2026-06-29)
 
 
