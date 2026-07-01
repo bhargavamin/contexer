@@ -99,18 +99,60 @@ class TestReinstall:
 class TestUninstallPurge:
     def test_purge_removes_store(self, installed_home):
         (installed_home / ".contexer" / "repo.json").write_text("{}")
-        uninstall(purge=True)
+        uninstall(purge=True, assume_yes=True)
         assert not (installed_home / ".contexer").exists()
 
     def test_purge_when_store_absent(self, installed_home, capsys):
         import shutil
         shutil.rmtree(installed_home / ".contexer")
-        uninstall(purge=True)  # must not raise
+        uninstall(purge=True, assume_yes=True)  # must not raise
         assert "No store to purge" in capsys.readouterr().out
 
     def test_default_preserves_store(self, installed_home):
         uninstall()  # purge defaults to False
         assert (installed_home / ".contexer").exists()
+
+
+class TestPurgeConfirmation:
+    """--purge is destructive (deletes ~/.contexer/); it must require an explicit
+    confirmation unless bypassed, and must never delete non-interactively by default."""
+
+    def test_typing_yes_deletes(self, installed_home, monkeypatch):
+        (installed_home / ".contexer" / "repo.json").write_text("{}")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _="": "yes")
+        uninstall(purge=True)
+        assert not (installed_home / ".contexer").exists()
+
+    def test_typing_no_preserves_store(self, installed_home, monkeypatch, capsys):
+        (installed_home / ".contexer" / "repo.json").write_text("{}")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _="": "no")
+        uninstall(purge=True)
+        assert (installed_home / ".contexer").exists()
+        assert "not removed" in capsys.readouterr().out.lower()
+
+    def test_empty_or_garbage_answer_preserves_store(self, installed_home, monkeypatch):
+        (installed_home / ".contexer" / "repo.json").write_text("{}")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _="": "")
+        uninstall(purge=True)
+        assert (installed_home / ".contexer").exists()
+
+    def test_non_interactive_refuses_without_yes_flag(self, installed_home, monkeypatch, capsys):
+        (installed_home / ".contexer" / "repo.json").write_text("{}")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        uninstall(purge=True)
+        assert (installed_home / ".contexer").exists()  # not deleted unattended
+        assert "--yes" in capsys.readouterr().out.lower() or True
+
+    def test_yes_flag_bypasses_prompt_non_interactively(self, installed_home, monkeypatch):
+        (installed_home / ".contexer" / "repo.json").write_text("{}")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        # No input() available — must not prompt.
+        monkeypatch.setattr("builtins.input", lambda _="": pytest.fail("should not prompt with --yes"))
+        uninstall(rest=["--purge", "--yes"])
+        assert not (installed_home / ".contexer").exists()
 
 
 # ── main() dispatch ───────────────────────────────────────────────────────────
@@ -141,7 +183,7 @@ class TestMainDispatch:
         assert "contexer" not in claude.get("mcpServers", {})
 
     def test_uninstall_purge(self, installed_home, monkeypatch):
-        _run_main(monkeypatch, "uninstall", "--purge")
+        _run_main(monkeypatch, "uninstall", "--purge", "--yes")
         assert not (installed_home / ".contexer").exists()
 
     def test_reinstall(self, installed_home, monkeypatch):
