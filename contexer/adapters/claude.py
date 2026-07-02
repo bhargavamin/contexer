@@ -22,7 +22,7 @@ NAME = "claude"
 
 # Remote teams MCP endpoint. Prod HTTPS by default; localhost only via the explicit
 # CONTEXER_ENV=local developer opt-in (never registered for a normal user).
-CONTEXER_TEAMS_PROD = "https://dev.contexer.ai/mcp"
+CONTEXER_TEAMS_PROD = "https://mcp.dev.contexer.ai/mcp"
 CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
 
 

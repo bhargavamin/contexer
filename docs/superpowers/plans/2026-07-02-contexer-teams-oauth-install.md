@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Default remote endpoint MUST be `https://dev.contexer.ai/mcp` (HTTPS). Never register localhost for a normal user.
+- Default remote endpoint MUST be `https://mcp.dev.contexer.ai/mcp` (HTTPS). Never register localhost for a normal user.
 - localhost (`http://localhost:8080/mcp`) only via explicit `CONTEXER_ENV=local`, off by default.
 - Never write a token/secret into config; the entry has exactly `{"type","url"}`.
 - Idempotent install/uninstall; merge into existing config, never clobber unrelated `mcpServers` keys or the local `contexer` stdio entry.
@@ -28,7 +28,7 @@
 - Test: `tests/test_install.py`
 
 **Interfaces:**
-- Produces: `contexer.adapters.claude._teams_url() -> str` — returns `"https://dev.contexer.ai/mcp"` unless `CONTEXER_ENV == "local"`, then `"http://localhost:8080/mcp"`. Module constants `CONTEXER_TEAMS_PROD` and `CONTEXER_TEAMS_LOCAL`.
+- Produces: `contexer.adapters.claude._teams_url() -> str` — returns `"https://mcp.dev.contexer.ai/mcp"` unless `CONTEXER_ENV == "local"`, then `"http://localhost:8080/mcp"`. Module constants `CONTEXER_TEAMS_PROD` and `CONTEXER_TEAMS_LOCAL`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -41,7 +41,7 @@ from contexer.adapters import claude
 class TestTeamsUrl:
     def test_defaults_to_prod(self, monkeypatch):
         monkeypatch.delenv("CONTEXER_ENV", raising=False)
-        assert claude._teams_url() == "https://dev.contexer.ai/mcp"
+        assert claude._teams_url() == "https://mcp.dev.contexer.ai/mcp"
 
     def test_local_env_selects_localhost(self, monkeypatch):
         monkeypatch.setenv("CONTEXER_ENV", "local")
@@ -49,7 +49,7 @@ class TestTeamsUrl:
 
     def test_unknown_env_falls_back_to_prod(self, monkeypatch):
         monkeypatch.setenv("CONTEXER_ENV", "staging")
-        assert claude._teams_url() == "https://dev.contexer.ai/mcp"
+        assert claude._teams_url() == "https://mcp.dev.contexer.ai/mcp"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -76,7 +76,7 @@ Immediately after `NAME = "claude"` (line 20), add:
 ```python
 # Remote teams MCP endpoint. Prod HTTPS by default; localhost only via the explicit
 # CONTEXER_ENV=local developer opt-in (never registered for a normal user).
-CONTEXER_TEAMS_PROD = "https://dev.contexer.ai/mcp"
+CONTEXER_TEAMS_PROD = "https://mcp.dev.contexer.ai/mcp"
 CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
 
 
@@ -118,7 +118,7 @@ class TestTeamsRegistration:
         monkeypatch.delenv("CONTEXER_ENV", raising=False)
         install()
         servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"] == {"type": "http", "url": "https://dev.contexer.ai/mcp"}
+        assert servers["contexer-teams"] == {"type": "http", "url": "https://mcp.dev.contexer.ai/mcp"}
 
     def test_local_env_registers_localhost(self, clean_home, monkeypatch):
         monkeypatch.setenv("CONTEXER_ENV", "local")
@@ -135,7 +135,7 @@ class TestTeamsRegistration:
     def test_reinstall_idempotent(self, installed_home):
         install()  # second install
         servers = json.loads((installed_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"] == {"type": "http", "url": "https://dev.contexer.ai/mcp"}
+        assert servers["contexer-teams"] == {"type": "http", "url": "https://mcp.dev.contexer.ai/mcp"}
 
     def test_preserves_unrelated_servers(self, clean_home):
         cfg = clean_home / ".claude.json"
@@ -299,7 +299,7 @@ class TestTeamsStatus:
     def test_status_shows_teams_registered(self, installed_home):
         joined = "\n".join(claude.status_lines(installed_home))
         assert "teams (remote)" in joined
-        assert "dev.contexer.ai" in joined
+        assert "mcp.dev.contexer.ai" in joined
 
     def test_status_shows_teams_not_registered_on_clean(self, clean_home):
         joined = "\n".join(claude.status_lines(clean_home))

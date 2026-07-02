@@ -8,7 +8,7 @@ MCP server so the MCP client's *native* OAuth completes on first use. Claude Cod
 ## Goal
 
 After `contexer install`, a brand-new user has the remote Contexer MCP server registered
-in Claude Code pointing at `https://dev.contexer.ai/mcp`, and the client's **native MCP
+in Claude Code pointing at `https://mcp.dev.contexer.ai/mcp`, and the client's **native MCP
 OAuth** completes a browser sign-in on first use — no flags, no transport shim, no token
 minting or pasting. Once authenticated, the already-running contexer-teams web app can show
 that user's context.
@@ -46,7 +46,7 @@ The existing local entry is untouched; install adds exactly one sibling key:
 ```json
 "mcpServers": {
   "contexer":       { "type": "stdio", "command": "/Users/<you>/.local/bin/contexer" },
-  "contexer-teams": { "type": "http",  "url": "https://dev.contexer.ai/mcp" }
+  "contexer-teams": { "type": "http",  "url": "https://mcp.dev.contexer.ai/mcp" }
 }
 ```
 
@@ -63,7 +63,7 @@ A single place to change the prod URL. In `contexer/adapters/claude.py` (or a sh
 module-level constant):
 
 ```python
-CONTEXER_TEAMS_PROD  = "https://dev.contexer.ai/mcp"
+CONTEXER_TEAMS_PROD  = "https://mcp.dev.contexer.ai/mcp"
 CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
 
 def _teams_url() -> str:
