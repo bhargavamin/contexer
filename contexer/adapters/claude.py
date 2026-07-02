@@ -1,5 +1,6 @@
 """Claude Code integration adapter."""
 import json
+import os
 import re
 import shutil
 import sys
@@ -18,6 +19,16 @@ from contexer.adapters.base import (
 )
 
 NAME = "claude"
+
+# Remote teams MCP endpoint. Prod HTTPS by default; localhost only via the explicit
+# CONTEXER_ENV=local developer opt-in (never registered for a normal user).
+CONTEXER_TEAMS_PROD = "https://dev.contexer.ai/mcp"
+CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
+
+
+def _teams_url() -> str:
+    return CONTEXER_TEAMS_LOCAL if os.environ.get("CONTEXER_ENV") == "local" else CONTEXER_TEAMS_PROD
+
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall

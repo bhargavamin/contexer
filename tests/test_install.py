@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from contexer.adapters import claude
 from contexer.cli import install, uninstall
 
 
@@ -357,3 +358,17 @@ class TestRepoPointerNotPoisoned:
         git_cmds = [c for c in cmds if "git rev-parse" in c]
         assert git_cmds
         assert all("|| true" in c for c in git_cmds)
+
+
+class TestTeamsUrl:
+    def test_defaults_to_prod(self, monkeypatch):
+        monkeypatch.delenv("CONTEXER_ENV", raising=False)
+        assert claude._teams_url() == "https://dev.contexer.ai/mcp"
+
+    def test_local_env_selects_localhost(self, monkeypatch):
+        monkeypatch.setenv("CONTEXER_ENV", "local")
+        assert claude._teams_url() == "http://localhost:8080/mcp"
+
+    def test_unknown_env_falls_back_to_prod(self, monkeypatch):
+        monkeypatch.setenv("CONTEXER_ENV", "staging")
+        assert claude._teams_url() == "https://dev.contexer.ai/mcp"
