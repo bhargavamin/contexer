@@ -195,13 +195,33 @@ def install(home: Path) -> list[str]:
         "if [ -f \"$FLAG\" ]; then "
         "rm -f \"$FLAG\"; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
-        "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
-        "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
-        "(2) any EXISTING approach you applied again (same or similar content is fine — "
-        "the server deduplicates and tracks repetition without storing a duplicate). "
-        "If update_context appears as a deferred tool, first call: "
-        "ToolSearch(query='select:mcp__contexer__update_context')\"}}'; "
+        "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing. "
+        "(1) NEW decisions that STUCK: call update_context with the full reasoning. "
+        "(2) A PROVISIONAL decision from earlier this session (e.g. from an approved plan) that HELD: "
+        "approve it; that CHANGED during implementation: call update_context with the new value "
+        "(it supersedes the old revision); that was ABANDONED: mark it ignored via approve_decision. "
+        "(3) Do NOT store approaches you tried and reverted, and keep your own unratified proposals "
+        "provisional (created_by=ai) rather than storing them as settled fact. "
+        "The server deduplicates and tracks repetition. "
+        "If update_context appears as a deferred tool, first call "
+        "ToolSearch(query=select:mcp__contexer__update_context).\"}}'; "
         "else echo '{}'; fi"
+        f" # {_HOOK_SENTINEL}"
+    )
+
+    # ExitPlanMode: fires PostToolUse when the user approves a plan. Approval continues execution
+    # in the SAME flow - there is no fresh UserPromptSubmit to consume a .pending_capture flag - so
+    # we inject the capture reminder DIRECTLY here. Plan decisions are captured PROVISIONAL
+    # (created_by=plan -> suggested, never authoritative) and reconciled at the next prompt's anchor.
+    plan_cmd = (
+        "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", "
+        "\"additionalContext\": \"Contexer: plan approved. Capture each key decision in the plan now "
+        "via update_context with created_by=plan - architecture choices, constraints, conventions, "
+        "including the REASONING not just the conclusion. They are stored as PROVISIONAL (suggested), "
+        "not authoritative, until implementation validates them; you will reconcile them (approve / "
+        "update / ignore) at the next prompt. "
+        "If update_context appears as a deferred tool, first call "
+        "ToolSearch(query=select:mcp__contexer__update_context).\"}}'"
         f" # {_HOOK_SENTINEL}"
     )
 
@@ -258,6 +278,10 @@ def install(home: Path) -> list[str]:
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
+    # Plan-approval capture: separate matcher on ExitPlanMode, injects the reminder directly.
+    if not _in_groups(put, "plan approved"):
+        put.append({"matcher": "ExitPlanMode", "hooks": [{"type": "command",
+            "command": plan_cmd}]})
 
     # Retire any previously-installed Stop hook: end-of-turn prompting is replaced by the
     # deterministic PostToolUse flag + next-prompt anchor reminder. The Stop entry remains
@@ -303,6 +327,12 @@ def install(home: Path) -> list[str]:
     # Replace old anchor hook (without .pending_capture logic) with new one
     if _in_groups(ups, ".current_repo") and not _in_groups(ups, ".pending_capture"):
         ups = _filter_groups(ups, [".current_repo"])
+        hooks["UserPromptSubmit"] = ups
+
+    # Migrate: replace the old capture-only anchor text with the reconciliation-framed one
+    # (settle checkpoint: promote / revise / drop provisional decisions).
+    if _in_groups(ups, "you wrote or edited files") and not _in_groups(ups, "last turn settled"):
+        ups = _filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
 
     if not _in_groups(ups, ".pending_capture"):
@@ -396,7 +426,7 @@ def uninstall(home: Path) -> list[str]:
         event_markers = {
             "SessionStart":     ["get_session_start_context", _HOOK_SENTINEL],
             "SessionEnd":       ["sync_memory", _HOOK_SENTINEL],
-            "PostToolUse":      [".pending_capture", _HOOK_SENTINEL],
+            "PostToolUse":      [".pending_capture", "plan approved", _HOOK_SENTINEL],
             "Stop":             [".pending_capture", _HOOK_SENTINEL],
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
