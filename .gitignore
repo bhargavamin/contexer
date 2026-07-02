@@ -38,3 +38,5 @@ package-lock.json
 node_modules/
 
 .coverage
+# Planning artifacts — never commit specs/plans (kept locally only)
+docs/superpowers/
