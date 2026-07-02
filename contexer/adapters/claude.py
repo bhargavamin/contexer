@@ -483,9 +483,12 @@ def status_lines(home: Path) -> list[str]:
     """Diagnostic lines for `contexer status`: MCP/hooks state for the Claude target."""
     mcp, hooks_ok = _mcp_and_hooks_ok(home)
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
+    teams = _load_safe(home / ".claude.json").get("mcpServers", {}).get("contexer-teams")
+    teams_url = teams.get("url") if isinstance(teams, dict) else None
     return [
         "  [claude]",
         f"    MCP server: {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
+        f"    teams (remote): {'registered → ' + teams_url if teams_url else 'NOT registered'}",
         f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
     ]
 

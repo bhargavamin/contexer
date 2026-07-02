@@ -429,3 +429,15 @@ class TestTeamsUninstall:
         assert servers.get("other") == {"type": "stdio", "command": "x"}
         assert "contexer-teams" not in servers
         assert "contexer" not in servers
+
+
+class TestTeamsStatus:
+    def test_status_shows_teams_registered(self, installed_home):
+        joined = "\n".join(claude.status_lines(installed_home))
+        assert "teams (remote)" in joined
+        assert "dev.contexer.ai" in joined
+
+    def test_status_shows_teams_not_registered_on_clean(self, clean_home):
+        joined = "\n".join(claude.status_lines(clean_home))
+        assert "teams (remote)" in joined
+        assert "NOT registered" in joined
