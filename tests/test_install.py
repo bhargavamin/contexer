@@ -372,3 +372,41 @@ class TestTeamsUrl:
     def test_unknown_env_falls_back_to_prod(self, monkeypatch):
         monkeypatch.setenv("CONTEXER_ENV", "staging")
         assert claude._teams_url() == "https://dev.contexer.ai/mcp"
+
+
+class TestTeamsRegistration:
+    def test_registers_contexer_teams_http_prod(self, clean_home, monkeypatch):
+        monkeypatch.delenv("CONTEXER_ENV", raising=False)
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"] == {"type": "http", "url": "https://dev.contexer.ai/mcp"}
+
+    def test_local_env_registers_localhost(self, clean_home, monkeypatch):
+        monkeypatch.setenv("CONTEXER_ENV", "local")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"]["url"] == "http://localhost:8080/mcp"
+
+    def test_local_stdio_entry_untouched(self, clean_home):
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer"]["type"] == "stdio"
+        assert "command" in servers["contexer"]
+
+    def test_reinstall_idempotent(self, installed_home):
+        install()  # second install
+        servers = json.loads((installed_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"] == {"type": "http", "url": "https://dev.contexer.ai/mcp"}
+
+    def test_preserves_unrelated_servers(self, clean_home):
+        cfg = clean_home / ".claude.json"
+        cfg.write_text(json.dumps({"mcpServers": {"other": {"type": "stdio", "command": "x"}}}))
+        install()
+        servers = json.loads(cfg.read_text())["mcpServers"]
+        assert servers["other"] == {"type": "stdio", "command": "x"}
+        assert "contexer-teams" in servers
+
+    def test_no_token_or_secret_in_entry(self, clean_home):
+        install()
+        entry = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]["contexer-teams"]
+        assert set(entry.keys()) == {"type", "url"}
