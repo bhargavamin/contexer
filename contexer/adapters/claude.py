@@ -394,7 +394,8 @@ def uninstall(home: Path) -> list[str]:
     if claude_json.exists():
         claude = _load(claude_json)
         removed = claude.get("mcpServers", {}).pop("contexer", None)
-        if removed:
+        removed_teams = claude.get("mcpServers", {}).pop("contexer-teams", None)
+        if removed or removed_teams:
             _save(claude_json, claude)
             log.append("  ✓ MCP server removed from ~/.claude.json")
         else:

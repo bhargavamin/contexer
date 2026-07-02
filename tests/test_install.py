@@ -410,3 +410,22 @@ class TestTeamsRegistration:
         install()
         entry = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]["contexer-teams"]
         assert set(entry.keys()) == {"type", "url"}
+
+
+class TestTeamsUninstall:
+    def test_uninstall_removes_contexer_teams(self, installed_home):
+        uninstall()
+        servers = json.loads((installed_home / ".claude.json").read_text()).get("mcpServers", {})
+        assert "contexer-teams" not in servers
+
+    def test_uninstall_preserves_unrelated_servers(self, clean_home):
+        install()
+        cfg = clean_home / ".claude.json"
+        data = json.loads(cfg.read_text())
+        data["mcpServers"]["other"] = {"type": "stdio", "command": "x"}
+        cfg.write_text(json.dumps(data))
+        uninstall()
+        servers = json.loads(cfg.read_text()).get("mcpServers", {})
+        assert servers.get("other") == {"type": "stdio", "command": "x"}
+        assert "contexer-teams" not in servers
+        assert "contexer" not in servers
