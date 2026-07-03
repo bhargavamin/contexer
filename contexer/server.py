@@ -5,7 +5,27 @@ from mcp.server.fastmcp import FastMCP
 from contexer import store
 
 SESSION_ID = str(uuid.uuid4())
-mcp = FastMCP("contexer")
+
+# Server-level instructions travel with the MCP server itself: the host surfaces them to the
+# model on initialize (Claude Code injects them under "MCP Server Instructions"), so this guidance
+# applies in EVERY repo and session with no per-project CLAUDE.md required. This is the universal
+# channel for "use Contexer" - the hooks provide the deterministic, model-independent capture.
+_INSTRUCTIONS = (
+    "Contexer is the project's persistent engineering-decision memory. Use it in every session and "
+    "every repo without being asked.\n"
+    "CAPTURE - call update_context whenever you make, or the user states, a significant decision: a "
+    "technology or approach chosen over alternatives (subtype=architecture), a naming/structure "
+    "convention (pattern/convention), a rule like 'always X'/'never Y' (constraint), or anything that "
+    "would surprise a future session. Pass the full reasoning, not just the conclusion. The server "
+    "silently filters duplicates, so err on the side of calling it.\n"
+    "MATURITY - store observations and settled or user-ratified decisions freely, but keep your OWN "
+    "not-yet-approved proposals provisional (created_by=ai records them as 'suggested', not "
+    "authoritative) instead of writing them as fact. A decision from an approved-but-unimplemented "
+    "plan is provisional (created_by=plan) until implementation validates it, then reconciled.\n"
+    "RETRIEVE - call get_context BEFORE reading files for any question about architecture, design "
+    "rationale, constraints, patterns, or conventions."
+)
+mcp = FastMCP("contexer", instructions=_INSTRUCTIONS)
 
 
 @mcp.tool()
@@ -14,7 +34,9 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
-    created_by: 'ai' (default) | 'bootstrap' (when storing bootstrap_context results) | 'scan' (low-insight repo facts)
+    created_by: 'ai' (default) | 'plan' (a decision from a just-approved plan - stored PROVISIONAL/
+                suggested until implementation validates it, then reconciled) | 'bootstrap' (when
+                storing bootstrap_context results) | 'scan' (low-insight repo facts)
     replace_id: ID (full UUID or 8-char short id) of an existing decision this content changes.
                 Bypasses similarity filtering. Decisions are versioned, never overwritten:
                 - a trivial change (typo/formatting, or a pattern/convention) is applied in

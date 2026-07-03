@@ -454,6 +454,11 @@ def _classify_level(content: str, subtype: str, created_by: str) -> str:
     """
     if created_by in ("scan", "human"):
         return "auto"
+    if created_by == "plan":
+        # Plan intent is provisional - validated only after implementation. A plan decision is
+        # never born 'approved': constraints still need ratification, everything else is suggested.
+        # Reconciliation at the settle checkpoint promotes/revises/drops it.
+        return "approval_required" if subtype == "constraint" else "suggested"
     if subtype == "constraint":
         return "approval_required"
     if created_by == "bootstrap" and subtype in ("convention", "pattern"):

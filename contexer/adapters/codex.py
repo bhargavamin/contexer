@@ -125,12 +125,16 @@ def install(home: Path) -> list[str]:
         "if [ -f \"$FLAG\" ]; then "
         "rm -f \"$FLAG\"; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
-        "\"additionalContext\": \"Contexer: you wrote or edited files last turn "
-        "— call update_context for: (1) any NEW architecture/pattern/constraint/convention decisions; "
-        "(2) any EXISTING approach you applied again (same or similar content is fine — "
-        "the server deduplicates and tracks repetition without storing a duplicate). "
-        "If update_context appears as a deferred tool, first call: "
-        "ToolSearch(query=\\\"select:mcp__contexer__update_context\\\")\"}}'; "
+        "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing. "
+        "(1) NEW decisions that STUCK: call update_context with the full reasoning. "
+        "(2) A PROVISIONAL decision from earlier this session (e.g. from an approved plan) that HELD: "
+        "approve it; that CHANGED during implementation: call update_context with the new value "
+        "(it supersedes the old revision); that was ABANDONED: mark it ignored via approve_decision. "
+        "(3) Do NOT store approaches you tried and reverted, and keep your own unratified proposals "
+        "provisional (created_by=ai) rather than storing them as settled fact. "
+        "The server deduplicates and tracks repetition. "
+        "If update_context appears as a deferred tool, first call "
+        "ToolSearch(query=select:mcp__contexer__update_context).\"}}'; "
         "else echo '{}'; fi"
     )
     cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
@@ -194,6 +198,11 @@ def install(home: Path) -> list[str]:
             "statusMessage": "Reloading context after compact...", "command": _py(post_code)}]})
 
     ups = hooks.setdefault("UserPromptSubmit", [])
+    # Migrate: replace the old capture-only anchor text with the reconciliation-framed one
+    # (settle checkpoint: promote / revise / drop provisional decisions). Mirrors claude.py.
+    if base._in_groups(ups, "you wrote or edited files") and not base._in_groups(ups, "last turn settled"):
+        ups = base._filter_groups(ups, [".pending_capture"])
+        hooks["UserPromptSubmit"] = ups
     if not base._in_groups(ups, ".pending_capture"):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...", "command": anchor_cmd}]})
