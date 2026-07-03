@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.0](https://github.com/bhargavamin/contexer/compare/v0.12.0...v0.13.0) (2026-07-03)
+
+
+### Features
+
+* **cli:** guard uninstall --purge behind a confirmation ([00a1460](https://github.com/bhargavamin/contexer/commit/00a1460e295fbe4853225532959f46b65b07ebdf))
+* **cli:** guard uninstall --purge behind a yes/no confirmation ([cf99c48](https://github.com/bhargavamin/contexer/commit/cf99c4899abbef3f08d1a3d73cf0e621ac635aa1))
+* maturity-aware decision lifecycle + plan-mode capture ([#65](https://github.com/bhargavamin/contexer/issues/65)) ([5c31e93](https://github.com/bhargavamin/contexer/commit/5c31e937804c29e50321bf54e2846900ef740615))
+
 ## [0.12.0](https://github.com/bhargavamin/contexer/compare/v0.11.0...v0.12.0) (2026-06-30)
 
 
