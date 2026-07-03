@@ -165,13 +165,18 @@ def _anchor_current_repo(repo: str) -> None:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
+    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives +
+    promote provisional decisions validated by any new commit. This is Cursor's every-prompt
+    command hook and the only one that resolves the repo, so commit-time promotion rides here
+    (Cursor has no PostToolUse/UserPromptSubmit command hook like Claude/Codex). All three are
+    silent, fail-soft side effects; the hook still returns the pass-through."""
     try:
         repo = _repo_from(raw, repo_path)
         if repo:
             _anchor_current_repo(repo)
             store.capture_user_constraint(repo, store.prompt_from_hook_stdin(raw),
                                           store.session_from_hook_stdin(raw))
+            store.promote_on_commit(repo)
     except Exception:
         pass
     return json.dumps(format_prompt_passthrough())

@@ -112,3 +112,14 @@ def test_idempotent_noop_on_same_head(git_repo):
 def test_non_git_dir_is_safe_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
     assert store.promote_on_commit(str(tmp_path / "not-a-repo")) == {}
+
+
+def test_cursor_hook_promotes_on_commit(git_repo):
+    """Cursor rides commit-promotion on its beforeSubmitPrompt hook (capture_constraint)."""
+    from contexer.adapters import cursor
+    _, eid = store.update_decision(git_repo, "core logic lives in contexer/ledger.py", "s1",
+                                   "architecture", created_by="plan")
+    cursor.capture_constraint(git_repo, "{}")  # seed
+    _commit(git_repo, "contexer/ledger.py", "# es", "feat: ledger")
+    cursor.capture_constraint(git_repo, "{}")  # promotes
+    assert _status(git_repo, eid) == "approved"
