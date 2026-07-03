@@ -1,5 +1,6 @@
 """Claude Code integration adapter."""
 import json
+import os
 import re
 import shutil
 import sys
@@ -18,6 +19,16 @@ from contexer.adapters.base import (
 )
 
 NAME = "claude"
+
+# Remote teams MCP endpoint. Prod HTTPS by default; localhost only via the explicit
+# CONTEXER_ENV=local developer opt-in (never registered for a normal user).
+CONTEXER_TEAMS_PROD = "https://mcp.dev.contexer.ai/mcp"
+CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
+
+
+def _teams_url() -> str:
+    return CONTEXER_TEAMS_LOCAL if os.environ.get("CONTEXER_ENV") == "local" else CONTEXER_TEAMS_PROD
+
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall
@@ -241,8 +252,14 @@ def install(home: Path) -> list[str]:
         "type": "stdio",
         "command": contexer_bin,
     }
+    # Remote teams MCP server (additive; leaves the local stdio entry above intact).
+    # {type:http,url} is the shape that triggers Claude Code's native OAuth on first
+    # use (401 → DCR → browser PKCE → token). No token is written here.
+    teams_url = _teams_url()
+    claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": teams_url}
     _save(claude_json, claude)
     log.append("  ✓ MCP server registered in ~/.claude.json")
+    log.append(f"  ✓ contexer-teams (remote) registered → {teams_url}")
 
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"
@@ -407,7 +424,8 @@ def uninstall(home: Path) -> list[str]:
     if claude_json.exists():
         claude = _load(claude_json)
         removed = claude.get("mcpServers", {}).pop("contexer", None)
-        if removed:
+        removed_teams = claude.get("mcpServers", {}).pop("contexer-teams", None)
+        if removed or removed_teams:
             _save(claude_json, claude)
             log.append("  ✓ MCP server removed from ~/.claude.json")
         else:
@@ -495,9 +513,12 @@ def status_lines(home: Path) -> list[str]:
     """Diagnostic lines for `contexer status`: MCP/hooks state for the Claude target."""
     mcp, hooks_ok = _mcp_and_hooks_ok(home)
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
+    teams = _load_safe(home / ".claude.json").get("mcpServers", {}).get("contexer-teams")
+    teams_url = teams.get("url") if isinstance(teams, dict) else None
     return [
         "  [claude]",
         f"    MCP server: {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
+        f"    teams (remote): {'registered → ' + teams_url if teams_url else 'NOT registered'}",
         f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
     ]
 
