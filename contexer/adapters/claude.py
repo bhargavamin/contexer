@@ -94,6 +94,18 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+def commit_promote(repo_path: str, raw: str) -> str:
+    """UserPromptSubmit (every prompt): if HEAD advanced since last check, validate/promote
+    provisional decisions matched by the new commit. Silent by design (per the silent-operation
+    constraint) - promotions surface via get_context evidence ('Validated by commit <sha>') and
+    the SessionStart approved/suggested counts, not an injected message. Never raises."""
+    try:
+        store.promote_on_commit(store._resolve_repo(repo_path))
+    except Exception:
+        pass
+    return "{}"
+
+
 def _memory_dir(repo_path: str) -> Path | None:
     """Locate Claude Code's memory-tool dir for a repo, or None if absent.
 
@@ -231,6 +243,9 @@ def install(home: Path) -> list[str]:
     cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                f'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
+    cap_commit = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                  f'print(claude.commit_promote(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     contexer_bin = shutil.which("contexer") or "contexer"
 
@@ -369,6 +384,9 @@ def install(home: Path) -> list[str]:
     if not _in_groups(ups, "claude.rationale"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for relevant decisions...", "command": cap_rat}]})
+    if not _in_groups(ups, "claude.commit_promote"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for commit-validated decisions...", "command": cap_commit}]})
 
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for p in [
@@ -433,7 +451,7 @@ def uninstall(home: Path) -> list[str]:
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
             "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
                                  "claude.capture_task", "claude.capture_constraint", "claude.rationale",
-                                 _HOOK_SENTINEL],
+                                 "claude.commit_promote", _HOOK_SENTINEL],
         }
         for event, markers in event_markers.items():
             before = hooks.get(event, [])

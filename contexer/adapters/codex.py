@@ -143,6 +143,9 @@ def install(home: Path) -> list[str]:
     cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
+    cap_commit = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                  'print(claude.commit_promote(sys.argv[1], sys.stdin.read()))" "$REPO"')
 
     # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
@@ -221,6 +224,9 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, "claude.rationale"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for relevant decisions...", "command": cap_rat}]})
+    if not base._in_groups(ups, "claude.commit_promote"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for commit-validated decisions...", "command": cap_commit}]})
 
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.codex/hooks.json")
@@ -235,7 +241,8 @@ _EVENT_MARKERS = {
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],
     "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
-                         "claude.capture_task", "claude.capture_constraint", "claude.rationale"],
+                         "claude.capture_task", "claude.capture_constraint", "claude.rationale",
+                         "claude.commit_promote"],
 }
 
 

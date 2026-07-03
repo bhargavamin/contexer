@@ -528,6 +528,10 @@ def _compute_confidence(entry: dict) -> tuple[int, list[str]]:
         score += 5
         factors.append("Persisted to memory tool")
 
+    if entry.get("validated_by_commit"):
+        score += 25
+        factors.append(f"Validated by commit {entry['validated_by_commit'][:7]}")
+
     return min(score, 100), factors
 
 
@@ -816,6 +820,140 @@ def _append_revision(entry: dict, content: str, source: str,
     entry["updated_at"] = rev["created_at"]
     _sync_decision_cache(entry)
     return rev
+
+
+# ── Commit-time promotion ────────────────────────────────────────────────────────────────────
+# A git commit is the strongest "this decision survived and the human kept it" signal, so it
+# promotes provisional (suggested) decisions to approved. Deliberately NARROW: commits only
+# PROMOTE existing decisions, they never CAPTURE new ones (capture stays MCP-only). Detection
+# is HEAD-polling from the existing UserPromptSubmit path - no git hooks are installed, so we
+# never clobber a user's husky/lefthook setup. Matching is evidence-based (changed files +
+# message keywords), never blanket session-time promotion - see decision d46bde5f: recurrence
+# / bulk auto-promotion mislabels, so a commit must be matched to specific decisions.
+
+# Minimal stopwords so message-keyword overlap keys on distinctive terms, not filler and
+# Conventional-Commit prefixes. Not a linguistic list - just what would inflate overlap.
+_COMMIT_STOPWORDS = frozenset({
+    "the", "a", "an", "to", "of", "in", "on", "for", "and", "or", "is", "are", "was", "were",
+    "be", "this", "that", "it", "with", "as", "by", "from", "at", "we", "add", "adds", "added",
+    "fix", "fixes", "update", "updates", "use", "uses", "feat", "chore", "refactor", "test",
+    "tests", "docs", "wip", "merge", "branch", "commit", "change", "changes", "so", "not", "now",
+})
+
+
+def _distinctive(tokens: set[str]) -> set[str]:
+    return {t for t in tokens if len(t) > 2 and t not in _COMMIT_STOPWORDS}
+
+
+def _commit_match(content: str, changed: list[str], msg_tokens: set[str]) -> str | None:
+    """How strongly a commit validates a decision's content.
+      'strong' - the content names a file the commit changed (full path or basename): promote.
+      'weak'   - no file match, but content shares distinctive words with the commit message.
+      None     - no meaningful overlap.
+    File overlap is the robust signal (per d46bde5f: match on evidence, never blanket-promote);
+    message overlap is secondary and requires >=2 distinctive shared tokens covering >=30% of
+    the message's distinctive tokens, so a coincidental filler-word hit does not qualify."""
+    low = content.lower()
+    for path in changed:
+        p = path.lower()
+        base = p.rsplit("/", 1)[-1]
+        if p and p in low:
+            return "strong"
+        if len(base) > 3 and base in low:
+            return "strong"
+    ctoks = _distinctive(_tokenize(content))
+    mtoks = _distinctive(msg_tokens)
+    if ctoks and mtoks:
+        shared = ctoks & mtoks
+        if len(shared) >= 2 and len(shared) / len(mtoks) >= 0.3:
+            return "weak"
+    return None
+
+
+def _apply_commit_validation(entry: dict, sha: str, strong: bool) -> None:
+    """Attach commit-validation evidence to a decision's current revision. Strong matches also
+    promote status suggested->approved in place - content is unchanged, so no new revision is
+    created (mirrors the pending_approval bless-in-place path). Confidence is recomputed from the
+    single _compute_confidence source of truth, which now credits `validated_by_commit`."""
+    rev = _current_revision(entry)
+    if rev is None:
+        return
+    entry["validated_by_commit"] = sha
+    now = datetime.now(timezone.utc).isoformat()
+    if strong:
+        entry["status"] = "approved"
+        rev["approved_at"] = rev.get("approved_at") or now
+    entry["updated_at"] = now
+    score, factors = _compute_confidence(entry)
+    rev["confidence_score"] = score
+    rev["evidence"] = factors
+    _sync_decision_cache(entry)
+
+
+def _git_out(repo: str, args: list[str]) -> str:
+    """stdout of a git command in `repo`, or "" on any failure. Never raises."""
+    try:
+        out = subprocess.run(["git", "-C", repo, *args],
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def promote_on_commit(repo_path: str = "") -> dict:
+    """Detect a new commit (HEAD advanced since last check) and validate/promote provisional
+    decisions matched by what the commit changed. Silent, fail-soft, idempotent.
+
+    No git hooks: HEAD is polled from the existing UserPromptSubmit path. The first observation
+    per repo only seeds the marker (never promotes retroactively against unknown history). Strong
+    file-overlap matches promote suggested->approved; weak message-keyword matches attach
+    'Validated by commit <sha>' evidence but stay suggested. Only `suggested` decisions are
+    eligible - `pending_approval` keeps its explicit human gate, `approved`/`ignored` are settled.
+    Returns a summary dict (empty when nothing happened)."""
+    try:
+        repo = _resolve_repo(repo_path)
+        if not repo:
+            return {}
+        head = _git_out(repo, ["rev-parse", "HEAD"]).strip()
+        if not head:
+            return {}
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        marker = STORE_DIR / f".last_head_{_slug(repo)}"
+        last = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        if last == head:
+            return {}
+        # Advance the marker first so a mid-run failure never reprocesses the same commit.
+        marker.write_text(head, encoding="utf-8")
+        if not last:
+            return {}  # first observation: seed only, never promote retroactively
+        rng = f"{last}..{head}"
+        files_out = _git_out(repo, ["diff", "--name-only", rng])
+        if files_out:
+            msgs = _git_out(repo, ["log", "--format=%s%n%b", rng])
+        else:
+            # Range invalid (rebase / force-push / shallow) - fall back to the tip commit only.
+            files_out = _git_out(repo, ["show", "--name-only", "--format=", head])
+            msgs = _git_out(repo, ["log", "-1", "--format=%s%n%b", head])
+        changed = [f for f in files_out.splitlines() if f.strip()]
+        msg_tokens = _tokenize(msgs)
+        if not changed and not _distinctive(msg_tokens):
+            return {}
+        data = _load(repo)
+        promoted: list[str] = []
+        validated: list[str] = []
+        for entry in data.get("entries", []):
+            if entry.get("type") != "decision" or _entry_status(entry) != "suggested":
+                continue
+            kind = _commit_match(_current_content(entry), changed, msg_tokens)
+            if kind is None:
+                continue
+            _apply_commit_validation(entry, head, strong=(kind == "strong"))
+            (promoted if kind == "strong" else validated).append(entry["id"])
+        if promoted or validated:
+            _save(repo, data)
+        return {"sha": head[:7], "promoted": promoted, "validated": validated}
+    except Exception:
+        return {}
 
 
 def _migrate_decision(entry: dict) -> bool:
