@@ -50,6 +50,19 @@ def load_profile(path: Path | None = None) -> Profile:
     return Profile(mode=mode, endpoint=endpoint, token=token)
 
 
+def write_team_profile(endpoint: str, path: Path | None = None) -> None:
+    """Persist a team profile to config.toml (mode='team' + endpoint), preserving any
+    existing token. Creates the file/dir if absent — so `contexer login` self-configures and
+    the user never hand-edits config.toml."""
+    config_path = CONFIG_PATH if path is None else path
+    existing = load_profile(config_path)
+    lines = ['mode = "team"', f'endpoint = "{endpoint}"']
+    if existing.token:
+        lines.append(f'token = "{existing.token}"')
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("\n".join(lines) + "\n")
+
+
 def _opt_str(data: dict, key: str, config_path: Path) -> str | None:
     value = data.get(key)
     if value is None:

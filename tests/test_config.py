@@ -13,6 +13,23 @@ def config_path(tmp_path, monkeypatch):
     return path
 
 
+def test_write_team_profile_creates_config(config_path):
+    config.write_team_profile("http://localhost:8080/mcp")
+    prof = load_profile()
+    assert prof.mode == "team"
+    assert prof.endpoint == "http://localhost:8080/mcp"
+    assert prof.token is None
+
+
+def test_write_team_profile_preserves_existing_token(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://old/mcp"\ntoken = "keep-me"\n')
+    config.write_team_profile("http://new/mcp")
+    prof = load_profile()
+    assert prof.endpoint == "http://new/mcp"
+    assert prof.token == "keep-me"  # a pasted token survives login self-config
+
+
 def test_absent_file_is_pure_local(config_path):
     assert not config_path.exists()
     profile = load_profile()

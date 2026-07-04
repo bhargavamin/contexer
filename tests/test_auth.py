@@ -17,6 +17,7 @@ TEAM = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token=N
 @pytest.fixture
 def creds_env(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / ".contexer" / "config.toml")  # login self-configures
     return tmp_path
 
 
@@ -183,17 +184,21 @@ def test_resolve_token_refresh_failure_falls_back(creds_env, monkeypatch):
 
 # ── login / logout ───────────────────────────────────────────────────────────────
 
-def test_login_saves_creds(creds_env, monkeypatch, capsys):
-    monkeypatch.setattr(auth, "_discover", lambda issuer: {
+def _stub_oauth(monkeypatch, *, discover=None):
+    monkeypatch.setattr(auth, "_discover", discover or (lambda issuer: {
         "authorization_endpoint": "http://localhost:8080/authorize",
         "token_endpoint": "http://localhost:8080/token",
-        "registration_endpoint": "http://localhost:8080/register"})
+        "registration_endpoint": "http://localhost:8080/register"}))
     monkeypatch.setattr(auth, "_free_port", lambda: 5555)
     monkeypatch.setattr(auth, "_register", lambda re, ru: "cid-9")
     monkeypatch.setattr(auth, "_await_code", lambda url, port, state: "authcode")
     monkeypatch.setattr(auth, "_exchange_code",
                         lambda te, cid, code, ver, ru: {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600})
-    auth.login(TEAM)
+
+
+def test_login_saves_creds_and_writes_config(creds_env, monkeypatch):
+    _stub_oauth(monkeypatch)
+    auth.login(endpoint="http://localhost:8080/mcp")
     creds = auth._load_creds()
     assert creds["access_token"] == "AT"
     assert creds["refresh_token"] == "RT"
@@ -201,12 +206,32 @@ def test_login_saves_creds(creds_env, monkeypatch, capsys):
     assert creds["issuer"] == "http://localhost:8080"
     assert creds["token_endpoint"] == "http://localhost:8080/token"
     assert creds["expires_at"] > time.time()
+    # self-configured: no manual config.toml — login wrote team mode + endpoint
+    prof = config.load_profile()
+    assert prof.mode == "team"
+    assert prof.endpoint == "http://localhost:8080/mcp"
 
 
-def test_login_requires_team_mode(creds_env, capsys):
-    auth.login(config.Profile())  # local
-    assert auth._load_creds() is None
-    assert "team" in capsys.readouterr().err.lower()
+def test_login_defaults_endpoint(creds_env, monkeypatch):
+    captured = {}
+
+    def fake_discover(issuer):
+        captured["issuer"] = issuer
+        return {"authorization_endpoint": "http://x/authorize", "token_endpoint": "http://x/token",
+                "registration_endpoint": "http://x/register"}
+
+    monkeypatch.setattr(auth, "default_endpoint", lambda: "http://localhost:8080/mcp")
+    _stub_oauth(monkeypatch, discover=fake_discover)
+    auth.login()  # no endpoint -> uses default_endpoint()
+    assert captured["issuer"] == "http://localhost:8080"
+    assert config.load_profile().endpoint == "http://localhost:8080/mcp"
+
+
+def test_default_endpoint_env(monkeypatch):
+    monkeypatch.setenv("CONTEXER_ENV", "local")
+    assert auth.default_endpoint() == "http://localhost:8080/mcp"
+    monkeypatch.delenv("CONTEXER_ENV", raising=False)
+    assert auth.default_endpoint() == "https://mcp.dev.contexer.ai/mcp"
 
 
 def test_logout_deletes_creds(creds_env):
@@ -235,11 +260,18 @@ def test_from_profile_none_when_no_token(monkeypatch):
 
 def test_cli_login_dispatches(monkeypatch):
     from contexer import cli
-    called = {}
-    monkeypatch.setattr(auth, "login", lambda profile: called.setdefault("login", True))
-    monkeypatch.setattr("contexer.config.load_profile", lambda: TEAM)
+    captured = {}
+    monkeypatch.setattr(auth, "login", lambda endpoint=None: captured.update(endpoint=endpoint))
     cli.login_cmd([])
-    assert called.get("login")
+    assert "endpoint" in captured and captured["endpoint"] is None
+
+
+def test_cli_login_endpoint_flag(monkeypatch):
+    from contexer import cli
+    captured = {}
+    monkeypatch.setattr(auth, "login", lambda endpoint=None: captured.update(endpoint=endpoint))
+    cli.login_cmd(["--endpoint", "http://x/mcp"])
+    assert captured["endpoint"] == "http://x/mcp"
 
 
 def test_cli_logout_dispatches(monkeypatch, capsys):

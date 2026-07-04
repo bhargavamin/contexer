@@ -61,7 +61,8 @@ class TestStatus:
     def test_reports_installed(self, installed_home, capsys):
         status()
         out = capsys.readouterr().out
-        assert "registered" in out and "NOT registered" not in out
+        assert "MCP server: registered" in out
+        assert "teams (remote): NOT registered" in out  # native teams MCP is opt-in (CONTEXER_TEAMS_MCP)
         assert "hooks:      installed" in out
         assert "Not fully installed" not in out
 

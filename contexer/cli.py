@@ -403,11 +403,19 @@ def share_cmd(rest: list | None = None) -> None:
 
 
 def login_cmd(rest: list | None = None) -> None:
-    """`contexer login`: sign in to Contexer Teams via the browser (OAuth), storing a token
-    so `pull`/`share` work without a pasted token."""
-    from contexer import auth, config
+    """`contexer login [--endpoint URL]`: sign in to Contexer Teams via the browser (OAuth).
 
-    auth.login(config.load_profile())
+    Self-configuring — writes config.toml itself, so no manual setup. Endpoint defaults to prod
+    (or localhost under CONTEXER_ENV=local); override with --endpoint."""
+    from contexer import auth
+
+    rest = rest or []
+    endpoint = None
+    if "--endpoint" in rest:
+        i = rest.index("--endpoint")
+        if i + 1 < len(rest):
+            endpoint = rest[i + 1]
+    auth.login(endpoint=endpoint)
 
 
 def logout_cmd(rest: list | None = None) -> None:

@@ -20,12 +20,21 @@ import time
 import urllib.parse
 import urllib.request
 
-from contexer import store
+from contexer import config, store
 from contexer.config import Profile
 
 # Refresh a little before the token actually expires, to avoid a race at the boundary.
 _EXPIRY_SKEW = 60
 _HTTP_TIMEOUT = 30
+
+# Default Teams endpoint for `contexer login` (prod, or localhost under CONTEXER_ENV=local).
+_DEFAULT_ENDPOINT_PROD = "https://mcp.dev.contexer.ai/mcp"
+_DEFAULT_ENDPOINT_LOCAL = "http://localhost:8080/mcp"
+
+
+def default_endpoint() -> str:
+    """The Teams endpoint to log in against: localhost under CONTEXER_ENV=local, else prod."""
+    return _DEFAULT_ENDPOINT_LOCAL if os.environ.get("CONTEXER_ENV") == "local" else _DEFAULT_ENDPOINT_PROD
 
 
 def _creds_path():
@@ -178,13 +187,14 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
     return result["code"]
 
 
-def login(profile: Profile) -> None:
-    """Run the interactive browser OAuth flow and persist the resulting tokens."""
-    if profile.mode != "team" or not profile.endpoint:
-        print("Set mode='team' + endpoint in ~/.contexer/config.toml before logging in.",
-              file=sys.stderr)
-        return
-    issuer = _issuer_from_endpoint(profile.endpoint)
+def login(endpoint: str | None = None) -> None:
+    """Run the interactive browser OAuth flow, persist tokens, and self-configure config.toml.
+
+    `endpoint` defaults to default_endpoint() (prod, or localhost under CONTEXER_ENV=local).
+    On success this writes mode='team' + endpoint to config.toml, so the user never hand-edits
+    it — team onboarding is just `contexer install` then `contexer login`."""
+    endpoint = endpoint or default_endpoint()
+    issuer = _issuer_from_endpoint(endpoint)
     meta = _discover(issuer)
     port = _free_port()
     redirect_uri = f"http://127.0.0.1:{port}/callback"
@@ -211,7 +221,8 @@ def login(profile: Profile) -> None:
         "expires_at": time.time() + tok.get("expires_in", 3600),
         "scope": tok.get("scope", ""),
     })
-    print("Logged in to Contexer Teams. `contexer pull` / `contexer share` now use your account.")
+    config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
+    print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
 
 
 def logout() -> bool:
