@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import memory_sync, store
+from contexer import config, memory_sync, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -18,15 +18,6 @@ from contexer.adapters.base import (
 )
 
 NAME = "claude"
-
-# Remote teams MCP endpoint. Prod HTTPS by default; localhost only via the explicit
-# CONTEXER_ENV=local developer opt-in (never registered for a normal user).
-CONTEXER_TEAMS_PROD = "https://mcp.dev.contexer.ai/mcp"
-CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
-
-
-def _teams_url() -> str:
-    return CONTEXER_TEAMS_LOCAL if os.environ.get("CONTEXER_ENV") == "local" else CONTEXER_TEAMS_PROD
 
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
@@ -294,13 +285,13 @@ def install(home: Path) -> list[str]:
     # existing entry, so a plain `contexer reinstall` removes a stale one.
     register_teams = bool(os.environ.get("CONTEXER_TEAMS_MCP"))
     if register_teams:
-        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": _teams_url()}
+        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": config.default_endpoint()}
     else:
         claude["mcpServers"].pop("contexer-teams", None)  # drop a stale opt-in entry on plain install
     _save(claude_json, claude)
     log.append("  ✓ MCP server registered in ~/.claude.json")
     if register_teams:
-        log.append(f"  ✓ contexer-teams (remote MCP) registered → {_teams_url()}")
+        log.append(f"  ✓ contexer-teams (remote MCP) registered → {config.default_endpoint()}")
 
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"

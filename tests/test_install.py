@@ -376,20 +376,6 @@ class TestRepoPointerNotPoisoned:
         assert all("|| true" in c for c in git_cmds)
 
 
-class TestTeamsUrl:
-    def test_defaults_to_prod(self, monkeypatch):
-        monkeypatch.delenv("CONTEXER_ENV", raising=False)
-        assert claude._teams_url() == "https://mcp.dev.contexer.ai/mcp"
-
-    def test_local_env_selects_localhost(self, monkeypatch):
-        monkeypatch.setenv("CONTEXER_ENV", "local")
-        assert claude._teams_url() == "http://localhost:8080/mcp"
-
-    def test_unknown_env_falls_back_to_prod(self, monkeypatch):
-        monkeypatch.setenv("CONTEXER_ENV", "staging")
-        assert claude._teams_url() == "https://mcp.dev.contexer.ai/mcp"
-
-
 class TestTeamsRegistration:
     def test_not_registered_by_default(self, clean_home, monkeypatch):
         # Path B: the native contexer-teams MCP entry is opt-in only (CONTEXER_TEAMS_MCP).
@@ -403,7 +389,7 @@ class TestTeamsRegistration:
         monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
         install()
         servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"] == {"type": "http", "url": "https://mcp.dev.contexer.ai/mcp"}
+        assert servers["contexer-teams"] == {"type": "http", "url": "https://mcp.contexer.ai/mcp"}
 
     def test_opt_in_local_env_registers_localhost(self, clean_home, monkeypatch):
         monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
@@ -468,7 +454,7 @@ class TestTeamsStatus:
         install()
         joined = "\n".join(claude.status_lines(clean_home))
         assert "teams (remote)" in joined
-        assert "mcp.dev.contexer.ai" in joined
+        assert "mcp.contexer.ai" in joined
 
     def test_status_shows_teams_not_registered_on_clean(self, clean_home):
         joined = "\n".join(claude.status_lines(clean_home))
