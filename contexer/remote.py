@@ -13,9 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from contexer.config import Profile
+
+T = TypeVar("T")
 
 # push_decision returns a text message "Saved decision <id> to your personal context."
 _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
@@ -146,6 +151,57 @@ class RemoteStore:
         if getattr(result, "isError", False):
             raise RemoteStoreError(_first_text(getattr(result, "content", None)) or f"{name} failed")
         return result
+
+
+# ── Offline / auth-failure degradation (C8) ──────────────────────────────────────
+# contexer is local-first: the cloud being unreachable or rejecting the token must NEVER
+# block local capture or local reads. Callers (C4 share, C5 pull, C7 poll) run their
+# RemoteStore calls through with_local_fallback so a cloud failure degrades to local-only
+# with a single, clear warning instead of a traceback reaching the agent or a hook.
+
+_WARNED: set[str] = set()
+
+
+def reset_degradation_warnings() -> None:
+    """Clear the process-wide warn-once state (a fresh session; test isolation)."""
+    _WARNED.clear()
+
+
+def warn_once(message: str, *, key: str) -> None:
+    """Print `message` to stderr at most once per process per `key` (no per-call spam).
+
+    Uses stderr prints (contexer's convention — it has no logging module) so the warning
+    is visible to the developer without ever being injected into the agent's context."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(message, file=sys.stderr)
+
+
+def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
+    """Run a RemoteStore operation, degrading to local-only on any RemoteStoreError.
+
+    Returns `default` (and warns once per failure category) when the cloud is unreachable
+    or rejects the token — a cloud failure MUST NEVER block local capture or local reads,
+    so no RemoteStoreError bubbles out. Non-RemoteStoreError exceptions (real bugs) are NOT
+    swallowed; they propagate. `action` is a short phrase ("pull team context") used in the
+    warning so the developer knows what degraded."""
+    try:
+        return op()
+    except RemoteAuthError:
+        warn_once(
+            f"Contexer: Teams authentication failed while trying to {action} - "
+            "continuing local-only (run 'contexer login --team' or check your token).",
+            key="degrade:auth",
+        )
+        return default
+    except RemoteStoreError:
+        warn_once(
+            f"Contexer: Teams endpoint unreachable while trying to {action} - "
+            "continuing local-only.",
+            key="degrade:unreachable",
+        )
+        return default
 
 
 def _first_text(content) -> str:
