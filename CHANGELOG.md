@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.2](https://github.com/bhargavamin/contexer/compare/v0.14.1...v0.14.2) (2026-07-04)
+
+
+### Bug Fixes
+
+* **bootstrap:** answer a repo question instead of showing the setup menu ([8307387](https://github.com/bhargavamin/contexer/commit/8307387b9117eeab47012a7fc4cac19c4dc9ba36))
+* **bootstrap:** answer a repo question instead of showing the setup menu ([4751ce9](https://github.com/bhargavamin/contexer/commit/4751ce9ee98c09c66b278c48332ed1b556c2939f))
+
 ## [0.14.1](https://github.com/bhargavamin/contexer/compare/v0.14.0...v0.14.1) (2026-07-04)
 
 
