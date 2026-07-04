@@ -15,7 +15,6 @@ from contexer.adapters.base import (
     _load,
     _load_safe,
     _save,
-    _strip_stale,
 )
 
 NAME = "claude"
@@ -188,10 +187,6 @@ def install(home: Path) -> list[str]:
         "result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); "
         "print(json.dumps(result))"
     )
-    post_code = (
-        "from contexer import store; import json,sys; "
-        "print(json.dumps(store.get_post_compact_context(sys.argv[1])))"
-    )
 
     # Memory-tool sync (SessionEnd + PreCompact). Runs claude.sync_memory then emits
     # `tail` as the hook's stdout JSON. The python call prints nothing — only `tail`
@@ -337,22 +332,24 @@ def install(home: Path) -> list[str]:
             "statusMessage": "Saving decisions before compact...",
             "command": precompact_cmd}]})
 
-    poc = hooks.setdefault("PostCompact", [])
-    # Heal stale PostCompact hooks. A from-source install wrote a `uv run --directory
-    # <clone>` count-pointer whose path dies the instant the clone moves; older installs
-    # used get_context / a "reloaded after compaction" echo. The previous migration only
-    # matched one of those phrasings, so the dead from-source hook survived reinstall and
-    # ran alongside the new one. Strip any PostCompact hook that isn't the current command
-    # (matched by identity marker or the sentinel), then add the current one if absent.
-    desired_poc = _py(post_code)
-    poc = _strip_stale(poc, [
+    # PostCompact is intentionally NOT wired. A PostCompact hook cannot inject into
+    # Claude's context — the event supports no `additionalContext`, and its `systemMessage`
+    # is user-facing only (the model never sees it). The old Contexer PostCompact hook
+    # therefore did no real work: it dumped the full stored context into a visible
+    # systemMessage on every /compact — pure transcript noise — while reloading nothing.
+    # SessionStart fires again with source="compact" after compaction and silently
+    # re-injects via additionalContext (session_start_payload's normal path), so that
+    # event already owns post-compaction reload. Strip any previously-installed Contexer
+    # PostCompact hook so an upgrade goes quiet; leave foreign PostCompact hooks intact.
+    poc = hooks.get("PostCompact", [])
+    new_poc = _filter_groups(poc, [
         "get_post_compact_context", "reloaded after compaction",
-        "decision(s) available", _HOOK_SENTINEL], desired_poc)
-    hooks["PostCompact"] = poc
-    if not _in_groups(poc, "get_post_compact_context"):
-        poc.append({"hooks": [{"type": "command",
-            "statusMessage": "Reloading context after compact...",
-            "command": desired_poc}]})
+        "decision(s) available", "uv run --directory", _HOOK_SENTINEL])
+    if new_poc != poc:
+        if new_poc:
+            hooks["PostCompact"] = new_poc
+        else:
+            hooks.pop("PostCompact", None)
 
     ups = hooks.setdefault("UserPromptSubmit", [])
 
