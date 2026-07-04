@@ -413,9 +413,17 @@ def login_cmd(rest: list | None = None) -> None:
     endpoint = None
     if "--endpoint" in rest:
         i = rest.index("--endpoint")
-        if i + 1 < len(rest):
-            endpoint = rest[i + 1]
-    auth.login(endpoint=endpoint)
+        if i + 1 >= len(rest):
+            print("contexer login: --endpoint requires a URL", file=sys.stderr)
+            sys.exit(1)
+        endpoint = rest[i + 1]
+    try:
+        auth.login(endpoint=endpoint)
+    except (ValueError, RuntimeError) as e:
+        # ValueError: bad --endpoint; RuntimeError: OAuth flow failure (state mismatch,
+        # no code, no token). Both are user-actionable — print cleanly, no traceback.
+        print(f"contexer login: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def logout_cmd(rest: list | None = None) -> None:

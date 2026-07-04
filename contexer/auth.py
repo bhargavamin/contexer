@@ -21,20 +21,11 @@ import urllib.parse
 import urllib.request
 
 from contexer import config, store
-from contexer.config import Profile
+from contexer.config import Profile, default_endpoint
 
 # Refresh a little before the token actually expires, to avoid a race at the boundary.
 _EXPIRY_SKEW = 60
 _HTTP_TIMEOUT = 30
-
-# Default Teams endpoint for `contexer login` (prod, or localhost under CONTEXER_ENV=local).
-_DEFAULT_ENDPOINT_PROD = "https://mcp.dev.contexer.ai/mcp"
-_DEFAULT_ENDPOINT_LOCAL = "http://localhost:8080/mcp"
-
-
-def default_endpoint() -> str:
-    """The Teams endpoint to log in against: localhost under CONTEXER_ENV=local, else prod."""
-    return _DEFAULT_ENDPOINT_LOCAL if os.environ.get("CONTEXER_ENV") == "local" else _DEFAULT_ENDPOINT_PROD
 
 
 def _creds_path():
@@ -72,6 +63,18 @@ def _issuer_from_endpoint(endpoint: str) -> str:
     """The AS issuer (scheme://host[:port]) from an MCP endpoint URL — drops the path."""
     parts = urllib.parse.urlsplit(endpoint)
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
+def _validate_endpoint(endpoint: str) -> str:
+    """Reject anything that isn't a plain http(s) URL before it reaches OAuth discovery
+    or gets persisted to config.toml."""
+    parts = urllib.parse.urlsplit(endpoint)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(
+            f"invalid Teams endpoint {endpoint!r}: expected an http(s) URL "
+            f"like {config.DEFAULT_ENDPOINT_PROD}"
+        )
+    return endpoint
 
 
 def _request(url: str, *, data: dict | None = None, form: bool = False) -> dict:
@@ -142,8 +145,11 @@ def resolve_token(profile: Profile) -> str | None:
     if creds and profile.endpoint and creds.get("issuer") == _issuer_from_endpoint(profile.endpoint):
         if creds.get("expires_at", 0) > time.time() + _EXPIRY_SKEW:
             return creds.get("access_token")
+        refresh_token = creds.get("refresh_token")
+        if not refresh_token:
+            return profile.token  # expired, nothing to refresh with — skip the doomed network call
         try:
-            tok = _refresh(creds["token_endpoint"], creds["client_id"], creds["refresh_token"])
+            tok = _refresh(creds["token_endpoint"], creds["client_id"], refresh_token)
         except Exception:
             return profile.token  # refresh failed — degrade to the static token (or None)
         creds["access_token"] = tok.get("access_token", creds.get("access_token"))
@@ -193,7 +199,7 @@ def login(endpoint: str | None = None) -> None:
     `endpoint` defaults to default_endpoint() (prod, or localhost under CONTEXER_ENV=local).
     On success this writes mode='team' + endpoint to config.toml, so the user never hand-edits
     it — team onboarding is just `contexer install` then `contexer login`."""
-    endpoint = endpoint or default_endpoint()
+    endpoint = _validate_endpoint(endpoint or default_endpoint())
     issuer = _issuer_from_endpoint(endpoint)
     meta = _discover(issuer)
     port = _free_port()
@@ -212,6 +218,8 @@ def login(endpoint: str | None = None) -> None:
     })
     code = _await_code(auth_url, port, state)
     tok = _exchange_code(meta["token_endpoint"], client_id, code, verifier, redirect_uri)
+    if not tok.get("access_token"):
+        raise RuntimeError("token endpoint returned no access_token — login failed.")
     _save_creds({
         "issuer": issuer,
         "client_id": client_id,

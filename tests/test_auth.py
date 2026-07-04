@@ -33,7 +33,7 @@ def test_pkce_challenge_is_s256_of_verifier():
 
 def test_issuer_from_endpoint_strips_path():
     assert auth._issuer_from_endpoint("http://localhost:8080/mcp") == "http://localhost:8080"
-    assert auth._issuer_from_endpoint("https://mcp.dev.contexer.ai/mcp") == "https://mcp.dev.contexer.ai"
+    assert auth._issuer_from_endpoint("https://mcp.contexer.ai/mcp") == "https://mcp.contexer.ai"
     assert auth._issuer_from_endpoint("https://x.example") == "https://x.example"
 
 
@@ -169,6 +169,15 @@ def test_resolve_token_expired_refreshes(creds_env, monkeypatch):
     assert creds["expires_at"] > time.time()
 
 
+def test_resolve_token_expired_without_refresh_token_skips_network(creds_env, monkeypatch):
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "old",
+                      "refresh_token": None, "expires_at": time.time() - 10})
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("must not attempt a refresh"))
+    prof = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token="static")
+    assert auth.resolve_token(prof) == "static"
+
+
 def test_resolve_token_refresh_failure_falls_back(creds_env, monkeypatch):
     auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
                       "token_endpoint": "http://localhost:8080/token", "access_token": "old",
@@ -227,11 +236,20 @@ def test_login_defaults_endpoint(creds_env, monkeypatch):
     assert config.load_profile().endpoint == "http://localhost:8080/mcp"
 
 
-def test_default_endpoint_env(monkeypatch):
-    monkeypatch.setenv("CONTEXER_ENV", "local")
-    assert auth.default_endpoint() == "http://localhost:8080/mcp"
-    monkeypatch.delenv("CONTEXER_ENV", raising=False)
-    assert auth.default_endpoint() == "https://mcp.dev.contexer.ai/mcp"
+def test_login_fails_loudly_without_access_token(creds_env, monkeypatch):
+    _stub_oauth(monkeypatch)
+    monkeypatch.setattr(auth, "_exchange_code", lambda *a: {"expires_in": 3600})  # no access_token
+    with pytest.raises(RuntimeError, match="no access_token"):
+        auth.login(endpoint="http://localhost:8080/mcp")
+    assert auth._load_creds() is None  # nothing persisted, no false "logged in"
+
+
+def test_login_rejects_invalid_endpoint(creds_env, monkeypatch):
+    _stub_oauth(monkeypatch)
+    for bad in ("mcp.contexer.ai/mcp", "ftp://x/mcp", "https://", "not a url"):
+        with pytest.raises(ValueError):
+            auth.login(endpoint=bad)
+    assert auth._load_creds() is None  # nothing persisted on rejection
 
 
 def test_logout_deletes_creds(creds_env):
@@ -272,6 +290,26 @@ def test_cli_login_endpoint_flag(monkeypatch):
     monkeypatch.setattr(auth, "login", lambda endpoint=None: captured.update(endpoint=endpoint))
     cli.login_cmd(["--endpoint", "http://x/mcp"])
     assert captured["endpoint"] == "http://x/mcp"
+
+
+def test_cli_login_endpoint_flag_missing_url(monkeypatch, capsys):
+    from contexer import cli
+    monkeypatch.setattr(auth, "login", lambda endpoint=None: pytest.fail("login must not run"))
+    with pytest.raises(SystemExit):
+        cli.login_cmd(["--endpoint"])
+    assert "--endpoint requires a URL" in capsys.readouterr().err
+
+
+def test_cli_login_reports_invalid_endpoint(monkeypatch, capsys):
+    from contexer import cli
+
+    def bad_login(endpoint=None):
+        raise ValueError("invalid Teams endpoint")
+
+    monkeypatch.setattr(auth, "login", bad_login)
+    with pytest.raises(SystemExit):
+        cli.login_cmd(["--endpoint", "junk"])
+    assert "invalid Teams endpoint" in capsys.readouterr().err
 
 
 def test_cli_logout_dispatches(monkeypatch, capsys):

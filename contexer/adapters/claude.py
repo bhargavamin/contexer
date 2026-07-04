@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import memory_sync, store
+from contexer import config, memory_sync, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -19,14 +19,19 @@ from contexer.adapters.base import (
 
 NAME = "claude"
 
-# Remote teams MCP endpoint. Prod HTTPS by default; localhost only via the explicit
-# CONTEXER_ENV=local developer opt-in (never registered for a normal user).
-CONTEXER_TEAMS_PROD = "https://mcp.dev.contexer.ai/mcp"
-CONTEXER_TEAMS_LOCAL = "http://localhost:8080/mcp"
-
 
 def _teams_url() -> str:
-    return CONTEXER_TEAMS_LOCAL if os.environ.get("CONTEXER_ENV") == "local" else CONTEXER_TEAMS_PROD
+    """Endpoint for the opt-in native contexer-teams MCP entry (CONTEXER_TEAMS_MCP).
+
+    Prefers the user's configured team endpoint (config.toml) so a dev override like
+    `contexer login --endpoint <dev-url>` governs this entry too; falls back to the
+    built-in default. Fail-soft: a malformed config.toml must never break install —
+    and local-only users (no config, flag unset) never reach this path at all."""
+    try:
+        configured = config.load_profile().endpoint
+    except config.ConfigError:
+        configured = None
+    return configured or config.default_endpoint()
 
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
