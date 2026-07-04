@@ -221,3 +221,76 @@ def test_push_decision_reads_dict_content_item(monkeypatch):
     )
     did = RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
     assert did == "dd-7"
+
+
+# ── C8: offline / auth-failure degradation ───────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _reset_degrade_warnings():
+    """Isolate the process-wide warn-once state between tests."""
+    remote.reset_degradation_warnings()
+    yield
+    remote.reset_degradation_warnings()
+
+
+def _raise(exc):
+    """A zero-arg op that raises `exc` (used as the `op` passed to with_local_fallback)."""
+    def op():
+        raise exc
+    return op
+
+
+def test_with_local_fallback_returns_op_result_on_success(capsys):
+    result = remote.with_local_fallback(lambda: "ok", default="fallback", action="pull")
+    assert result == "ok"
+    assert capsys.readouterr().err == ""
+
+
+def test_with_local_fallback_unreachable_returns_default_and_warns_once(capsys):
+    op = _raise(RemoteUnavailableError("down"))
+    r1 = remote.with_local_fallback(op, default=[], action="pull team context")
+    r2 = remote.with_local_fallback(op, default=[], action="pull team context")
+    assert r1 == [] and r2 == []
+    err = capsys.readouterr().err
+    assert err.count("Contexer:") == 1
+    assert "unreachable" in err.lower()
+    assert "local-only" in err.lower()
+
+
+def test_with_local_fallback_auth_returns_default_and_hints_login(capsys):
+    result = remote.with_local_fallback(_raise(RemoteAuthError("401")), default=None, action="push")
+    assert result is None
+    err = capsys.readouterr().err
+    assert err.count("Contexer:") == 1
+    assert "contexer login --team" in err
+
+
+def test_auth_and_unreachable_each_warn_once(capsys):
+    remote.with_local_fallback(_raise(RemoteAuthError("a")), default=None, action="x")
+    remote.with_local_fallback(_raise(RemoteUnavailableError("u")), default=None, action="y")
+    remote.with_local_fallback(_raise(RemoteAuthError("a")), default=None, action="x")
+    remote.with_local_fallback(_raise(RemoteUnavailableError("u")), default=None, action="y")
+    assert capsys.readouterr().err.count("Contexer:") == 2  # one per category, not per call
+
+
+def test_with_local_fallback_does_not_swallow_non_remote_errors():
+    with pytest.raises(ValueError):
+        remote.with_local_fallback(_raise(ValueError("real bug")), default=None, action="x")
+
+
+def test_reset_rearms_the_warning(capsys):
+    op = _raise(RemoteUnavailableError("down"))
+    remote.with_local_fallback(op, default=None, action="x")
+    remote.reset_degradation_warnings()
+    remote.with_local_fallback(op, default=None, action="x")
+    assert capsys.readouterr().err.count("Contexer:") == 2
+
+
+def test_warn_once_dedups_by_key(capsys):
+    remote.warn_once("first", key="k")
+    remote.warn_once("second", key="k")
+    remote.warn_once("third", key="other")
+    err = capsys.readouterr().err
+    assert "first" in err
+    assert "second" not in err
+    assert "third" in err
