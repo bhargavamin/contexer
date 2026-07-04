@@ -209,3 +209,23 @@ def test_refresh_worker_degraded_leaves_no_pending(team_env, monkeypatch):
     _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
     team_context._refresh_worker(team_env)
     assert not team_context._pending_path(team_env).exists()
+
+
+# ── inclusive-cursor defense (live finding: server re-sends rows stamped == cursor) ──
+
+def test_sync_skips_unchanged_resends(team_env, monkeypatch):
+    """The dev server's updatedSince is inclusive: rows at == cursor re-send forever.
+    An unchanged row must not count as new (it would re-inject every poll window)."""
+    team_context._save_cache(team_env, {"repo_key": "github.com/a/b", "cursor": "c1",
+                                        "decisions": [team_context._row_to_dict(_rd("t1", "same rule"))],
+                                        "last_poll_at": 0})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "same rule")], [], "c1"))
+    assert team_context.poll(team_env, profile=TEAM) == []  # unchanged re-send -> nothing new
+
+
+def test_sync_still_surfaces_changed_rows(team_env, monkeypatch):
+    team_context._save_cache(team_env, {"repo_key": "github.com/a/b", "cursor": "c1",
+                                        "decisions": [team_context._row_to_dict(_rd("t1", "old wording"))],
+                                        "last_poll_at": 0})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "new wording")], [], "c2"))
+    assert [d["content"] for d in team_context.poll(team_env, profile=TEAM)] == ["new wording"]

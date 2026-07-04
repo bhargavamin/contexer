@@ -97,6 +97,11 @@ def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str
         if rd.scope != "team":
             continue  # local store already holds personal; cache team rows only
         row = _row_to_dict(rd)
+        if by_id.get(rd.id) == row:
+            # Unchanged re-send: the live server's updatedSince filter is INCLUSIVE, so
+            # rows stamped exactly at the cursor come back on every delta fetch. Treating
+            # them as new would re-inject the same decisions every poll window.
+            continue
         by_id[rd.id] = row
         new_rows.append(row)
     removed: list[str] = []
