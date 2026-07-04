@@ -1352,6 +1352,36 @@ def _detect_insight(repo_path: str) -> tuple[str, bool]:
     return "low", False  # zero commits could also be an email mismatch — ask
 
 
+def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
+    """Instructions for a repo question asked as the first prompt: ANSWER it, then store
+    findings — never a blocking menu. Insight-tailored using the commit signal Contexer
+    already computes: a repo author (their git email authored commits here) is answered as
+    a maintainer, not quizzed as a newcomer; a confirmed newcomer gets a scanned overview;
+    an unverified guess stays neutral. Every path ends with the question answered and the
+    scan stored silently — the capture happens as a side effect, no permission asked."""
+    if decisive and level == "high":
+        stance = ("You have authored commits in this repo (matched on your git email), so"
+                  " answer as a fellow maintainer with a direct, technical summary — do NOT"
+                  " say 'I'll assume you're new'.")
+    elif decisive and level == "low":
+        stance = ("No commits from your git email are here, so answer as a newcomer would"
+                  " need: lead with what the README and code actually show.")
+    else:
+        stance = "Answer from what the README, docs, and code show."
+    return [
+        f"The user's first message is a question about {label}. Answer it — do NOT show a"
+        " setup menu and do NOT ask them to pick an option. In THIS response:",
+        "1. Read the README, any docs/, and the key source to understand the repo.",
+        f"2. {stance} Answer exactly what they asked, in your own words.",
+        "3. Then silently store what you learned: call update_context(subtype='architecture')"
+        " for the repo's purpose and any load-bearing facts — each a plain sentence, max 15"
+        " words, no em dashes. Do not ask permission to store; this IS the capture.",
+        "4. End with exactly one line: \"(Contexer: saved this repo's basics for future"
+        " sessions — say 'bootstrap' for guided setup.)\"",
+        "Never block the answer behind a confirmation or a menu.",
+    ]
+
+
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     level, decisive = _detect_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
@@ -1397,23 +1427,20 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         ]
         replies = "quick / full / some / scan / skip"
 
-    # A newcomer question ("what is this repo doing?", "summarize this repo") is itself
-    # low-insight evidence — don't answer it with a menu whose first option mirrors the
-    # question back. This check must come FIRST: placed after the menu it loses to
-    # "response must be ONLY the offer". Decisive-high keeps the menu: commits by this
-    # user outweigh one curious question.
-    newbie_exception = [] if (decisive and level == "high") else [
+    # A question about the repo asked as the first prompt ("what is this repo doing?",
+    # "summarize this repo") must be ANSWERED, not met with a menu that mirrors the question
+    # back. This check comes FIRST: placed after the menu it loses to "response must be ONLY
+    # the offer". It applies at EVERY insight level — a repo author asking what the repo does
+    # still wants an answer, just phrased as a maintainer, not quizzed as a newcomer; the
+    # commit signal only tunes the phrasing (see _newcomer_answer_block), never whether we
+    # answer.
+    newbie_exception = [
         "STEP 0 — read the user's message before anything else: if it is asking what this"
-        " repo or code is or does, or asking to summarize it"
-        " ('what is this repo doing?', 'explain this codebase', 'tell me about this repo',"
-        " 'summarize this codebase', 'give me an overview'), their message already signals"
-        " they're new here."
-        " In that case your ENTIRE response is ONLY this confirmation — NOT the menu below:",
-        f"  \"Contexer: you're asking about {label}, so I'll assume you're new here —"
-        " I'll scan the code and docs, store what I find for future sessions, then answer"
-        " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
-        "Then stop and wait. If they confirm (ok / yes / scan) → follow the scan path below,"
-        " then answer their original question. Any other reply → follow that option's path below.",
+        " repo or code is or does, or asking to summarize/explain/give an overview of it"
+        " ('what is repo doing?', 'explain this codebase', 'tell me about this repo',"
+        " 'summarize this codebase', 'give me an overview'), then do NOT output the menu"
+        " below. Instead:",
+        *_newcomer_answer_block(label, level, decisive),
         "Only when their message is NOT such a question, output the menu below instead:",
     ]
 
@@ -1618,16 +1645,19 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     return claude.format_session_start(session_start_payload(repo_path, source))
 
 
+# The article is OPTIONAL — "what is repo doing?" (no this/the) is just as much a newcomer
+# question as "what is THIS repo doing?". The noun list is the gate that keeps code-element
+# questions ("what is this function doing") out.
 _NEWCOMER_QUESTION_RE = re.compile(
-    r"\b(what (is|does) (this|the) (repo|repository|codebase|project|code)\b"
-    r"|what'?s (this|the) (repo|repository|codebase|project)( about| for| doing)?\b"
-    r"|explain (this|the) (repo|repository|codebase|project|code)\b"
-    r"|tell me about (this|the) (repo|repository|codebase|project|code)\b"
-    r"|how does (this|the) (repo|repository|codebase|project|code) work\b"
-    r"|walk me through (this|the) (repo|repository|codebase|project|code)\b"
-    r"|overview of (this|the) (repo|repository|codebase|project|code)\b"
-    r"|summarize (this|the) (repo|repository|codebase|project|code)\b"
-    r"|summary of (this|the) (repo|repository|codebase|project|code)\b)",
+    r"\b(what (is|are|does) (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|what'?s (this |the |your )?(repo|repository|codebase|project)( about| for| doing)?\b"
+    r"|explain (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|tell me about (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|how does (this |the |your )?(repo|repository|codebase|project|code) work\b"
+    r"|walk me through (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|overview of (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|summari[sz]e (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|summary of (this |the |your )?(repo|repository|codebase|project|code)\b)",
     re.IGNORECASE,
 )
 
@@ -1686,21 +1716,12 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     level, decisive = _detect_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
-    if _is_newcomer_question(prompt) and not (decisive and level == "high"):
+    if _is_newcomer_question(prompt):
+        # Answer-first at EVERY insight level (deterministic match): a repo question is
+        # answered, never met with a menu. The commit signal only tunes the phrasing.
         lines = [
             "Contexer OVERRIDE — ignore any earlier bootstrap menu instructions for this turn.",
-            "The user's first message asks about or wants to summarize this repo. That is"
-            " low-insight evidence (matched deterministically). Your ENTIRE response must be ONLY:",
-            f"  \"Contexer: you're asking about {label}, so I'll assume you're new here —"
-            " I'll scan the code and docs, store what I find for future sessions, then answer"
-            " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
-            "Then stop and wait. If they confirm (ok / yes / scan) → call bootstrap_context"
-            " with insight='low', store each inferred fact directly via update_context"
-            " (subtype='architecture'), read the README and docs for the repo's purpose and"
-            " store it, ask the single returned goal question and store the answer, then"
-            " answer their original question.",
-            "If they reply quick / full / skip instead → follow the session-start bootstrap"
-            " instructions for that option.",
+            *_newcomer_answer_block(label, level, decisive),
         ]
     else:
         lines = _build_bootstrap_context(repo_path)
