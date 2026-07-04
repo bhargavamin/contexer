@@ -1136,6 +1136,35 @@ def get_pending_decisions(repo_path: str) -> list[dict]:
     ]
 
 
+def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
+    """Return a decision's current shareable fields, or None (C4).
+
+    Resolves `decision_id` (full UUID or 8-char prefix) or, when omitted, the most
+    recently updated decision. Ignored decisions are excluded. Returns the push wire
+    projection {id, type, content, confidence, evidence, source}: `type` is the decision
+    subtype; `evidence` is None when empty so the push omits it."""
+    data = _load(repo_path)
+    decisions = [e for e in data.get("entries", [])
+                 if e.get("type") == "decision" and _entry_status(e) != "ignored"]
+    if not decisions:
+        return None
+    if decision_id:
+        entry = next((e for e in decisions if e.get("id", "").startswith(decision_id)), None)
+    else:
+        entry = max(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp", ""))
+    if entry is None:
+        return None
+    rev = _current_revision(entry) or {}
+    return {
+        "id": entry.get("id", ""),
+        "type": entry.get("subtype", "") or "convention",
+        "content": _current_content(entry),
+        "confidence": rev.get("confidence_score"),
+        "evidence": rev.get("evidence") or None,
+        "source": rev.get("source"),
+    }
+
+
 def _format_update_approval(entry: dict) -> str:
     """Approval prompt for a Suggested Update - current revision vs the detected change."""
     prop = entry.get("proposed_revision") or {}

@@ -24,6 +24,7 @@ Commands:
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   review        Interactively approve, edit, or ignore pending engineering decisions.
+  share         Push a local decision to your team cloud context: share [id] (default: latest).
   status        Show install state: version, binary path, MCP/hooks, store summary.
   version       Print the installed version.
   help          Show this message.
@@ -382,6 +383,23 @@ def pull(rest: list | None = None) -> None:
     print(msg + ".")
 
 
+def share_cmd(rest: list | None = None) -> None:
+    """`contexer share [id]`: push a local decision up to your team cloud context.
+
+    Local-first: prints a clear message when not in team mode / offline (never crashes).
+    Must be run inside a git repository."""
+    import os
+
+    from contexer import share, store
+
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    if not repo:
+        print("No git repo detected - run `contexer share` inside a repository.", file=sys.stderr)
+        sys.exit(1)
+    decision_id = rest[0] if rest else ""
+    print(share.share(repo, decision_id))
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -407,6 +425,8 @@ def main() -> None:
         status(rest)
     elif cmd == "pull":
         _run_guarded(lambda: pull(rest))
+    elif cmd == "share":
+        _run_guarded(lambda: share_cmd(rest))
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)
