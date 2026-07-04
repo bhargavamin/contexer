@@ -13,6 +13,7 @@ decisions; fresh-clone restore of the personal cloud mirror is a later follow-up
 from __future__ import annotations
 
 import json
+import time
 
 from contexer import config, store
 from contexer.remote import RemoteDecision, RemoteStore, with_local_fallback
@@ -20,6 +21,9 @@ from contexer.repo_key import canonical_repo_key
 
 # Max team rows rendered into a single get_context (mirrors the local filtered display).
 _TEAM_DISPLAY = 25
+
+# Min seconds between mid-session delta polls (C7) — keeps UserPromptSubmit cheap.
+_POLL_MIN_INTERVAL = 15
 
 # Fields persisted per cached team decision (the get_context wire projection).
 _ROW_FIELDS = ("id", "type", "content", "rationale", "repo", "agent", "scope")
@@ -62,20 +66,18 @@ def _row_to_dict(rd: RemoteDecision) -> dict:
     }
 
 
-def pull(repo_path: str, *, profile: config.Profile | None = None) -> tuple[int, int]:
-    """Fetch team context for this repo and update the local team cache (incremental).
+def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str]] | None:
+    """Fetch team context incrementally and merge it into the cache.
 
-    Returns (upserted, removed). No-op `(0, 0)` when not in team mode, when the repo has no
-    git origin (nothing to key on), or when the cloud is unreachable / rejects the token
-    (degrades to local-only via with_local_fallback, keeping any existing cache untouched).
-    """
-    profile = profile or config.load_profile()
+    Returns (new_or_updated_rows, removed_ids) on success, or None (no-op) when not in team
+    mode, when the repo has no git origin, or when the cloud is unreachable / rejects the
+    token (degrades via with_local_fallback, leaving any existing cache untouched)."""
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return (0, 0)  # local mode / not configured
+        return None  # local mode / not configured
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
     if key is None:
-        return (0, 0)  # no git remote — nothing to sync on
+        return None  # no git remote — nothing to sync on
 
     cache = _load_cache(repo_path)
     ctx = with_local_fallback(
@@ -84,26 +86,58 @@ def pull(repo_path: str, *, profile: config.Profile | None = None) -> tuple[int,
         action="pull team context",
     )
     if ctx is None:
-        return (0, 0)  # degraded — leave the existing cache in place
+        return None  # degraded — leave the existing cache in place
 
     by_id: dict[str, dict] = {d["id"]: d for d in cache.get("decisions", [])}
-    upserted = 0
+    new_rows: list[dict] = []
     for rd in ctx.decisions:
         if rd.scope != "team":
             continue  # local store already holds personal; cache team rows only
-        by_id[rd.id] = _row_to_dict(rd)
-        upserted += 1
-    removed = 0
+        row = _row_to_dict(rd)
+        by_id[rd.id] = row
+        new_rows.append(row)
+    removed: list[str] = []
     for dead in ctx.deleted:
         if by_id.pop(dead, None) is not None:
-            removed += 1
+            removed.append(dead)
 
     _save_cache(repo_path, {
+        **cache,  # preserve extra keys (e.g. last_poll_at) across a sync
         "repo_key": key,
         "cursor": ctx.cursor or cache.get("cursor"),  # null cursor (empty pull) keeps prior
         "decisions": list(by_id.values()),
     })
-    return (upserted, removed)
+    return (new_rows, removed)
+
+
+def pull(repo_path: str, *, profile: config.Profile | None = None) -> tuple[int, int]:
+    """Fetch team context and update the local cache (incremental). Returns (upserted,
+    removed) counts; `(0, 0)` on any no-op (local mode / no origin / cloud unreachable)."""
+    profile = profile or config.load_profile()
+    result = _sync(repo_path, profile)
+    if result is None:
+        return (0, 0)
+    new_rows, removed = result
+    return (len(new_rows), len(removed))
+
+
+def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]:
+    """Delta-poll for injection (C7): return the team decisions newly synced this poll.
+
+    Throttled to at most once per `_POLL_MIN_INTERVAL` so it never adds perceptible latency
+    to a prompt. `[]` when throttled, not in team mode, or degraded — never raises."""
+    profile = profile or config.load_profile()
+    if profile.mode != "team" or not profile.endpoint:
+        return []  # not configured — no work, no cache file for a local repo
+    cache = _load_cache(repo_path)
+    if time.time() - cache.get("last_poll_at", 0) < _POLL_MIN_INTERVAL:
+        return []  # throttled — skip the network round-trip
+    result = _sync(repo_path, profile)
+    # Stamp the poll time regardless of outcome (don't hammer a down cloud every prompt).
+    stamped = _load_cache(repo_path)
+    stamped["last_poll_at"] = time.time()
+    _save_cache(repo_path, stamped)
+    return result[0] if result else []
 
 
 def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -> str:
