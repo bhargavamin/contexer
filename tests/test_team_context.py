@@ -1,0 +1,228 @@
+"""Tests for the C5 team-context cache + merge (contexer/team_context.py).
+
+The team cache is separate from the local store: pulled TEAM decisions never enter
+store.py entries[], they live in ~/.contexer/.team_{slug}.json and are merged at read
+time. RemoteStore is faked here so no network is touched.
+"""
+import json
+
+import pytest
+
+import contexer.remote as remote
+from contexer import config, store, team_context
+from contexer.remote import RemoteAuthError, RemoteContext, RemoteDecision, RemoteUnavailableError
+
+TEAM_PROFILE = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
+
+
+def _rd(id, content, scope="team", type="architecture"):
+    return RemoteDecision(id=id, type=type, content=content, rationale=None,
+                          repo="github.com/a/b", agent=None, scope=scope)
+
+
+class _FakeRS:
+    def __init__(self, ctx=None, exc=None):
+        self._ctx, self._exc = ctx, exc
+        self.calls = []
+
+    def get_context(self, repo=None, updated_since=None):
+        self.calls.append((repo, updated_since))
+        if self._exc is not None:
+            raise self._exc
+        return self._ctx
+
+
+@pytest.fixture
+def team_env(tmp_repo, monkeypatch):
+    """tmp_repo isolates STORE_DIR; give the repo a git origin so a canonical key resolves."""
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    remote.reset_degradation_warnings()
+    return tmp_repo
+
+
+def _fake_rs(monkeypatch, *, ctx=None, exc=None):
+    fake = _FakeRS(ctx=ctx, exc=exc)
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    return fake
+
+
+# ── pull ─────────────────────────────────────────────────────────────────────────
+
+def test_pull_local_mode_is_noop(team_env, monkeypatch):
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p: None))
+    assert team_context.pull(team_env, profile=config.Profile()) == (0, 0)
+    assert not team_context._cache_path(team_env).exists()
+
+
+def test_pull_no_git_remote_is_noop(team_env, monkeypatch):
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)  # no origin
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    assert team_context.pull(team_env, profile=TEAM_PROFILE) == (0, 0)
+
+
+def test_pull_caches_team_rows_only(team_env, monkeypatch):
+    ctx = RemoteContext(
+        decisions=[_rd("t1", "team rule", "team"), _rd("p1", "personal mirror", "personal")],
+        deleted=[], cursor="2026-01-01T00:00:00Z")
+    fake = _fake_rs(monkeypatch, ctx=ctx)
+    up, rm = team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert (up, rm) == (1, 0)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]  # personal row NOT cached
+    assert cache["cursor"] == "2026-01-01T00:00:00Z"
+    assert cache["repo_key"] == "github.com/a/b"
+    assert fake.calls == [("github.com/a/b", None)]  # first pull: no cursor
+
+
+def test_pull_incremental_upserts_and_deletes(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0",
+        "decisions": [
+            {"id": "t1", "type": "architecture", "content": "old", "rationale": None,
+             "repo": None, "agent": None, "scope": "team"},
+            {"id": "t2", "type": "constraint", "content": "keep", "rationale": None,
+             "repo": None, "agent": None, "scope": "team"},
+        ]})
+    ctx = RemoteContext(decisions=[_rd("t1", "updated", "team")], deleted=["t2"], cursor="c1")
+    fake = _fake_rs(monkeypatch, ctx=ctx)
+    up, rm = team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert (up, rm) == (1, 1)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    by_id = {d["id"]: d for d in cache["decisions"]}
+    assert set(by_id) == {"t1"}
+    assert by_id["t1"]["content"] == "updated"
+    assert cache["cursor"] == "c1"
+    assert fake.calls == [("github.com/a/b", "c0")]  # incremental: prior cursor sent
+
+
+def test_pull_degraded_keeps_existing_cache(team_env, monkeypatch, capsys):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0",
+        "decisions": [{"id": "t1", "type": "architecture", "content": "keep", "rationale": None,
+                       "repo": None, "agent": None, "scope": "team"}]})
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    assert team_context.pull(team_env, profile=TEAM_PROFILE) == (0, 0)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]  # untouched
+    assert "unreachable" in capsys.readouterr().err.lower()  # C8 warned once
+
+
+def test_pull_auth_failure_degrades(team_env, monkeypatch, capsys):
+    _fake_rs(monkeypatch, exc=RemoteAuthError("401"))
+    assert team_context.pull(team_env, profile=TEAM_PROFILE) == (0, 0)
+    assert "contexer login --team" in capsys.readouterr().err
+
+
+def test_pull_null_cursor_preserves_prior_cursor(team_env, monkeypatch):
+    team_context._save_cache(team_env, {"repo_key": "github.com/a/b", "cursor": "c0", "decisions": []})
+    _fake_rs(monkeypatch, ctx=RemoteContext(decisions=[], deleted=[], cursor=None))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["cursor"] == "c0"  # empty pull doesn't wipe the cursor
+
+
+# ── format_team_section ──────────────────────────────────────────────────────────
+
+def test_format_team_section_empty_when_no_cache(tmp_repo):
+    assert team_context.format_team_section(tmp_repo) == ""
+
+
+def test_format_team_section_renders_scope_and_type(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1aaaaaa", "type": "architecture", "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context" in out
+    assert "[scope=team]" in out
+    assert "[architecture]" in out
+    assert "Use Postgres" in out
+    assert "(id=t1aaaaaa)" in out
+
+
+def test_format_team_section_filters_by_type_and_query(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "a", "type": "architecture", "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"},
+        {"id": "b", "type": "constraint", "content": "Never log secrets", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    arch = team_context.format_team_section(tmp_repo, entry_type="architecture")
+    assert "Postgres" in arch and "secrets" not in arch
+    q = team_context.format_team_section(tmp_repo, query="secrets")
+    assert "secrets" in q and "Postgres" not in q
+
+
+def test_load_cache_tolerates_corrupt_file(tmp_repo):
+    path = team_context._cache_path(tmp_repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ not json")
+    assert team_context._load_cache(tmp_repo) == {"repo_key": None, "cursor": None, "decisions": []}
+
+
+# ── store.get_context integration ────────────────────────────────────────────────
+
+def test_get_context_appends_team_section(tmp_repo):
+    store.update_decision(tmp_repo, "local decision about auth tokens", "sess-1")
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1", "type": "architecture", "content": "Team: use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = store.get_context(tmp_repo)
+    assert "## Decisions and context" in out
+    assert "decision about auth tokens" in out  # content is normalized (first char capitalized)
+    assert "## Team context" in out
+    assert "Team: use Postgres" in out
+
+
+def test_get_context_unchanged_when_no_team_cache(tmp_repo):
+    store.update_decision(tmp_repo, "local only decision", "sess-1")
+    out = store.get_context(tmp_repo)
+    assert "## Team context" not in out
+
+
+def test_get_context_fresh_clone_shows_team_only(tmp_repo):
+    # No local entries, but team cache present — the "fresh clone, no bootstrap" path.
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1", "type": "architecture", "content": "Team rule X", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = store.get_context(tmp_repo)
+    assert out != "No context stored for this repository."
+    assert "## Team context" in out
+    assert "Team rule X" in out
+
+
+def test_get_context_no_local_no_team_is_empty(tmp_repo):
+    assert store.get_context(tmp_repo) == "No context stored for this repository."
+
+
+# ── CLI + adapter wiring ─────────────────────────────────────────────────────────
+
+def test_cli_pull_prints_summary(monkeypatch, capsys):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo: (3, 1))
+    cli.pull([])
+    out = capsys.readouterr().out
+    assert "3" in out and "1" in out
+
+
+def test_cli_pull_no_repo_errors(monkeypatch):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "")
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    with pytest.raises(SystemExit):
+        cli.pull([])
+
+
+def test_adapter_pull_team_swallows_errors(monkeypatch):
+    from contexer.adapters import claude
+
+    def boom(repo):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(team_context, "pull", boom)
+    assert claude.pull_team("/repo") == (0, 0)
+
+
+def test_adapter_pull_team_returns_counts(monkeypatch):
+    from contexer.adapters import claude
+    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 0))
+    assert claude.pull_team("/repo") == (2, 0)

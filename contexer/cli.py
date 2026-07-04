@@ -362,6 +362,26 @@ def _run_guarded(fn) -> None:
         sys.exit(1)
 
 
+def pull(rest: list | None = None) -> None:
+    """`contexer pull`: fetch team context for the current repo into the local team cache.
+
+    Local-first: no-op when not in team mode / no remote / cloud unreachable (degrades
+    quietly). Requires being run inside a git repository."""
+    import os
+
+    from contexer import store, team_context
+
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    if not repo:
+        print("No git repo detected - run `contexer pull` inside a repository.", file=sys.stderr)
+        sys.exit(1)
+    upserted, removed = team_context.pull(repo)
+    msg = f"Pulled {upserted} team decision(s)"
+    if removed:
+        msg += f", removed {removed}"
+    print(msg + ".")
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -385,6 +405,8 @@ def main() -> None:
         review()
     elif cmd == "status":
         status(rest)
+    elif cmd == "pull":
+        _run_guarded(lambda: pull(rest))
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)
