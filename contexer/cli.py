@@ -25,6 +25,8 @@ Commands:
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   review        Interactively approve, edit, or ignore pending engineering decisions.
   share         Push a local decision to your team cloud context: share [id] (default: latest).
+  login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
+  logout        Remove stored Contexer Teams credentials.
   status        Show install state: version, binary path, MCP/hooks, store summary.
   version       Print the installed version.
   help          Show this message.
@@ -400,6 +402,24 @@ def share_cmd(rest: list | None = None) -> None:
     print(share.share(repo, decision_id))
 
 
+def login_cmd(rest: list | None = None) -> None:
+    """`contexer login`: sign in to Contexer Teams via the browser (OAuth), storing a token
+    so `pull`/`share` work without a pasted token."""
+    from contexer import auth, config
+
+    auth.login(config.load_profile())
+
+
+def logout_cmd(rest: list | None = None) -> None:
+    """`contexer logout`: remove stored Contexer Teams credentials."""
+    from contexer import auth
+
+    if auth.logout():
+        print("Logged out of Contexer Teams.")
+    else:
+        print("Not logged in.")
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -427,6 +447,10 @@ def main() -> None:
         _run_guarded(lambda: pull(rest))
     elif cmd == "share":
         _run_guarded(lambda: share_cmd(rest))
+    elif cmd == "login":
+        _run_guarded(lambda: login_cmd(rest))
+    elif cmd == "logout":
+        _run_guarded(lambda: logout_cmd(rest))
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)
