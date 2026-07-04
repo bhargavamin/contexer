@@ -148,11 +148,12 @@ class TestInstall:
         pc = hooks.get("PreCompact", [])
         assert _in_groups(pc, "compaction starting")
 
-    def test_post_compact_hook_registered(self, tmp_home):
+    def test_post_compact_hook_not_registered(self, tmp_home):
+        # PostCompact can't inject context; SessionStart(source="compact") reloads
+        # silently. A PostCompact hook would only dump visible noise on /compact.
         cli.install()
         hooks = _settings(tmp_home).get("hooks", {})
-        poc = hooks.get("PostCompact", [])
-        assert _in_groups(poc, "get_post_compact_context")
+        assert not hooks.get("PostCompact")
 
     @pytest.mark.parametrize("perm", [
         "mcp__contexer__update_context",

@@ -64,17 +64,13 @@ class TestInstall:
                 for h in grp["hooks"] if "command" in h]
         assert any("sync_memory" in c for c in cmds)
 
-    def test_post_compact_hook_registered(self, installed_home):
+    def test_post_compact_hook_not_registered(self, installed_home):
+        # PostCompact cannot inject context (no additionalContext; systemMessage is
+        # user-facing only), so a PostCompact hook was pure visible noise on /compact.
+        # SessionStart(source="compact") owns the silent reload — no PostCompact hook.
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
-        cmds = [h["command"] for grp in settings["hooks"]["PostCompact"]
-                for h in grp["hooks"] if "command" in h]
-        assert any("get_post_compact_context" in c for c in cmds)
-
-    def test_post_compact_cmd_uses_current_python(self, installed_home):
-        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
-        cmds = [h["command"] for grp in settings["hooks"]["PostCompact"]
-                for h in grp["hooks"] if "command" in h]
-        assert any(sys.executable in c for c in cmds)
+        assert not settings["hooks"].get("PostCompact"), \
+            "PostCompact hook must not be wired (SessionStart source=compact reloads silently)"
 
     def test_user_prompt_submit_anchor_registered(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
@@ -321,14 +317,18 @@ class TestStaleHookHealing:
         return settings_path
 
     def test_legacy_postcompact_removed_on_install(self, clean_home):
+        # Install now strips every Contexer PostCompact hook (the event can't inject
+        # context; SessionStart source=compact reloads silently) — the dead from-source
+        # hook and the whole PostCompact key are gone, not replaced.
         path = self._seed_from_source(clean_home)
         install()
-        poc = json.loads(path.read_text())["hooks"]["PostCompact"]
-        cmds = [h.get("command", "") for grp in poc for h in grp["hooks"]]
+        poc = json.loads(path.read_text()).get("hooks", {}).get("PostCompact", [])
+        cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
         assert not any("uv run --directory" in c for c in cmds), \
             "dead from-source PostCompact hook must be removed"
-        assert sum("get_post_compact_context" in c for c in cmds) == 1
-        assert len(poc) == 1
+        assert not any("get_post_compact_context" in c for c in cmds), \
+            "Contexer PostCompact hook must not be re-added"
+        assert poc == []
 
     def test_legacy_postcompact_removed_on_uninstall(self, clean_home):
         path = self._seed_from_source(clean_home)
@@ -337,6 +337,22 @@ class TestStaleHookHealing:
         poc = json.loads(path.read_text()).get("hooks", {}).get("PostCompact", [])
         cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
         assert not any("uv run --directory" in c for c in cmds)
+
+    def test_foreign_postcompact_preserved_on_install(self, clean_home):
+        # Stripping our PostCompact hook must never remove a non-Contexer one.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        foreign = "echo 'someone elses postcompact hook'"
+        settings_path.write_text(json.dumps({"hooks": {
+            "PostCompact": [
+                {"hooks": [{"type": "command", "command": self._LEGACY_POC}]},
+                {"hooks": [{"type": "command", "command": foreign}]},
+            ],
+        }}))
+        install()
+        poc = json.loads(settings_path.read_text())["hooks"]["PostCompact"]
+        cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
+        assert cmds == [foreign], "foreign PostCompact hook must survive, ours must go"
 
 
 class TestRepoPointerNotPoisoned:
