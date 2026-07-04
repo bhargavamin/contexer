@@ -287,14 +287,20 @@ def install(home: Path) -> list[str]:
         "type": "stdio",
         "command": contexer_bin,
     }
-    # Remote teams MCP server (additive; leaves the local stdio entry above intact).
-    # {type:http,url} is the shape that triggers Claude Code's native OAuth on first
-    # use (401 → DCR → browser PKCE → token). No token is written here.
-    teams_url = _teams_url()
-    claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": teams_url}
+    # Team sync is the Python client path (`contexer login` + pull/share/poll). The native
+    # remote-MCP entry (Claude Code's OWN OAuth client) is redundant under that design and
+    # would show a failed/unauthenticated server for every user (incl. local-only), so it is
+    # registered ONLY when explicitly opted in via CONTEXER_TEAMS_MCP. `uninstall` strips any
+    # existing entry, so a plain `contexer reinstall` removes a stale one.
+    register_teams = bool(os.environ.get("CONTEXER_TEAMS_MCP"))
+    if register_teams:
+        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": _teams_url()}
+    else:
+        claude["mcpServers"].pop("contexer-teams", None)  # drop a stale opt-in entry on plain install
     _save(claude_json, claude)
     log.append("  ✓ MCP server registered in ~/.claude.json")
-    log.append(f"  ✓ contexer-teams (remote) registered → {teams_url}")
+    if register_teams:
+        log.append(f"  ✓ contexer-teams (remote MCP) registered → {_teams_url()}")
 
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"

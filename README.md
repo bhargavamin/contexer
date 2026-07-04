@@ -393,6 +393,19 @@ A few people publish the rules; everyone else's agent just consumes them — no 
 
 → **[Request early access at contexer.ai](https://contexer.ai)** — design-partner teams.
 
+### Connecting to a team
+
+Once you have access, joining a team is two commands — nothing to hand-edit:
+
+```bash
+contexer install     # local setup (same as above)
+contexer login       # opens your browser to sign in; enables team sync
+```
+
+`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you. After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up. `contexer logout` disconnects.
+
+Pointing at a self-hosted or local Teams server (for development): set `CONTEXER_ENV=local` before `contexer login`, or pass `contexer login --endpoint <url>`.
+
 ---
 
 ## Limitations
