@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/bhargavamin/contexer/compare/v0.14.0...v0.14.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* resolve SSH host aliases when deriving the canonical repo key (C2) ([3afe686](https://github.com/bhargavamin/contexer/commit/3afe68657e92166d086b856fecf4f2d736661d0e))
+* resolve SSH host aliases when deriving the canonical repo key (C2) ([0459c2b](https://github.com/bhargavamin/contexer/commit/0459c2bf83f724abb8d09bc2b6bc5da7821b4ceb))
+
 ## [0.14.0](https://github.com/bhargavamin/contexer/compare/v0.13.0...v0.14.0) (2026-07-04)
 
 
