@@ -13,6 +13,9 @@ decisions; fresh-clone restore of the personal cloud mirror is a later follow-up
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 
 from contexer import config, store
@@ -140,6 +143,86 @@ def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]
     return result[0] if result else []
 
 
+def _pending_path(repo_path: str):
+    return store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json"
+
+
+def _claim_pending(repo_path: str) -> list[dict]:
+    """Atomically take the rows the background refresher parked for injection.
+
+    Claim = rename-then-read: the rename is atomic, so a refresher writing concurrently
+    lands a fresh pending file for the NEXT prompt instead of being lost mid-consume."""
+    path = _pending_path(repo_path)
+    claim = path.with_name(path.name + ".claim")
+    try:
+        os.replace(path, claim)
+    except OSError:
+        return []  # nothing pending (or a concurrent prompt claimed it first)
+    try:
+        data = json.loads(claim.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        data = []
+    finally:
+        try:
+            claim.unlink()
+        except OSError:
+            pass
+    return data if isinstance(data, list) else []
+
+
+def _refresh_worker(repo_path: str) -> None:
+    """Background refresher body (runs in a detached process spawned by poll_nonblocking):
+    the network sync happens OFF the prompt path. Newly synced team rows are parked in the
+    pending file, merged by id with any rows not yet consumed by a prompt."""
+    result = _sync(repo_path, config.load_profile())
+    if not result or not result[0]:
+        return
+    path = _pending_path(repo_path)
+    existing: list = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            existing = []
+    if not isinstance(existing, list):
+        existing = []
+    by_id = {r.get("id"): r for r in existing}
+    for row in result[0]:
+        by_id[row["id"]] = row
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store._atomic_write(path, json.dumps(list(by_id.values()), indent=2, ensure_ascii=False))
+
+
+def _spawn_refresh(repo_path: str) -> None:
+    """Start a detached background refresher — the hook process never waits on it."""
+    subprocess.Popen(  # noqa: S603 - fixed argv, our own interpreter/module
+        [sys.executable, "-m", "contexer.team_context", repo_path],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def poll_nonblocking(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]:
+    """C7 delta-poll with ZERO network on the prompt path.
+
+    Returns the rows the background refresher synced since the last prompt (one prompt of
+    staleness vs the synchronous poll()) and — at most once per _POLL_MIN_INTERVAL — spawns
+    a detached refresher whose results surface on the NEXT prompt. The prompt only ever pays
+    a cache read plus a non-blocking process spawn, so a slow-but-healthy cloud (or the full
+    transport timeout) can never stall the user."""
+    profile = profile or config.load_profile()
+    if profile.mode != "team" or not profile.endpoint:
+        return []  # not configured — no work, no cache file for a local repo
+    new = _claim_pending(repo_path)
+    cache = _load_cache(repo_path)
+    if time.time() - cache.get("last_poll_at", 0) >= _POLL_MIN_INTERVAL:
+        # Stamp BEFORE spawning so even a crashing refresher can't cause a spawn storm.
+        cache["last_poll_at"] = time.time()
+        _save_cache(repo_path, cache)
+        _spawn_refresh(repo_path)
+    return new
+
+
 def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -> str:
     """Render the cached team context as a '## Team context (synced)' markdown block, or ''.
 
@@ -163,3 +246,8 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
         id_tag = f" (id={rid})" if rid else ""
         lines.append(f"- [scope={scope}]{type_tag} {r.get('content', '')}{id_tag}")
     return "\n".join(lines)
+
+
+if __name__ == "__main__":  # pragma: no cover - the spawned refresher process entrypoint
+    if len(sys.argv) > 1:
+        _refresh_worker(sys.argv[1])

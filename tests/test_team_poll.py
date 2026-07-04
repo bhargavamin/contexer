@@ -92,7 +92,7 @@ def test_pull_contract_intact_after_refactor(team_env, monkeypatch):
 def test_team_poll_injects_new_decisions(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "poll", lambda repo: [{"content": "Use Postgres", "type": "architecture"}])
+    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo: [{"content": "Use Postgres", "type": "architecture"}])
     data = json.loads(claude.team_poll("/repo", ""))
     assert "Use Postgres" in data["hookSpecificOutput"]["additionalContext"]
     assert data["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
@@ -101,7 +101,7 @@ def test_team_poll_injects_new_decisions(monkeypatch):
 def test_team_poll_empty_when_nothing_new(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "poll", lambda repo: [])
+    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo: [])
     assert claude.team_poll("/repo", "") == "{}"
 
 
@@ -118,5 +118,94 @@ def test_team_poll_swallows_errors(monkeypatch):
     def boom(repo):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(team_context, "poll", boom)
+    monkeypatch.setattr(team_context, "poll_nonblocking", boom)
     assert claude.team_poll("/repo", "") == "{}"
+
+
+# ── poll_nonblocking (background refresh; zero network on the prompt path) ────────
+
+def _no_spawn(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(team_context, "_spawn_refresh", lambda repo: spawned.append(repo))
+    return spawned
+
+
+def test_nonblocking_returns_and_consumes_pending(team_env, monkeypatch):
+    spawned = _no_spawn(monkeypatch)
+    team_context.store.STORE_DIR.mkdir(exist_ok=True)
+    team_context._pending_path(team_env).write_text(
+        json.dumps([{"id": "t1", "content": "team rule", "type": "constraint"}]))
+    new = team_context.poll_nonblocking(team_env, profile=TEAM)
+    assert [d["id"] for d in new] == ["t1"]
+    assert not team_context._pending_path(team_env).exists()  # consumed
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []  # gone next prompt
+    assert spawned  # a refresh was scheduled for the next window
+
+
+def test_nonblocking_spawns_when_due_and_stamps_first(team_env, monkeypatch):
+    spawned = _no_spawn(monkeypatch)
+    team_context._save_cache(team_env, {"repo_key": "github.com/a/b", "cursor": None,
+                                        "decisions": [], "last_poll_at": time.time() - 100})
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
+    assert spawned == [team_env]
+    # stamped before spawn: a second prompt inside the window must not spawn again
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
+    assert spawned == [team_env]
+
+
+def test_nonblocking_throttled_no_spawn(team_env, monkeypatch):
+    spawned = _no_spawn(monkeypatch)
+    team_context._save_cache(team_env, {"repo_key": "github.com/a/b", "cursor": None,
+                                        "decisions": [], "last_poll_at": time.time()})
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
+    assert spawned == []
+
+
+def test_nonblocking_local_mode_no_work(tmp_repo, monkeypatch):
+    spawned = _no_spawn(monkeypatch)
+    assert team_context.poll_nonblocking(tmp_repo, profile=config.Profile()) == []
+    assert spawned == []
+    assert not team_context._cache_path(tmp_repo).exists()
+
+
+def test_nonblocking_never_does_network(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    fake = _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t9", "x")], [], "c9"))
+    team_context.poll_nonblocking(team_env, profile=TEAM)
+    assert fake.calls == []  # the prompt path itself must never touch the cloud
+
+
+def test_nonblocking_corrupt_pending_is_empty(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    team_context.store.STORE_DIR.mkdir(exist_ok=True)
+    team_context._pending_path(team_env).write_text("{not json")
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
+    assert not team_context._pending_path(team_env).exists()  # corrupt file still consumed
+
+
+def test_refresh_worker_parks_new_rows(team_env, monkeypatch):
+    monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
+    _fake_rs(monkeypatch, ctx=RemoteContext(
+        [_rd("t1", "team rule"), _rd("p1", "mine", "personal")], [], "c1"))
+    team_context._refresh_worker(team_env)
+    pending = json.loads(team_context._pending_path(team_env).read_text())
+    assert [r["id"] for r in pending] == ["t1"]  # team rows only, parked for the next prompt
+    assert team_context._load_cache(team_env)["cursor"] == "c1"  # cache advanced too
+
+
+def test_refresh_worker_merges_unconsumed_pending(team_env, monkeypatch):
+    monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
+    team_context.store.STORE_DIR.mkdir(exist_ok=True)
+    team_context._pending_path(team_env).write_text(
+        json.dumps([{"id": "t0", "content": "earlier, not yet injected"}]))
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "newer")], [], "c2"))
+    team_context._refresh_worker(team_env)
+    pending = {r["id"] for r in json.loads(team_context._pending_path(team_env).read_text())}
+    assert pending == {"t0", "t1"}  # nothing lost between prompts
+
+
+def test_refresh_worker_degraded_leaves_no_pending(team_env, monkeypatch):
+    monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context._refresh_worker(team_env)
+    assert not team_context._pending_path(team_env).exists()

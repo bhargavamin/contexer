@@ -98,13 +98,15 @@ def rationale(repo_path: str, raw: str) -> str:
 def team_poll(repo_path: str, raw: str) -> str:
     """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
 
-    Fail-soft, and throttled inside team_context.poll so it never blocks or breaks a prompt."""
+    Fail-soft. Uses the non-blocking poll: the network sync runs in a detached background
+    process and its results inject on the NEXT prompt, so this hook never waits on the
+    cloud — a slow or timing-out endpoint cannot stall prompt submission."""
     try:
         from contexer import team_context
         repo = store._resolve_repo(repo_path)
         if not repo:
             return "{}"
-        new = team_context.poll(repo)
+        new = team_context.poll_nonblocking(repo)
         if not new:
             return "{}"
         lines = ["Team decisions just approved (now in effect):"]
