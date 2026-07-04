@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.14.0](https://github.com/bhargavamin/contexer/compare/v0.13.0...v0.14.0) (2026-07-04)
+
+
+### Features
+
+* add contexer login (zero-paste OAuth) (C-auth) ([1e9a840](https://github.com/bhargavamin/contexer/commit/1e9a840e2e3a8d12ddfa8f97dffc4ecc3c97d9f3))
+* add contexer login (zero-paste OAuth) (C-auth) ([b0ec893](https://github.com/bhargavamin/contexer/commit/b0ec893d9e25877725c891f70b228547f462d437))
+* add delta-poll injection (C7) ([9080fc9](https://github.com/bhargavamin/contexer/commit/9080fc9a2b19738f29e25a9ed13440c061087e2b))
+* add delta-poll injection (C7) ([113bee1](https://github.com/bhargavamin/contexer/commit/113bee1cc63b814cc9531b72cb8b07e13960234d))
+* add local-fallback degradation for RemoteStore (C8) ([54530d9](https://github.com/bhargavamin/contexer/commit/54530d9132eaf2462580a20b701b255b9dd9c830))
+* add local-fallback degradation for RemoteStore (C8) ([da6949a](https://github.com/bhargavamin/contexer/commit/da6949a7dcae2173c1435900645ca02080477b2d))
+* add RemoteStore MCP sync client (C3) ([447afde](https://github.com/bhargavamin/contexer/commit/447afde76b28028b7509e9d1d5074e0692b4bfb7))
+* add RemoteStore MCP sync client (C3) ([027a4c9](https://github.com/bhargavamin/contexer/commit/027a4c92b7a4cbdc6a87ea93da0d1baacbfdbbcc))
+* add share_decision + contexer share (C4) ([0f9fbe5](https://github.com/bhargavamin/contexer/commit/0f9fbe53aaea2faed6df017d7d9814412bbdfdbe))
+* add share_decision + contexer share (C4) ([bad6554](https://github.com/bhargavamin/contexer/commit/bad6554e584bf6440627dc9b1ff87bd2d185045b))
+* add team-context pull + merge (C5) ([fb73cbe](https://github.com/bhargavamin/contexer/commit/fb73cbea76458132fb575d22a2e5771394b23dfd))
+* add team-context pull + merge (C5) ([1460c2e](https://github.com/bhargavamin/contexer/commit/1460c2ee32979e5eb31162bcb97e8a42f25b4ac5))
+* clean team onboarding — opt-in native MCP + self-configuring login ([e4afd6e](https://github.com/bhargavamin/contexer/commit/e4afd6e4c0d677063dbf88a27966b3ec138228af))
+* clean team onboarding (opt-in native MCP + self-configuring login) ([e16375a](https://github.com/bhargavamin/contexer/commit/e16375a5061b3bbaecb8e0226cf8400b83ed25c2))
+* make C7 delta-poll non-blocking (background refresh off the prompt path) ([a0107fb](https://github.com/bhargavamin/contexer/commit/a0107fb426b09625a11778222b4731dc85d05a45))
+* non-blocking C7 delta-poll + inclusive-cursor re-injection fix ([cf71923](https://github.com/bhargavamin/contexer/commit/cf71923875b971e05c550b69e9c58271c0889dc7))
+* opt-in native teams MCP entry respects the configured endpoint ([9c414cf](https://github.com/bhargavamin/contexer/commit/9c414cf3248b02d115ab9a6c268597dd97b490b3))
+* zero-config remote OAuth on install (contexer-teams) ([00a7371](https://github.com/bhargavamin/contexer/commit/00a7371a09ee536fd874e1445461e4bc31ddb505))
+
+
+### Bug Fixes
+
+* don't re-inject unchanged rows re-sent by an inclusive updatedSince cursor ([3404445](https://github.com/bhargavamin/contexer/commit/3404445f7e961a2fed127859c423a52663e0b1ec))
+* remove PostCompact hook (visible noise, injected nothing) ([#76](https://github.com/bhargavamin/contexer/issues/76)) ([8906a1e](https://github.com/bhargavamin/contexer/commit/8906a1e82a0dfc0e36178a446a330fc4571fae58))
+* single-source Teams endpoint on the stable domain + harden login ([b4290d6](https://github.com/bhargavamin/contexer/commit/b4290d6d738b1035942adf6f7d1c51752076c796))
+* single-source Teams endpoint on the stable domain + harden login ([576b510](https://github.com/bhargavamin/contexer/commit/576b51009a9ed3d7e7213f730b78ea17952036ee))
+
+
+### Documentation
+
+* **readme:** lead with cross-tool + aha demo; add Contexer Teams (governance) ([#67](https://github.com/bhargavamin/contexer/issues/67)) ([be4a666](https://github.com/bhargavamin/contexer/commit/be4a66609a6c65e9c7ee3cdf1747ee7db4342963))
+
 ## [0.13.0](https://github.com/bhargavamin/contexer/compare/v0.12.0...v0.13.0) (2026-07-03)
 
 
