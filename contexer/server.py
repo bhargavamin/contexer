@@ -94,6 +94,20 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
 
 
 @mcp.tool()
+def share_decision(decision_id: str = "", repo_path: str = "") -> str:
+    """Explicitly push a local decision up to your team cloud context (never auto-shares).
+
+    decision_id: the decision to share (full id or 8-char prefix); omit to share the most
+    recent decision. Syncs to your PERSONAL cloud context today; true team review arrives
+    with a team-scoped push endpoint."""
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    from contexer import share as _share
+    return _share.share(resolved, decision_id)
+
+
+@mcp.tool()
 def bootstrap_context(repo_path: str = "", insight: str = "") -> str:
     """Scans a repo for inferable decisions and gap questions, filtered by how much
     insight the user has into the repo.
