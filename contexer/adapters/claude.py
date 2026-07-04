@@ -105,6 +105,28 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+def team_poll(repo_path: str, raw: str) -> str:
+    """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
+
+    Fail-soft, and throttled inside team_context.poll so it never blocks or breaks a prompt."""
+    try:
+        from contexer import team_context
+        repo = store._resolve_repo(repo_path)
+        if not repo:
+            return "{}"
+        new = team_context.poll(repo)
+        if not new:
+            return "{}"
+        lines = ["Team decisions just approved (now in effect):"]
+        for d in new:
+            type_tag = f" ({d.get('type')})" if d.get("type") else ""
+            lines.append(f"- {d.get('content', '')}{type_tag}")
+        return json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(lines)}})
+    except Exception:
+        return "{}"
+
+
 def _memory_dir(repo_path: str) -> Path | None:
     """Locate Claude Code's memory-tool dir for a repo, or None if absent.
 
@@ -257,6 +279,9 @@ def install(home: Path) -> list[str]:
     cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                f'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
+    cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     contexer_bin = shutil.which("contexer") or "contexer"
 
@@ -401,6 +426,9 @@ def install(home: Path) -> list[str]:
     if not _in_groups(ups, "claude.rationale"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for relevant decisions...", "command": cap_rat}]})
+    if not _in_groups(ups, "claude.team_poll"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
 
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for p in [
