@@ -96,3 +96,12 @@ def populated_repo(tmp_repo):
     store.update_decision(tmp_repo, "decided to use JWT instead of sessions — stateless, easier to scale", "sess-1")
     store.update_decision(tmp_repo, "constraint: never store plaintext passwords, always use bcrypt", "sess-1")
     return tmp_repo
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ssh_config(monkeypatch):
+    """Repo-key ssh-alias resolution is identity in tests: never consult the dev
+    machine's real ~/.ssh/config (an alias there would skew every key-deriving test).
+    Alias-specific tests override this stub; _ssh_hostname unit tests bypass it."""
+    from contexer import repo_key
+    monkeypatch.setattr(repo_key, "_resolve_ssh_host", lambda h: h)
