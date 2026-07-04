@@ -1788,16 +1788,27 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     return ""
 
 
+def _team_section(repo_path: str, query: str, entry_type: str) -> str:
+    """Formatted team-context block from the C5 cache. Function-level import avoids a
+    store <-> team_context cycle. '' when there is no team context (local mode / no cache)."""
+    from contexer import team_context
+    return team_context.format_team_section(repo_path, query, entry_type)
+
+
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
                 _active_only: bool = False) -> str:
     """Returns stored context for the given repo.
 
     _active_only: internal flag — when True, exclude pending_approval and ignored entries
     (used by auto-injection paths so only trusted decisions reach the AI automatically).
+
+    Team context (pulled by C5 and cached separately) is appended as its own section so
+    the agent reads local (personal) and team decisions together, scope-tagged.
     """
     data = _load(repo_path)
     entries = data.get("entries", [])
-    if not entries:
+    team_section = _team_section(repo_path, query, entry_type)
+    if not entries and not team_section:
         return "No context stored for this repository."
 
     lines = [f"# Context for {repo_path}\n"]
@@ -1853,6 +1864,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             parts.append(f"type='{entry_type}'")
         lines.append(f"No matching decisions found ({', '.join(parts)}).")
 
+    if team_section:
+        lines.append(team_section)
     return "\n".join(lines)
 
 

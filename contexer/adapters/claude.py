@@ -144,6 +144,18 @@ def sync_memory(repo_path: str) -> int:
         return 0
 
 
+def pull_team(repo_path: str) -> tuple[int, int]:
+    """SessionStart: refresh the local team-context cache before building context.
+
+    Fail-soft — a sync hiccup (offline, bad token, anything) MUST NEVER break the session,
+    so any exception degrades to a no-op. Returns (upserted, removed)."""
+    try:
+        from contexer import team_context
+        return team_context.pull(repo_path)
+    except Exception:
+        return (0, 0)
+
+
 def install(home: Path) -> list[str]:
     """Wire the Claude MCP server + hooks + permissions. Returns log lines."""
     log: list[str] = []
@@ -166,6 +178,9 @@ def install(home: Path) -> list[str]:
         # Import any memory-tool facts before building context (crash-recovery net:
         # catches facts whose session ended without a clean SessionEnd flush).
         "_c.sync_memory(repo); "
+        # Refresh team context (Path B, C5) before building the session context —
+        # fail-soft so a sync hiccup never breaks the session.
+        "_c.pull_team(repo); "
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
     )
     boot_code = (
