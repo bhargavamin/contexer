@@ -20,6 +20,20 @@ from contexer.adapters.base import (
 NAME = "claude"
 
 
+def _teams_url() -> str:
+    """Endpoint for the opt-in native contexer-teams MCP entry (CONTEXER_TEAMS_MCP).
+
+    Prefers the user's configured team endpoint (config.toml) so a dev override like
+    `contexer login --endpoint <dev-url>` governs this entry too; falls back to the
+    built-in default. Fail-soft: a malformed config.toml must never break install —
+    and local-only users (no config, flag unset) never reach this path at all."""
+    try:
+        configured = config.load_profile().endpoint
+    except config.ConfigError:
+        configured = None
+    return configured or config.default_endpoint()
+
+
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall
 # recognize and replace stale hooks (e.g. a dead from-source `uv run --directory`).
@@ -287,13 +301,13 @@ def install(home: Path) -> list[str]:
     # existing entry, so a plain `contexer reinstall` removes a stale one.
     register_teams = bool(os.environ.get("CONTEXER_TEAMS_MCP"))
     if register_teams:
-        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": config.default_endpoint()}
+        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": _teams_url()}
     else:
         claude["mcpServers"].pop("contexer-teams", None)  # drop a stale opt-in entry on plain install
     _save(claude_json, claude)
     log.append("  ✓ MCP server registered in ~/.claude.json")
     if register_teams:
-        log.append(f"  ✓ contexer-teams (remote MCP) registered → {config.default_endpoint()}")
+        log.append(f"  ✓ contexer-teams (remote MCP) registered → {_teams_url()}")
 
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"

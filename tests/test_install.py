@@ -5,8 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from contexer import config
 from contexer.adapters import claude
 from contexer.cli import install, uninstall
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    """Never read the developer's real ~/.contexer/config.toml during install tests."""
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "isolated-config.toml")
+    return config.CONFIG_PATH
 
 
 @pytest.fixture
@@ -397,6 +405,37 @@ class TestTeamsRegistration:
         install()
         servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
         assert servers["contexer-teams"]["url"] == "http://localhost:8080/mcp"
+
+    def test_opt_in_respects_configured_endpoint(self, clean_home, monkeypatch, tmp_path):
+        # A dev override in config.toml (e.g. from `contexer login --endpoint`) governs
+        # the native entry too — the built-in default is only the unconfigured fallback.
+        cfg = tmp_path / "isolated-config.toml"
+        cfg.write_text('mode = "team"\nendpoint = "https://mcp.dev.contexer.ai/mcp"\n')
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"]["url"] == "https://mcp.dev.contexer.ai/mcp"
+
+    def test_opt_in_malformed_config_falls_back_to_default(self, clean_home, monkeypatch, tmp_path):
+        # A corrupt config.toml must never break install — fall back to the default.
+        cfg = tmp_path / "isolated-config.toml"
+        cfg.write_text("mode = = broken")
+        monkeypatch.delenv("CONTEXER_ENV", raising=False)
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"]["url"] == "https://mcp.contexer.ai/mcp"
+
+    def test_local_only_install_never_reads_config(self, clean_home, monkeypatch, tmp_path):
+        # OSS/local-only path: flag unset — even a corrupt config.toml is irrelevant,
+        # no teams entry is written, install succeeds untouched.
+        cfg = tmp_path / "isolated-config.toml"
+        cfg.write_text("mode = = broken")
+        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert "contexer-teams" not in servers
+        assert servers["contexer"]["type"] == "stdio"
 
     def test_default_install_strips_stale_entry(self, clean_home, monkeypatch):
         monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
