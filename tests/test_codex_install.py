@@ -53,6 +53,46 @@ class TestCodexInstall:
                        "claude.capture_constraint", "claude.rationale", ".pending_capture"):
             assert marker in joined
 
+    # ── T2: team sync ────────────────────────────────────────────────────────────
+
+    def test_session_start_pulls_team(self, home):
+        codex.install(home)
+        cmds = [g["hooks"][0]["command"] for g in _hooks(home)["hooks"]["SessionStart"]]
+        assert any("pull_team" in c for c in cmds)  # team cache refreshed at session start
+
+    def test_user_prompt_submit_wires_team_poll(self, home):
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        assert any("claude.team_poll" in c for c in cmds)  # per-prompt delta injection
+
+    def test_team_poll_wired_once(self, home):
+        codex.install(home)
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        assert sum("claude.team_poll" in c for c in cmds) == 1
+
+    def test_session_start_pull_team_wired_once(self, home):
+        codex.install(home)
+        codex.install(home)
+        assert len(_hooks(home)["hooks"]["SessionStart"]) == 1  # not duplicated on reinstall
+
+    def test_migrates_stale_session_start_to_add_team_pull(self, home):
+        # An older install: SessionStart loads context but has NO team pull. Reinstall must
+        # replace it so team context refreshes at session start.
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command",
+                        "command": 'py -c "store.get_session_start_context(repo)" "$REPO"'}]}]}}))
+        codex.install(home)
+        ss = _hooks(home)["hooks"]["SessionStart"]
+        cmds = [g["hooks"][0]["command"] for g in ss]
+        assert len(ss) == 1  # replaced in place, not duplicated
+        assert any("pull_team" in c for c in cmds)
+        assert any("get_session_start_context" in c for c in cmds)
+
     def test_post_tool_use_matches_write_edit(self, home):
         codex.install(home)
         put = _hooks(home)["hooks"]["PostToolUse"]
@@ -170,6 +210,13 @@ class TestCodexUninstall:
         codex.install(home)
         codex.uninstall(home)
         codex.uninstall(home)  # must not raise
+
+    def test_uninstall_removes_team_poll(self, home):
+        codex.install(home)
+        codex.uninstall(home)
+        ups = _hooks(home)["hooks"].get("UserPromptSubmit", [])
+        cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])]
+        assert not any("claude.team_poll" in c for c in cmds)
 
 
 class TestCodexStatus:
