@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.15.0](https://github.com/bhargavamin/contexer/compare/v0.14.2...v0.15.0) (2026-07-05)
+
+
+### Features
+
+* **team-sync:** adapter-agnostic team-context seam (T1) ([0f99b4d](https://github.com/bhargavamin/contexer/commit/0f99b4d7e43d2b1b04760eff9ab49cf5c04739eb))
+* **team-sync:** adapter-agnostic team-context seam (T1) ([f395f5c](https://github.com/bhargavamin/contexer/commit/f395f5c8dbc479f57dddeab9a05cb9144df26f62))
+* **team-sync:** Codex SessionStart pull + per-prompt delta poll (T2) ([74be5f6](https://github.com/bhargavamin/contexer/commit/74be5f602ad0717e0029b6935f8dc0d7edb9c481))
+* **team-sync:** Codex SessionStart pull + per-prompt delta poll (T2) ([1a4c195](https://github.com/bhargavamin/contexer/commit/1a4c19514c5466f4868c92fe3a8614dace1c4ea1))
+
+
+### Bug Fixes
+
+* **team-sync:** restore pull_team import fail-soft + suppress team on resume ([a7e7ba1](https://github.com/bhargavamin/contexer/commit/a7e7ba13d224901622d91ce82590049e6a14af97))
+
 ## [0.14.2](https://github.com/bhargavamin/contexer/compare/v0.14.1...v0.14.2) (2026-07-04)
 
 
