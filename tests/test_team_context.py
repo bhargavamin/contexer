@@ -121,6 +121,57 @@ def test_pull_null_cursor_preserves_prior_cursor(team_env, monkeypatch):
     assert cache["cursor"] == "c0"  # empty pull doesn't wipe the cursor
 
 
+# ── last_sync telemetry ────────────────────────────────────────────────────────────
+
+def test_last_sync_recorded_on_success(team_env, monkeypatch):
+    ctx = RemoteContext(decisions=[_rd("t1", "team rule", "team")], deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["ok"] is True
+    assert isinstance(last_sync["at"], float)
+    assert isinstance(last_sync["duration_ms"], int)
+    assert last_sync["upserted"] == 1
+    assert last_sync["removed"] == 0
+
+
+def test_last_sync_recorded_on_degraded(team_env, monkeypatch):
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["ok"] is False
+    assert last_sync["error"] == "degraded"
+    assert isinstance(last_sync["duration_ms"], int)
+    assert cache["decisions"] == []  # degraded path only writes telemetry, never decisions
+
+
+def test_last_sync_degraded_preserves_existing_decisions(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0",
+        "decisions": [{"id": "t1", "type": "architecture", "content": "keep", "rationale": None,
+                       "repo": None, "agent": None, "scope": "team"}]})
+    _fake_rs(monkeypatch, exc=RemoteAuthError("401"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]  # untouched by the failed attempt
+    assert cache["last_sync"]["ok"] is False
+
+
+def test_last_sync_no_cache_file_for_local_mode(team_env, monkeypatch):
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p, **kw: None))
+    team_context.pull(team_env, profile=config.Profile())
+    assert not team_context._cache_path(team_env).exists()
+
+
+def test_last_sync_no_cache_file_for_no_origin_repo(team_env, monkeypatch):
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)  # no origin
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert not team_context._cache_path(team_env).exists()
+
+
 # ── format_team_section ──────────────────────────────────────────────────────────
 
 def test_format_team_section_empty_when_no_cache(tmp_repo):

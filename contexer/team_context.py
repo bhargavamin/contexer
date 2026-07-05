@@ -74,21 +74,36 @@ def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str
 
     Returns (new_or_updated_rows, removed_ids) on success, or None (no-op) when not in team
     mode, when the repo has no git origin, or when the cloud is unreachable / rejects the
-    token (degrades via with_local_fallback, leaving any existing cache untouched)."""
+    token (degrades via with_local_fallback, leaving any existing cache untouched).
+
+    Observability: every ATTEMPTED sync (i.e. we got past the mode/origin checks and
+    actually tried the network) records its outcome as a `last_sync` cache key - {"at",
+    "ok", "duration_ms"} plus either {"upserted", "removed"} on success or {"error"} on
+    failure - so `contexer status` can show when sync last ran and why it degraded,
+    without itself touching the network."""
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return None  # local mode / not configured
+        return None  # local mode / not configured - no cache file for a local-only repo
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
     if key is None:
-        return None  # no git remote — nothing to sync on
+        return None  # no git remote - nothing to sync on, no cache file
 
     cache = _load_cache(repo_path)
+    start = time.time()
     ctx = with_local_fallback(
         lambda: remote.get_context(repo=key, updated_since=cache.get("cursor")),
         default=None,
         action="pull team context",
     )
+    duration_ms = int((time.time() - start) * 1000)
     if ctx is None:
+        # Degraded (cloud unreachable / auth rejected): record the attempt but leave the
+        # decisions/cursor exactly as loaded - a transient outage must never wipe the cache.
+        _save_cache(repo_path, {
+            **cache,
+            "last_sync": {"at": time.time(), "ok": False, "duration_ms": duration_ms,
+                         "error": "degraded"},
+        })
         return None  # degraded — leave the existing cache in place
 
     by_id: dict[str, dict] = {d["id"]: d for d in cache.get("decisions", [])}
@@ -114,6 +129,8 @@ def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str
         "repo_key": key,
         "cursor": ctx.cursor or cache.get("cursor"),  # null cursor (empty pull) keeps prior
         "decisions": list(by_id.values()),
+        "last_sync": {"at": time.time(), "ok": True, "duration_ms": duration_ms,
+                     "upserted": len(new_rows), "removed": len(removed)},
     })
     return (new_rows, removed)
 
