@@ -303,6 +303,19 @@ def test_session_start_payload_no_team_when_cache_absent(tmp_repo):
     assert "## Team context" not in ctx  # local-only session start is unchanged
 
 
+def test_session_start_payload_status_suffix_when_team_synced(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    _seed_team(tmp_repo, "Team deploy via CI only")
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 1 synced")
+
+
+def test_session_start_payload_no_status_suffix_without_team(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint x", "s1", subtype="constraint")
+    payload = store.session_start_payload(tmp_repo)
+    assert "| team:" not in payload["status"]
+
+
 def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
     # No local decisions, but a team cache exists — a fresh clone should still see team.
     _seed_team(tmp_repo, "Team rule survives fresh clone")
