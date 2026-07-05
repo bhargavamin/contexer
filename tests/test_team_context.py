@@ -151,6 +151,100 @@ def test_format_team_section_filters_by_type_and_query(tmp_repo):
     assert "secrets" in q and "Postgres" not in q
 
 
+# ── local-dedup (provenance-preserving) ──────────────────────────────────────────
+#
+# When a team row says essentially the same thing as a LOCAL decision, injecting both wastes
+# tokens and reads as two sources. Overlap (store's novelty metric) decides: >= 0.7 collapses
+# to a "ratifies local decision" pointer; 0.5-0.7 renders in full but tagged with the local id;
+# below 0.5 renders as before. Comparison degrades to today's behavior on any local-store error.
+
+# 8 distinct tokens; a team row sharing 5 of them is 5/8 = 0.625 overlap (the 0.5-0.7 tier).
+_LOCAL8 = "alpha beta gamma delta epsilon zeta eta theta"
+_TEAM5 = "alpha beta gamma delta epsilon iota kappa lambda"  # 5/8 = 0.625
+
+
+def _seed_local(repo, content, session="s1", subtype=""):
+    ok, did = store.update_decision(repo, content, session, subtype=subtype)
+    assert ok
+    return did
+
+
+def _one_team_row(repo, content, rid="teamaaaa", rtype="architecture"):
+    team_context._save_cache(repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": rid, "type": rtype, "content": content, "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+
+
+def test_dedup_collapses_team_row_identical_to_local(tmp_repo):
+    lid = _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _LOCAL8, rid="teamaaaa")
+    out = team_context.format_team_section(tmp_repo)
+    assert f"ratifies local decision {lid[:8]}" in out
+    assert "(id=teamaaaa)" in out       # team-id provenance is kept
+    assert "alpha" not in out           # the duplicate text is NOT re-injected
+    assert "[scope=team]" in out
+
+
+def test_dedup_partial_overlap_renders_full_with_tag(tmp_repo):
+    lid = _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _TEAM5, rid="teambbbb")
+    out = team_context.format_team_section(tmp_repo)
+    assert f"[scope=team, overlaps local {lid[:8]}]" in out
+    assert "iota kappa lambda" in out   # full divergent text stays visible
+    assert "ratifies" not in out
+    assert "(id=teambbbb)" in out
+
+
+def test_dedup_unrelated_row_renders_unchanged(tmp_repo):
+    _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, "completely different rule about logging", rid="teamcccc")
+    out = team_context.format_team_section(tmp_repo)
+    assert "- [scope=team] [architecture] completely different rule about logging (id=teamcccc)" in out
+    assert "ratifies" not in out
+    assert "overlaps local" not in out
+
+
+def test_dedup_ignores_ignored_local_decisions(tmp_repo):
+    _seed_local(tmp_repo, _LOCAL8)
+    # Mark the only local decision ignored - it must not be a dedup target.
+    data = store._load(tmp_repo)
+    data["entries"][0]["status"] = "ignored"
+    store._save(tmp_repo, data)
+    _one_team_row(tmp_repo, _LOCAL8, rid="teamdddd")
+    out = team_context.format_team_section(tmp_repo)
+    assert "ratifies" not in out        # ignored local is invisible to matching
+    assert "alpha" in out               # so the team row renders in full
+
+
+def test_dedup_fail_soft_when_local_store_raises(tmp_repo, monkeypatch):
+    _one_team_row(tmp_repo, _LOCAL8, rid="teameeee")
+
+    def boom(_repo):
+        raise RuntimeError("corrupt store")
+
+    monkeypatch.setattr(store, "_load", boom)
+    out = team_context.format_team_section(tmp_repo)   # must not raise
+    assert "- [scope=team] [architecture] " + _LOCAL8 + " (id=teameeee)" in out
+    assert "ratifies" not in out
+
+
+def test_dedup_cap_applies_after_collapse(tmp_repo):
+    _seed_local(tmp_repo, _LOCAL8)
+    # 30 team rows (> _TEAM_DISPLAY=25); the first is a collapse, the rest unrelated. Collapsed
+    # one-liners still count as rows, so exactly _TEAM_DISPLAY rows render.
+    rows = [{"id": "collapse0", "type": "architecture", "content": _LOCAL8, "rationale": None,
+             "repo": None, "agent": None, "scope": "team"}]
+    for i in range(29):
+        rows.append({"id": f"row{i:05d}", "type": "architecture",
+                     "content": f"unrelated distinct decision number {i}", "rationale": None,
+                     "repo": None, "agent": None, "scope": "team"})
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": rows})
+    out = team_context.format_team_section(tmp_repo)
+    rendered = [ln for ln in out.splitlines() if ln.startswith("- ")]
+    assert len(rendered) == team_context._TEAM_DISPLAY
+    assert any("ratifies local decision" in ln for ln in rendered)
+
+
 def test_load_cache_tolerates_corrupt_file(tmp_repo):
     path = team_context._cache_path(tmp_repo)
     path.parent.mkdir(parents=True, exist_ok=True)

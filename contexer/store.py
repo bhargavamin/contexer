@@ -285,6 +285,16 @@ def _tokenize(text: str) -> set[str]:
     return set(_PUNCT_RE.sub("", text.lower()).split())
 
 
+def _overlap_ratio(a: set[str], b: set[str]) -> float:
+    """Token overlap of two token sets: |a∩b| / max(|a|, |b|). This is the metric the
+    novelty filter thresholds at 0.7 to reject duplicates; team-context dedup reuses it so
+    both sites judge "same rule" identically. 0.0 when either side is empty."""
+    if not a or not b:
+        return 0.0
+    hi = len(a) if len(a) > len(b) else len(b)
+    return len(a & b) / hi
+
+
 def _query_pattern(query: str) -> "re.Pattern":
     """Case-insensitive search pattern for a user query. A leading `\\b` is added only
     when the query starts with a word char — prepending it before `.`, `@`, `#` would
@@ -316,7 +326,7 @@ def _find_match(content: str, existing: list) -> dict | None:
         lo = m if n > m else n
         if lo <= 0.7 * hi:                       # overlap can't clear the bar — skip intersection
             continue
-        if len(tokens & other) / hi > 0.7:
+        if _overlap_ratio(tokens, other) > 0.7:
             return entry
     return None
 
