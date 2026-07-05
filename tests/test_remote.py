@@ -212,6 +212,55 @@ def test_invoke_reraises_typed_error_unwrapped(monkeypatch):
         RemoteStore("https://t/mcp", "tok").get_context()
 
 
+@pytest.mark.parametrize("message", [
+    "This token lacks the 'write' scope required for this action.",
+    "Forbidden",
+    "unauthorized",
+    "You do not have permission to do that.",
+])
+def test_authz_tool_error_maps_to_auth_error(monkeypatch, message):
+    """A reachable-but-refusing cloud (insufficient scope / permission) is an auth failure,
+    NOT a transport outage — so it must raise RemoteAuthError, never a bare RemoteStoreError."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text(message)], is_error=True),
+    )
+    with pytest.raises(RemoteAuthError):
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+
+
+def test_generic_tool_error_is_not_auth_error(monkeypatch):
+    """A non-authorization tool error (e.g. bad input) stays a plain RemoteStoreError so the
+    scope-error classifier doesn't over-broaden into every failure."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
+    )
+    with pytest.raises(RemoteStoreError) as exc:
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+    assert not isinstance(exc.value, RemoteAuthError)
+
+
+def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
+    """End-to-end for Bug 2: a missing-write-scope push, run through with_local_fallback, warns
+    the user to re-authenticate — instead of the misleading 'endpoint unreachable' message."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(
+            content=[_text("This token lacks the 'write' scope required for this action.")],
+            is_error=True),
+    )
+    remote.reset_degradation_warnings()
+    store = RemoteStore("https://t/mcp", "tok")
+    result = remote.with_local_fallback(
+        lambda: store.push_decision(type="constraint", content="c", repo=None),
+        default=None, action="share decision")
+    assert result is None
+    err = capsys.readouterr().err
+    assert "authentication failed" in err and "contexer login" in err
+    assert "unreachable" not in err
+
+
 # ── content parsing edge (SDK returns dict content items in some transports) ──────
 
 def test_push_decision_reads_dict_content_item(monkeypatch):

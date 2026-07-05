@@ -153,7 +153,8 @@ class RemoteStore:
         except Exception as exc:  # network / transport / anyio group -> typed, catchable
             raise _classify(exc) from exc
         if getattr(result, "isError", False):
-            raise RemoteStoreError(_first_text(getattr(result, "content", None)) or f"{name} failed")
+            message = _first_text(getattr(result, "content", None)) or f"{name} failed"
+            raise _classify_tool_error(message)
         return result
 
 
@@ -237,6 +238,24 @@ def _classify(exc: BaseException) -> RemoteStoreError:
     if status in (401, 403):
         return RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
     return RemoteUnavailableError(f"Teams endpoint unreachable: {exc}")
+
+
+# A tool call that returns isError with one of these signals is an AUTHORIZATION failure
+# (insufficient scope, forbidden, permission denied) - the cloud was reached and answered, it
+# just refused the action. It must NOT be reported as "endpoint unreachable": the remedy is to
+# re-authenticate, so it is raised as RemoteAuthError and surfaced via the auth degradation path.
+_AUTHZ_ERROR_RE = re.compile(r"\b(?:scope|forbidden|unauthori[sz]ed|permission|not allowed)\b", re.I)
+
+
+def _classify_tool_error(message: str) -> RemoteStoreError:
+    """Map a server-returned tool error (an isError result's text) to a typed RemoteStoreError.
+
+    An insufficient-scope / permission message is an authorization failure (RemoteAuthError), not
+    a transport outage - so with_local_fallback tells the user to re-authenticate instead of
+    misreporting a reachable-but-refusing cloud as unreachable."""
+    if _AUTHZ_ERROR_RE.search(message):
+        return RemoteAuthError(message)
+    return RemoteStoreError(message)
 
 
 def _call_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O, exercised by the opt-in integration test
