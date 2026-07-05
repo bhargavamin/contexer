@@ -56,6 +56,17 @@ def test_from_profile_team_missing_endpoint_returns_none():
     assert RemoteStore.from_profile(Profile(mode="team", endpoint=None, token="tok")) is None
 
 
+def test_from_profile_default_timeout():
+    rs = RemoteStore.from_profile(Profile(mode="team", endpoint="https://t/mcp", token="tok"))
+    assert rs._timeout == remote._DEFAULT_TIMEOUT
+
+
+def test_from_profile_accepts_timeout_override():
+    rs = RemoteStore.from_profile(
+        Profile(mode="team", endpoint="https://t/mcp", token="tok"), timeout=3.0)
+    assert rs._timeout == 3.0
+
+
 # ── push_decision serialization + id parsing ─────────────────────────────────────
 
 def test_push_decision_serializes_full_wire_shape(monkeypatch):

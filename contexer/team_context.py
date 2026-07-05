@@ -69,7 +69,8 @@ def _row_to_dict(rd: RemoteDecision) -> dict:
     }
 
 
-def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str]] | None:
+def _sync(repo_path: str, profile: config.Profile,
+         *, timeout: float | None = None) -> tuple[list[dict], list[str]] | None:
     """Fetch team context incrementally and merge it into the cache.
 
     Returns (new_or_updated_rows, removed_ids) on success, or None (no-op) when not in team
@@ -80,8 +81,14 @@ def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str
     actually tried the network) records its outcome as a `last_sync` cache key - {"at",
     "ok", "duration_ms"} plus either {"upserted", "removed"} on success or {"error"} on
     failure - so `contexer status` can show when sync last ran and why it degraded,
-    without itself touching the network."""
-    remote = RemoteStore.from_profile(profile)
+    without itself touching the network.
+
+    `timeout` (seconds) overrides RemoteStore's default transport timeout - used by the
+    SessionStart `refresh` seam to bound how long a slow cloud can stall a session start.
+    None (the default) keeps RemoteStore.from_profile's own default (10.0s) for callers
+    that don't care (poll, poll_nonblocking, the CLI `pull` command)."""
+    kwargs = {} if timeout is None else {"timeout": timeout}
+    remote = RemoteStore.from_profile(profile, **kwargs)
     if remote is None:
         return None  # local mode / not configured - no cache file for a local-only repo
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
@@ -135,11 +142,14 @@ def _sync(repo_path: str, profile: config.Profile) -> tuple[list[dict], list[str
     return (new_rows, removed)
 
 
-def pull(repo_path: str, *, profile: config.Profile | None = None) -> tuple[int, int]:
+def pull(repo_path: str, *, profile: config.Profile | None = None,
+        timeout: float | None = None) -> tuple[int, int]:
     """Fetch team context and update the local cache (incremental). Returns (upserted,
-    removed) counts; `(0, 0)` on any no-op (local mode / no origin / cloud unreachable)."""
+    removed) counts; `(0, 0)` on any no-op (local mode / no origin / cloud unreachable).
+
+    `timeout` overrides the transport timeout (see `_sync`); None keeps the default."""
     profile = profile or config.load_profile()
-    result = _sync(repo_path, profile)
+    result = _sync(repo_path, profile, timeout=timeout)
     if result is None:
         return (0, 0)
     new_rows, removed = result
@@ -252,15 +262,27 @@ def poll_nonblocking(repo_path: str, *, profile: config.Profile | None = None) -
 # store.session_start_payload (which appends format_team_section for every adapter).
 
 
+# SessionStart is the one seam where a slow cloud is directly on the user's critical path
+# (a hook running before the assistant can respond), so it trades some freshness for a hard
+# ceiling: at most ~3s stall instead of the full 10s transport default. Every other caller
+# (poll, poll_nonblocking, the CLI `pull` command) is either non-blocking or explicitly
+# interactive, so they keep the longer default - this bound is deliberately narrow.
+_SESSION_START_TIMEOUT = 3.0
+
+
 def refresh(repo_path: str) -> tuple[int, int]:
     """SessionStart pull for ANY adapter. Resolves the repo, refreshes the team cache,
     and NEVER raises — a sync hiccup (offline, bad token, anything) must not break session
-    start. Returns (upserted, removed); (0, 0) on no-op / not-team / degraded / error."""
+    start. Returns (upserted, removed); (0, 0) on no-op / not-team / degraded / error.
+
+    Uses a short transport timeout (see `_SESSION_START_TIMEOUT`) so a slow-but-reachable
+    cloud degrades to the existing cache (freshness, never correctness) rather than
+    stalling session start for the full default timeout."""
     try:
         repo = store._resolve_repo(repo_path)
         if not repo:
             return (0, 0)
-        return pull(repo)
+        return pull(repo, timeout=_SESSION_START_TIMEOUT)
     except Exception:
         return (0, 0)
 

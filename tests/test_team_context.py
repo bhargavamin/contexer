@@ -42,7 +42,7 @@ def team_env(tmp_repo, monkeypatch):
 
 def _fake_rs(monkeypatch, *, ctx=None, exc=None):
     fake = _FakeRS(ctx=ctx, exc=exc)
-    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p, **kw: fake))
     return fake
 
 
@@ -277,7 +277,7 @@ def test_adapter_pull_team_swallows_errors(monkeypatch):
 def test_adapter_pull_team_returns_counts(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 0))
+    monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 0))
     assert claude.pull_team("/repo") == (2, 0)
 
 
@@ -355,8 +355,50 @@ def test_session_start_payload_resume_fresh_clone_shows_team(tmp_repo):
 
 def test_refresh_delegates_to_pull(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 1))
+    monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 1))
     assert team_context.refresh("/x") == (2, 1)
+
+
+def test_refresh_passes_short_timeout_to_pull(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+
+    def fake_pull(repo, *, profile=None, timeout=None):
+        captured["timeout"] = timeout
+        return (0, 0)
+
+    monkeypatch.setattr(team_context, "pull", fake_pull)
+    team_context.refresh("/x")
+    assert captured["timeout"] == team_context._SESSION_START_TIMEOUT == 3.0
+
+
+def test_refresh_timeout_reaches_remote_store_construction(team_env, monkeypatch):
+    # End-to-end through pull -> _sync -> RemoteStore.from_profile, with only RemoteStore
+    # itself faked (real _sync/pull/refresh code runs) - proves the seam is fully wired.
+    captured = {}
+
+    def fake_from_profile(profile, **kw):
+        captured.update(kw)
+        return _FakeRS(ctx=RemoteContext(decisions=[], deleted=[], cursor=None))
+
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(fake_from_profile))
+    monkeypatch.setattr(team_context.config, "load_profile", lambda: TEAM_PROFILE)
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: team_env)
+    team_context.refresh(team_env)
+    assert captured["timeout"] == 3.0
+
+
+def test_poll_keeps_default_timeout(team_env, monkeypatch):
+    # poll() must NOT inherit the SessionStart short timeout - only refresh() does.
+    captured = {}
+
+    def fake_from_profile(profile, **kw):
+        captured.update(kw)
+        return _FakeRS(ctx=RemoteContext(decisions=[], deleted=[], cursor=None))
+
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(fake_from_profile))
+    team_context.poll(team_env, profile=TEAM_PROFILE)
+    assert "timeout" not in captured  # no override - RemoteStore.from_profile's own default applies
 
 
 def test_refresh_empty_repo_is_noop(monkeypatch):

@@ -70,16 +70,19 @@ class RemoteStore:
         self._timeout = timeout
 
     @classmethod
-    def from_profile(cls, profile: Profile) -> "RemoteStore | None":
+    def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
         """Build a RemoteStore for a team profile, or None when sync is not configured
-        (local mode, or a missing endpoint/token). None = the caller stays local-only."""
+        (local mode, or a missing endpoint/token). None = the caller stays local-only.
+
+        `timeout` (seconds) overrides the default transport timeout - callers on a tighter
+        latency budget (e.g. the SessionStart pull) pass a shorter one."""
         if profile.mode != "team" or not profile.endpoint:
             return None
         from contexer import auth
         token = auth.resolve_token(profile)  # OAuth (login) token, refreshed; else static config token
         if not token:
             return None
-        return cls(profile.endpoint, token)
+        return cls(profile.endpoint, token, timeout=timeout)
 
     def push_decision(self, *, type: str, content: str, repo: str | None,
                       rationale: str | None = None, agent: str | None = None,
