@@ -228,6 +228,39 @@ def poll_nonblocking(repo_path: str, *, profile: config.Profile | None = None) -
     return new
 
 
+# ── Neutral adapter seam (Option A) ────────────────────────────────────────────────
+# One pull + one poll entrypoint every adapter (Claude, Codex, Cursor, Gemini) calls
+# from its hooks. Both resolve the repo and NEVER raise, so an adapter wires team sync
+# without re-implementing the fail-soft try/except. RENDERING is unified separately in
+# store.session_start_payload (which appends format_team_section for every adapter).
+
+
+def refresh(repo_path: str) -> tuple[int, int]:
+    """SessionStart pull for ANY adapter. Resolves the repo, refreshes the team cache,
+    and NEVER raises — a sync hiccup (offline, bad token, anything) must not break session
+    start. Returns (upserted, removed); (0, 0) on no-op / not-team / degraded / error."""
+    try:
+        repo = store._resolve_repo(repo_path)
+        if not repo:
+            return (0, 0)
+        return pull(repo)
+    except Exception:
+        return (0, 0)
+
+
+def poll_for_injection(repo_path: str) -> list[dict]:
+    """Per-prompt delta poll for ANY adapter. Returns the team rows newly synced since the
+    last prompt (empty when throttled / not team mode / degraded). NEVER raises. Adapters
+    format these rows for their own host's hook output."""
+    try:
+        repo = store._resolve_repo(repo_path)
+        if not repo:
+            return []
+        return poll_nonblocking(repo)
+    except Exception:
+        return []
+
+
 def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -> str:
     """Render the cached team context as a '## Team context (synced)' markdown block, or ''.
 

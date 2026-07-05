@@ -117,10 +117,7 @@ def team_poll(repo_path: str, raw: str) -> str:
     cloud — a slow or timing-out endpoint cannot stall prompt submission."""
     try:
         from contexer import team_context
-        repo = store._resolve_repo(repo_path)
-        if not repo:
-            return "{}"
-        new = team_context.poll_nonblocking(repo)
+        new = team_context.poll_for_injection(repo_path)
         if not new:
             return "{}"
         lines = ["Team decisions just approved (now in effect):"]
@@ -175,11 +172,15 @@ def sync_memory(repo_path: str) -> int:
 def pull_team(repo_path: str) -> tuple[int, int]:
     """SessionStart: refresh the local team-context cache before building context.
 
-    Fail-soft — a sync hiccup (offline, bad token, anything) MUST NEVER break the session,
-    so any exception degrades to a no-op. Returns (upserted, removed)."""
+    Delegates to the neutral, fail-soft team_context.refresh() seam (Option A) — a sync
+    hiccup (offline, bad token, anything) degrades to a no-op. Returns (upserted, removed).
+    Kept as a named entrypoint because installed Claude hooks call `_c.pull_team`.
+
+    The try/except also guards the lazy import itself: a broken/partial install (import
+    error in team_context or its deps) must not crash the SessionStart hook."""
     try:
         from contexer import team_context
-        return team_context.pull(repo_path)
+        return team_context.refresh(repo_path)
     except Exception:
         return (0, 0)
 
