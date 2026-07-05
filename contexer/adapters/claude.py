@@ -174,9 +174,15 @@ def pull_team(repo_path: str) -> tuple[int, int]:
 
     Delegates to the neutral, fail-soft team_context.refresh() seam (Option A) — a sync
     hiccup (offline, bad token, anything) degrades to a no-op. Returns (upserted, removed).
-    Kept as a named entrypoint because installed Claude hooks call `_c.pull_team`."""
-    from contexer import team_context
-    return team_context.refresh(repo_path)
+    Kept as a named entrypoint because installed Claude hooks call `_c.pull_team`.
+
+    The try/except also guards the lazy import itself: a broken/partial install (import
+    error in team_context or its deps) must not crash the SessionStart hook."""
+    try:
+        from contexer import team_context
+        return team_context.refresh(repo_path)
+    except Exception:
+        return (0, 0)
 
 
 def install(home: Path) -> list[str]:

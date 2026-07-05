@@ -1519,10 +1519,16 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     (Claude/Codex/Cursor/Gemini) — the local payload plus the C5 team cache, joined. Reads
     the cache only (NO network here); adapters refresh it via team_context.refresh() from
     their SessionStart hook before this runs. `''` team section (local mode / empty cache)
-    leaves the local payload untouched."""
+    leaves the local payload untouched.
+
+    Resume exception: when a session is resumed with local decisions already present, the
+    local path deliberately injects nothing (context='') because those decisions — and the
+    team section injected at the ORIGINAL session start — are already in the reloaded
+    conversation. Re-appending team there would duplicate it; freshly-approved team rows
+    still surface via the per-prompt delta poll. So team is suppressed on that path too."""
     payload = _local_session_start_payload(repo_path, source)
     team = _team_section(repo_path, "", "")
-    if not team:
+    if not team or (source == "resume" and not payload.get("context")):
         return payload
     return {**payload, "context": _join_context_sections(payload.get("context", ""), team)}
 

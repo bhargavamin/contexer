@@ -267,6 +267,26 @@ def test_get_session_start_context_envelope_includes_team(tmp_repo):
     assert "Team via Claude envelope" in blob
 
 
+def test_session_start_payload_resume_with_decisions_suppresses_team(tmp_repo):
+    # Resume + local decisions: local context is deliberately "" (decisions already in the
+    # reloaded conversation, alongside the team block injected at the original start). Team
+    # must NOT be re-appended here — that would duplicate it; deltas surface via the poll.
+    store.update_decision(tmp_repo, "local decision present on resume", "s1", subtype="constraint")
+    _seed_team(tmp_repo, "Team rule should not double on resume")
+    payload = store.session_start_payload(tmp_repo, source="resume")
+    assert payload["context"] == ""
+    assert "## Team context" not in payload["context"]
+
+
+def test_session_start_payload_resume_fresh_clone_shows_team(tmp_repo):
+    # Resume with NO local decisions (fresh clone): local mining context is non-empty, so
+    # team still surfaces — the resume-suppression only applies to the empty-context path.
+    _seed_team(tmp_repo, "Team rule on fresh resume")
+    ctx = store.session_start_payload(tmp_repo, source="resume")["context"]
+    assert "## Team context" in ctx
+    assert "Team rule on fresh resume" in ctx
+
+
 # ── Option A seam: neutral refresh / poll_for_injection ──────────────────────────
 
 def test_refresh_delegates_to_pull(monkeypatch):
