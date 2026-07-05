@@ -1506,8 +1506,29 @@ def _build_resume_mining_context(repo_path: str) -> list[str]:
     ]
 
 
+def _join_context_sections(*parts: str) -> str:
+    """Join non-empty context sections with a blank line between them."""
+    return "\n\n".join(p for p in parts if p)
+
+
 def session_start_payload(repo_path: str, source: str = "") -> dict:
-    """Provider-neutral session-start content. Returns {"status": str, "context": str}:
+    """Provider-neutral session-start content, with the shared TEAM-context section
+    appended. Returns {"status": str, "context": str}.
+
+    Option A seam: this ONE place renders team context at session start for EVERY adapter
+    (Claude/Codex/Cursor/Gemini) — the local payload plus the C5 team cache, joined. Reads
+    the cache only (NO network here); adapters refresh it via team_context.refresh() from
+    their SessionStart hook before this runs. `''` team section (local mode / empty cache)
+    leaves the local payload untouched."""
+    payload = _local_session_start_payload(repo_path, source)
+    team = _team_section(repo_path, "", "")
+    if not team:
+        return payload
+    return {**payload, "context": _join_context_sections(payload.get("context", ""), team)}
+
+
+def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
+    """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
     is unchanged from the original get_session_start_context."""

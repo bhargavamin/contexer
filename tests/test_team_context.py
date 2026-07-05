@@ -218,11 +218,111 @@ def test_adapter_pull_team_swallows_errors(monkeypatch):
     def boom(repo):
         raise RuntimeError("boom")
 
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", boom)
-    assert claude.pull_team("/repo") == (0, 0)
+    assert claude.pull_team("/repo") == (0, 0)  # delegates to the fail-soft refresh() seam
 
 
 def test_adapter_pull_team_returns_counts(monkeypatch):
     from contexer.adapters import claude
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo: (2, 0))
     assert claude.pull_team("/repo") == (2, 0)
+
+
+# ── Option A seam: shared session-start rendering ────────────────────────────────
+
+def _seed_team(repo, content="Team rule X", rid="t1aaaaaa", rtype="architecture"):
+    team_context._save_cache(repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": rid, "type": rtype, "content": content, "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+
+
+def test_session_start_payload_appends_team_section(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    _seed_team(tmp_repo, "Team deploy via CI only")
+    ctx = store.session_start_payload(tmp_repo)["context"]
+    assert "## Team context" in ctx
+    assert "Team deploy via CI only" in ctx
+
+
+def test_session_start_payload_no_team_when_cache_absent(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint x", "s1", subtype="constraint")
+    ctx = store.session_start_payload(tmp_repo)["context"]
+    assert "## Team context" not in ctx  # local-only session start is unchanged
+
+
+def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
+    # No local decisions, but a team cache exists — a fresh clone should still see team.
+    _seed_team(tmp_repo, "Team rule survives fresh clone")
+    ctx = store.session_start_payload(tmp_repo)["context"]
+    assert "## Team context" in ctx
+    assert "Team rule survives fresh clone" in ctx
+
+
+def test_get_session_start_context_envelope_includes_team(tmp_repo):
+    # Every adapter renders team at session start through this ONE builder.
+    _seed_team(tmp_repo, "Team via Claude envelope")
+    blob = json.dumps(store.get_session_start_context(tmp_repo))
+    assert "Team via Claude envelope" in blob
+
+
+# ── Option A seam: neutral refresh / poll_for_injection ──────────────────────────
+
+def test_refresh_delegates_to_pull(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 1))
+    assert team_context.refresh("/x") == (2, 1)
+
+
+def test_refresh_empty_repo_is_noop(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    assert team_context.refresh("/x") == (0, 0)
+
+
+def test_refresh_never_raises(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+
+    def boom(repo):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(team_context, "pull", boom)
+    assert team_context.refresh("/x") == (0, 0)
+
+
+def test_poll_for_injection_delegates(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo: [{"id": "t1", "content": "c"}])
+    assert team_context.poll_for_injection("/x") == [{"id": "t1", "content": "c"}]
+
+
+def test_poll_for_injection_empty_repo_is_noop(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    assert team_context.poll_for_injection("/x") == []
+
+
+def test_poll_for_injection_never_raises(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+
+    def boom(repo):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(team_context, "poll_nonblocking", boom)
+    assert team_context.poll_for_injection("/x") == []
+
+
+# ── No double-inject: session start renders once, poll injects deltas only ────────
+
+def test_team_poll_empty_when_no_new(monkeypatch):
+    from contexer.adapters import claude
+    monkeypatch.setattr(team_context, "poll_for_injection", lambda rp: [])
+    assert claude.team_poll("/repo", "{}") == "{}"
+
+
+def test_team_poll_injects_new_rows(monkeypatch):
+    from contexer.adapters import claude
+    monkeypatch.setattr(team_context, "poll_for_injection",
+                        lambda rp: [{"id": "t1", "content": "New team rule", "type": "constraint"}])
+    out = claude.team_poll("/repo", "{}")
+    assert "New team rule" in out
+    assert "just approved" in out.lower()
