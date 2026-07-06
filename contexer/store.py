@@ -1525,12 +1525,30 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     local path deliberately injects nothing (context='') because those decisions — and the
     team section injected at the ORIGINAL session start — are already in the reloaded
     conversation. Re-appending team there would duplicate it; freshly-approved team rows
-    still surface via the per-prompt delta poll. So team is suppressed on that path too."""
+    still surface via the per-prompt delta poll. So team is suppressed on that path too.
+
+    Visibility (Phase 2): when a team section IS appended, the human-facing `status` string
+    gets a short ` | team: N synced` suffix so the developer can tell team sync is live
+    without reading the (model-facing) `context` blob. The `context` string itself is
+    unchanged beyond the existing team-section join. The suffix is cap-aware: `format_team_
+    section` renders at most `_team_display_cap()` rows, so when the cache holds more than
+    that the suffix adds `(cap shown)` rather than claiming a count the model never
+    actually received."""
     payload = _local_session_start_payload(repo_path, source)
     team = _team_section(repo_path, "", "")
     if not team or (source == "resume" and not payload.get("context")):
         return payload
-    return {**payload, "context": _join_context_sections(payload.get("context", ""), team)}
+    count = _team_count(repo_path)
+    status = payload.get("status", "")
+    if count:
+        cap = _team_display_cap()
+        status = (f"{status} | team: {count} synced" if count <= cap
+                 else f"{status} | team: {count} synced ({cap} shown)")
+    return {
+        **payload,
+        "status": status,
+        "context": _join_context_sections(payload.get("context", ""), team),
+    }
 
 
 def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
@@ -1870,6 +1888,23 @@ def _team_section(repo_path: str, query: str, entry_type: str) -> str:
     store <-> team_context cycle. '' when there is no team context (local mode / no cache)."""
     from contexer import team_context
     return team_context.format_team_section(repo_path, query, entry_type)
+
+
+def _team_count(repo_path: str) -> int:
+    """Count of cached team decisions for the session-start status suffix. Same
+    function-level import as `_team_section`, for the same reason (avoids a store <->
+    team_context cycle)."""
+    from contexer import team_context
+    return len(team_context._load_cache(repo_path).get("decisions", []))
+
+
+def _team_display_cap() -> int:
+    """The row cap `format_team_section` renders (`team_context._TEAM_DISPLAY`), so the
+    status suffix can stay honest about what actually landed in context. Same
+    function-level import as `_team_count`, for the same reason (avoids a store <->
+    team_context cycle)."""
+    from contexer import team_context
+    return team_context._TEAM_DISPLAY
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,

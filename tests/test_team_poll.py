@@ -340,3 +340,84 @@ def test_sync_still_surfaces_changed_rows(team_env, monkeypatch):
                                         "last_poll_at": 0})
     _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "new wording")], [], "c2"))
     assert [d["content"] for d in team_context.poll(team_env, profile=TEAM)] == ["new wording"]
+
+
+# ── exponential backoff on consecutive sync failures ──────────────────────────────
+
+def test_poll_throttle_widens_after_failures(team_env, monkeypatch):
+    # 2 consecutive failures -> interval = 15 * 2**2 = 60s. 40s since last poll is still
+    # inside that window, so it must stay throttled even though it's past the base 15s.
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_poll_at": time.time() - 40,
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 2}})
+    fake = _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    assert team_context.poll(team_env, profile=TEAM) == []
+    assert fake.calls == []  # still backed off — no round-trip
+
+
+def test_poll_polls_again_once_backoff_window_elapses(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_poll_at": time.time() - 61,
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 2}})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "recovered")], [], "c1"))
+    assert [d["content"] for d in team_context.poll(team_env, profile=TEAM)] == ["recovered"]
+
+
+def test_poll_backoff_caps_at_max_interval(team_env, monkeypatch):
+    # Enough failures that the raw exponential would be far past 900s - must clamp there,
+    # so 901s since last poll is enough to unblock even after a long outage.
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_poll_at": time.time() - 901,
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 20}})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    assert [d["content"] for d in team_context.poll(team_env, profile=TEAM)] == ["x"]
+
+
+def test_poll_healthy_cloud_keeps_15s_cadence(team_env, monkeypatch):
+    # consecutive_failures == 0 (healthy) - base interval unchanged, matching pre-backoff
+    # behaviour exactly.
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_poll_at": time.time() - 16,
+        "last_sync": {"at": 1, "ok": True, "duration_ms": 1, "consecutive_failures": 0}})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    assert [d["content"] for d in team_context.poll(team_env, profile=TEAM)] == ["x"]
+
+
+def test_nonblocking_spawn_widens_after_failures(team_env, monkeypatch):
+    spawned = _no_spawn(monkeypatch)
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": None, "decisions": [],
+        "last_poll_at": time.time() - 40,
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 2}})
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
+    assert spawned == []  # 40s < 60s backoff window - no spawn yet
+
+
+def test_nonblocking_spawn_resumes_after_backoff_window(team_env, monkeypatch):
+    spawned = _no_spawn(monkeypatch)
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": None, "decisions": [],
+        "last_poll_at": time.time() - 61,
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 2}})
+    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
+    assert spawned == [team_env]
+
+
+def test_first_success_snaps_backoff_back_to_base(team_env, monkeypatch):
+    # A successful sync resets consecutive_failures to 0, so the very next poll uses the
+    # base 15s cadence again rather than staying widened from the prior outage.
+    # consecutive_failures=3 -> current interval is 15*2**3=120s, so last_poll_at must be
+    # further back than that for this poll to actually reach _sync (and observe the reset).
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_poll_at": time.time() - 121,
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 3}})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "back up")], [], "c1"))
+    team_context.poll(team_env, profile=TEAM)
+    cache = team_context._load_cache(team_env)
+    assert cache["last_sync"]["consecutive_failures"] == 0
+    assert team_context._poll_interval(cache) == team_context._POLL_MIN_INTERVAL

@@ -56,6 +56,17 @@ def test_from_profile_team_missing_endpoint_returns_none():
     assert RemoteStore.from_profile(Profile(mode="team", endpoint=None, token="tok")) is None
 
 
+def test_from_profile_default_timeout():
+    rs = RemoteStore.from_profile(Profile(mode="team", endpoint="https://t/mcp", token="tok"))
+    assert rs._timeout == remote._DEFAULT_TIMEOUT
+
+
+def test_from_profile_accepts_timeout_override():
+    rs = RemoteStore.from_profile(
+        Profile(mode="team", endpoint="https://t/mcp", token="tok"), timeout=3.0)
+    assert rs._timeout == 3.0
+
+
 # ── push_decision serialization + id parsing ─────────────────────────────────────
 
 def test_push_decision_serializes_full_wire_shape(monkeypatch):
@@ -212,6 +223,68 @@ def test_invoke_reraises_typed_error_unwrapped(monkeypatch):
         RemoteStore("https://t/mcp", "tok").get_context()
 
 
+@pytest.mark.parametrize("message", [
+    "This token lacks the 'write' scope required for this action.",
+    "Forbidden",
+    "unauthorized",
+    "You do not have permission to do that.",
+])
+def test_authz_tool_error_maps_to_auth_error(monkeypatch, message):
+    """A reachable-but-refusing cloud (insufficient scope / permission) is an auth failure,
+    NOT a transport outage — so it must raise RemoteAuthError, never a bare RemoteStoreError."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text(message)], is_error=True),
+    )
+    with pytest.raises(RemoteAuthError):
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+
+
+def test_generic_tool_error_is_not_auth_error(monkeypatch):
+    """A non-authorization tool error (e.g. bad input) stays a plain RemoteStoreError so the
+    scope-error classifier doesn't over-broaden into every failure."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
+    )
+    with pytest.raises(RemoteStoreError) as exc:
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+    assert not isinstance(exc.value, RemoteAuthError)
+
+
+def test_scope_mentioning_validation_error_is_not_auth_error(monkeypatch):
+    """A validation error that merely mentions a 'scope' parameter must NOT be misclassified as
+    an authorization failure - the phrase-level regex only matches genuine auth denials."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(
+            content=[_text("Value for 'scope' parameter must be a string")], is_error=True),
+    )
+    with pytest.raises(RemoteStoreError) as exc:
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+    assert not isinstance(exc.value, RemoteAuthError)
+
+
+def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
+    """End-to-end for Bug 2: a missing-write-scope push, run through with_local_fallback, warns
+    the user to re-authenticate — instead of the misleading 'endpoint unreachable' message."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(
+            content=[_text("This token lacks the 'write' scope required for this action.")],
+            is_error=True),
+    )
+    remote.reset_degradation_warnings()
+    store = RemoteStore("https://t/mcp", "tok")
+    result = remote.with_local_fallback(
+        lambda: store.push_decision(type="constraint", content="c", repo=None),
+        default=None, action="share decision")
+    assert result is None
+    err = capsys.readouterr().err
+    assert "authentication failed" in err and "contexer login" in err
+    assert "unreachable" not in err
+
+
 # ── content parsing edge (SDK returns dict content items in some transports) ──────
 
 def test_push_decision_reads_dict_content_item(monkeypatch):
@@ -263,6 +336,24 @@ def test_with_local_fallback_auth_returns_default_and_hints_login(capsys):
     err = capsys.readouterr().err
     assert err.count("Contexer:") == 1
     assert "contexer login --team" in err
+
+
+def test_with_local_fallback_generic_tool_error_warns_request_failed_not_unreachable(monkeypatch, capsys):
+    """A reachable-but-refusing/failing tool call (e.g. bad input) must warn with an honest
+    'request failed' message, not the misleading 'endpoint unreachable' wording - the cloud
+    answered, it just couldn't complete the request."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
+    )
+    store = RemoteStore("https://t/mcp", "tok")
+    result = remote.with_local_fallback(
+        lambda: store.push_decision(type="constraint", content="c", repo=None),
+        default=None, action="share decision")
+    assert result is None
+    err = capsys.readouterr().err
+    assert "request failed" in err
+    assert "unreachable" not in err
 
 
 def test_auth_and_unreachable_each_warn_once(capsys):

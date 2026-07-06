@@ -77,6 +77,123 @@ class TestStatus:
         assert "/tmp/some/repo" in out
 
 
+# ── status: team sync block (zero network calls) ─────────────────────────────
+
+class TestStatusTeamSync:
+    def test_local_mode_reports_off(self, installed_home, capsys):
+        status()
+        out = capsys.readouterr().out
+        assert "team sync:    off (local mode)" in out
+
+    def test_team_mode_reports_endpoint_and_no_token(self, installed_home, capsys):
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        status()
+        out = capsys.readouterr().out
+        assert "team sync:    on (https://t/mcp)" in out
+        assert "token:      none" in out
+
+    def test_team_mode_config_token_source(self, installed_home, capsys):
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\ntoken = "sekret-token-value"\n')
+        status()
+        out = capsys.readouterr().out
+        assert "token:      config token" in out
+        assert "sekret-token-value" not in out  # never print the token itself
+
+    def test_team_mode_oauth_token_source(self, installed_home, capsys):
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".team_auth.json").write_text(json.dumps(
+            {"issuer": "https://t", "access_token": "super-secret-oauth-token"}))
+        status()
+        out = capsys.readouterr().out
+        assert "token:      oauth" in out
+        assert "super-secret-oauth-token" not in out  # never print the token itself
+
+    def test_team_mode_no_current_repo_reports_gracefully(self, installed_home, capsys):
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        status()
+        out = capsys.readouterr().out
+        assert "cache:      (no current repo detected)" in out
+
+    def test_team_mode_shows_cache_count_and_cursor(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": "c1", "decisions": [{"id": "a"}, {"id": "b"}]}))
+        status()
+        out = capsys.readouterr().out
+        assert "cache:      2 decision(s), cursor=c1" in out
+
+    def test_team_mode_shows_last_sync_ok(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": "c1", "decisions": [],
+             "last_sync": {"at": time.time() - 4, "ok": True, "duration_ms": 42,
+                          "upserted": 1, "removed": 0}}))
+        status()
+        out = capsys.readouterr().out
+        assert "last sync:  ok, 4s ago (42ms)" in out
+
+    def test_team_mode_shows_last_sync_failed(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": None, "decisions": [],
+             "last_sync": {"at": time.time(), "ok": False, "duration_ms": 3000,
+                          "error": "degraded"}}))
+        status()
+        out = capsys.readouterr().out
+        assert "last sync:  failed" in out
+
+    def test_team_mode_shows_last_render(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": "c1", "decisions": [],
+             "last_render": {"at": time.time(), "rows": 10, "chars": 1229}}))
+        status()
+        out = capsys.readouterr().out
+        assert "last render: 10 rows, ~1.2KB" in out
+
+    def test_team_mode_omits_last_render_when_absent(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": "c1", "decisions": []}))
+        status()
+        out = capsys.readouterr().out
+        assert "last render" not in out
+
+
+
 # ── reinstall ─────────────────────────────────────────────────────────────────
 
 class TestReinstall:
