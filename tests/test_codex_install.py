@@ -98,6 +98,28 @@ class TestCodexInstall:
         assert len(polls) == 1  # replaced in place, not duplicated
         assert "'codex'" in polls[0]  # now tagged
 
+    def test_migrates_untagged_team_poll_despite_foreign_codex_substring(self, home):
+        # The migration guard is keyed on the QUOTED 'codex' marker, not a bare "codex"
+        # substring. An unrelated foreign hook whose command merely mentions "codex"
+        # (e.g. a path) must not be mistaken for the tagged call and suppress migration.
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+               '"py" -c "from contexer.adapters import claude; import sys; '
+               'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO"')
+        foreign = "/usr/local/codex-tools/run.sh"  # bare "codex" substring, unquoted
+        hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]},
+            {"hooks": [{"type": "command", "command": foreign}]},
+        ]}}))
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        polls = [c for c in cmds if "claude.team_poll" in c]
+        assert len(polls) == 1  # migration still fired, not suppressed by the foreign hook
+        assert "'codex'" in polls[0]  # now tagged
+        assert any(foreign in c for c in cmds)  # unrelated foreign hook left untouched
+
     def test_tagged_team_poll_hook_not_re_migrated(self, home):
         codex.install(home)
         codex.install(home)  # a reinstall over the already-tagged hook must be a no-op

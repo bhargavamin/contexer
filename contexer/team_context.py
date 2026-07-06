@@ -244,11 +244,16 @@ def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
 
 def _drop_legacy_pending(repo_path: str) -> None:
     """Remove a parked-pending file left by an older Contexer (delivery is now the per-consumer
-    sync log). Best-effort — a missing file (the normal case) is silently ignored."""
-    try:
-        (store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json").unlink()
-    except OSError:
-        pass
+    sync log). Called on every poll (every prompt), so once the legacy file is gone — the
+    common case — an existence check up front avoids an unlink()-then-catch syscall on every
+    single prompt. Still best-effort — a file that vanishes between the check and the unlink
+    is silently ignored."""
+    path = store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json"
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _refresh_worker(repo_path: str) -> None:

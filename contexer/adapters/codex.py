@@ -240,8 +240,12 @@ def install(home: Path) -> list[str]:
     # Migrate: the pre-consumer codex team-poll hook called claude.team_poll WITHOUT the
     # "codex" tag, so a Claude and a Codex session on the same repo raced to claim a single
     # per-repo delivery and only one got the injection. Replace it with the tagged call.
-    # Keyed on the "codex" consumer marker (absent from the old string) so it runs once.
-    if base._in_groups(ups, "claude.team_poll") and not base._in_groups(ups, "codex"):
+    # Keyed on the QUOTED 'codex' consumer marker (absent from the old string) so it runs
+    # once. Quoting matters: a bare "codex" substring check would false-positive on any
+    # unrelated hook whose command merely mentions "codex" (e.g. a path containing
+    # "codex-tools"), silently suppressing the migration. Only the tagged call this codebase
+    # generates contains 'codex' as a quoted argument.
+    if base._in_groups(ups, "claude.team_poll") and not base._in_groups(ups, "'codex'"):
         ups = base._filter_groups(ups, ["claude.team_poll"])
         hooks["UserPromptSubmit"] = ups
     if not base._in_groups(ups, "claude.team_poll"):
