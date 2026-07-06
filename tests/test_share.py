@@ -90,6 +90,8 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-9" in msg
+    assert "personal" in msg.lower()
+    assert "team" in msg.lower() and "won't see" in msg.lower()  # honest about visibility
     assert len(fake.calls) == 1
     kw = fake.calls[0]
     assert kw["type"] == "architecture"
