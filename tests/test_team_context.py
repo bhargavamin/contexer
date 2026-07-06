@@ -42,7 +42,7 @@ def team_env(tmp_repo, monkeypatch):
 
 def _fake_rs(monkeypatch, *, ctx=None, exc=None):
     fake = _FakeRS(ctx=ctx, exc=exc)
-    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p, **kw: fake))
     return fake
 
 
@@ -119,6 +119,87 @@ def test_pull_null_cursor_preserves_prior_cursor(team_env, monkeypatch):
     team_context.pull(team_env, profile=TEAM_PROFILE)
     cache = json.loads(team_context._cache_path(team_env).read_text())
     assert cache["cursor"] == "c0"  # empty pull doesn't wipe the cursor
+
+
+# ── last_sync telemetry ────────────────────────────────────────────────────────────
+
+def test_last_sync_recorded_on_success(team_env, monkeypatch):
+    ctx = RemoteContext(decisions=[_rd("t1", "team rule", "team")], deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["ok"] is True
+    assert isinstance(last_sync["at"], float)
+    assert isinstance(last_sync["duration_ms"], int)
+    assert last_sync["upserted"] == 1
+    assert last_sync["removed"] == 0
+
+
+def test_last_sync_recorded_on_degraded(team_env, monkeypatch):
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["ok"] is False
+    assert last_sync["error"] == "degraded"
+    assert isinstance(last_sync["duration_ms"], int)
+    assert cache["decisions"] == []  # degraded path only writes telemetry, never decisions
+
+
+def test_last_sync_degraded_preserves_existing_decisions(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0",
+        "decisions": [{"id": "t1", "type": "architecture", "content": "keep", "rationale": None,
+                       "repo": None, "agent": None, "scope": "team"}]})
+    _fake_rs(monkeypatch, exc=RemoteAuthError("401"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]  # untouched by the failed attempt
+    assert cache["last_sync"]["ok"] is False
+
+
+def test_last_sync_no_cache_file_for_local_mode(team_env, monkeypatch):
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p, **kw: None))
+    team_context.pull(team_env, profile=config.Profile())
+    assert not team_context._cache_path(team_env).exists()
+
+
+def test_last_sync_no_cache_file_for_no_origin_repo(team_env, monkeypatch):
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)  # no origin
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert not team_context._cache_path(team_env).exists()
+
+
+def test_last_sync_at_is_sync_start_not_end_of_write(team_env, monkeypatch):
+    # `at` must equal the clock reading taken BEFORE the network call, not a later one
+    # taken while computing duration_ms or serialising/writing the cache. Feed a fixed
+    # sequence of clock readings: 1000.0 (start), 1005.0 (right after the network call,
+    # used only for duration_ms). If the code ever reads the clock a THIRD time to stamp
+    # `at` (the bug: end-of-write instead of start-of-sync), that call drains this
+    # iterator and raises StopIteration, failing the test loudly rather than silently
+    # accepting a later timestamp.
+    times = iter([1000.0, 1005.0])
+    monkeypatch.setattr(team_context.time, "time", lambda: next(times))
+    ctx = RemoteContext(decisions=[_rd("t1", "team rule", "team")], deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["at"] == 1000.0  # the start reading, not the post-network one
+    assert last_sync["duration_ms"] == 5000
+
+
+def test_last_sync_at_is_sync_start_on_degraded_path(team_env, monkeypatch):
+    times = iter([2000.0, 2003.0])
+    monkeypatch.setattr(team_context.time, "time", lambda: next(times))
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["at"] == 2000.0
+    assert last_sync["duration_ms"] == 3000
 
 
 # ── format_team_section ──────────────────────────────────────────────────────────
@@ -226,7 +307,7 @@ def test_adapter_pull_team_swallows_errors(monkeypatch):
 def test_adapter_pull_team_returns_counts(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 0))
+    monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 0))
     assert claude.pull_team("/repo") == (2, 0)
 
 
@@ -250,6 +331,42 @@ def test_session_start_payload_no_team_when_cache_absent(tmp_repo):
     store.update_decision(tmp_repo, "local constraint x", "s1", subtype="constraint")
     ctx = store.session_start_payload(tmp_repo)["context"]
     assert "## Team context" not in ctx  # local-only session start is unchanged
+
+
+def test_session_start_payload_status_suffix_when_team_synced(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    _seed_team(tmp_repo, "Team deploy via CI only")
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 1 synced")
+
+
+def test_session_start_payload_no_status_suffix_without_team(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint x", "s1", subtype="constraint")
+    payload = store.session_start_payload(tmp_repo)
+    assert "| team:" not in payload["status"]
+
+
+def test_session_start_payload_status_suffix_caps_at_display_limit(tmp_repo):
+    # format_team_section only ever renders _TEAM_DISPLAY (25) rows, so a cache holding
+    # more than that must not claim a synced count the model never actually received.
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    decisions = [{"id": f"t{i}", "type": "architecture", "content": f"rule {i}",
+                  "rationale": None, "repo": None, "agent": None, "scope": "team"}
+                 for i in range(30)]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 30 synced (25 shown)")
+
+
+def test_session_start_payload_status_suffix_exact_cap_no_shown_note(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    decisions = [{"id": f"t{i}", "type": "architecture", "content": f"rule {i}",
+                  "rationale": None, "repo": None, "agent": None, "scope": "team"}
+                 for i in range(25)]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 25 synced")
+    assert "shown" not in payload["status"]
 
 
 def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
@@ -291,8 +408,50 @@ def test_session_start_payload_resume_fresh_clone_shows_team(tmp_repo):
 
 def test_refresh_delegates_to_pull(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 1))
+    monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 1))
     assert team_context.refresh("/x") == (2, 1)
+
+
+def test_refresh_passes_short_timeout_to_pull(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+
+    def fake_pull(repo, *, profile=None, timeout=None):
+        captured["timeout"] = timeout
+        return (0, 0)
+
+    monkeypatch.setattr(team_context, "pull", fake_pull)
+    team_context.refresh("/x")
+    assert captured["timeout"] == team_context._SESSION_START_TIMEOUT == 3.0
+
+
+def test_refresh_timeout_reaches_remote_store_construction(team_env, monkeypatch):
+    # End-to-end through pull -> _sync -> RemoteStore.from_profile, with only RemoteStore
+    # itself faked (real _sync/pull/refresh code runs) - proves the seam is fully wired.
+    captured = {}
+
+    def fake_from_profile(profile, **kw):
+        captured.update(kw)
+        return _FakeRS(ctx=RemoteContext(decisions=[], deleted=[], cursor=None))
+
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(fake_from_profile))
+    monkeypatch.setattr(team_context.config, "load_profile", lambda: TEAM_PROFILE)
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: team_env)
+    team_context.refresh(team_env)
+    assert captured["timeout"] == 3.0
+
+
+def test_poll_keeps_default_timeout(team_env, monkeypatch):
+    # poll() must NOT inherit the SessionStart short timeout - only refresh() does.
+    captured = {}
+
+    def fake_from_profile(profile, **kw):
+        captured.update(kw)
+        return _FakeRS(ctx=RemoteContext(decisions=[], deleted=[], cursor=None))
+
+    monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(fake_from_profile))
+    team_context.poll(team_env, profile=TEAM_PROFILE)
+    assert "timeout" not in captured  # no override - RemoteStore.from_profile's own default applies
 
 
 def test_refresh_empty_repo_is_noop(monkeypatch):

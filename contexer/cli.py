@@ -70,6 +70,48 @@ def _version_tuple(v: str) -> tuple | None:
         return None
 
 
+def _format_age(seconds: float) -> str:
+    """A short human age like '5s', '3m', '2h', '4d' for a `last_sync` timestamp."""
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _read_team_cache(store_dir: Path, repo_path: str) -> dict:
+    """Read the team cache file for `repo_path`, resolved off `store_dir` (the SAME home
+    `status()` already derived for this call) rather than team_context.STORE_DIR, which is
+    a module constant frozen at import time. Tolerant of missing/corrupt files, like
+    team_context._load_cache - a diagnostic must never raise on bad state, ZERO network."""
+    from contexer import store as _store
+    path = store_dir / f".team_{_store._slug(repo_path)}.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _read_team_creds(store_dir: Path) -> dict | None:
+    """Read stored Teams OAuth credentials directly off `store_dir` - the read-only,
+    home-consistent counterpart to auth._load_creds() (which is pinned to the frozen
+    auth.STORE_DIR constant). Never prints the token itself, only whether one exists."""
+    path = store_dir / ".team_auth.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _usage(stream=None) -> None:
     print(USAGE, file=stream or sys.stdout)
 
@@ -315,6 +357,39 @@ def status(rest: list | None = None) -> None:
             print(f"  current repo: {current.read_text().strip()}")
         except OSError:
             print("  current repo: (unreadable)")
+
+    # Team sync block (Phase 2 observability). ZERO network calls - config.toml + the team
+    # cache file are read straight off disk, same as everything else in status(). Never
+    # prints the token itself, only where it came from (oauth / config token / none).
+    from contexer import auth, config
+
+    profile = config.load_profile(path=store_dir / "config.toml")
+    if profile.mode != "team" or not profile.endpoint:
+        print("  team sync:    off (local mode)")
+    else:
+        print(f"  team sync:    on ({profile.endpoint})")
+        creds = _read_team_creds(store_dir)
+        if creds and creds.get("issuer") == auth._issuer_from_endpoint(profile.endpoint):
+            token_source = "oauth"
+        elif profile.token:
+            token_source = "config token"
+        else:
+            token_source = "none"
+        print(f"    token:      {token_source}")
+        repo = current.read_text().strip() if current.exists() else ""
+        if not repo:
+            print("    cache:      (no current repo detected)")
+        else:
+            cache = _read_team_cache(store_dir, repo)
+            rows = cache.get("decisions", [])
+            print(f"    cache:      {len(rows)} decision(s), cursor={cache.get('cursor') or '(none)'}")
+            last_sync = cache.get("last_sync")
+            if not last_sync:
+                print("    last sync:  never")
+            else:
+                outcome = "ok" if last_sync.get("ok") else "failed"
+                age = _format_age(time.time() - last_sync.get("at", time.time()))
+                print(f"    last sync:  {outcome}, {age} ago ({last_sync.get('duration_ms', 0)}ms)")
 
     config_paths = (
         home / ".claude.json",
