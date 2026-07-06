@@ -422,6 +422,37 @@ def poll_for_injection(repo_path: str, consumer: str = "claude") -> list[dict]:
         return []
 
 
+def _local_decisions(repo_path: str) -> list[tuple[str, str]]:
+    """(id, current-content) for each live local decision - the base team rows dedup against.
+
+    Only `type == "decision"` entries that are not `ignored`, read through the same current-
+    revision accessor replay uses. Fail-soft: any load error returns [] so team-context dedup
+    degrades to unmodified rendering (this runs inside session-start hooks and must not raise)."""
+    try:
+        out: list[tuple[str, str]] = []
+        for e in store._load(repo_path).get("entries", []):
+            if e.get("type") != "decision" or e.get("status") == "ignored":
+                continue
+            content = store._current_content(e)
+            if content:
+                out.append((e.get("id", ""), content))
+        return out
+    except Exception:
+        return []
+
+
+def _best_local_overlap(content: str, local_tokens: list[tuple[str, set]]) -> tuple[str, float]:
+    """Highest token overlap (store's novelty metric) of `content` against the local
+    decisions, with the winning local id. ('', 0.0) when there are no local decisions."""
+    team_tok = store._tokenize(content)
+    best_id, best = "", 0.0
+    for lid, ltok in local_tokens:
+        r = store._overlap_ratio(team_tok, ltok)
+        if r > best:
+            best_id, best = lid, r
+    return best_id, best
+
+
 def _format_staleness(age_seconds: float) -> str:
     """Human staleness suffix for the team-context header: whole hours, switching to whole
     days once the gap reaches 48h (e.g. '30 hours ago', '2 days ago')."""
@@ -460,6 +491,15 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     Filtered like `store.get_context` (by `entry_type` and a `query` substring). Each row is
     tagged `[scope=team]` so the reading agent treats it as provenance, not tool routing.
 
+    Rows that duplicate a LOCAL decision are deduped so the same rule is not injected twice
+    (once local, once team). Token overlap against the local store decides - reusing the very
+    metric the novelty filter thresholds at 0.7: >= 0.7 collapses to a one-line "ratifies local
+    decision …" pointer (the team's ratification is kept as provenance, not the duplicate text);
+    0.5-0.7 renders in full but tagged with the local id so a genuine divergence stays visible;
+    below 0.5 renders exactly as before. The _TEAM_DISPLAY cap applies AFTER collapsing (a
+    collapsed one-liner still counts as a row). Fail-soft: if the local store can't be read,
+    `_local_decisions` yields [] and every row renders unmodified - this never raises.
+
     The header is tagged '(synced N hours/days ago - may be stale)' when the cache's
     `last_ok_at` is older than `_STALE_AFTER` — this is the signal for a quietly-dead
     refresher (rows keep rendering with no indication sync stopped working). A cache with
@@ -480,6 +520,9 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     if not rows:
         return ""
 
+    # Local decision token sets to dedup team rows against ([] on any load failure).
+    local_tokens = [(lid, store._tokenize(c)) for lid, c in _local_decisions(repo_path)]
+
     header = "## Team context (synced)"
     last_ok_at = cache.get("last_ok_at")
     if isinstance(last_ok_at, (int, float)):
@@ -490,11 +533,23 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     lines = [header]
     rendered = rows[:_TEAM_DISPLAY]
     for r in rendered:
-        scope = r.get("scope", "team")
-        type_tag = f" [{r['type']}]" if r.get("type") else ""
+        content = r.get("content", "")
         rid = (r.get("id") or "")[:8]
         id_tag = f" (id={rid})" if rid else ""
-        lines.append(f"- [scope={scope}]{type_tag} {r.get('content', '')}{id_tag}")
+        type_tag = f" [{r['type']}]" if r.get("type") else ""
+        lid, overlap = _best_local_overlap(content, local_tokens)
+        if lid and overlap >= 0.7:
+            # Same rule already stored locally - collapse to a ratification pointer instead of
+            # re-injecting the full duplicate text (keeps the team-approval provenance signal).
+            lines.append(f"- [scope=team] ratifies local decision {lid[:8]}{id_tag}")
+        elif lid and overlap >= 0.5:
+            # Heavy but partial overlap: keep the full row (may be a genuine divergence, e.g. a
+            # different directive on the same topic) but tag the related local id for the reader.
+            scope = r.get("scope", "team")
+            lines.append(f"- [scope={scope}, overlaps local {lid[:8]}]{type_tag} {content}{id_tag}")
+        else:
+            scope = r.get("scope", "team")
+            lines.append(f"- [scope={scope}]{type_tag} {content}{id_tag}")
     result = "\n".join(lines)
     _record_render(repo_path, cache, rows=len(rendered), chars=len(result))
     return result
