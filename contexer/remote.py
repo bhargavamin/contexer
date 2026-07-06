@@ -200,11 +200,21 @@ def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
             key="degrade:auth",
         )
         return default
-    except RemoteStoreError:
+    except RemoteUnavailableError:
         warn_once(
             f"Contexer: Teams endpoint unreachable while trying to {action} - "
             "continuing local-only.",
             key="degrade:unreachable",
+        )
+        return default
+    except RemoteStoreError:
+        # The cloud was reached and answered, it just refused or failed the request (e.g. a
+        # validation error) - distinct from the transport-level "unreachable" case above, so the
+        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
+        warn_once(
+            f"Contexer: Teams request failed while trying to {action} - "
+            "continuing local-only.",
+            key="degrade:request",
         )
         return default
 
@@ -244,7 +254,14 @@ def _classify(exc: BaseException) -> RemoteStoreError:
 # (insufficient scope, forbidden, permission denied) - the cloud was reached and answered, it
 # just refused the action. It must NOT be reported as "endpoint unreachable": the remedy is to
 # re-authenticate, so it is raised as RemoteAuthError and surfaced via the auth degradation path.
-_AUTHZ_ERROR_RE = re.compile(r"\b(?:scope|forbidden|unauthori[sz]ed|permission|not allowed)\b", re.I)
+# The scope arms are phrase-level (not a bare `\bscope\b`) so a validation error that merely
+# mentions a "scope" parameter (e.g. "Value for 'scope' parameter must be a string") is not
+# misclassified as an auth failure - only genuine authorization denials match.
+_AUTHZ_ERROR_RE = re.compile(
+    r"\b(?:forbidden|unauthori[sz]ed|permission|not allowed"
+    r"|lacks the .{0,40} scope|insufficient[ _-]scope|scope required)\b",
+    re.I,
+)
 
 
 def _classify_tool_error(message: str) -> RemoteStoreError:
