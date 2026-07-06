@@ -349,6 +349,20 @@ def _format_staleness(age_seconds: float) -> str:
     return f"{hours} hour{'' if hours == 1 else 's'} ago"
 
 
+def _record_render(repo_path: str, cache: dict, *, rows: int, chars: int) -> None:
+    """Best-effort render-size telemetry (measure-don't-guess input for future display-cap
+    tuning) — never raises, since this runs inline inside every hook that injects context.
+    Only touches a cache file that already exists: a pure-local repo (no team cache) must
+    never grow one just because get_context ran through format_team_section."""
+    if not _cache_path(repo_path).exists():
+        return
+    try:
+        updated = {**cache, "last_render": {"at": time.time(), "rows": rows, "chars": chars}}
+        _save_cache(repo_path, updated)
+    except Exception:
+        pass  # telemetry must never break the render it's measuring
+
+
 def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -> str:
     """Render the cached team context as a '## Team context (synced)' markdown block, or ''.
 
@@ -360,6 +374,10 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     refresher (rows keep rendering with no indication sync stopped working). A cache with
     no `last_ok_at` at all (old-format cache, pre-dating this field) is treated as unknown
     freshness and left untagged, to avoid false alarms right after an upgrade.
+
+    On a non-empty result, also records `last_render` telemetry (rows rendered + char
+    count) into the cache - see `_record_render` - so display-cap/deferral decisions can
+    be made from real data instead of guessing.
     """
     cache = _load_cache(repo_path)
     rows = cache.get("decisions", [])
@@ -379,13 +397,16 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
             header = f"## Team context (synced {_format_staleness(age)} - may be stale)"
 
     lines = [header]
-    for r in rows[:_TEAM_DISPLAY]:
+    rendered = rows[:_TEAM_DISPLAY]
+    for r in rendered:
         scope = r.get("scope", "team")
         type_tag = f" [{r['type']}]" if r.get("type") else ""
         rid = (r.get("id") or "")[:8]
         id_tag = f" (id={rid})" if rid else ""
         lines.append(f"- [scope={scope}]{type_tag} {r.get('content', '')}{id_tag}")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    _record_render(repo_path, cache, rows=len(rendered), chars=len(result))
+    return result
 
 
 if __name__ == "__main__":  # pragma: no cover - the spawned refresher process entrypoint

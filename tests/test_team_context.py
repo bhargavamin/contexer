@@ -328,6 +328,47 @@ def test_stale_tag_only_touches_header_not_rows(tmp_repo):
     assert "may be stale" not in lines[1]
 
 
+# ── last_render telemetry ─────────────────────────────────────────────────────────
+
+def test_render_records_rows_and_chars(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1", "type": "architecture", "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = team_context.format_team_section(tmp_repo)
+    cache = json.loads(team_context._cache_path(tmp_repo).read_text())
+    last_render = cache["last_render"]
+    assert last_render["rows"] == 1
+    assert last_render["chars"] == len(out)
+    assert isinstance(last_render["at"], float)
+
+
+def test_render_not_written_when_cache_file_absent(tmp_repo, monkeypatch):
+    # No cache file exists at all — format_team_section returns "" (no rows) and must
+    # never create one from the render path.
+    assert team_context.format_team_section(tmp_repo) == ""
+    assert not team_context._cache_path(tmp_repo).exists()
+
+
+def test_record_render_guard_direct_no_file_created(tmp_repo):
+    # Exercise the guard directly (belt and suspenders on top of the format_team_section
+    # path above): calling _record_render with no cache file on disk must be a pure no-op.
+    team_context._record_render(tmp_repo, {}, rows=5, chars=100)
+    assert not team_context._cache_path(tmp_repo).exists()
+
+
+def test_render_fail_soft_on_write_error(tmp_repo, monkeypatch):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1", "type": "architecture", "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+
+    def boom(repo, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(team_context, "_save_cache", boom)
+    out = team_context.format_team_section(tmp_repo)  # must not raise
+    assert "Use Postgres" in out
+
+
 # ── store.get_context integration ────────────────────────────────────────────────
 
 def test_get_context_appends_team_section(tmp_repo):

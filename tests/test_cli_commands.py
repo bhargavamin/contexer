@@ -165,6 +165,33 @@ class TestStatusTeamSync:
         out = capsys.readouterr().out
         assert "last sync:  failed" in out
 
+    def test_team_mode_shows_last_render(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": "c1", "decisions": [],
+             "last_render": {"at": time.time(), "rows": 10, "chars": 1229}}))
+        status()
+        out = capsys.readouterr().out
+        assert "last render: 10 rows, ~1.2KB" in out
+
+    def test_team_mode_omits_last_render_when_absent(self, installed_home, capsys):
+        from contexer import store as _store
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"repo_key": "k", "cursor": "c1", "decisions": []}))
+        status()
+        out = capsys.readouterr().out
+        assert "last render" not in out
+
 
 
 # ── reinstall ─────────────────────────────────────────────────────────────────
