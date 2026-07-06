@@ -166,6 +166,7 @@ class TestStatusTeamSync:
         assert "last sync:  failed" in out
 
 
+
 # ── reinstall ─────────────────────────────────────────────────────────────────
 
 class TestReinstall:

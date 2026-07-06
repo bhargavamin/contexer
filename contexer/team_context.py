@@ -25,11 +25,21 @@ from contexer.repo_key import canonical_repo_key
 # Max team rows rendered into a single get_context (mirrors the local filtered display).
 _TEAM_DISPLAY = 25
 
-# Min seconds between mid-session delta polls (C7) — keeps UserPromptSubmit cheap.
+# Min seconds between mid-session delta polls (C7) — keeps UserPromptSubmit cheap. This is
+# the healthy-cloud cadence; consecutive sync failures back this off exponentially (see
+# _poll_interval), up to _POLL_MAX_INTERVAL, so a down cloud isn't hammered every prompt.
 _POLL_MIN_INTERVAL = 15
+
+# Ceiling for the backoff interval (15 min) — a down cloud never gets polled less often
+# than this, but also never floods a prompting session with retries forever.
+_POLL_MAX_INTERVAL = 900
 
 # Fields persisted per cached team decision (the get_context wire projection).
 _ROW_FIELDS = ("id", "type", "content", "rationale", "repo", "agent", "scope")
+
+# How stale last_ok_at must be before format_team_section tags the header as possibly
+# stale (the "quietly dead refresher" failure mode: rows keep rendering with no signal).
+_STALE_AFTER = 24 * 3600
 
 
 def _cache_path(repo_path: str):
@@ -79,9 +89,12 @@ def _sync(repo_path: str, profile: config.Profile,
 
     Observability: every ATTEMPTED sync (i.e. we got past the mode/origin checks and
     actually tried the network) records its outcome as a `last_sync` cache key - {"at",
-    "ok", "duration_ms"} plus either {"upserted", "removed"} on success or {"error"} on
-    failure - so `contexer status` can show when sync last ran and why it degraded,
-    without itself touching the network.
+    "ok", "duration_ms", "consecutive_failures"} plus either {"upserted", "removed"} on
+    success or {"error"} on failure - so `contexer status` can show when sync last ran and
+    why it degraded, without itself touching the network. `consecutive_failures` resets to
+    0 on success and increments on failure, driving the poll backoff (see _poll_interval).
+    A successful sync also stamps a top-level `last_ok_at` (epoch float) - the freshness
+    signal `format_team_section` uses to tag its header when the cache has gone stale.
 
     `timeout` (seconds) overrides RemoteStore's default transport timeout - used by the
     SessionStart `refresh` seam to bound how long a slow cloud can stall a session start.
@@ -109,7 +122,8 @@ def _sync(repo_path: str, profile: config.Profile,
         _save_cache(repo_path, {
             **cache,
             "last_sync": {"at": time.time(), "ok": False, "duration_ms": duration_ms,
-                         "error": "degraded"},
+                         "error": "degraded",
+                         "consecutive_failures": _consecutive_failures(cache) + 1},
         })
         return None  # degraded — leave the existing cache in place
 
@@ -137,9 +151,30 @@ def _sync(repo_path: str, profile: config.Profile,
         "cursor": ctx.cursor or cache.get("cursor"),  # null cursor (empty pull) keeps prior
         "decisions": list(by_id.values()),
         "last_sync": {"at": time.time(), "ok": True, "duration_ms": duration_ms,
-                     "upserted": len(new_rows), "removed": len(removed)},
+                     "upserted": len(new_rows), "removed": len(removed),
+                     "consecutive_failures": 0},
+        "last_ok_at": time.time(),
     })
     return (new_rows, removed)
+
+
+def _consecutive_failures(cache: dict) -> int:
+    """Fail-soft read of the last_sync consecutive-failure counter. Missing key, missing
+    last_sync, or a corrupt/non-int value all read as 0 - a diagnostic counter must never
+    itself become a crash source."""
+    last_sync = cache.get("last_sync")
+    if not isinstance(last_sync, dict):
+        return 0
+    n = last_sync.get("consecutive_failures", 0)
+    return n if isinstance(n, int) and n >= 0 else 0
+
+
+def _poll_interval(cache: dict) -> float:
+    """Backoff interval (seconds) before the next poll/refresher spawn is due. Healthy
+    cloud (0 consecutive failures) keeps the base _POLL_MIN_INTERVAL cadence; each
+    consecutive failure doubles it, capped at _POLL_MAX_INTERVAL. The first success after
+    an outage resets consecutive_failures to 0, snapping the cadence back immediately."""
+    return min(_POLL_MIN_INTERVAL * (2 ** _consecutive_failures(cache)), _POLL_MAX_INTERVAL)
 
 
 def pull(repo_path: str, *, profile: config.Profile | None = None,
@@ -159,13 +194,15 @@ def pull(repo_path: str, *, profile: config.Profile | None = None,
 def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]:
     """Delta-poll for injection (C7): return the team decisions newly synced this poll.
 
-    Throttled to at most once per `_POLL_MIN_INTERVAL` so it never adds perceptible latency
-    to a prompt. `[]` when throttled, not in team mode, or degraded — never raises."""
+    Throttled to at most once per `_poll_interval` (base `_POLL_MIN_INTERVAL`, backed off
+    exponentially on consecutive sync failures - see `_poll_interval`) so it never adds
+    perceptible latency to a prompt. `[]` when throttled, not in team mode, or degraded —
+    never raises."""
     profile = profile or config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
         return []  # not configured — no work, no cache file for a local repo
     cache = _load_cache(repo_path)
-    if time.time() - cache.get("last_poll_at", 0) < _POLL_MIN_INTERVAL:
+    if time.time() - cache.get("last_poll_at", 0) < _poll_interval(cache):
         return []  # throttled — skip the network round-trip
     result = _sync(repo_path, profile)
     # Stamp the poll time regardless of outcome (don't hammer a down cloud every prompt).
@@ -238,16 +275,18 @@ def poll_nonblocking(repo_path: str, *, profile: config.Profile | None = None) -
     """C7 delta-poll with ZERO network on the prompt path.
 
     Returns the rows the background refresher synced since the last prompt (one prompt of
-    staleness vs the synchronous poll()) and — at most once per _POLL_MIN_INTERVAL — spawns
-    a detached refresher whose results surface on the NEXT prompt. The prompt only ever pays
-    a cache read plus a non-blocking process spawn, so a slow-but-healthy cloud (or the full
-    transport timeout) can never stall the user."""
+    staleness vs the synchronous poll()) and — at most once per `_poll_interval` (base
+    _POLL_MIN_INTERVAL, backed off exponentially on consecutive sync failures up to
+    _POLL_MAX_INTERVAL) — spawns a detached refresher whose results surface on the NEXT
+    prompt. The prompt only ever pays a cache read plus a non-blocking process spawn, so a
+    slow-but-healthy cloud (or the full transport timeout) can never stall the user, and a
+    down cloud stops being re-spawned every 15s forever."""
     profile = profile or config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
         return []  # not configured — no work, no cache file for a local repo
     new = _claim_pending(repo_path)
     cache = _load_cache(repo_path)
-    if time.time() - cache.get("last_poll_at", 0) >= _POLL_MIN_INTERVAL:
+    if time.time() - cache.get("last_poll_at", 0) >= _poll_interval(cache):
         # Stamp BEFORE spawning so even a crashing refresher can't cause a spawn storm.
         cache["last_poll_at"] = time.time()
         _save_cache(repo_path, cache)
@@ -300,13 +339,30 @@ def poll_for_injection(repo_path: str) -> list[dict]:
         return []
 
 
+def _format_staleness(age_seconds: float) -> str:
+    """Human staleness suffix for the team-context header: whole hours, switching to whole
+    days once the gap reaches 48h (e.g. '30 hours ago', '2 days ago')."""
+    if age_seconds >= 48 * 3600:
+        days = int(age_seconds // 86400)
+        return f"{days} day{'' if days == 1 else 's'} ago"
+    hours = int(age_seconds // 3600)
+    return f"{hours} hour{'' if hours == 1 else 's'} ago"
+
+
 def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -> str:
     """Render the cached team context as a '## Team context (synced)' markdown block, or ''.
 
     Filtered like `store.get_context` (by `entry_type` and a `query` substring). Each row is
     tagged `[scope=team]` so the reading agent treats it as provenance, not tool routing.
+
+    The header is tagged '(synced N hours/days ago - may be stale)' when the cache's
+    `last_ok_at` is older than `_STALE_AFTER` — this is the signal for a quietly-dead
+    refresher (rows keep rendering with no indication sync stopped working). A cache with
+    no `last_ok_at` at all (old-format cache, pre-dating this field) is treated as unknown
+    freshness and left untagged, to avoid false alarms right after an upgrade.
     """
-    rows = _load_cache(repo_path).get("decisions", [])
+    cache = _load_cache(repo_path)
+    rows = cache.get("decisions", [])
     if entry_type:
         rows = [r for r in rows if r.get("type", "") == entry_type]
     if query:
@@ -315,7 +371,14 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     if not rows:
         return ""
 
-    lines = ["## Team context (synced)"]
+    header = "## Team context (synced)"
+    last_ok_at = cache.get("last_ok_at")
+    if isinstance(last_ok_at, (int, float)):
+        age = time.time() - last_ok_at
+        if age >= _STALE_AFTER:
+            header = f"## Team context (synced {_format_staleness(age)} - may be stale)"
+
+    lines = [header]
     for r in rows[:_TEAM_DISPLAY]:
         scope = r.get("scope", "team")
         type_tag = f" [{r['type']}]" if r.get("type") else ""

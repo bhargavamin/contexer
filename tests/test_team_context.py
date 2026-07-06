@@ -5,6 +5,7 @@ store.py entries[], they live in ~/.contexer/.team_{slug}.json and are merged at
 time. RemoteStore is faked here so no network is touched.
 """
 import json
+import time
 
 import pytest
 
@@ -172,6 +173,60 @@ def test_last_sync_no_cache_file_for_no_origin_repo(team_env, monkeypatch):
     assert not team_context._cache_path(team_env).exists()
 
 
+# ── consecutive_failures + last_ok_at (backoff / staleness telemetry) ────────────
+
+def test_success_sets_last_ok_at_and_resets_failures(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "error": "degraded",
+                     "consecutive_failures": 3}})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 0
+    assert isinstance(cache["last_ok_at"], float)
+
+
+def test_degraded_increments_consecutive_failures(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_sync": {"at": 1, "ok": True, "duration_ms": 1, "consecutive_failures": 0}})
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 1
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 2
+
+
+def test_degraded_first_failure_from_absent_counter(team_env, monkeypatch):
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 1
+
+
+def test_consecutive_failures_reads_fail_soft():
+    assert team_context._consecutive_failures({}) == 0
+    assert team_context._consecutive_failures({"last_sync": "not a dict"}) == 0
+    assert team_context._consecutive_failures({"last_sync": {"consecutive_failures": "x"}}) == 0
+    assert team_context._consecutive_failures({"last_sync": {"consecutive_failures": -1}}) == 0
+    assert team_context._consecutive_failures({"last_sync": {"consecutive_failures": 4}}) == 4
+
+
+def test_poll_interval_backoff_doubles_and_caps():
+    assert team_context._poll_interval({}) == team_context._POLL_MIN_INTERVAL
+    assert team_context._poll_interval(
+        {"last_sync": {"consecutive_failures": 1}}) == team_context._POLL_MIN_INTERVAL * 2
+    assert team_context._poll_interval(
+        {"last_sync": {"consecutive_failures": 2}}) == team_context._POLL_MIN_INTERVAL * 4
+    # Enough failures to blow past the ceiling — must clamp, never grow unbounded.
+    assert team_context._poll_interval(
+        {"last_sync": {"consecutive_failures": 20}}) == team_context._POLL_MAX_INTERVAL
+
+
 # ── format_team_section ──────────────────────────────────────────────────────────
 
 def test_format_team_section_empty_when_no_cache(tmp_repo):
@@ -207,6 +262,70 @@ def test_load_cache_tolerates_corrupt_file(tmp_repo):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{ not json")
     assert team_context._load_cache(tmp_repo) == {"repo_key": None, "cursor": None, "decisions": []}
+
+
+# ── staleness tag on the header ───────────────────────────────────────────────────
+
+def _seed_with_last_ok_at(repo, *, last_ok_at):
+    data = {"repo_key": "k", "cursor": None,
+           "decisions": [{"id": "t1aaaaaa", "type": "architecture", "content": "Use Postgres",
+                          "rationale": None, "repo": None, "agent": None, "scope": "team"}]}
+    if last_ok_at is not None:
+        data["last_ok_at"] = last_ok_at
+    team_context._save_cache(repo, data)
+
+
+def test_fresh_sync_no_stale_tag(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time())
+    out = team_context.format_team_section(tmp_repo)
+    assert out.startswith("## Team context (synced)\n")
+    assert "stale" not in out
+
+
+def test_missing_last_ok_at_no_stale_tag(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=None)  # old-format cache, field absent
+    out = team_context.format_team_section(tmp_repo)
+    assert out.startswith("## Team context (synced)\n")
+    assert "stale" not in out
+
+
+def test_stale_header_hours_wording(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 30 * 3600)  # 30h ago
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context (synced 30 hours ago - may be stale)" in out
+
+
+def test_stale_header_exactly_24h_is_tagged(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - team_context._STALE_AFTER)
+    out = team_context.format_team_section(tmp_repo)
+    assert "may be stale" in out
+
+
+def test_fresh_23h_not_tagged(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 23 * 3600)
+    out = team_context.format_team_section(tmp_repo)
+    assert "stale" not in out
+
+
+def test_stale_header_days_wording_at_48h(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 48 * 3600)
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context (synced 2 days ago - may be stale)" in out
+
+
+def test_stale_header_days_wording_multi_day(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 5 * 86400)
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context (synced 5 days ago - may be stale)" in out
+
+
+def test_stale_tag_only_touches_header_not_rows(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 72 * 3600)
+    out = team_context.format_team_section(tmp_repo)
+    lines = out.split("\n")
+    assert "may be stale" in lines[0]
+    assert "Use Postgres" in lines[1]
+    assert "may be stale" not in lines[1]
 
 
 # ── store.get_context integration ────────────────────────────────────────────────
