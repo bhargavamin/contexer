@@ -312,8 +312,18 @@ def test_refresh_never_raises(monkeypatch):
 
 def test_poll_for_injection_delegates(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo: [{"id": "t1", "content": "c"}])
+    monkeypatch.setattr(team_context, "poll_nonblocking",
+                        lambda repo, consumer="claude": [{"id": "t1", "content": "c"}])
     assert team_context.poll_for_injection("/x") == [{"id": "t1", "content": "c"}]
+
+
+def test_poll_for_injection_threads_consumer(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "poll_nonblocking",
+                        lambda repo, consumer="claude": seen.setdefault("consumer", consumer) or [])
+    team_context.poll_for_injection("/x", "codex")
+    assert seen["consumer"] == "codex"
 
 
 def test_poll_for_injection_empty_repo_is_noop(monkeypatch):
@@ -324,7 +334,7 @@ def test_poll_for_injection_empty_repo_is_noop(monkeypatch):
 def test_poll_for_injection_never_raises(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
 
-    def boom(repo):
+    def boom(repo, consumer="claude"):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(team_context, "poll_nonblocking", boom)
@@ -335,14 +345,23 @@ def test_poll_for_injection_never_raises(monkeypatch):
 
 def test_team_poll_empty_when_no_new(monkeypatch):
     from contexer.adapters import claude
-    monkeypatch.setattr(team_context, "poll_for_injection", lambda rp: [])
+    monkeypatch.setattr(team_context, "poll_for_injection", lambda rp, consumer="claude": [])
     assert claude.team_poll("/repo", "{}") == "{}"
 
 
 def test_team_poll_injects_new_rows(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(team_context, "poll_for_injection",
-                        lambda rp: [{"id": "t1", "content": "New team rule", "type": "constraint"}])
+                        lambda rp, consumer="claude": [{"id": "t1", "content": "New team rule", "type": "constraint"}])
     out = claude.team_poll("/repo", "{}")
     assert "New team rule" in out
     assert "just approved" in out.lower()
+
+
+def test_team_poll_threads_consumer(monkeypatch):
+    from contexer.adapters import claude
+    seen = {}
+    monkeypatch.setattr(team_context, "poll_for_injection",
+                        lambda rp, consumer="claude": seen.setdefault("consumer", consumer) or [])
+    claude.team_poll("/repo", "{}", "codex")
+    assert seen["consumer"] == "codex"

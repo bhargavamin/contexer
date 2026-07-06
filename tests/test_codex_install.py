@@ -73,6 +73,38 @@ class TestCodexInstall:
                 for h in g["hooks"]]
         assert sum("claude.team_poll" in c for c in cmds) == 1
 
+    def test_team_poll_hook_tags_codex_consumer(self, home):
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        poll = next(c for c in cmds if "claude.team_poll" in c)
+        assert "'codex'" in poll  # per-consumer tag so codex isn't starved by a claude session
+
+    def test_migrates_old_untagged_team_poll_hook(self, home):
+        # A pre-consumer install: the codex team-poll hook reused claude.team_poll WITHOUT the
+        # "codex" tag, so it raced a concurrent Claude session for a single delivery. Reinstall
+        # must replace it in place with the tagged call.
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+               '"py" -c "from contexer.adapters import claude; import sys; '
+               'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO"')
+        hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        polls = [c for c in cmds if "claude.team_poll" in c]
+        assert len(polls) == 1  # replaced in place, not duplicated
+        assert "'codex'" in polls[0]  # now tagged
+
+    def test_tagged_team_poll_hook_not_re_migrated(self, home):
+        codex.install(home)
+        codex.install(home)  # a reinstall over the already-tagged hook must be a no-op
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        assert sum("'codex'" in c for c in cmds) == 1
+
     def test_session_start_pull_team_wired_once(self, home):
         codex.install(home)
         codex.install(home)

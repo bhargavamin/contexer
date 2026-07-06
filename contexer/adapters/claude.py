@@ -109,15 +109,19 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
-def team_poll(repo_path: str, raw: str) -> str:
+def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
     """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
 
     Fail-soft. Uses the non-blocking poll: the network sync runs in a detached background
     process and its results inject on the NEXT prompt, so this hook never waits on the
-    cloud — a slow or timing-out endpoint cannot stall prompt submission."""
+    cloud — a slow or timing-out endpoint cannot stall prompt submission. `consumer`
+    identifies the polling host (defaults to "claude" so the original installed Claude hook
+    string keeps working); each consumer gets every newly-synced batch exactly once via its
+    own high-water marker, so a Codex session on the same repo never steals Claude's injection
+    (or vice versa)."""
     try:
         from contexer import team_context
-        new = team_context.poll_for_injection(repo_path)
+        new = team_context.poll_for_injection(repo_path, consumer)
         if not new:
             return "{}"
         lines = ["Team decisions just approved (now in effect):"]

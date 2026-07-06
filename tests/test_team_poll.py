@@ -92,7 +92,8 @@ def test_pull_contract_intact_after_refactor(team_env, monkeypatch):
 def test_team_poll_injects_new_decisions(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo: [{"content": "Use Postgres", "type": "architecture"}])
+    monkeypatch.setattr(team_context, "poll_nonblocking",
+                        lambda repo, consumer="claude": [{"content": "Use Postgres", "type": "architecture"}])
     data = json.loads(claude.team_poll("/repo", ""))
     assert "Use Postgres" in data["hookSpecificOutput"]["additionalContext"]
     assert data["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
@@ -101,7 +102,7 @@ def test_team_poll_injects_new_decisions(monkeypatch):
 def test_team_poll_empty_when_nothing_new(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo: [])
+    monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo, consumer="claude": [])
     assert claude.team_poll("/repo", "") == "{}"
 
 
@@ -115,14 +116,14 @@ def test_team_poll_swallows_errors(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
 
-    def boom(repo):
+    def boom(repo, consumer="claude"):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(team_context, "poll_nonblocking", boom)
     assert claude.team_poll("/repo", "") == "{}"
 
 
-# ── poll_nonblocking (background refresh; zero network on the prompt path) ────────
+# ── poll_nonblocking (background refresh; per-consumer sync-log delivery) ─────────
 
 def _no_spawn(monkeypatch):
     spawned = []
@@ -130,16 +131,102 @@ def _no_spawn(monkeypatch):
     return spawned
 
 
-def test_nonblocking_returns_and_consumes_pending(team_env, monkeypatch):
-    spawned = _no_spawn(monkeypatch)
-    team_context.store.STORE_DIR.mkdir(exist_ok=True)
-    team_context._pending_path(team_env).write_text(
-        json.dumps([{"id": "t1", "content": "team rule", "type": "constraint"}]))
-    new = team_context.poll_nonblocking(team_env, profile=TEAM)
-    assert [d["id"] for d in new] == ["t1"]
-    assert not team_context._pending_path(team_env).exists()  # consumed
-    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []  # gone next prompt
-    assert spawned  # a refresh was scheduled for the next window
+def _seed_log(repo, *, seq, sync_log, decisions, last_poll_at=None):
+    """Write a cache with a per-repo sync log (as _sync would leave it). Throttled by default
+    (last_poll_at=now) so a test can assert delivery without a background spawn interfering."""
+    team_context._save_cache(repo, {
+        "repo_key": "github.com/a/b", "cursor": "c1",
+        "last_poll_at": time.time() if last_poll_at is None else last_poll_at,
+        "seq": seq, "sync_log": sync_log, "decisions": decisions})
+
+
+def test_two_consumers_each_get_new_rows_once(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    _seed_log(team_env, seq=1, sync_log=[{"seq": 1, "ids": ["t1"]}],
+              decisions=[{"id": "t1", "content": "team rule", "type": "constraint"}])
+    # Both consumers were caught up at seq 0 before the seq-1 batch was logged mid-session.
+    team_context._write_seen(team_env, "claude", 0)
+    team_context._write_seen(team_env, "codex", 0)
+    a = team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    b = team_context.poll_nonblocking(team_env, "codex", profile=TEAM)
+    assert [r["id"] for r in a] == ["t1"]
+    assert [r["id"] for r in b] == ["t1"]  # codex NOT starved by claude's earlier poll
+    # a second poll by each consumer sees nothing new (its own marker advanced)
+    assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []
+    assert team_context.poll_nonblocking(team_env, "codex", profile=TEAM) == []
+
+
+def test_new_consumer_starts_caught_up(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    # SessionStart already rendered these rows; a brand-new consumer (no marker yet) must NOT
+    # re-inject the backlog — it catches up to the current log head instead.
+    _seed_log(team_env, seq=2, sync_log=[{"seq": 1, "ids": ["t1"]}, {"seq": 2, "ids": ["t2"]}],
+              decisions=[{"id": "t1", "content": "a"}, {"id": "t2", "content": "b"}])
+    assert team_context.poll_nonblocking(team_env, "codex", profile=TEAM) == []  # caught up
+    assert json.loads(team_context._seen_path(team_env, "codex").read_text())["seq"] == 2
+
+
+def test_marker_files_are_per_consumer(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    _seed_log(team_env, seq=2, sync_log=[{"seq": 2, "ids": ["t1"]}],
+              decisions=[{"id": "t1", "content": "x"}])
+    team_context._write_seen(team_env, "claude", 1)  # claude caught up at seq 1
+    team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    assert json.loads(team_context._seen_path(team_env, "claude").read_text())["seq"] == 2
+    assert not team_context._seen_path(team_env, "codex").exists()  # untouched by claude's poll
+
+
+def test_default_consumer_is_claude(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    _seed_log(team_env, seq=1, sync_log=[{"seq": 1, "ids": ["t1"]}],
+              decisions=[{"id": "t1", "content": "x"}])
+    team_context._write_seen(team_env, "claude", 0)
+    got = team_context.poll_nonblocking(team_env, profile=TEAM)  # no consumer arg
+    assert [r["id"] for r in got] == ["t1"]  # used the claude marker (the default)
+
+
+def test_sync_appends_batch_to_log(team_env, monkeypatch):
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "a"), _rd("t2", "b")], [], "c1"))
+    team_context.poll(team_env, profile=TEAM)  # the blocking poll runs _sync
+    cache = team_context._load_cache(team_env)
+    assert cache["seq"] == 1
+    assert cache["sync_log"] == [{"seq": 1, "ids": ["t1", "t2"]}]
+
+
+def test_sync_log_is_capped_dropping_oldest(team_env, monkeypatch):
+    seeded = [{"seq": i, "ids": [f"x{i}"]} for i in range(1, team_context._SYNC_LOG_CAP + 1)]
+    _seed_log(team_env, seq=team_context._SYNC_LOG_CAP, sync_log=seeded, decisions=[],
+              last_poll_at=0)
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("new", "z")], [], "c2"))
+    team_context.poll(team_env, profile=TEAM)
+    log = team_context._load_cache(team_env)["sync_log"]
+    assert len(log) == team_context._SYNC_LOG_CAP
+    assert log[0]["seq"] == 2  # seq 1 dropped off the front
+    assert log[-1] == {"seq": team_context._SYNC_LOG_CAP + 1, "ids": ["new"]}
+
+
+def test_consumer_behind_cap_gets_current_log_only(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    # log covers seq 3..5 (1,2 dropped by the cap); a brand-new consumer (marker 0) still gets
+    # every batch REMAINING in the log — the dropped ones stay reachable via get_context.
+    _seed_log(team_env, seq=5,
+              sync_log=[{"seq": 3, "ids": ["t3"]}, {"seq": 4, "ids": ["t4"]},
+                        {"seq": 5, "ids": ["t5"]}],
+              decisions=[{"id": "t3", "content": "3"}, {"id": "t4", "content": "4"},
+                         {"id": "t5", "content": "5"}])
+    team_context._write_seen(team_env, "codex", 2)  # further behind than the log's oldest (3)
+    got = team_context.poll_nonblocking(team_env, "codex", profile=TEAM)
+    assert [r["id"] for r in got] == ["t3", "t4", "t5"]  # gets every batch still in the log
+
+
+def test_deleted_id_in_log_is_skipped(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    # log references t_gone but it's no longer in decisions (deleted since it was logged).
+    _seed_log(team_env, seq=1, sync_log=[{"seq": 1, "ids": ["t_gone", "t1"]}],
+              decisions=[{"id": "t1", "content": "kept"}])
+    team_context._write_seen(team_env, "claude", 0)
+    got = team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    assert [r["id"] for r in got] == ["t1"]  # missing row skipped, not a KeyError
 
 
 def test_nonblocking_spawns_when_due_and_stamps_first(team_env, monkeypatch):
@@ -175,40 +262,64 @@ def test_nonblocking_never_does_network(team_env, monkeypatch):
     assert fake.calls == []  # the prompt path itself must never touch the cloud
 
 
-def test_nonblocking_corrupt_pending_is_empty(team_env, monkeypatch):
+def test_legacy_pending_file_deleted_on_poll(team_env, monkeypatch):
     _no_spawn(monkeypatch)
     team_context.store.STORE_DIR.mkdir(exist_ok=True)
-    team_context._pending_path(team_env).write_text("{not json")
-    assert team_context.poll_nonblocking(team_env, profile=TEAM) == []
-    assert not team_context._pending_path(team_env).exists()  # corrupt file still consumed
+    legacy = (team_context.store.STORE_DIR
+              / f".team_pending_{team_context.store._slug(team_env)}.json")
+    legacy.write_text(json.dumps([{"id": "old", "content": "stale"}]))
+    _seed_log(team_env, seq=0, sync_log=[], decisions=[])
+    assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []
+    assert not legacy.exists()  # old parked file cleaned up, never injected
 
 
-def test_refresh_worker_parks_new_rows(team_env, monkeypatch):
+def test_corrupt_marker_degrades_to_empty(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    _seed_log(team_env, seq=1, sync_log=[{"seq": 1, "ids": ["t1"]}],
+              decisions=[{"id": "t1", "content": "x"}])
+    team_context.store.STORE_DIR.mkdir(exist_ok=True)
+    team_context._seen_path(team_env, "claude").write_text("{not json")
+    # corrupt marker: no crash, no re-spam of the whole log — empty injection this once
+    assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []
+    # self-healed to caught-up (seq 1); a follow-up poll with no new batch is still empty
+    assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []
+    assert json.loads(team_context._seen_path(team_env, "claude").read_text())["seq"] == 1
+
+
+def test_corrupt_sync_log_degrades_to_empty(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c1", "last_poll_at": time.time(),
+        "seq": 1, "sync_log": "not a list", "decisions": [{"id": "t1", "content": "x"}]})
+    assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []  # never raises
+
+
+def test_malformed_log_entries_are_skipped(team_env, monkeypatch):
+    _no_spawn(monkeypatch)
+    # A hand-mangled log: a non-dict entry and one with a non-int seq sit beside a good batch.
+    _seed_log(team_env, seq=3,
+              sync_log=["junk", {"seq": "x", "ids": ["bad"]}, {"seq": 3, "ids": ["t3"]}],
+              decisions=[{"id": "t3", "content": "kept"}])
+    team_context._write_seen(team_env, "claude", 0)
+    got = team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    assert [r["id"] for r in got] == ["t3"]  # only the well-formed batch survives, no crash
+
+
+def test_refresh_worker_appends_team_rows_to_log(team_env, monkeypatch):
     monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
     _fake_rs(monkeypatch, ctx=RemoteContext(
         [_rd("t1", "team rule"), _rd("p1", "mine", "personal")], [], "c1"))
     team_context._refresh_worker(team_env)
-    pending = json.loads(team_context._pending_path(team_env).read_text())
-    assert [r["id"] for r in pending] == ["t1"]  # team rows only, parked for the next prompt
-    assert team_context._load_cache(team_env)["cursor"] == "c1"  # cache advanced too
+    cache = team_context._load_cache(team_env)
+    assert cache["sync_log"] == [{"seq": 1, "ids": ["t1"]}]  # team rows only
+    assert cache["cursor"] == "c1"  # cache advanced too
 
 
-def test_refresh_worker_merges_unconsumed_pending(team_env, monkeypatch):
-    monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
-    team_context.store.STORE_DIR.mkdir(exist_ok=True)
-    team_context._pending_path(team_env).write_text(
-        json.dumps([{"id": "t0", "content": "earlier, not yet injected"}]))
-    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "newer")], [], "c2"))
-    team_context._refresh_worker(team_env)
-    pending = {r["id"] for r in json.loads(team_context._pending_path(team_env).read_text())}
-    assert pending == {"t0", "t1"}  # nothing lost between prompts
-
-
-def test_refresh_worker_degraded_leaves_no_pending(team_env, monkeypatch):
+def test_refresh_worker_degraded_leaves_no_log(team_env, monkeypatch):
     monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
     _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
     team_context._refresh_worker(team_env)
-    assert not team_context._pending_path(team_env).exists()
+    assert team_context._load_cache(team_env).get("sync_log", []) == []
 
 
 # ── inclusive-cursor defense (live finding: server re-sends rows stamped == cursor) ──

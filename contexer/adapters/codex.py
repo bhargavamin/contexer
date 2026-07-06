@@ -147,11 +147,13 @@ def install(home: Path) -> list[str]:
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
     # Team delta poll (T2): Codex shares Claude's UserPromptSubmit output schema, so
-    # claude.team_poll is reused verbatim — non-blocking, fail-soft, injects newly-approved
-    # team decisions on the next prompt.
+    # claude.team_poll is reused — non-blocking, fail-soft, injects newly-approved team
+    # decisions on the next prompt. The third arg tags this consumer "codex" so a Codex and a
+    # Claude session on the same repo each get every synced batch once (independent high-water
+    # markers) instead of racing for a single per-repo delivery.
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
-                'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO"')
+                'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
 
     # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
@@ -235,6 +237,13 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, "claude.rationale"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for relevant decisions...", "command": cap_rat}]})
+    # Migrate: the pre-consumer codex team-poll hook called claude.team_poll WITHOUT the
+    # "codex" tag, so a Claude and a Codex session on the same repo raced to claim a single
+    # per-repo delivery and only one got the injection. Replace it with the tagged call.
+    # Keyed on the "codex" consumer marker (absent from the old string) so it runs once.
+    if base._in_groups(ups, "claude.team_poll") and not base._in_groups(ups, "codex"):
+        ups = base._filter_groups(ups, ["claude.team_poll"])
+        hooks["UserPromptSubmit"] = ups
     if not base._in_groups(ups, "claude.team_poll"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
