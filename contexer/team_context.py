@@ -13,7 +13,6 @@ decisions; fresh-clone restore of the personal cloud mirror is a later follow-up
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -33,6 +32,11 @@ _POLL_MIN_INTERVAL = 15
 # Ceiling for the backoff interval (15 min) — a down cloud never gets polled less often
 # than this, but also never floods a prompting session with retries forever.
 _POLL_MAX_INTERVAL = 900
+
+# Cap the in-cache sync log (last N batches). A consumer further behind than this misses the
+# proactive "just approved" banner for old batches only — those rows are still in the cache
+# (get_context / SessionStart render them), so this is a UX degradation, never data loss.
+_SYNC_LOG_CAP = 50
 
 # Fields persisted per cached team decision (the get_context wire projection).
 _ROW_FIELDS = ("id", "type", "content", "rationale", "repo", "agent", "scope")
@@ -148,8 +152,8 @@ def _sync(repo_path: str, profile: config.Profile,
         if by_id.pop(dead, None) is not None:
             removed.append(dead)
 
-    _save_cache(repo_path, {
-        **cache,  # preserve extra keys (e.g. last_poll_at) across a sync
+    saved = {
+        **cache,  # preserve extra keys (last_poll_at, seq, sync_log) across a sync
         "repo_key": key,
         "cursor": ctx.cursor or cache.get("cursor"),  # null cursor (empty pull) keeps prior
         "decisions": list(by_id.values()),
@@ -157,7 +161,20 @@ def _sync(repo_path: str, profile: config.Profile,
                      "upserted": len(new_rows), "removed": len(removed),
                      "consecutive_failures": 0},
         "last_ok_at": start,
-    })
+    }
+    if new_rows:
+        # Record this batch in the per-repo sync log under a fresh monotonic seq. Per-consumer
+        # high-water markers (.team_seen_<slug>_<consumer>.json) read this log, so EACH consumer
+        # (a Claude and a Codex session on the same repo) is shown every batch exactly once,
+        # independently of the others. seq is a stored counter, never wall-clock, so ordering
+        # is deterministic and immune to clock skew.
+        seq = int(cache.get("seq", 0)) + 1
+        prior = cache.get("sync_log")
+        log = list(prior) if isinstance(prior, list) else []
+        log.append({"seq": seq, "ids": [r["id"] for r in new_rows]})
+        saved["seq"] = seq
+        saved["sync_log"] = log[-_SYNC_LOG_CAP:]  # drop oldest; very stale consumers miss old banners only
+    _save_cache(repo_path, saved)
     return (new_rows, removed)
 
 
@@ -215,54 +232,102 @@ def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]
     return result[0] if result else []
 
 
-def _pending_path(repo_path: str):
-    return store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json"
+def _seen_path(repo_path: str, consumer: str):
+    return store.STORE_DIR / f".team_seen_{store._slug(repo_path)}_{consumer}.json"
 
 
-def _claim_pending(repo_path: str) -> list[dict]:
-    """Atomically take the rows the background refresher parked for injection.
+def _read_seen(repo_path: str, consumer: str) -> int | None:
+    """Highest sync-log seq this consumer has already been shown, or None when it has no
+    valid marker (never polled, or the marker is corrupt).
 
-    Claim = rename-then-read: the rename is atomic, so a refresher writing concurrently
-    lands a fresh pending file for the NEXT prompt instead of being lost mid-consume."""
-    path = _pending_path(repo_path)
-    claim = path.with_name(path.name + ".claim")
+    The caller treats None as 'caught up': it stamps the current log head and injects nothing
+    that once. A brand-new consumer therefore does NOT re-inject the existing backlog (its own
+    SessionStart already rendered it), and a garbled marker self-heals to caught-up instead of
+    crashing or re-spamming the whole log."""
+    path = _seen_path(repo_path, consumer)
+    if not path.exists():
+        return None
     try:
-        os.replace(path, claim)
-    except OSError:
-        return []  # nothing pending (or a concurrent prompt claimed it first)
-    try:
-        data = json.loads(claim.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        data = []
-    finally:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("seq"), int):
+        return data["seq"]
+    return None
+
+
+def _write_seen(repo_path: str, consumer: str, seq: int) -> None:
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store._atomic_write(_seen_path(repo_path, consumer), json.dumps({"seq": seq}, ensure_ascii=False))
+
+
+def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
+    """Rows from every sync-log batch newer than this consumer's high-water mark.
+
+    Advances the marker to the newest logged seq and returns the current version of each row
+    (deduped by id, resolved from the cache's decisions list; a since-deleted id is skipped).
+    Per-consumer marker + per-repo log = each consumer sees every batch exactly once,
+    independently of any other consumer. Fail-soft: any corruption yields an empty injection,
+    never an exception."""
+    try:
+        log = cache.get("sync_log")
+        if not isinstance(log, list):
+            return []
+        seen = _read_seen(repo_path, consumer)
+        if seen is None:
+            # No valid marker (new consumer or corrupt file): catch up to the current log head
+            # and inject nothing this once. SessionStart already rendered everything synced so
+            # far, so the delta-poll surfaces only batches logged AFTER this point.
+            _write_seen(repo_path, consumer, int(cache.get("seq", 0)))
+            return []
+        unseen_ids: list = []
+        high = seen
+        for entry in log:
+            if not isinstance(entry, dict):
+                continue
+            seq = entry.get("seq")
+            if not isinstance(seq, int) or seq <= seen:
+                continue
+            unseen_ids.extend(entry.get("ids") or [])
+            high = max(high, seq)
+        if high > seen:
+            _write_seen(repo_path, consumer, high)
+        if not unseen_ids:
+            return []
+        by_id = {d.get("id"): d for d in cache.get("decisions", [])}
+        rows: list[dict] = []
+        emitted: set = set()
+        for rid in unseen_ids:
+            if rid in emitted:
+                continue
+            emitted.add(rid)
+            row = by_id.get(rid)
+            if row is not None:  # skip an id deleted since it was logged
+                rows.append(row)
+        return rows
+    except Exception:
+        return []
+
+
+def _drop_legacy_pending(repo_path: str) -> None:
+    """Remove a parked-pending file left by an older Contexer (delivery is now the per-consumer
+    sync log). Called on every poll (every prompt), so once the legacy file is gone — the
+    common case — an existence check up front avoids an unlink()-then-catch syscall on every
+    single prompt. Still best-effort — a file that vanishes between the check and the unlink
+    is silently ignored."""
+    path = store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json"
+    if path.exists():
         try:
-            claim.unlink()
+            path.unlink()
         except OSError:
             pass
-    return data if isinstance(data, list) else []
 
 
 def _refresh_worker(repo_path: str) -> None:
     """Background refresher body (runs in a detached process spawned by poll_nonblocking):
-    the network sync happens OFF the prompt path. Newly synced team rows are parked in the
-    pending file, merged by id with any rows not yet consumed by a prompt."""
-    result = _sync(repo_path, config.load_profile())
-    if not result or not result[0]:
-        return
-    path = _pending_path(repo_path)
-    existing: list = []
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            existing = []
-    if not isinstance(existing, list):
-        existing = []
-    by_id = {r.get("id"): r for r in existing}
-    for row in result[0]:
-        by_id[row["id"]] = row
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    store._atomic_write(path, json.dumps(list(by_id.values()), indent=2, ensure_ascii=False))
+    the network sync happens OFF the prompt path. `_sync` appends any newly synced rows to the
+    cache's sync_log, from which each consumer's poll picks them up exactly once."""
+    _sync(repo_path, config.load_profile())
 
 
 def _spawn_refresh(repo_path: str) -> None:
@@ -274,21 +339,25 @@ def _spawn_refresh(repo_path: str) -> None:
     )
 
 
-def poll_nonblocking(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]:
-    """C7 delta-poll with ZERO network on the prompt path.
+def poll_nonblocking(repo_path: str, consumer: str = "claude", *,
+                     profile: config.Profile | None = None) -> list[dict]:
+    """C7 delta-poll with ZERO network on the prompt path, per consumer.
 
-    Returns the rows the background refresher synced since the last prompt (one prompt of
-    staleness vs the synchronous poll()) and — at most once per `_poll_interval` (base
+    Returns the team rows synced since THIS consumer last polled (read from the per-repo sync
+    log via the consumer's own high-water marker, so a Claude and a Codex session on the same
+    repo each receive every batch once) and — at most once per `_poll_interval` (base
     _POLL_MIN_INTERVAL, backed off exponentially on consecutive sync failures up to
     _POLL_MAX_INTERVAL) — spawns a detached refresher whose results surface on the NEXT
     prompt. The prompt only ever pays a cache read plus a non-blocking process spawn, so a
     slow-but-healthy cloud (or the full transport timeout) can never stall the user, and a
-    down cloud stops being re-spawned every 15s forever."""
+    down cloud stops being re-spawned every 15s forever. `consumer` defaults to "claude" so
+    the original installed Claude hook string keeps working unchanged."""
     profile = profile or config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
         return []  # not configured — no work, no cache file for a local repo
-    new = _claim_pending(repo_path)
+    _drop_legacy_pending(repo_path)  # one-time cleanup of a pre-sync-log parked file
     cache = _load_cache(repo_path)
+    new = _collect_unseen(repo_path, cache, consumer)
     if time.time() - cache.get("last_poll_at", 0) >= _poll_interval(cache):
         # Stamp BEFORE spawning so even a crashing refresher can't cause a spawn storm.
         cache["last_poll_at"] = time.time()
@@ -338,15 +407,17 @@ def refresh(repo_path: str) -> tuple[int, int]:
     return result
 
 
-def poll_for_injection(repo_path: str) -> list[dict]:
-    """Per-prompt delta poll for ANY adapter. Returns the team rows newly synced since the
-    last prompt (empty when throttled / not team mode / degraded). NEVER raises. Adapters
-    format these rows for their own host's hook output."""
+def poll_for_injection(repo_path: str, consumer: str = "claude") -> list[dict]:
+    """Per-prompt delta poll for ANY adapter. Returns the team rows newly synced since THIS
+    consumer last polled (empty when throttled / not team mode / degraded). Each consumer
+    ("claude", "codex") keeps its own high-water marker, so concurrent sessions on one repo
+    don't steal each other's proactive injection. NEVER raises. Adapters format these rows for
+    their own host's hook output. `consumer` defaults to "claude" (the original hook string)."""
     try:
         repo = store._resolve_repo(repo_path)
         if not repo:
             return []
-        return poll_nonblocking(repo)
+        return poll_nonblocking(repo, consumer)
     except Exception:
         return []
 
