@@ -81,7 +81,10 @@ def _sync(repo_path: str, profile: config.Profile,
     actually tried the network) records its outcome as a `last_sync` cache key - {"at",
     "ok", "duration_ms"} plus either {"upserted", "removed"} on success or {"error"} on
     failure - so `contexer status` can show when sync last ran and why it degraded,
-    without itself touching the network.
+    without itself touching the network. `at` is stamped once, from `start` (captured
+    before the network call), so it means "when the sync attempt began" for both the
+    success and degraded paths - not end-of-write, which would drift by however long
+    the cache write itself takes.
 
     `timeout` (seconds) overrides RemoteStore's default transport timeout - used by the
     SessionStart `refresh` seam to bound how long a slow cloud can stall a session start.
@@ -108,7 +111,7 @@ def _sync(repo_path: str, profile: config.Profile,
         # decisions/cursor exactly as loaded - a transient outage must never wipe the cache.
         _save_cache(repo_path, {
             **cache,
-            "last_sync": {"at": time.time(), "ok": False, "duration_ms": duration_ms,
+            "last_sync": {"at": start, "ok": False, "duration_ms": duration_ms,
                          "error": "degraded"},
         })
         return None  # degraded — leave the existing cache in place
@@ -136,7 +139,7 @@ def _sync(repo_path: str, profile: config.Profile,
         "repo_key": key,
         "cursor": ctx.cursor or cache.get("cursor"),  # null cursor (empty pull) keeps prior
         "decisions": list(by_id.values()),
-        "last_sync": {"at": time.time(), "ok": True, "duration_ms": duration_ms,
+        "last_sync": {"at": start, "ok": True, "duration_ms": duration_ms,
                      "upserted": len(new_rows), "removed": len(removed)},
     })
     return (new_rows, removed)

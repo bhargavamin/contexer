@@ -1530,7 +1530,10 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     Visibility (Phase 2): when a team section IS appended, the human-facing `status` string
     gets a short ` | team: N synced` suffix so the developer can tell team sync is live
     without reading the (model-facing) `context` blob. The `context` string itself is
-    unchanged beyond the existing team-section join."""
+    unchanged beyond the existing team-section join. The suffix is cap-aware: `format_team_
+    section` renders at most `_team_display_cap()` rows, so when the cache holds more than
+    that the suffix adds `(cap shown)` rather than claiming a count the model never
+    actually received."""
     payload = _local_session_start_payload(repo_path, source)
     team = _team_section(repo_path, "", "")
     if not team or (source == "resume" and not payload.get("context")):
@@ -1538,7 +1541,9 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     count = _team_count(repo_path)
     status = payload.get("status", "")
     if count:
-        status = f"{status} | team: {count} synced"
+        cap = _team_display_cap()
+        status = (f"{status} | team: {count} synced" if count <= cap
+                 else f"{status} | team: {count} synced ({cap} shown)")
     return {
         **payload,
         "status": status,
@@ -1891,6 +1896,15 @@ def _team_count(repo_path: str) -> int:
     team_context cycle)."""
     from contexer import team_context
     return len(team_context._load_cache(repo_path).get("decisions", []))
+
+
+def _team_display_cap() -> int:
+    """The row cap `format_team_section` renders (`team_context._TEAM_DISPLAY`), so the
+    status suffix can stay honest about what actually landed in context. Same
+    function-level import as `_team_count`, for the same reason (avoids a store <->
+    team_context cycle)."""
+    from contexer import team_context
+    return team_context._TEAM_DISPLAY
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
