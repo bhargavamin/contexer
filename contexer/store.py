@@ -285,6 +285,16 @@ def _tokenize(text: str) -> set[str]:
     return set(_PUNCT_RE.sub("", text.lower()).split())
 
 
+def _overlap_ratio(a: set[str], b: set[str]) -> float:
+    """Token overlap of two token sets: |a∩b| / max(|a|, |b|). This is the metric the
+    novelty filter thresholds at 0.7 to reject duplicates; team-context dedup reuses it so
+    both sites judge "same rule" identically. 0.0 when either side is empty."""
+    if not a or not b:
+        return 0.0
+    hi = len(a) if len(a) > len(b) else len(b)
+    return len(a & b) / hi
+
+
 def _query_pattern(query: str) -> "re.Pattern":
     """Case-insensitive search pattern for a user query. A leading `\\b` is added only
     when the query starts with a word char — prepending it before `.`, `@`, `#` would
@@ -316,7 +326,7 @@ def _find_match(content: str, existing: list) -> dict | None:
         lo = m if n > m else n
         if lo <= 0.7 * hi:                       # overlap can't clear the bar — skip intersection
             continue
-        if len(tokens & other) / hi > 0.7:
+        if _overlap_ratio(tokens, other) > 0.7:
             return entry
     return None
 
@@ -1310,6 +1320,35 @@ def get_pending_decisions(repo_path: str) -> list[dict]:
     ]
 
 
+def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
+    """Return a decision's current shareable fields, or None (C4).
+
+    Resolves `decision_id` (full UUID or 8-char prefix) or, when omitted, the most
+    recently updated decision. Ignored decisions are excluded. Returns the push wire
+    projection {id, type, content, confidence, evidence, source}: `type` is the decision
+    subtype; `evidence` is None when empty so the push omits it."""
+    data = _load(repo_path)
+    decisions = [e for e in data.get("entries", [])
+                 if e.get("type") == "decision" and _entry_status(e) != "ignored"]
+    if not decisions:
+        return None
+    if decision_id:
+        entry = next((e for e in decisions if e.get("id", "").startswith(decision_id)), None)
+    else:
+        entry = max(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp", ""))
+    if entry is None:
+        return None
+    rev = _current_revision(entry) or {}
+    return {
+        "id": entry.get("id", ""),
+        "type": entry.get("subtype", "") or "convention",
+        "content": _current_content(entry),
+        "confidence": rev.get("confidence_score"),
+        "evidence": rev.get("evidence") or None,
+        "source": rev.get("source"),
+    }
+
+
 def _format_update_approval(entry: dict) -> str:
     """Approval prompt for a Suggested Update - current revision vs the detected change."""
     prop = entry.get("proposed_revision") or {}
@@ -1497,6 +1536,36 @@ def _detect_insight(repo_path: str) -> tuple[str, bool]:
     return "low", False  # zero commits could also be an email mismatch — ask
 
 
+def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
+    """Instructions for a repo question asked as the first prompt: ANSWER it, then store
+    findings — never a blocking menu. Insight-tailored using the commit signal Contexer
+    already computes: a repo author (their git email authored commits here) is answered as
+    a maintainer, not quizzed as a newcomer; a confirmed newcomer gets a scanned overview;
+    an unverified guess stays neutral. Every path ends with the question answered and the
+    scan stored silently — the capture happens as a side effect, no permission asked."""
+    if decisive and level == "high":
+        stance = ("You have authored commits in this repo (matched on your git email), so"
+                  " answer as a fellow maintainer with a direct, technical summary — do NOT"
+                  " say 'I'll assume you're new'.")
+    elif decisive and level == "low":
+        stance = ("No commits from your git email are here, so answer as a newcomer would"
+                  " need: lead with what the README and code actually show.")
+    else:
+        stance = "Answer from what the README, docs, and code show."
+    return [
+        f"The user's first message is a question about {label}. Answer it — do NOT show a"
+        " setup menu and do NOT ask them to pick an option. In THIS response:",
+        "1. Read the README, any docs/, and the key source to understand the repo.",
+        f"2. {stance} Answer exactly what they asked, in your own words.",
+        "3. Then silently store what you learned: call update_context(subtype='architecture')"
+        " for the repo's purpose and any load-bearing facts — each a plain sentence, max 15"
+        " words, no em dashes. Do not ask permission to store; this IS the capture.",
+        "4. End with exactly one line: \"(Contexer: saved this repo's basics for future"
+        " sessions — say 'bootstrap' for guided setup.)\"",
+        "Never block the answer behind a confirmation or a menu.",
+    ]
+
+
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     level, decisive = _detect_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
@@ -1542,23 +1611,20 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         ]
         replies = "quick / full / some / scan / skip"
 
-    # A newcomer question ("what is this repo doing?", "summarize this repo") is itself
-    # low-insight evidence — don't answer it with a menu whose first option mirrors the
-    # question back. This check must come FIRST: placed after the menu it loses to
-    # "response must be ONLY the offer". Decisive-high keeps the menu: commits by this
-    # user outweigh one curious question.
-    newbie_exception = [] if (decisive and level == "high") else [
+    # A question about the repo asked as the first prompt ("what is this repo doing?",
+    # "summarize this repo") must be ANSWERED, not met with a menu that mirrors the question
+    # back. This check comes FIRST: placed after the menu it loses to "response must be ONLY
+    # the offer". It applies at EVERY insight level — a repo author asking what the repo does
+    # still wants an answer, just phrased as a maintainer, not quizzed as a newcomer; the
+    # commit signal only tunes the phrasing (see _newcomer_answer_block), never whether we
+    # answer.
+    newbie_exception = [
         "STEP 0 — read the user's message before anything else: if it is asking what this"
-        " repo or code is or does, or asking to summarize it"
-        " ('what is this repo doing?', 'explain this codebase', 'tell me about this repo',"
-        " 'summarize this codebase', 'give me an overview'), their message already signals"
-        " they're new here."
-        " In that case your ENTIRE response is ONLY this confirmation — NOT the menu below:",
-        f"  \"Contexer: you're asking about {label}, so I'll assume you're new here —"
-        " I'll scan the code and docs, store what I find for future sessions, then answer"
-        " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
-        "Then stop and wait. If they confirm (ok / yes / scan) → follow the scan path below,"
-        " then answer their original question. Any other reply → follow that option's path below.",
+        " repo or code is or does, or asking to summarize/explain/give an overview of it"
+        " ('what is repo doing?', 'explain this codebase', 'tell me about this repo',"
+        " 'summarize this codebase', 'give me an overview'), then do NOT output the menu"
+        " below. Instead:",
+        *_newcomer_answer_block(label, level, decisive),
         "Only when their message is NOT such a question, output the menu below instead:",
     ]
 
@@ -1624,8 +1690,53 @@ def _build_resume_mining_context(repo_path: str) -> list[str]:
     ]
 
 
+def _join_context_sections(*parts: str) -> str:
+    """Join non-empty context sections with a blank line between them."""
+    return "\n\n".join(p for p in parts if p)
+
+
 def session_start_payload(repo_path: str, source: str = "") -> dict:
-    """Provider-neutral session-start content. Returns {"status": str, "context": str}:
+    """Provider-neutral session-start content, with the shared TEAM-context section
+    appended. Returns {"status": str, "context": str}.
+
+    Option A seam: this ONE place renders team context at session start for EVERY adapter
+    (Claude/Codex/Cursor/Gemini) — the local payload plus the C5 team cache, joined. Reads
+    the cache only (NO network here); adapters refresh it via team_context.refresh() from
+    their SessionStart hook before this runs. `''` team section (local mode / empty cache)
+    leaves the local payload untouched.
+
+    Resume exception: when a session is resumed with local decisions already present, the
+    local path deliberately injects nothing (context='') because those decisions — and the
+    team section injected at the ORIGINAL session start — are already in the reloaded
+    conversation. Re-appending team there would duplicate it; freshly-approved team rows
+    still surface via the per-prompt delta poll. So team is suppressed on that path too.
+
+    Visibility (Phase 2): when a team section IS appended, the human-facing `status` string
+    gets a short ` | team: N synced` suffix so the developer can tell team sync is live
+    without reading the (model-facing) `context` blob. The `context` string itself is
+    unchanged beyond the existing team-section join. The suffix is cap-aware: `format_team_
+    section` renders at most `_team_display_cap()` rows, so when the cache holds more than
+    that the suffix adds `(cap shown)` rather than claiming a count the model never
+    actually received."""
+    payload = _local_session_start_payload(repo_path, source)
+    team = _team_section(repo_path, "", "")
+    if not team or (source == "resume" and not payload.get("context")):
+        return payload
+    count = _team_count(repo_path)
+    status = payload.get("status", "")
+    if count:
+        cap = _team_display_cap()
+        status = (f"{status} | team: {count} synced" if count <= cap
+                 else f"{status} | team: {count} synced ({cap} shown)")
+    return {
+        **payload,
+        "status": status,
+        "context": _join_context_sections(payload.get("context", ""), team),
+    }
+
+
+def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
+    """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
     is unchanged from the original get_session_start_context."""
@@ -1763,16 +1874,19 @@ def get_session_start_context(repo_path: str, source: str = "") -> dict:
     return claude.format_session_start(session_start_payload(repo_path, source))
 
 
+# The article is OPTIONAL — "what is repo doing?" (no this/the) is just as much a newcomer
+# question as "what is THIS repo doing?". The noun list is the gate that keeps code-element
+# questions ("what is this function doing") out.
 _NEWCOMER_QUESTION_RE = re.compile(
-    r"\b(what (is|does) (this|the) (repo|repository|codebase|project|code)\b"
-    r"|what'?s (this|the) (repo|repository|codebase|project)( about| for| doing)?\b"
-    r"|explain (this|the) (repo|repository|codebase|project|code)\b"
-    r"|tell me about (this|the) (repo|repository|codebase|project|code)\b"
-    r"|how does (this|the) (repo|repository|codebase|project|code) work\b"
-    r"|walk me through (this|the) (repo|repository|codebase|project|code)\b"
-    r"|overview of (this|the) (repo|repository|codebase|project|code)\b"
-    r"|summarize (this|the) (repo|repository|codebase|project|code)\b"
-    r"|summary of (this|the) (repo|repository|codebase|project|code)\b)",
+    r"\b(what (is|are|does) (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|what'?s (this |the |your )?(repo|repository|codebase|project)( about| for| doing)?\b"
+    r"|explain (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|tell me about (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|how does (this |the |your )?(repo|repository|codebase|project|code) work\b"
+    r"|walk me through (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|overview of (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|summari[sz]e (this |the |your )?(repo|repository|codebase|project|code)\b"
+    r"|summary of (this |the |your )?(repo|repository|codebase|project|code)\b)",
     re.IGNORECASE,
 )
 
@@ -1831,21 +1945,12 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     level, decisive = _detect_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
-    if _is_newcomer_question(prompt) and not (decisive and level == "high"):
+    if _is_newcomer_question(prompt):
+        # Answer-first at EVERY insight level (deterministic match): a repo question is
+        # answered, never met with a menu. The commit signal only tunes the phrasing.
         lines = [
             "Contexer OVERRIDE — ignore any earlier bootstrap menu instructions for this turn.",
-            "The user's first message asks about or wants to summarize this repo. That is"
-            " low-insight evidence (matched deterministically). Your ENTIRE response must be ONLY:",
-            f"  \"Contexer: you're asking about {label}, so I'll assume you're new here —"
-            " I'll scan the code and docs, store what I find for future sessions, then answer"
-            " your question. OK? (or: quick / full / skip if you actually know this repo)\"",
-            "Then stop and wait. If they confirm (ok / yes / scan) → call bootstrap_context"
-            " with insight='low', store each inferred fact directly via update_context"
-            " (subtype='architecture'), read the README and docs for the repo's purpose and"
-            " store it, ask the single returned goal question and store the answer, then"
-            " answer their original question.",
-            "If they reply quick / full / skip instead → follow the session-start bootstrap"
-            " instructions for that option.",
+            *_newcomer_answer_block(label, level, decisive),
         ]
     else:
         lines = _build_bootstrap_context(repo_path)
@@ -1962,16 +2067,44 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     return ""
 
 
+def _team_section(repo_path: str, query: str, entry_type: str) -> str:
+    """Formatted team-context block from the C5 cache. Function-level import avoids a
+    store <-> team_context cycle. '' when there is no team context (local mode / no cache)."""
+    from contexer import team_context
+    return team_context.format_team_section(repo_path, query, entry_type)
+
+
+def _team_count(repo_path: str) -> int:
+    """Count of cached team decisions for the session-start status suffix. Same
+    function-level import as `_team_section`, for the same reason (avoids a store <->
+    team_context cycle)."""
+    from contexer import team_context
+    return len(team_context._load_cache(repo_path).get("decisions", []))
+
+
+def _team_display_cap() -> int:
+    """The row cap `format_team_section` renders (`team_context._TEAM_DISPLAY`), so the
+    status suffix can stay honest about what actually landed in context. Same
+    function-level import as `_team_count`, for the same reason (avoids a store <->
+    team_context cycle)."""
+    from contexer import team_context
+    return team_context._TEAM_DISPLAY
+
+
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
                 _active_only: bool = False) -> str:
     """Returns stored context for the given repo.
 
     _active_only: internal flag — when True, exclude pending_approval and ignored entries
     (used by auto-injection paths so only trusted decisions reach the AI automatically).
+
+    Team context (pulled by C5 and cached separately) is appended as its own section so
+    the agent reads local (personal) and team decisions together, scope-tagged.
     """
     data = _load(repo_path)
     entries = data.get("entries", [])
-    if not entries:
+    team_section = _team_section(repo_path, query, entry_type)
+    if not entries and not team_section:
         return "No context stored for this repository."
 
     lines = [f"# Context for {repo_path}\n"]
@@ -2027,6 +2160,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             parts.append(f"type='{entry_type}'")
         lines.append(f"No matching decisions found ({', '.join(parts)}).")
 
+    if team_section:
+        lines.append(team_section)
     return "\n".join(lines)
 
 

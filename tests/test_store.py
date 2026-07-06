@@ -56,6 +56,39 @@ class TestRepoResolution:
         store.set_session_repo("")  # reset
 
 
+# ── _overlap_ratio ────────────────────────────────────────────────────────────
+# The novelty filter's duplicate metric, extracted for reuse by team-context dedup.
+# These pin it to the exact behavior of the old inline `len(a & b) / max(|a|, |b|)`.
+
+class TestOverlapRatio:
+    def test_identical_sets_is_one(self):
+        assert store._overlap_ratio({"a", "b", "c"}, {"a", "b", "c"}) == 1.0
+
+    def test_disjoint_sets_is_zero(self):
+        assert store._overlap_ratio({"a", "b"}, {"c", "d"}) == 0.0
+
+    def test_empty_side_is_zero(self):
+        assert store._overlap_ratio(set(), {"a"}) == 0.0
+        assert store._overlap_ratio({"a"}, set()) == 0.0
+
+    def test_ratio_divides_by_larger_set(self):
+        # |{a,b}| shared / max(2, 4) = 2 / 4
+        assert store._overlap_ratio({"a", "b"}, {"a", "b", "c", "d"}) == 0.5
+
+    def test_matches_old_inline_formula(self):
+        # The pre-extraction expression, computed independently for a spread of pairs.
+        pairs = [
+            ({"x", "y", "z"}, {"x", "y"}),
+            ({"one", "two", "three", "four"}, {"three", "four", "five"}),
+            ({"solo"}, {"solo"}),
+            ({"a", "b", "c", "d", "e"}, {"a"}),
+        ]
+        for a, b in pairs:
+            hi = a if len(a) > len(b) else b
+            expected = len(a & b) / len(hi)
+            assert store._overlap_ratio(a, b) == expected
+
+
 # ── _is_novel ─────────────────────────────────────────────────────────────────
 
 class TestIsNovel:

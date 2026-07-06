@@ -148,11 +148,12 @@ class TestInstall:
         pc = hooks.get("PreCompact", [])
         assert _in_groups(pc, "compaction starting")
 
-    def test_post_compact_hook_registered(self, tmp_home):
+    def test_post_compact_hook_not_registered(self, tmp_home):
+        # PostCompact can't inject context; SessionStart(source="compact") reloads
+        # silently. A PostCompact hook would only dump visible noise on /compact.
         cli.install()
         hooks = _settings(tmp_home).get("hooks", {})
-        poc = hooks.get("PostCompact", [])
-        assert _in_groups(poc, "get_post_compact_context")
+        assert not hooks.get("PostCompact")
 
     @pytest.mark.parametrize("perm", [
         "mcp__contexer__update_context",
@@ -407,11 +408,11 @@ class TestOfferVariants:
         assert "'some' is likely right" in text
 
     def test_newcomer_question_check_comes_before_menu(self, tmp_repo):
-        """'what is this repo doing?' is low-insight evidence — the check must precede the
-        'response must be ONLY the offer' directive, or it loses to it."""
+        """A repo question must be ANSWERED, not met with the menu — so STEP 0 (answer-first)
+        must precede the 'response must be ONLY the offer' directive, or it loses to it."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
         assert "STEP 0" in text
-        assert "assume you're new here" in text
+        assert "Answer it" in text and "do NOT show a setup menu" in text
         assert text.index("STEP 0") < text.index("ENTIRE response must be ONLY the offer block")
 
     def test_newcomer_question_check_in_low_variant(self, git_repo, tmp_path):
@@ -422,12 +423,16 @@ class TestOfferVariants:
         text = "\n".join(store._build_bootstrap_context(str(clone)))
         assert "STEP 0" in text
 
-    def test_no_newcomer_check_when_high_decisive(self, git_repo):
-        """Commits by this user outweigh one curious question — keep the menu."""
+    def test_newcomer_check_present_when_high_decisive_with_maintainer_framing(self, git_repo):
+        """A repo author asking what the repo does still gets answered — but as a fellow
+        maintainer, never quizzed as a newcomer. STEP 0 applies at every insight level."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
         text = "\n".join(store._build_bootstrap_context(git_repo))
-        assert "STEP 0" not in text
+        assert "STEP 0" in text
+        assert "fellow maintainer" in text
+        assert "I'll assume you're new" in text  # only as the NEGATIVE instruction (do NOT say)
+        assert "answer as a newcomer would need" not in text
 
     def test_offer_includes_repo_name(self, tmp_repo):
         """Offer text must show the repo folder name so misfiring is immediately visible."""
@@ -449,6 +454,8 @@ class TestOfferVariants:
 class TestNewcomerQuestionDetection:
     @pytest.mark.parametrize("prompt", [
         "what is this repo doing?",
+        "what is repo doing?",          # article-less — the reported miss
+        "what does project do",         # article-less
         "What does this project do?",
         "explain this codebase",
         "tell me about this repo",
@@ -483,26 +490,38 @@ class TestNewcomerQuestionDetection:
     def test_newcomer_prompt_overrides_menu(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "OVERRIDE" in ctx and "assume you're new here" in ctx
+        assert "OVERRIDE" in ctx and "Answer it" in ctx
+        assert "update_context(subtype='architecture')" in ctx  # stores findings
+        assert "How well do you know this repo?" not in ctx
+
+    def test_articleless_prompt_overrides_menu(self, tmp_repo):
+        """'what is repo doing?' (no this/the) was the reported miss — must answer, not menu."""
+        result = store.get_bootstrap_context_prompt(tmp_repo, "what is repo doing?")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "OVERRIDE" in ctx and "Answer it" in ctx
         assert "How well do you know this repo?" not in ctx
 
     def test_summarize_prompt_overrides_menu(self, tmp_repo):
-        """'summarize this repo' was the original misfiring report — must trigger OVERRIDE."""
+        """'summarize this repo' was an earlier misfiring report — must answer, not menu."""
         result = store.get_bootstrap_context_prompt(tmp_repo, "summarize this repo")
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "OVERRIDE" in ctx and "assume you're new here" in ctx
+        assert "OVERRIDE" in ctx and "Answer it" in ctx
         assert "How well do you know this repo?" not in ctx
 
     def test_task_prompt_gets_the_menu(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo, "fix the login bug")
         assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
 
-    def test_newcomer_prompt_in_own_repo_keeps_menu(self, git_repo):
-        """Commits by the user outweigh one curious question — even deterministically."""
+    def test_newcomer_prompt_in_own_repo_answers_as_maintainer(self, git_repo):
+        """A repo author asking what the repo does is answered (not menued) — as a
+        maintainer, not quizzed. The commit signal tunes phrasing, never blocks the answer."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
-        result = store.get_bootstrap_context_prompt(git_repo, "what is this repo doing?")
-        assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
+        ctx = store.get_bootstrap_context_prompt(git_repo, "what is repo doing?")[
+            "hookSpecificOutput"]["additionalContext"]
+        assert "OVERRIDE" in ctx and "Answer it" in ctx
+        assert "fellow maintainer" in ctx
+        assert "How well do you know this repo?" not in ctx
 
     def test_existing_context_stays_silent(self, tmp_repo):
         store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")

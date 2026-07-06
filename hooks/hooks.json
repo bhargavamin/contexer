@@ -45,17 +45,6 @@
         ]
       }
     ],
-    "PostCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; import json,sys; print(json.dumps(store.get_post_compact_context(sys.argv[1])))\" \"$REPO\"",
-            "statusMessage": "Reloading context after compact..."
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [

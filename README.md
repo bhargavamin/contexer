@@ -39,7 +39,21 @@
 
 Contexer captures architecture decisions, constraints, conventions, and engineering patterns while you work with AI coding assistants.
 
-Compatible with Claude Code, Cursor, Codex and Gemini CLI.
+**One decision layer, every agent.** The same engineering knowledge follows you across **Claude Code, Cursor, Codex, and Gemini CLI** — capture a decision in one, and every other agent already knows it. No single-vendor lock-in.
+
+<!-- TODO: add a 15s asciinema/GIF of the aha moment here (session 1 teaches → session 2 already knows). A demo at the very top converts better than any prose below. -->
+
+### See it in one exchange
+
+**Session 1** — you correct the agent once:
+
+> **You:** Mock at the service boundary, not the DB layer.
+> _Contexer stores it as a convention._
+
+**Session 2, next day, fresh context** — before you type a word:
+
+> _Contexer injects:_ `[convention] Mock at the service boundary, not the DB layer.`
+> The agent gets it right the first time. The re-explanation tax is gone.
 
 ---
 
@@ -94,7 +108,7 @@ Contexer is **not** a replacement for README.md, CLAUDE.md, AGENTS.md, Cursor Me
 | | AI Memory | Contexer |
 |---|---|---|
 | **What it stores** | Conversations | Engineering decisions |
-| **Scope** | Personal | Project decisions (team sync on the roadmap) |
+| **Scope** | Personal | Project decisions (org-wide rules in Contexer Teams) |
 | **Persistence** | Session history | Cross-session |
 | **History** | n/a | Versioned - full history preserved, latest approved replayed |
 | **Focus** | Chat focused | Human approved |
@@ -188,10 +202,10 @@ Contexer continuously captures engineering knowledge as you work:
 
 Constraints and conventions load every session because they apply to every task. Architecture and pattern decisions are fetched on demand when you ask about rationale, design, or past decisions.
 
-Capture is two-track:
+Capture is two-track, and you stay in control of both:
 
-- Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook.
-- Everything else relies on the agent noticing a decision and calling the store tool. That is best-effort, and it does miss things. When it does, say *"store that decision"* and it's captured immediately.
+- Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook — no model guesswork, no decision stored behind your back.
+- Everything else relies on the agent noticing a decision and calling the store tool. That is best-effort by design; when the agent misses one, say *"store that decision"* and it's captured immediately.
 
 ### Bootstrap: establishing trusted knowledge
 
@@ -363,17 +377,40 @@ This is intentional. Every piece of complexity added to a decision store is a pi
 
 ---
 
-## Future vision
+## Contexer Teams (early access)
 
-Contexer aims to become the shared engineering decision layer for AI-native software teams.
+The open-source Contexer is per-developer. **Contexer Teams** makes your team's engineering and security standards **present in every AI agent** — the same engine, one shared, governed source of truth across the org.
 
-Every approved architecture decision becomes reusable organizational knowledge that guides future AI coding sessions, regardless of which coding assistant is used.
+- **Publish once, present everywhere.** Your security or platform team sets a rule — *"no plaintext secrets in code"*, *"all PII encrypted at rest"* — and every developer's AI agent starts with it, in every repo and every tool, *before the code is written*.
+- **Standards travel to the point of work.** A team's conventions reach any developer the moment they open that repo in their agent — not buried in a wiki no one reads.
+- **Governed and auditable.** Rules are centrally owned, lead-approved, and versioned — who decided what, when, and why. The trail compliance needs and onboarding lives on.
+
+A few people publish the rules; everyone else's agent just consumes them — no team-wide capture discipline required.
+
+> [!NOTE]
+> **Contexer steers, it doesn't enforce — and that distinction matters.**
+> It reliably *tells* every agent your standards at the moment it writes code — the leftmost shift, fewer violations at the source. It does **not** scan code, block commits, or guarantee compliance; your CI, secret scanners, and PR gates still verify and enforce. Contexer makes agents *aware*; it complements your gates, it doesn't replace them.
+
+→ **[Request early access at contexer.ai](https://contexer.ai)** — design-partner teams.
+
+### Connecting to a team
+
+Once you have access, joining a team is two commands — nothing to hand-edit:
+
+```bash
+contexer install     # local setup (same as above)
+contexer login       # opens your browser to sign in; enables team sync
+```
+
+`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you. After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up. `contexer logout` disconnects.
+
+Pointing at a self-hosted or local Teams server (for development): set `CONTEXER_ENV=local` before `contexer login`, or pass `contexer login --endpoint <url>`.
 
 ---
 
 ## Limitations
 
-- **Personal, not team.** The store is per-user, per-machine. There's no team sync yet. Shared rules don't propagate between developers. (It's on the roadmap.)
+- **Personal, not team.** The open-source store is per-user, per-machine — shared rules don't propagate between developers. Team sync, org-wide rules, and governance live in **Contexer Teams** (early access — see above).
 - **Cursor parity is partial.** Cursor's `beforeSubmitPrompt` hook can't inject context (only allow/block) and it has no usable compaction hook, so per-prompt rationale injection and compaction save/restore are unavailable there. Cursor steering rides on the session-start nudge plus an always-apply rule file.
 - **Gemini compression is deferred.** Gemini CLI has `PreCompress` but no `PostCompress`; Contexer re-injects stored context at the next prompt rather than immediately after compression.
 - **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch.

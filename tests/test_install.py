@@ -5,7 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from contexer import config
+from contexer.adapters import claude
 from contexer.cli import install, uninstall
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    """Never read the developer's real ~/.contexer/config.toml during install tests."""
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "isolated-config.toml")
+    return config.CONFIG_PATH
 
 
 @pytest.fixture
@@ -63,17 +72,13 @@ class TestInstall:
                 for h in grp["hooks"] if "command" in h]
         assert any("sync_memory" in c for c in cmds)
 
-    def test_post_compact_hook_registered(self, installed_home):
+    def test_post_compact_hook_not_registered(self, installed_home):
+        # PostCompact cannot inject context (no additionalContext; systemMessage is
+        # user-facing only), so a PostCompact hook was pure visible noise on /compact.
+        # SessionStart(source="compact") owns the silent reload — no PostCompact hook.
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
-        cmds = [h["command"] for grp in settings["hooks"]["PostCompact"]
-                for h in grp["hooks"] if "command" in h]
-        assert any("get_post_compact_context" in c for c in cmds)
-
-    def test_post_compact_cmd_uses_current_python(self, installed_home):
-        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
-        cmds = [h["command"] for grp in settings["hooks"]["PostCompact"]
-                for h in grp["hooks"] if "command" in h]
-        assert any(sys.executable in c for c in cmds)
+        assert not settings["hooks"].get("PostCompact"), \
+            "PostCompact hook must not be wired (SessionStart source=compact reloads silently)"
 
     def test_user_prompt_submit_anchor_registered(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
@@ -320,14 +325,18 @@ class TestStaleHookHealing:
         return settings_path
 
     def test_legacy_postcompact_removed_on_install(self, clean_home):
+        # Install now strips every Contexer PostCompact hook (the event can't inject
+        # context; SessionStart source=compact reloads silently) — the dead from-source
+        # hook and the whole PostCompact key are gone, not replaced.
         path = self._seed_from_source(clean_home)
         install()
-        poc = json.loads(path.read_text())["hooks"]["PostCompact"]
-        cmds = [h.get("command", "") for grp in poc for h in grp["hooks"]]
+        poc = json.loads(path.read_text()).get("hooks", {}).get("PostCompact", [])
+        cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
         assert not any("uv run --directory" in c for c in cmds), \
             "dead from-source PostCompact hook must be removed"
-        assert sum("get_post_compact_context" in c for c in cmds) == 1
-        assert len(poc) == 1
+        assert not any("get_post_compact_context" in c for c in cmds), \
+            "Contexer PostCompact hook must not be re-added"
+        assert poc == []
 
     def test_legacy_postcompact_removed_on_uninstall(self, clean_home):
         path = self._seed_from_source(clean_home)
@@ -336,6 +345,22 @@ class TestStaleHookHealing:
         poc = json.loads(path.read_text()).get("hooks", {}).get("PostCompact", [])
         cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
         assert not any("uv run --directory" in c for c in cmds)
+
+    def test_foreign_postcompact_preserved_on_install(self, clean_home):
+        # Stripping our PostCompact hook must never remove a non-Contexer one.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        foreign = "echo 'someone elses postcompact hook'"
+        settings_path.write_text(json.dumps({"hooks": {
+            "PostCompact": [
+                {"hooks": [{"type": "command", "command": self._LEGACY_POC}]},
+                {"hooks": [{"type": "command", "command": foreign}]},
+            ],
+        }}))
+        install()
+        poc = json.loads(settings_path.read_text())["hooks"]["PostCompact"]
+        cmds = [h.get("command", "") for grp in poc for h in grp.get("hooks", [])]
+        assert cmds == [foreign], "foreign PostCompact hook must survive, ours must go"
 
 
 class TestRepoPointerNotPoisoned:
@@ -357,3 +382,120 @@ class TestRepoPointerNotPoisoned:
         git_cmds = [c for c in cmds if "git rev-parse" in c]
         assert git_cmds
         assert all("|| true" in c for c in git_cmds)
+
+
+class TestTeamsRegistration:
+    def test_not_registered_by_default(self, clean_home, monkeypatch):
+        # Path B: the native contexer-teams MCP entry is opt-in only (CONTEXER_TEAMS_MCP).
+        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert "contexer-teams" not in servers
+
+    def test_opt_in_registers_prod(self, clean_home, monkeypatch):
+        monkeypatch.delenv("CONTEXER_ENV", raising=False)
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"] == {"type": "http", "url": "https://mcp.contexer.ai/mcp"}
+
+    def test_opt_in_local_env_registers_localhost(self, clean_home, monkeypatch):
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        monkeypatch.setenv("CONTEXER_ENV", "local")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"]["url"] == "http://localhost:8080/mcp"
+
+    def test_opt_in_respects_configured_endpoint(self, clean_home, monkeypatch, tmp_path):
+        # A dev override in config.toml (e.g. from `contexer login --endpoint`) governs
+        # the native entry too — the built-in default is only the unconfigured fallback.
+        cfg = tmp_path / "isolated-config.toml"
+        cfg.write_text('mode = "team"\nendpoint = "https://mcp.dev.contexer.ai/mcp"\n')
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"]["url"] == "https://mcp.dev.contexer.ai/mcp"
+
+    def test_opt_in_malformed_config_falls_back_to_default(self, clean_home, monkeypatch, tmp_path):
+        # A corrupt config.toml must never break install — fall back to the default.
+        cfg = tmp_path / "isolated-config.toml"
+        cfg.write_text("mode = = broken")
+        monkeypatch.delenv("CONTEXER_ENV", raising=False)
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer-teams"]["url"] == "https://mcp.contexer.ai/mcp"
+
+    def test_local_only_install_never_reads_config(self, clean_home, monkeypatch, tmp_path):
+        # OSS/local-only path: flag unset — even a corrupt config.toml is irrelevant,
+        # no teams entry is written, install succeeds untouched.
+        cfg = tmp_path / "isolated-config.toml"
+        cfg.write_text("mode = = broken")
+        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert "contexer-teams" not in servers
+        assert servers["contexer"]["type"] == "stdio"
+
+    def test_default_install_strips_stale_entry(self, clean_home, monkeypatch):
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()  # opt-in: entry present
+        assert "contexer-teams" in json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
+        install()  # plain (default) reinstall drops it
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert "contexer-teams" not in servers
+
+    def test_local_stdio_entry_untouched(self, clean_home):
+        install()
+        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        assert servers["contexer"]["type"] == "stdio"
+        assert "command" in servers["contexer"]
+
+    def test_preserves_unrelated_servers(self, clean_home):
+        cfg = clean_home / ".claude.json"
+        cfg.write_text(json.dumps({"mcpServers": {"other": {"type": "stdio", "command": "x"}}}))
+        install()
+        servers = json.loads(cfg.read_text())["mcpServers"]
+        assert servers["other"] == {"type": "stdio", "command": "x"}
+
+    def test_no_token_or_secret_in_entry(self, clean_home, monkeypatch):
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        entry = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]["contexer-teams"]
+        assert set(entry.keys()) == {"type", "url"}
+
+
+class TestTeamsUninstall:
+    def test_uninstall_removes_contexer_teams(self, clean_home, monkeypatch):
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()  # register the opt-in entry
+        uninstall()
+        servers = json.loads((clean_home / ".claude.json").read_text()).get("mcpServers", {})
+        assert "contexer-teams" not in servers
+
+    def test_uninstall_preserves_unrelated_servers(self, clean_home):
+        install()
+        cfg = clean_home / ".claude.json"
+        data = json.loads(cfg.read_text())
+        data["mcpServers"]["other"] = {"type": "stdio", "command": "x"}
+        cfg.write_text(json.dumps(data))
+        uninstall()
+        servers = json.loads(cfg.read_text()).get("mcpServers", {})
+        assert servers.get("other") == {"type": "stdio", "command": "x"}
+        assert "contexer-teams" not in servers
+        assert "contexer" not in servers
+
+
+class TestTeamsStatus:
+    def test_status_shows_teams_registered(self, clean_home, monkeypatch):
+        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
+        install()
+        joined = "\n".join(claude.status_lines(clean_home))
+        assert "teams (remote)" in joined
+        assert "mcp.contexer.ai" in joined
+
+    def test_status_shows_teams_not_registered_on_clean(self, clean_home):
+        joined = "\n".join(claude.status_lines(clean_home))
+        assert "teams (remote)" in joined
+        assert "NOT registered" in joined

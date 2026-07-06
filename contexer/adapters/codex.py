@@ -104,9 +104,12 @@ def install(home: Path) -> list[str]:
         )
 
     ss_code = (
-        "from contexer import store; import json,sys; "
+        "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
         "repo=sys.argv[1]; store.STORE_DIR.mkdir(exist_ok=True); "
         "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+        # Refresh team context (Path B seam) before building context — fail-soft, so a sync
+        # hiccup never breaks session start. session_start_payload then renders it (T1).
+        "_c.pull_team(repo); "
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
     )
     boot_code = (
@@ -146,6 +149,14 @@ def install(home: Path) -> list[str]:
     cap_commit = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                   f'"{python}" -c "from contexer.adapters import claude; import sys; '
                   'print(claude.commit_promote(sys.argv[1], sys.stdin.read()))" "$REPO"')
+    # Team delta poll (T2): Codex shares Claude's UserPromptSubmit output schema, so
+    # claude.team_poll is reused — non-blocking, fail-soft, injects newly-approved team
+    # decisions on the next prompt. The third arg tags this consumer "codex" so a Codex and a
+    # Claude session on the same repo each get every synced batch once (independent high-water
+    # markers) instead of racing for a single per-repo delivery.
+    cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+                f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
 
     # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
@@ -167,6 +178,11 @@ def install(home: Path) -> list[str]:
     hooks = cfg.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
+    # Migrate: an older SessionStart group predates the team-context pull (T2). Replace it so
+    # team context refreshes at session start. Keyed on the pull_team marker.
+    if base._in_groups(ss, "get_session_start_context") and not base._in_groups(ss, "pull_team"):
+        ss = base._filter_groups(ss, ["get_session_start_context"])
+        hooks["SessionStart"] = ss
     if not base._in_groups(ss, "get_session_start_context"):
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...", "command": _py(ss_code)}]})
@@ -227,6 +243,20 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, "claude.commit_promote"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for commit-validated decisions...", "command": cap_commit}]})
+    # Migrate: the pre-consumer codex team-poll hook called claude.team_poll WITHOUT the
+    # "codex" tag, so a Claude and a Codex session on the same repo raced to claim a single
+    # per-repo delivery and only one got the injection. Replace it with the tagged call.
+    # Keyed on the QUOTED 'codex' consumer marker (absent from the old string) so it runs
+    # once. Quoting matters: a bare "codex" substring check would false-positive on any
+    # unrelated hook whose command merely mentions "codex" (e.g. a path containing
+    # "codex-tools"), silently suppressing the migration. Only the tagged call this codebase
+    # generates contains 'codex' as a quoted argument.
+    if base._in_groups(ups, "claude.team_poll") and not base._in_groups(ups, "'codex'"):
+        ups = base._filter_groups(ups, ["claude.team_poll"])
+        hooks["UserPromptSubmit"] = ups
+    if not base._in_groups(ups, "claude.team_poll"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
 
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.codex/hooks.json")
@@ -242,7 +272,7 @@ _EVENT_MARKERS = {
     "PostCompact":      ["get_post_compact_context"],
     "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
                          "claude.capture_task", "claude.capture_constraint", "claude.rationale",
-                         "claude.commit_promote"],
+                         "claude.commit_promote", "claude.team_poll"],
 }
 
 

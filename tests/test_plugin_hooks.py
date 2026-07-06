@@ -53,15 +53,15 @@ def test_session_start_syncs_memory_and_reads_source(plugin_hooks):
     assert any("source_from_hook_stdin" in c for c in ss)
 
 
-def test_post_compact_uses_bootstrap_aware_path(plugin_hooks):
-    poc = _all_commands({"PostCompact": plugin_hooks["PostCompact"]})
-    assert any("get_post_compact_context" in c for c in poc)
-    # The old plugin used bare get_context (no bootstrap offer) — must be gone.
-    assert not any("store.get_context(" in c for c in poc)
+def test_no_post_compact_hook(plugin_hooks):
+    # PostCompact can't inject context (no additionalContext; systemMessage is
+    # user-facing only), so wiring it only dumped visible noise on /compact.
+    # SessionStart(source="compact") reloads silently — the plugin wires no PostCompact.
+    assert "PostCompact" not in plugin_hooks
 
 
 @pytest.mark.parametrize("event", ["SessionStart", "SessionEnd", "PreCompact",
-                                   "PostCompact", "PostToolUse", "UserPromptSubmit"])
+                                   "PostToolUse", "UserPromptSubmit"])
 def test_event_present(plugin_hooks, event):
     assert event in plugin_hooks, f"plugin missing {event} hook the adapter installs"
 

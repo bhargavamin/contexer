@@ -1,11 +1,12 @@
 """Claude Code integration adapter."""
 import json
+import os
 import re
 import shutil
 import sys
 from pathlib import Path
 
-from contexer import memory_sync, store
+from contexer import config, memory_sync, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -14,10 +15,24 @@ from contexer.adapters.base import (
     _load,
     _load_safe,
     _save,
-    _strip_stale,
 )
 
 NAME = "claude"
+
+
+def _teams_url() -> str:
+    """Endpoint for the opt-in native contexer-teams MCP entry (CONTEXER_TEAMS_MCP).
+
+    Prefers the user's configured team endpoint (config.toml) so a dev override like
+    `contexer login --endpoint <dev-url>` governs this entry too; falls back to the
+    built-in default. Fail-soft: a malformed config.toml must never break install —
+    and local-only users (no config, flag unset) never reach this path at all."""
+    try:
+        configured = config.load_profile().endpoint
+    except config.ConfigError:
+        configured = None
+    return configured or config.default_endpoint()
+
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall
@@ -106,6 +121,31 @@ def commit_promote(repo_path: str, raw: str) -> str:
     return "{}"
 
 
+def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
+    """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
+
+    Fail-soft. Uses the non-blocking poll: the network sync runs in a detached background
+    process and its results inject on the NEXT prompt, so this hook never waits on the
+    cloud — a slow or timing-out endpoint cannot stall prompt submission. `consumer`
+    identifies the polling host (defaults to "claude" so the original installed Claude hook
+    string keeps working); each consumer gets every newly-synced batch exactly once via its
+    own high-water marker, so a Codex session on the same repo never steals Claude's injection
+    (or vice versa)."""
+    try:
+        from contexer import team_context
+        new = team_context.poll_for_injection(repo_path, consumer)
+        if not new:
+            return "{}"
+        lines = ["Team decisions just approved (now in effect):"]
+        for d in new:
+            type_tag = f" ({d.get('type')})" if d.get("type") else ""
+            lines.append(f"- {d.get('content', '')}{type_tag}")
+        return json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(lines)}})
+    except Exception:
+        return "{}"
+
+
 def _memory_dir(repo_path: str) -> Path | None:
     """Locate Claude Code's memory-tool dir for a repo, or None if absent.
 
@@ -145,6 +185,22 @@ def sync_memory(repo_path: str) -> int:
         return 0
 
 
+def pull_team(repo_path: str) -> tuple[int, int]:
+    """SessionStart: refresh the local team-context cache before building context.
+
+    Delegates to the neutral, fail-soft team_context.refresh() seam (Option A) — a sync
+    hiccup (offline, bad token, anything) degrades to a no-op. Returns (upserted, removed).
+    Kept as a named entrypoint because installed Claude hooks call `_c.pull_team`.
+
+    The try/except also guards the lazy import itself: a broken/partial install (import
+    error in team_context or its deps) must not crash the SessionStart hook."""
+    try:
+        from contexer import team_context
+        return team_context.refresh(repo_path)
+    except Exception:
+        return (0, 0)
+
+
 def install(home: Path) -> list[str]:
     """Wire the Claude MCP server + hooks + permissions. Returns log lines."""
     log: list[str] = []
@@ -167,16 +223,15 @@ def install(home: Path) -> list[str]:
         # Import any memory-tool facts before building context (crash-recovery net:
         # catches facts whose session ended without a clean SessionEnd flush).
         "_c.sync_memory(repo); "
+        # Refresh team context (Path B, C5) before building the session context —
+        # fail-soft so a sync hiccup never breaks the session.
+        "_c.pull_team(repo); "
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
         "result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); "
         "print(json.dumps(result))"
-    )
-    post_code = (
-        "from contexer import store; import json,sys; "
-        "print(json.dumps(store.get_post_compact_context(sys.argv[1])))"
     )
 
     # Memory-tool sync (SessionEnd + PreCompact). Runs claude.sync_memory then emits
@@ -246,6 +301,9 @@ def install(home: Path) -> list[str]:
     cap_commit = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                   f'"{python}" -c "from contexer.adapters import claude; import sys; '
                   f'print(claude.commit_promote(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
+    cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     contexer_bin = shutil.which("contexer") or "contexer"
 
@@ -256,8 +314,20 @@ def install(home: Path) -> list[str]:
         "type": "stdio",
         "command": contexer_bin,
     }
+    # Team sync is the Python client path (`contexer login` + pull/share/poll). The native
+    # remote-MCP entry (Claude Code's OWN OAuth client) is redundant under that design and
+    # would show a failed/unauthenticated server for every user (incl. local-only), so it is
+    # registered ONLY when explicitly opted in via CONTEXER_TEAMS_MCP. `uninstall` strips any
+    # existing entry, so a plain `contexer reinstall` removes a stale one.
+    register_teams = bool(os.environ.get("CONTEXER_TEAMS_MCP"))
+    if register_teams:
+        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": _teams_url()}
+    else:
+        claude["mcpServers"].pop("contexer-teams", None)  # drop a stale opt-in entry on plain install
     _save(claude_json, claude)
     log.append("  ✓ MCP server registered in ~/.claude.json")
+    if register_teams:
+        log.append(f"  ✓ contexer-teams (remote MCP) registered → {_teams_url()}")
 
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"
@@ -320,22 +390,24 @@ def install(home: Path) -> list[str]:
             "statusMessage": "Saving decisions before compact...",
             "command": precompact_cmd}]})
 
-    poc = hooks.setdefault("PostCompact", [])
-    # Heal stale PostCompact hooks. A from-source install wrote a `uv run --directory
-    # <clone>` count-pointer whose path dies the instant the clone moves; older installs
-    # used get_context / a "reloaded after compaction" echo. The previous migration only
-    # matched one of those phrasings, so the dead from-source hook survived reinstall and
-    # ran alongside the new one. Strip any PostCompact hook that isn't the current command
-    # (matched by identity marker or the sentinel), then add the current one if absent.
-    desired_poc = _py(post_code)
-    poc = _strip_stale(poc, [
+    # PostCompact is intentionally NOT wired. A PostCompact hook cannot inject into
+    # Claude's context — the event supports no `additionalContext`, and its `systemMessage`
+    # is user-facing only (the model never sees it). The old Contexer PostCompact hook
+    # therefore did no real work: it dumped the full stored context into a visible
+    # systemMessage on every /compact — pure transcript noise — while reloading nothing.
+    # SessionStart fires again with source="compact" after compaction and silently
+    # re-injects via additionalContext (session_start_payload's normal path), so that
+    # event already owns post-compaction reload. Strip any previously-installed Contexer
+    # PostCompact hook so an upgrade goes quiet; leave foreign PostCompact hooks intact.
+    poc = hooks.get("PostCompact", [])
+    new_poc = _filter_groups(poc, [
         "get_post_compact_context", "reloaded after compaction",
-        "decision(s) available", _HOOK_SENTINEL], desired_poc)
-    hooks["PostCompact"] = poc
-    if not _in_groups(poc, "get_post_compact_context"):
-        poc.append({"hooks": [{"type": "command",
-            "statusMessage": "Reloading context after compact...",
-            "command": desired_poc}]})
+        "decision(s) available", "uv run --directory", _HOOK_SENTINEL])
+    if new_poc != poc:
+        if new_poc:
+            hooks["PostCompact"] = new_poc
+        else:
+            hooks.pop("PostCompact", None)
 
     ups = hooks.setdefault("UserPromptSubmit", [])
 
@@ -387,6 +459,9 @@ def install(home: Path) -> list[str]:
     if not _in_groups(ups, "claude.commit_promote"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for commit-validated decisions...", "command": cap_commit}]})
+    if not _in_groups(ups, "claude.team_poll"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
 
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for p in [
@@ -425,7 +500,8 @@ def uninstall(home: Path) -> list[str]:
     if claude_json.exists():
         claude = _load(claude_json)
         removed = claude.get("mcpServers", {}).pop("contexer", None)
-        if removed:
+        removed_teams = claude.get("mcpServers", {}).pop("contexer-teams", None)
+        if removed or removed_teams:
             _save(claude_json, claude)
             log.append("  ✓ MCP server removed from ~/.claude.json")
         else:
@@ -513,9 +589,12 @@ def status_lines(home: Path) -> list[str]:
     """Diagnostic lines for `contexer status`: MCP/hooks state for the Claude target."""
     mcp, hooks_ok = _mcp_and_hooks_ok(home)
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
+    teams = _load_safe(home / ".claude.json").get("mcpServers", {}).get("contexer-teams")
+    teams_url = teams.get("url") if isinstance(teams, dict) else None
     return [
         "  [claude]",
         f"    MCP server: {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
+        f"    teams (remote): {'registered → ' + teams_url if teams_url else 'NOT registered'}",
         f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
     ]
 
