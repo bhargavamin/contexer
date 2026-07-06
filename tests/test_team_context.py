@@ -399,6 +399,51 @@ def test_render_fail_soft_on_write_error(tmp_repo, monkeypatch):
     assert "Use Postgres" in out
 
 
+def test_record_render_preserves_concurrent_refresher_write(tmp_repo, monkeypatch):
+    # format_team_section loads the cache ONCE, up front, and renders from that snapshot.
+    # A background refresher (poll_nonblocking, a separate process) can complete and write
+    # fresh decisions/cursor/last_ok_at/consecutive_failures in the gap before _record_render
+    # does its own save. _record_render must re-read the cache fresh right before saving and
+    # touch ONLY last_render — never spread the stale snapshot format_team_section rendered
+    # from back over that fresher on-disk write.
+    stale = {"repo_key": "k", "cursor": "c0", "decisions": [
+        {"id": "t1", "type": "architecture", "content": "stale rule", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]}
+    fresh_on_disk = {"repo_key": "k", "cursor": "c1", "decisions": [
+        {"id": "t1", "type": "architecture", "content": "stale rule", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"},
+        {"id": "t2", "type": "architecture", "content": "fresh rule from refresher",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}],
+        "last_ok_at": 12345.0, "consecutive_failures": 0}
+    # Seed the cache file with what a concurrent refresher would already have written by
+    # the time _record_render re-reads it.
+    team_context._save_cache(tmp_repo, fresh_on_disk)
+
+    real_load_cache = team_context._load_cache
+    calls = {"n": 0}
+
+    def fake_load_cache(repo_path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return stale  # format_team_section's own initial load (pre-refresher snapshot)
+        return real_load_cache(repo_path)  # _record_render's re-load: sees the real file
+
+    monkeypatch.setattr(team_context, "_load_cache", fake_load_cache)
+    out = team_context.format_team_section(tmp_repo)
+    assert "stale rule" in out
+    assert "fresh rule from refresher" not in out  # rendered from the stale snapshot
+
+    saved = json.loads(team_context._cache_path(tmp_repo).read_text())
+    # The refresher's fresh write survives - not clobbered by the stale snapshot.
+    assert saved["cursor"] == "c1"
+    assert [d["id"] for d in saved["decisions"]] == ["t1", "t2"]
+    assert saved["last_ok_at"] == 12345.0
+    assert saved["consecutive_failures"] == 0
+    # And the new telemetry landed on top of that fresh copy.
+    assert saved["last_render"]["rows"] == 1  # rendered from the stale, single-row snapshot
+    assert isinstance(saved["last_render"]["at"], float)
+
+
 # ── store.get_context integration ────────────────────────────────────────────────
 
 def test_get_context_appends_team_section(tmp_repo):

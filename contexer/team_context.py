@@ -356,12 +356,20 @@ def _record_render(repo_path: str, cache: dict, *, rows: int, chars: int) -> Non
     """Best-effort render-size telemetry (measure-don't-guess input for future display-cap
     tuning) — never raises, since this runs inline inside every hook that injects context.
     Only touches a cache file that already exists: a pure-local repo (no team cache) must
-    never grow one just because get_context ran through format_team_section."""
+    never grow one just because get_context ran through format_team_section.
+
+    `cache` (the snapshot `format_team_section` loaded before rendering) is intentionally
+    NOT spread back to disk here: a background refresher (poll_nonblocking) runs in a
+    separate process and can complete between that initial load and this write, landing
+    fresh `decisions`/`cursor`/`last_ok_at`/`consecutive_failures`. Writing the caller's
+    now-stale snapshot would silently clobber that fresh write, so this re-loads the cache
+    fresh immediately before saving and sets ONLY `last_render` on that fresh copy."""
     if not _cache_path(repo_path).exists():
         return
     try:
-        updated = {**cache, "last_render": {"at": time.time(), "rows": rows, "chars": chars}}
-        _save_cache(repo_path, updated)
+        fresh = _load_cache(repo_path)
+        fresh["last_render"] = {"at": time.time(), "rows": rows, "chars": chars}
+        _save_cache(repo_path, fresh)
     except Exception:
         pass  # telemetry must never break the render it's measuring
 
