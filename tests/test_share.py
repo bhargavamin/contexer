@@ -332,6 +332,21 @@ def test_share_drains_queued_items_before_new_push(tmp_repo, monkeypatch):
     assert share._load_outbox() == []  # the queued item drained, only the new push happened
 
 
+def test_share_survives_drain_failure(tmp_repo, monkeypatch):
+    """A broken drain (e.g. a disk error saving the outbox) must not block the share
+    itself - share() never raises for infrastructure problems."""
+    _, did = store.update_decision(tmp_repo, "decision to share anyway", "s1", subtype="constraint")
+    fake = _fake(monkeypatch)
+
+    def boom(profile=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(share, "drain_outbox", boom)
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "Synced decision" in msg
+    assert [c["decision_id"] for c in fake.calls] == [did]  # the push still happened
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
 def test_cli_share_prints_result(monkeypatch, capsys):

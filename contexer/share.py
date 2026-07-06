@@ -127,7 +127,10 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
     decision untouched. `decision_id` selects the decision (full id / 8-char prefix); omit
     to share the most recent. `profile` defaults to load_profile()."""
     profile = profile or load_profile()
-    drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+    try:
+        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+    except Exception:
+        pass  # a broken drain (e.g. disk error saving the outbox) must not block this share
     dec = store.get_shareable(repo_path, decision_id)
     if dec is None:
         return "Nothing to share: no matching local decision."
