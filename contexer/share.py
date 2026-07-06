@@ -39,4 +39,8 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
     if server_id is None:
         return ("Share failed: cloud unreachable or auth rejected (see the warning above). "
                 "Your local decision is unchanged.")
-    return f"Synced decision to your personal team context (server id={server_id})."
+    # Honest about scope: v1 push_decision writes to the CALLER's personal cloud context
+    # only (see module docstring) - teammates get nothing until team promotion (Track A)
+    # ships, so the success message must not imply the decision is visible to the team yet.
+    return (f"Synced decision to your personal cloud context (server id={server_id}) - "
+            "teammates won't see this until team promotion ships.")
