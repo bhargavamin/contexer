@@ -614,6 +614,7 @@ def test_session_start_payload_resume_fresh_clone_shows_team(tmp_repo):
 def test_refresh_delegates_to_pull(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 1))
+    monkeypatch.setattr(team_context.share, "drain_outbox", lambda: 0)
     assert team_context.refresh("/x") == (2, 1)
 
 
@@ -672,6 +673,28 @@ def test_refresh_never_raises(monkeypatch):
 
     monkeypatch.setattr(team_context, "pull", boom)
     assert team_context.refresh("/x") == (0, 0)
+
+
+def test_refresh_drains_outbox_after_pull(monkeypatch):
+    """refresh() is the SessionStart seam every adapter funnels through, so it must
+    trigger the outbox drain (fail-soft) after a successful pull."""
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (1, 0))
+    calls = []
+    monkeypatch.setattr(team_context.share, "drain_outbox", lambda: calls.append(1))
+    assert team_context.refresh("/x") == (1, 0)
+    assert calls == [1]
+
+
+def test_refresh_drain_failure_is_fail_soft(monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (3, 2))
+
+    def boom():
+        raise RuntimeError("drain boom")
+
+    monkeypatch.setattr(team_context.share, "drain_outbox", boom)
+    assert team_context.refresh("/x") == (3, 2)  # pull's result still returned
 
 
 def test_poll_for_injection_delegates(monkeypatch):

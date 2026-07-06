@@ -135,6 +135,237 @@ def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
     assert "contexer login --team" in capsys.readouterr().err
 
 
+# ── outbox: enqueue on share ──────────────────────────────────────────────────────
+
+def test_share_degraded_enqueues_payload(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "queued" in msg.lower()
+    entries = share._load_outbox()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["decision_id"] == did
+    assert entry["type"] == "architecture"
+    assert "sync" in entry["content"].lower()
+    assert entry["repo"] == "github.com/a/b"
+    assert entry["source"] == "ai"
+    assert entry["attempts"] == 0
+    assert isinstance(entry["queued_at"], float)
+
+
+def test_share_degraded_auth_also_enqueues(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "decision with bad token sync", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteAuthError("401"))
+    share.share(tmp_repo, profile=TEAM)
+    assert len(share._load_outbox()) == 1  # auth failures enqueue too -- retry after re-login
+
+
+def test_share_nothing_to_share_does_not_enqueue(tmp_repo):
+    share.share(tmp_repo, profile=TEAM)
+    assert share._load_outbox() == []
+
+
+def test_share_local_mode_does_not_enqueue(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "a decision to maybe share", "s1", subtype="architecture")
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
+    share.share(tmp_repo, profile=config.Profile())
+    assert share._load_outbox() == []
+
+
+def test_share_happy_path_does_not_enqueue(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    _fake(monkeypatch, ret="srv-9")
+    share.share(tmp_repo, profile=TEAM)
+    assert share._load_outbox() == []
+
+
+# ── outbox: _enqueue dedupe + cap ─────────────────────────────────────────────────
+
+def test_enqueue_dedupe_by_decision_id_replaces(tmp_repo):
+    share._enqueue({"decision_id": "d1", "content": "stale content", "attempts": 0})
+    share._enqueue({"decision_id": "d1", "content": "fresh content", "attempts": 0})
+    entries = share._load_outbox()
+    assert len(entries) == 1
+    assert entries[0]["content"] == "fresh content"
+
+
+def test_enqueue_caps_at_50_drops_oldest(tmp_repo):
+    for i in range(55):
+        share._enqueue({"decision_id": f"d{i}", "content": f"c{i}", "attempts": 0})
+    entries = share._load_outbox()
+    assert len(entries) == 50
+    ids = [e["decision_id"] for e in entries]
+    assert "d0" not in ids  # oldest 5 dropped
+    assert "d4" not in ids
+    assert "d5" in ids  # oldest survivor
+    assert "d54" in ids  # newest kept
+
+
+# ── outbox: drain_outbox ──────────────────────────────────────────────────────────
+
+def test_drain_outbox_noop_when_empty(tmp_repo, monkeypatch):
+    fake = _fake(monkeypatch, ret="srv-1")
+    assert share.drain_outbox(TEAM) == 0
+    assert fake.calls == []
+
+
+def test_drain_outbox_noop_when_not_configured(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "c",
+                    "repo": None, "rationale": None, "confidence": None,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
+    assert share.drain_outbox(config.Profile()) == 0
+    assert len(share._load_outbox()) == 1  # left queued, untouched
+
+
+def test_drain_outbox_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    share._enqueue({"decision_id": "d2", "type": "constraint", "content": "second",
+                    "repo": "r", "rationale": None, "confidence": 90,
+                    "evidence": None, "source": "ai", "queued_at": 2.0, "attempts": 0})
+    fake = _fake(monkeypatch, ret="srv-ok")
+    sent = share.drain_outbox(TEAM)
+    assert sent == 2
+    assert [c["decision_id"] for c in fake.calls] == ["d1", "d2"]  # FIFO order
+    assert share._load_outbox() == []
+
+
+def test_drain_outbox_stops_at_first_failure_keeps_tail(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    share._enqueue({"decision_id": "d2", "type": "constraint", "content": "second",
+                    "repo": "r", "rationale": None, "confidence": 90,
+                    "evidence": None, "source": "ai", "queued_at": 2.0, "attempts": 0})
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    sent = share.drain_outbox(TEAM)
+    assert sent == 0
+    remaining = share._load_outbox()
+    assert [e["decision_id"] for e in remaining] == ["d1", "d2"]  # kept, in order
+    assert remaining[0]["attempts"] == 1  # incremented on the failed attempt
+
+
+def test_drain_outbox_partial_success_then_failure(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    share._enqueue({"decision_id": "d2", "type": "constraint", "content": "second",
+                    "repo": "r", "rationale": None, "confidence": 90,
+                    "evidence": None, "source": "ai", "queued_at": 2.0, "attempts": 0})
+
+    class _FlakyRS:
+        def __init__(self):
+            self.calls = []
+
+        def push_decision(self, **kw):
+            self.calls.append(kw)
+            if kw["decision_id"] == "d2":
+                raise RemoteUnavailableError("down")
+            return "srv-1"
+
+    fake = _FlakyRS()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    remote.reset_degradation_warnings()
+    sent = share.drain_outbox(TEAM)
+    assert sent == 1  # d1 sent, d2 kept
+    remaining = share._load_outbox()
+    assert [e["decision_id"] for e in remaining] == ["d2"]
+
+
+def test_drain_outbox_concurrent_enqueue_survives_final_save(tmp_repo, monkeypatch):
+    """An entry that lands on disk mid-drain (simulating another process's _enqueue while
+    this drain is running) must not be wiped out by drain_outbox's final save."""
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+
+    class _ConcurrentEnqueueRS:
+        def __init__(self):
+            self.calls = []
+
+        def push_decision(self, **kw):
+            self.calls.append(kw)
+            # Simulate a second process enqueueing a brand-new item while we're mid-drain --
+            # it writes straight to the on-disk outbox, bypassing our in-memory `entries`.
+            share._enqueue({"decision_id": "concurrent-1", "type": "constraint",
+                            "content": "concurrently enqueued", "repo": "r",
+                            "rationale": None, "confidence": 70, "evidence": None,
+                            "source": "ai", "queued_at": 2.0, "attempts": 0})
+            return "srv-1"
+
+    fake = _ConcurrentEnqueueRS()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    remote.reset_degradation_warnings()
+
+    sent = share.drain_outbox(TEAM)
+
+    assert sent == 1  # d1 sent successfully
+    remaining = share._load_outbox()
+    ids = [e["decision_id"] for e in remaining]
+    assert "concurrent-1" in ids  # must survive the final save, not be silently dropped
+    assert "d1" not in ids  # successfully sent, not re-queued
+
+
+def test_load_outbox_corrupt_file_reads_empty(tmp_repo):
+    path = share._outbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ not json")
+    assert share._load_outbox() == []
+
+
+def test_share_drains_queued_items_before_new_push(tmp_repo, monkeypatch):
+    """A queued item from an earlier offline share is sent first, then the new decision --
+    ordering is preserved."""
+    share._enqueue({"decision_id": "queued-1", "type": "architecture", "content": "old queued item",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    _, did = store.update_decision(tmp_repo, "brand new decision to share", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _fake(monkeypatch, ret="srv-ok")
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "srv-ok" in msg
+    assert [c["decision_id"] for c in fake.calls] == ["queued-1", did]
+    assert share._load_outbox() == []  # the queued item drained, only the new push happened
+
+
+def test_share_survives_drain_failure(tmp_repo, monkeypatch):
+    """A broken drain (e.g. a disk error saving the outbox) must not block the share
+    itself - share() never raises for infrastructure problems."""
+    _, did = store.update_decision(tmp_repo, "decision to share anyway", "s1", subtype="constraint")
+    fake = _fake(monkeypatch)
+
+    def boom(profile=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(share, "drain_outbox", boom)
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "Synced decision" in msg
+    assert [c["decision_id"] for c in fake.calls] == [did]  # the push still happened
+
+
+def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
+    """A failing _enqueue (disk full saving the outbox) must not escape share() - and the
+    message must not promise a queued retry that was never recorded."""
+    store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+
+    def boom(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(share, "_enqueue", boom)
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "fail" in msg.lower()
+    assert "queued" not in msg.lower()  # honest: nothing was recorded for retry
+    assert "unchanged" in msg.lower()
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
 def test_cli_share_prints_result(monkeypatch, capsys):

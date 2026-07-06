@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from contexer import config, store
+from contexer import config, share, store
 from contexer.remote import RemoteDecision, RemoteStore, with_local_fallback
 from contexer.repo_key import canonical_repo_key
 
@@ -324,9 +324,18 @@ def refresh(repo_path: str) -> tuple[int, int]:
         repo = store._resolve_repo(repo_path)
         if not repo:
             return (0, 0)
-        return pull(repo, timeout=_SESSION_START_TIMEOUT)
+        result = pull(repo, timeout=_SESSION_START_TIMEOUT)
     except Exception:
         return (0, 0)
+    try:
+        # Drain any pushes queued by an earlier offline/auth-failed share (the outbox).
+        # SessionStart is the one seam every adapter already funnels through, so this is
+        # where a queued share gets retried automatically. Fail-soft: a drain error must
+        # never break session start (mirrors the try/except above around pull()).
+        share.drain_outbox()
+    except Exception:
+        pass
+    return result
 
 
 def poll_for_injection(repo_path: str) -> list[dict]:
