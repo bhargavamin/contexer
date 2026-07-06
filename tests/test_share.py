@@ -349,6 +349,23 @@ def test_share_survives_drain_failure(tmp_repo, monkeypatch):
     assert [c["decision_id"] for c in fake.calls] == [did]  # the push still happened
 
 
+def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
+    """A failing _enqueue (disk full saving the outbox) must not escape share() - and the
+    message must not promise a queued retry that was never recorded."""
+    store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+
+    def boom(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(share, "_enqueue", boom)
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "fail" in msg.lower()
+    assert "queued" not in msg.lower()  # honest: nothing was recorded for retry
+    assert "unchanged" in msg.lower()
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
 def test_cli_share_prints_result(monkeypatch, capsys):

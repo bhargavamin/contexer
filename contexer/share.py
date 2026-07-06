@@ -149,12 +149,18 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
         # Cloud unreachable OR auth rejected - either way a queued retry can succeed
         # later (auth: after the user re-logs-in; unreachable: once the cloud is back),
         # so both degradations enqueue rather than losing the share.
-        _enqueue({
-            "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
-            "repo": key, "rationale": None, "confidence": dec["confidence"],
-            "evidence": dec["evidence"], "source": dec["source"],
-            "queued_at": time.time(), "attempts": 0,
-        })
+        try:
+            _enqueue({
+                "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
+                "repo": key, "rationale": None, "confidence": dec["confidence"],
+                "evidence": dec["evidence"], "source": dec["source"],
+                "queued_at": time.time(), "attempts": 0,
+            })
+        except Exception:
+            # Even queueing can fail (disk full, temp-dir perms). share() never raises -
+            # and the message must not promise a retry that was never recorded.
+            return ("Share failed: cloud unreachable or auth rejected (see the warning "
+                    "above). Your local decision is unchanged.")
         return ("Share failed: cloud unreachable or auth rejected (see the warning above). "
                 "Queued - it will retry automatically at the next session start.")
     # Honest about scope: v1 push_decision writes to the CALLER's personal cloud context
