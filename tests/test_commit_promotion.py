@@ -114,6 +114,88 @@ def test_non_git_dir_is_safe_noop(tmp_path, monkeypatch):
     assert store.promote_on_commit(str(tmp_path / "not-a-repo")) == {}
 
 
+def test_substring_filename_does_not_falsely_promote(git_repo):
+    # Changing store.py must NOT strong-promote a decision that only names test_store.py:
+    # `base in low` substring matching would falsely fire (store.py is inside test_store.py).
+    _, eid = store.update_decision(git_repo, "unit tests live in tests/test_store.py",
+                                   "s1", "pattern", created_by="plan")
+    store.promote_on_commit(git_repo)  # seed
+    _commit(git_repo, "store.py", "x", "chore: bump deps")
+    res = store.promote_on_commit(git_repo)
+    assert eid not in res.get("promoted", [])
+    assert _status(git_repo, eid) == "suggested"
+
+
+def test_datastore_does_not_match_store(git_repo):
+    # datastore.py contains "store.py" as a substring but is a different file - no promotion.
+    _, eid = store.update_decision(git_repo, "persistence goes through datastore.py",
+                                   "s1", "architecture", created_by="plan")
+    store.promote_on_commit(git_repo)  # seed
+    _commit(git_repo, "store.py", "x", "chore: bump deps")
+    res = store.promote_on_commit(git_repo)
+    assert eid not in res.get("promoted", [])
+    assert _status(git_repo, eid) == "suggested"
+
+
+def test_genuine_basename_reference_still_promotes(git_repo):
+    # A decision naming store.py as a whole token IS a strong match when store.py changes.
+    _, eid = store.update_decision(git_repo, "all persistence lives in store.py",
+                                   "s1", "architecture", created_by="plan")
+    store.promote_on_commit(git_repo)  # seed
+    _commit(git_repo, "store.py", "x", "chore: rework persistence")
+    res = store.promote_on_commit(git_repo)
+    assert eid in res["promoted"]
+    assert _status(git_repo, eid) == "approved"
+
+
+def test_subdir_path_still_matches(git_repo):
+    # A subdir path reference still matches its changed file (boundary check keeps full paths).
+    _, eid = store.update_decision(git_repo, "core logic lives in contexer/store.py",
+                                   "s1", "architecture", created_by="plan")
+    store.promote_on_commit(git_repo)  # seed
+    _commit(git_repo, "contexer/store.py", "# core", "feat: store")
+    res = store.promote_on_commit(git_repo)
+    assert eid in res["promoted"]
+    assert _status(git_repo, eid) == "approved"
+
+
+def test_valid_empty_diff_range_uses_full_range_messages(git_repo):
+    # A net-zero range (file added then deleted) is a VALID range with an empty diff, not an
+    # invalid one: weak matching must see the full-range messages, not just the tip commit's.
+    import os
+    _, eid = store.update_decision(git_repo, "the queue uses exponential backoff for retries",
+                                   "s1", "architecture", created_by="plan")
+    store.promote_on_commit(git_repo)  # seed at current HEAD
+    _commit(git_repo, "foo.txt", "x", "fix: exponential backoff for queue retries")
+    os.remove(os.path.join(git_repo, "foo.txt"))
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-m", "chore: cleanup unused")
+    res = store.promote_on_commit(git_repo)
+    assert eid in res["validated"]  # matched via the earlier commit's message, not the tip
+    assert _status(git_repo, eid) == "suggested"
+
+
+def test_commit_credit_does_not_survive_new_revision(git_repo):
+    # The +25 commit-validation credit is scoped to the validated revision: a later revision
+    # that rewrote the content must not inherit it.
+    _, eid = store.update_decision(git_repo, "core logic in contexer/ledger.py", "s1",
+                                   "architecture", created_by="plan")
+    store.promote_on_commit(git_repo)  # seed
+    _commit(git_repo, "contexer/ledger.py", "# es", "feat: ledger")
+    store.promote_on_commit(git_repo)  # strong-promote
+    entry = store._load(git_repo)["entries"][0]
+    validated_rev = store._current_revision(entry)
+    assert any("Validated by commit" in f for f in validated_rev["evidence"])
+    base_score = validated_rev["confidence_score"]
+    # Rewrite the content into a new revision.
+    store._append_revision(entry, "core logic now split across modules", source="ai")
+    new_rev = store._current_revision(entry)
+    assert not any("Validated by commit" in f for f in new_rev["evidence"])
+    assert new_rev["confidence_score"] == base_score - 25
+    # The prior validated revision keeps its credit in history.
+    assert any("Validated by commit" in f for f in validated_rev["evidence"])
+
+
 def test_cursor_hook_promotes_on_commit(git_repo):
     """Cursor rides commit-promotion on its beforeSubmitPrompt hook (capture_constraint)."""
     from contexer.adapters import cursor

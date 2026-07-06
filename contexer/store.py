@@ -490,9 +490,13 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
     return subtype in _SIGNIFICANT_UPDATE_SUBTYPES
 
 
-def _compute_confidence(entry: dict) -> tuple[int, list[str]]:
+def _compute_confidence(entry: dict, validated_by_commit: str | None = None) -> tuple[int, list[str]]:
     """Compute a confidence score (0-100) and evidence factors from an entry's metadata.
-    Confidence reflects available evidence, NOT AI certainty."""
+    Confidence reflects available evidence, NOT AI certainty.
+
+    `validated_by_commit` is revision-scoped (passed by the caller from the revision being
+    scored), NOT read off the entry: a commit only validates the exact content it matched, so
+    a later revision that rewrote that content must not inherit the +25 credit."""
     score = 30
     factors: list[str] = []
 
@@ -528,9 +532,9 @@ def _compute_confidence(entry: dict) -> tuple[int, list[str]]:
         score += 5
         factors.append("Persisted to memory tool")
 
-    if entry.get("validated_by_commit"):
+    if validated_by_commit:
         score += 25
-        factors.append(f"Validated by commit {entry['validated_by_commit'][:7]}")
+        factors.append(f"Validated by commit {validated_by_commit[:7]}")
 
     return min(score, 100), factors
 
@@ -845,6 +849,15 @@ def _distinctive(tokens: set[str]) -> set[str]:
     return {t for t in tokens if len(t) > 2 and t not in _COMMIT_STOPWORDS}
 
 
+def _path_token_in(needle: str, hay: str) -> bool:
+    """True when `needle` (a lowercased path or basename) appears in `hay` as a whole path
+    segment / word, not an incidental substring. The char on either side of a genuine
+    reference must be a boundary (string edge or a non-word, non-path char) - so a changed
+    `store.py` does NOT match a decision naming `test_store.py` or `datastore.py`, while a
+    bare `store.py` or a subdir path `contexer/store.py` still matches."""
+    return re.search(r"(?<![/\w])" + re.escape(needle) + r"(?![/\w])", hay) is not None
+
+
 def _commit_match(content: str, changed: list[str], msg_tokens: set[str]) -> str | None:
     """How strongly a commit validates a decision's content.
       'strong' - the content names a file the commit changed (full path or basename): promote.
@@ -857,9 +870,9 @@ def _commit_match(content: str, changed: list[str], msg_tokens: set[str]) -> str
     for path in changed:
         p = path.lower()
         base = p.rsplit("/", 1)[-1]
-        if p and p in low:
+        if p and _path_token_in(p, low):
             return "strong"
-        if len(base) > 3 and base in low:
+        if len(base) > 3 and _path_token_in(base, low):
             return "strong"
     ctoks = _distinctive(_tokenize(content))
     mtoks = _distinctive(msg_tokens)
@@ -873,31 +886,41 @@ def _commit_match(content: str, changed: list[str], msg_tokens: set[str]) -> str
 def _apply_commit_validation(entry: dict, sha: str, strong: bool) -> None:
     """Attach commit-validation evidence to a decision's current revision. Strong matches also
     promote status suggested->approved in place - content is unchanged, so no new revision is
-    created (mirrors the pending_approval bless-in-place path). Confidence is recomputed from the
-    single _compute_confidence source of truth, which now credits `validated_by_commit`."""
+    created (mirrors the pending_approval bless-in-place path). The +25 credit is scoped to the
+    validated revision (stored on it as `validated_by_commit`), so a later revision that rewrites
+    the content does not inherit it - _compute_confidence reads the credit only from what it is
+    passed, never from the entry."""
     rev = _current_revision(entry)
     if rev is None:
         return
-    entry["validated_by_commit"] = sha
+    rev["validated_by_commit"] = sha
     now = datetime.now(timezone.utc).isoformat()
     if strong:
         entry["status"] = "approved"
         rev["approved_at"] = rev.get("approved_at") or now
     entry["updated_at"] = now
-    score, factors = _compute_confidence(entry)
+    score, factors = _compute_confidence(entry, validated_by_commit=sha)
     rev["confidence_score"] = score
     rev["evidence"] = factors
     _sync_decision_cache(entry)
 
 
-def _git_out(repo: str, args: list[str]) -> str:
-    """stdout of a git command in `repo`, or "" on any failure. Never raises."""
+def _git_out_ok(repo: str, args: list[str]) -> str | None:
+    """stdout of a git command in `repo` on success, or None on any failure (non-zero exit /
+    exception). None distinguishes a failed invocation from a successful-but-empty result ("");
+    callers that only need the text use `_git_out`. Never raises."""
     try:
         out = subprocess.run(["git", "-C", repo, *args],
                              capture_output=True, text=True, timeout=3)
-        return out.stdout if out.returncode == 0 else ""
+        return out.stdout if out.returncode == 0 else None
     except Exception:
-        return ""
+        return None
+
+
+def _git_out(repo: str, args: list[str]) -> str:
+    """stdout of a git command in `repo`, or "" on any failure. Never raises."""
+    out = _git_out_ok(repo, args)
+    return out if out is not None else ""
 
 
 def promote_on_commit(repo_path: str = "") -> dict:
@@ -927,8 +950,12 @@ def promote_on_commit(repo_path: str = "") -> dict:
         if not last:
             return {}  # first observation: seed only, never promote retroactively
         rng = f"{last}..{head}"
-        files_out = _git_out(repo, ["diff", "--name-only", rng])
-        if files_out:
+        files_out = _git_out_ok(repo, ["diff", "--name-only", rng])
+        if files_out is not None:
+            # Valid range - use full-range messages. An empty diff here is a legitimate
+            # zero-net-change range (add-then-delete, or an --allow-empty commit), NOT an
+            # invalid range: keep the full-range messages for weak matching instead of
+            # dropping to the tip commit only.
             msgs = _git_out(repo, ["log", "--format=%s%n%b", rng])
         else:
             # Range invalid (rebase / force-push / shallow) - fall back to the tip commit only.
@@ -938,19 +965,23 @@ def promote_on_commit(repo_path: str = "") -> dict:
         msg_tokens = _tokenize(msgs)
         if not changed and not _distinctive(msg_tokens):
             return {}
-        data = _load(repo)
-        promoted: list[str] = []
-        validated: list[str] = []
-        for entry in data.get("entries", []):
-            if entry.get("type") != "decision" or _entry_status(entry) != "suggested":
-                continue
-            kind = _commit_match(_current_content(entry), changed, msg_tokens)
-            if kind is None:
-                continue
-            _apply_commit_validation(entry, head, strong=(kind == "strong"))
-            (promoted if kind == "strong" else validated).append(entry["id"])
-        if promoted or validated:
-            _save(repo, data)
+        # Lock the whole read-modify-write like every other write path (update_decision,
+        # approve_decision, ...): _save is atomic but two concurrent sessions could otherwise
+        # both load the same snapshot and the second clobber the first's promotions.
+        with _store_lock(_slug(repo)):
+            data = _load(repo)
+            promoted: list[str] = []
+            validated: list[str] = []
+            for entry in data.get("entries", []):
+                if entry.get("type") != "decision" or _entry_status(entry) != "suggested":
+                    continue
+                kind = _commit_match(_current_content(entry), changed, msg_tokens)
+                if kind is None:
+                    continue
+                _apply_commit_validation(entry, head, strong=(kind == "strong"))
+                (promoted if kind == "strong" else validated).append(entry["id"])
+            if promoted or validated:
+                _save(repo, data)
         return {"sha": head[:7], "promoted": promoted, "validated": validated}
     except Exception:
         return {}
@@ -1251,7 +1282,12 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
         entry["approved_by"] = "human"
         if cur is not None:
             cur["approved_at"] = now
-            score, factors = _compute_confidence(entry)
+            # An 'edit' rewrites the content, so any prior commit-validation no longer applies;
+            # otherwise preserve the revision-scoped credit.
+            vbc = None if action == "edit" else cur.get("validated_by_commit")
+            if action == "edit":
+                cur.pop("validated_by_commit", None)
+            score, factors = _compute_confidence(entry, validated_by_commit=vbc)
             cur["confidence_score"] = score
             cur["evidence"] = factors
         _sync_decision_cache(entry)
