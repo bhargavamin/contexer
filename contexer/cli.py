@@ -390,6 +390,10 @@ def status(rest: list | None = None) -> None:
                 outcome = "ok" if last_sync.get("ok") else "failed"
                 age = _format_age(time.time() - last_sync.get("at", time.time()))
                 print(f"    last sync:  {outcome}, {age} ago ({last_sync.get('duration_ms', 0)}ms)")
+            last_render = cache.get("last_render")
+            if last_render:
+                kb = last_render.get("chars", 0) / 1024
+                print(f"    last render: {last_render.get('rows', 0)} rows, ~{kb:.1f}KB")
 
     config_paths = (
         home / ".claude.json",

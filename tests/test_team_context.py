@@ -5,6 +5,7 @@ store.py entries[], they live in ~/.contexer/.team_{slug}.json and are merged at
 time. RemoteStore is faked here so no network is touched.
 """
 import json
+import time
 
 import pytest
 
@@ -202,6 +203,60 @@ def test_last_sync_at_is_sync_start_on_degraded_path(team_env, monkeypatch):
     assert last_sync["duration_ms"] == 3000
 
 
+# ── consecutive_failures + last_ok_at (backoff / staleness telemetry) ────────────
+
+def test_success_sets_last_ok_at_and_resets_failures(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "error": "degraded",
+                     "consecutive_failures": 3}})
+    _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 0
+    assert isinstance(cache["last_ok_at"], float)
+
+
+def test_degraded_increments_consecutive_failures(team_env, monkeypatch):
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c0", "decisions": [],
+        "last_sync": {"at": 1, "ok": True, "duration_ms": 1, "consecutive_failures": 0}})
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 1
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 2
+
+
+def test_degraded_first_failure_from_absent_counter(team_env, monkeypatch):
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["consecutive_failures"] == 1
+
+
+def test_consecutive_failures_reads_fail_soft():
+    assert team_context._consecutive_failures({}) == 0
+    assert team_context._consecutive_failures({"last_sync": "not a dict"}) == 0
+    assert team_context._consecutive_failures({"last_sync": {"consecutive_failures": "x"}}) == 0
+    assert team_context._consecutive_failures({"last_sync": {"consecutive_failures": -1}}) == 0
+    assert team_context._consecutive_failures({"last_sync": {"consecutive_failures": 4}}) == 4
+
+
+def test_poll_interval_backoff_doubles_and_caps():
+    assert team_context._poll_interval({}) == team_context._POLL_MIN_INTERVAL
+    assert team_context._poll_interval(
+        {"last_sync": {"consecutive_failures": 1}}) == team_context._POLL_MIN_INTERVAL * 2
+    assert team_context._poll_interval(
+        {"last_sync": {"consecutive_failures": 2}}) == team_context._POLL_MIN_INTERVAL * 4
+    # Enough failures to blow past the ceiling — must clamp, never grow unbounded.
+    assert team_context._poll_interval(
+        {"last_sync": {"consecutive_failures": 20}}) == team_context._POLL_MAX_INTERVAL
+
+
 # ── format_team_section ──────────────────────────────────────────────────────────
 
 def test_format_team_section_empty_when_no_cache(tmp_repo):
@@ -237,6 +292,156 @@ def test_load_cache_tolerates_corrupt_file(tmp_repo):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{ not json")
     assert team_context._load_cache(tmp_repo) == {"repo_key": None, "cursor": None, "decisions": []}
+
+
+# ── staleness tag on the header ───────────────────────────────────────────────────
+
+def _seed_with_last_ok_at(repo, *, last_ok_at):
+    data = {"repo_key": "k", "cursor": None,
+           "decisions": [{"id": "t1aaaaaa", "type": "architecture", "content": "Use Postgres",
+                          "rationale": None, "repo": None, "agent": None, "scope": "team"}]}
+    if last_ok_at is not None:
+        data["last_ok_at"] = last_ok_at
+    team_context._save_cache(repo, data)
+
+
+def test_fresh_sync_no_stale_tag(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time())
+    out = team_context.format_team_section(tmp_repo)
+    assert out.startswith("## Team context (synced)\n")
+    assert "stale" not in out
+
+
+def test_missing_last_ok_at_no_stale_tag(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=None)  # old-format cache, field absent
+    out = team_context.format_team_section(tmp_repo)
+    assert out.startswith("## Team context (synced)\n")
+    assert "stale" not in out
+
+
+def test_stale_header_hours_wording(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 30 * 3600)  # 30h ago
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context (synced 30 hours ago - may be stale)" in out
+
+
+def test_stale_header_exactly_24h_is_tagged(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - team_context._STALE_AFTER)
+    out = team_context.format_team_section(tmp_repo)
+    assert "may be stale" in out
+
+
+def test_fresh_23h_not_tagged(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 23 * 3600)
+    out = team_context.format_team_section(tmp_repo)
+    assert "stale" not in out
+
+
+def test_stale_header_days_wording_at_48h(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 48 * 3600)
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context (synced 2 days ago - may be stale)" in out
+
+
+def test_stale_header_days_wording_multi_day(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 5 * 86400)
+    out = team_context.format_team_section(tmp_repo)
+    assert "## Team context (synced 5 days ago - may be stale)" in out
+
+
+def test_stale_tag_only_touches_header_not_rows(tmp_repo):
+    _seed_with_last_ok_at(tmp_repo, last_ok_at=time.time() - 72 * 3600)
+    out = team_context.format_team_section(tmp_repo)
+    lines = out.split("\n")
+    assert "may be stale" in lines[0]
+    assert "Use Postgres" in lines[1]
+    assert "may be stale" not in lines[1]
+
+
+# ── last_render telemetry ─────────────────────────────────────────────────────────
+
+def test_render_records_rows_and_chars(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1", "type": "architecture", "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = team_context.format_team_section(tmp_repo)
+    cache = json.loads(team_context._cache_path(tmp_repo).read_text())
+    last_render = cache["last_render"]
+    assert last_render["rows"] == 1
+    assert last_render["chars"] == len(out)
+    assert isinstance(last_render["at"], float)
+
+
+def test_render_not_written_when_cache_file_absent(tmp_repo, monkeypatch):
+    # No cache file exists at all — format_team_section returns "" (no rows) and must
+    # never create one from the render path.
+    assert team_context.format_team_section(tmp_repo) == ""
+    assert not team_context._cache_path(tmp_repo).exists()
+
+
+def test_record_render_guard_direct_no_file_created(tmp_repo):
+    # Exercise the guard directly (belt and suspenders on top of the format_team_section
+    # path above): calling _record_render with no cache file on disk must be a pure no-op.
+    team_context._record_render(tmp_repo, {}, rows=5, chars=100)
+    assert not team_context._cache_path(tmp_repo).exists()
+
+
+def test_render_fail_soft_on_write_error(tmp_repo, monkeypatch):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1", "type": "architecture", "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+
+    def boom(repo, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(team_context, "_save_cache", boom)
+    out = team_context.format_team_section(tmp_repo)  # must not raise
+    assert "Use Postgres" in out
+
+
+def test_record_render_preserves_concurrent_refresher_write(tmp_repo, monkeypatch):
+    # format_team_section loads the cache ONCE, up front, and renders from that snapshot.
+    # A background refresher (poll_nonblocking, a separate process) can complete and write
+    # fresh decisions/cursor/last_ok_at/consecutive_failures in the gap before _record_render
+    # does its own save. _record_render must re-read the cache fresh right before saving and
+    # touch ONLY last_render — never spread the stale snapshot format_team_section rendered
+    # from back over that fresher on-disk write.
+    stale = {"repo_key": "k", "cursor": "c0", "decisions": [
+        {"id": "t1", "type": "architecture", "content": "stale rule", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]}
+    fresh_on_disk = {"repo_key": "k", "cursor": "c1", "decisions": [
+        {"id": "t1", "type": "architecture", "content": "stale rule", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"},
+        {"id": "t2", "type": "architecture", "content": "fresh rule from refresher",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}],
+        "last_ok_at": 12345.0, "consecutive_failures": 0}
+    # Seed the cache file with what a concurrent refresher would already have written by
+    # the time _record_render re-reads it.
+    team_context._save_cache(tmp_repo, fresh_on_disk)
+
+    real_load_cache = team_context._load_cache
+    calls = {"n": 0}
+
+    def fake_load_cache(repo_path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return stale  # format_team_section's own initial load (pre-refresher snapshot)
+        return real_load_cache(repo_path)  # _record_render's re-load: sees the real file
+
+    monkeypatch.setattr(team_context, "_load_cache", fake_load_cache)
+    out = team_context.format_team_section(tmp_repo)
+    assert "stale rule" in out
+    assert "fresh rule from refresher" not in out  # rendered from the stale snapshot
+
+    saved = json.loads(team_context._cache_path(tmp_repo).read_text())
+    # The refresher's fresh write survives - not clobbered by the stale snapshot.
+    assert saved["cursor"] == "c1"
+    assert [d["id"] for d in saved["decisions"]] == ["t1", "t2"]
+    assert saved["last_ok_at"] == 12345.0
+    assert saved["consecutive_failures"] == 0
+    # And the new telemetry landed on top of that fresh copy.
+    assert saved["last_render"]["rows"] == 1  # rendered from the stale, single-row snapshot
+    assert isinstance(saved["last_render"]["at"], float)
 
 
 # ── store.get_context integration ────────────────────────────────────────────────
