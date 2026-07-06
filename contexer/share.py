@@ -66,6 +66,25 @@ def _enqueue(payload: dict) -> None:
     _save_outbox(entries)
 
 
+def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
+    """Re-read the outbox immediately before the final save and fold in anything that
+    only exists on disk. Lock-free (this file's existing convention - no file locking
+    added here): a concurrent `_enqueue` between our initial `_load_outbox()` at the top
+    of `drain_outbox` and this point writes straight to disk, so that payload is invisible
+    to our in-memory `entries` and would otherwise be silently overwritten by this drain's
+    final save. Re-reading here and keeping any entry we neither sent nor already carry in
+    `tail` shrinks the loss window from "the whole drain" down to the handful of lines
+    between this re-read and the write that follows it - effectively zero, not perfect
+    serialization, which is the deliberate tradeoff for staying lock-free. Disk-only
+    entries are appended after `tail` since they were enqueued after this drain started,
+    so FIFO order is preserved."""
+    disk_entries = _load_outbox()
+    tail_ids = {e.get("decision_id") for e in tail}
+    extra = [d for d in disk_entries
+             if d.get("decision_id") not in sent_ids and d.get("decision_id") not in tail_ids]
+    return tail + extra
+
+
 def drain_outbox(profile: Profile | None = None) -> int:
     """Retry every queued push, FIFO, and return how many succeeded.
 
@@ -82,6 +101,7 @@ def drain_outbox(profile: Profile | None = None) -> int:
     if remote is None:
         return 0
     sent = 0
+    sent_ids: set = set()
     for idx, entry in enumerate(entries):
         server_id = with_local_fallback(
             lambda entry=entry: remote.push_decision(
@@ -92,10 +112,11 @@ def drain_outbox(profile: Profile | None = None) -> int:
             default=None, action="drain queued share")
         if server_id is None:
             entry["attempts"] = entry.get("attempts", 0) + 1
-            _save_outbox(entries[idx:])
+            _save_outbox(_reconcile_with_disk(entries[idx:], sent_ids))
             return sent
+        sent_ids.add(entry.get("decision_id"))
         sent += 1
-    _save_outbox([])
+    _save_outbox(_reconcile_with_disk([], sent_ids))
     return sent
 
 

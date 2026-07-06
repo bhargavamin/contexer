@@ -276,6 +276,40 @@ def test_drain_outbox_partial_success_then_failure(tmp_repo, monkeypatch):
     assert [e["decision_id"] for e in remaining] == ["d2"]
 
 
+def test_drain_outbox_concurrent_enqueue_survives_final_save(tmp_repo, monkeypatch):
+    """An entry that lands on disk mid-drain (simulating another process's _enqueue while
+    this drain is running) must not be wiped out by drain_outbox's final save."""
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+
+    class _ConcurrentEnqueueRS:
+        def __init__(self):
+            self.calls = []
+
+        def push_decision(self, **kw):
+            self.calls.append(kw)
+            # Simulate a second process enqueueing a brand-new item while we're mid-drain --
+            # it writes straight to the on-disk outbox, bypassing our in-memory `entries`.
+            share._enqueue({"decision_id": "concurrent-1", "type": "constraint",
+                            "content": "concurrently enqueued", "repo": "r",
+                            "rationale": None, "confidence": 70, "evidence": None,
+                            "source": "ai", "queued_at": 2.0, "attempts": 0})
+            return "srv-1"
+
+    fake = _ConcurrentEnqueueRS()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    remote.reset_degradation_warnings()
+
+    sent = share.drain_outbox(TEAM)
+
+    assert sent == 1  # d1 sent successfully
+    remaining = share._load_outbox()
+    ids = [e["decision_id"] for e in remaining]
+    assert "concurrent-1" in ids  # must survive the final save, not be silently dropped
+    assert "d1" not in ids  # successfully sent, not re-queued
+
+
 def test_load_outbox_corrupt_file_reads_empty(tmp_repo):
     path = share._outbox_path()
     path.parent.mkdir(parents=True, exist_ok=True)
