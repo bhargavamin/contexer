@@ -120,6 +120,59 @@ def drain_outbox(profile: Profile | None = None) -> int:
     return sent
 
 
+def _payload(dec: dict, key) -> dict:
+    """Outbox entry for one wire-projected decision (same shape share() enqueues)."""
+    return {
+        "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
+        "repo": key, "rationale": None, "confidence": dec["confidence"],
+        "evidence": dec["evidence"], "source": dec["source"],
+        "queued_at": time.time(), "attempts": 0,
+    }
+
+
+def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
+    """Push every non-ignored local decision to your team cloud context, oldest first.
+
+    Same local-first contract as share(): never raises for cloud problems. Stops at the
+    FIRST failed push (the cloud is likely down - drain_outbox semantics) and queues the
+    failed decision plus everything after it in the outbox, so no share intent is lost."""
+    profile = profile or load_profile()
+    try:
+        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+    except Exception:
+        pass
+    decs = store.get_shareable_all(repo_path)
+    if not decs:
+        return "Nothing to share: no local decisions."
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return ("Not in team mode. Set mode='team' + endpoint + token in "
+                "~/.contexer/config.toml to share.")
+    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    sent = 0
+    for idx, dec in enumerate(decs):
+        server_id = with_local_fallback(
+            lambda dec=dec: remote.push_decision(
+                type=dec["type"], content=dec["content"], repo=key,
+                confidence=dec["confidence"], evidence=dec["evidence"],
+                source=dec["source"], decision_id=dec["id"]),
+            default=None, action="share decision")
+        if server_id is None:
+            try:
+                for rest in decs[idx:]:
+                    _enqueue(_payload(rest, key))
+            except Exception:
+                return (f"Shared {sent} of {len(decs)} decision(s), then the cloud became "
+                        "unreachable or auth was rejected (see the warning above). The "
+                        "rest could not be queued - your local decisions are unchanged.")
+            return (f"Shared {sent} of {len(decs)} decision(s). The rest are queued and "
+                    "will retry automatically at the next session start (cloud "
+                    "unreachable or auth rejected - see the warning above).")
+        sent += 1
+    return (f"Synced {sent} decision(s) to your personal cloud context - "
+            "teammates won't see these until team promotion ships.")
+
+
 def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:
     """Push one local decision to your team cloud context; return a human-readable status.
 
@@ -150,12 +203,7 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
         # later (auth: after the user re-logs-in; unreachable: once the cloud is back),
         # so both degradations enqueue rather than losing the share.
         try:
-            _enqueue({
-                "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
-                "repo": key, "rationale": None, "confidence": dec["confidence"],
-                "evidence": dec["evidence"], "source": dec["source"],
-                "queued_at": time.time(), "attempts": 0,
-            })
+            _enqueue(_payload(dec, key))
         except Exception:
             # Even queueing can fail (disk full, temp-dir perms). share() never raises -
             # and the message must not promise a retry that was never recorded.

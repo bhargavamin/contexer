@@ -24,7 +24,7 @@ Commands:
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   review        Interactively approve, edit, or ignore pending engineering decisions.
-  share         Push a local decision to your team cloud context: share [id] (default: latest).
+  share         Push local decisions to your team cloud context: share [id | --all] (default: latest).
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -465,7 +465,7 @@ def pull(rest: list | None = None) -> None:
 
 
 def share_cmd(rest: list | None = None) -> None:
-    """`contexer share [id]`: push a local decision up to your team cloud context.
+    """`contexer share [id | --all]`: push local decision(s) up to your team cloud context.
 
     Local-first: prints a clear message when not in team mode / offline (never crashes).
     Must be run inside a git repository."""
@@ -473,12 +473,20 @@ def share_cmd(rest: list | None = None) -> None:
 
     from contexer import share, store
 
+    rest = rest or []
+    share_all = "--all" in rest
+    ids = [a for a in rest if a != "--all"]
+    if share_all and ids:
+        print("Pass either an id or --all, not both.", file=sys.stderr)
+        sys.exit(1)
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     if not repo:
         print("No git repo detected - run `contexer share` inside a repository.", file=sys.stderr)
         sys.exit(1)
-    decision_id = rest[0] if rest else ""
-    print(share.share(repo, decision_id))
+    if share_all:
+        print(share.share_all(repo))
+    else:
+        print(share.share(repo, ids[0] if ids else ""))
 
 
 def login_cmd(rest: list | None = None) -> None:

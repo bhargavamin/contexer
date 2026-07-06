@@ -72,6 +72,23 @@ def test_get_shareable_carries_provenance(tmp_repo):
     assert dec["evidence"] is None or isinstance(dec["evidence"], list)
 
 
+# ── store.get_shareable_all ──────────────────────────────────────────────────────
+
+def test_get_shareable_all_empty(tmp_repo):
+    assert store.get_shareable_all(tmp_repo) == []
+
+
+def test_get_shareable_all_returns_all_non_ignored(tmp_repo):
+    _, id1 = store.update_decision(tmp_repo, "first decision here", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "second newer decision", "s1", subtype="constraint")
+    _, id3 = store.update_decision(tmp_repo, "ignore this one please now", "s1", subtype="pattern")
+    store.approve_decision(tmp_repo, id3, "ignore")
+    decs = store.get_shareable_all(tmp_repo)
+    assert [d["id"] for d in decs] == [id1, id2]  # oldest first, ignored excluded
+    assert decs[0]["type"] == "architecture"
+    assert decs[1]["type"] == "constraint"
+
+
 # ── share.share ──────────────────────────────────────────────────────────────────
 
 def test_share_nothing_to_share(tmp_repo):
@@ -133,6 +150,80 @@ def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
     _fake(monkeypatch, exc=RemoteAuthError("401"))
     assert "fail" in share.share(tmp_repo, profile=TEAM).lower()
     assert "contexer login --team" in capsys.readouterr().err
+
+
+# ── share.share_all ──────────────────────────────────────────────────────────────
+
+def test_share_all_nothing_to_share(tmp_repo):
+    assert "nothing to share" in share.share_all(tmp_repo, profile=TEAM).lower()
+
+
+def test_share_all_local_mode_message(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "a decision to maybe share", "s1", subtype="architecture")
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
+    assert "team mode" in share.share_all(tmp_repo, profile=config.Profile()).lower()
+
+
+def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
+    _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
+    _, id3 = store.update_decision(tmp_repo, "snake case file naming", "s1", subtype="convention")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _fake(monkeypatch, ret="srv-9")
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "3" in msg
+    assert "won't see" in msg.lower()  # honest about visibility, like single share
+    assert [c["decision_id"] for c in fake.calls] == [id1, id2, id3]  # oldest first
+    assert all(c["repo"] == "github.com/a/b" for c in fake.calls)
+    assert share._load_outbox() == []
+
+
+def test_share_all_excludes_ignored(tmp_repo, monkeypatch):
+    _, id1 = store.update_decision(tmp_repo, "keep this decision here", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "ignore this one please now", "s1", subtype="constraint")
+    store.approve_decision(tmp_repo, id2, "ignore")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    fake = _fake(monkeypatch, ret="srv-1")
+    share.share_all(tmp_repo, profile=TEAM)
+    assert [c["decision_id"] for c in fake.calls] == [id1]
+
+
+def test_share_all_failure_enqueues_failed_and_remaining(tmp_repo, monkeypatch):
+    """First push succeeds, second fails: the failed decision AND everything after it
+    are queued for retry - stop pushing, the cloud is likely down (drain semantics)."""
+    _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
+    _, id3 = store.update_decision(tmp_repo, "snake case file naming", "s1", subtype="convention")
+
+    class _FlakyRS:
+        def __init__(self):
+            self.calls = []
+
+        def push_decision(self, **kw):
+            self.calls.append(kw)
+            if kw["decision_id"] == id2:
+                raise RemoteUnavailableError("down")
+            return "srv-1"
+
+    fake = _FlakyRS()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    remote.reset_degradation_warnings()
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "1" in msg  # one synced
+    assert "queued" in msg.lower()
+    assert [c["decision_id"] for c in fake.calls] == [id1, id2]  # stopped after the failure
+    assert [e["decision_id"] for e in share._load_outbox()] == [id2, id3]
+
+
+def test_share_all_total_failure_queues_everything(tmp_repo, monkeypatch):
+    _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "fail" in msg.lower() or "queued" in msg.lower()
+    assert [e["decision_id"] for e in share._load_outbox()] == [id1, id2]
 
 
 # ── outbox: enqueue on share ──────────────────────────────────────────────────────
@@ -374,6 +465,22 @@ def test_cli_share_prints_result(monkeypatch, capsys):
     monkeypatch.setattr(share, "share", lambda repo, decision_id="": f"shared {decision_id or 'latest'}")
     cli.share_cmd(["abc123"])
     assert "abc123" in capsys.readouterr().out
+
+
+def test_cli_share_all_flag(monkeypatch, capsys):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(share, "share_all", lambda repo: "shared all of them")
+    cli.share_cmd(["--all"])
+    assert "shared all of them" in capsys.readouterr().out
+
+
+def test_cli_share_all_with_id_rejected(monkeypatch, capsys):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    with pytest.raises(SystemExit):
+        cli.share_cmd(["--all", "abc123"])
+    assert "either" in capsys.readouterr().err.lower()
 
 
 def test_cli_share_no_repo_exits(monkeypatch):

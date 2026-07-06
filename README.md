@@ -402,7 +402,7 @@ contexer install     # local setup (same as above)
 contexer login       # opens your browser to sign in; enables team sync
 ```
 
-`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you. After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up. `contexer logout` disconnects.
+`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you. After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up (`contexer share --all` pushes every non-ignored decision, oldest first). `contexer logout` disconnects.
 
 Pointing at a self-hosted or local Teams server (for development): set `CONTEXER_ENV=local` before `contexer login`, or pass `contexer login --endpoint <url>`.
 
