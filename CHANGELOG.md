@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.16.0](https://github.com/bhargavamin/contexer/compare/v0.15.0...v0.16.0) (2026-07-06)
+
+
+### Features
+
+* **cli:** surface team sync visibility in status, session start, and share ([852d737](https://github.com/bhargavamin/contexer/commit/852d737cf2f164fff918cc4641f85561da45bee1))
+* **share:** durable outbox with session-start drain ([ca5ac2a](https://github.com/bhargavamin/contexer/commit/ca5ac2ae33f742eff494eea03c2e07a46e89eda5))
+* **team-sync:** bound session-start pull timeout to 3s ([e792219](https://github.com/bhargavamin/contexer/commit/e7922195d27ac87395e11799c22a24db6739fe22))
+* **team-sync:** collapse team rows that duplicate local decisions ([70f3291](https://github.com/bhargavamin/contexer/commit/70f32911df682c94461d6f5523ebfbf37006bd63))
+* **team-sync:** record last_sync telemetry on every attempted sync ([f05bd7b](https://github.com/bhargavamin/contexer/commit/f05bd7ba66f37e0b6a23124376bcc64f84c07ca4))
+* **team-sync:** record render size for future display-cap tuning ([3db2142](https://github.com/bhargavamin/contexer/commit/3db2142de300c52a68f7dabaacb08f87062f8256))
+* **team-sync:** staleness tag + exponential failure backoff ([ee9d138](https://github.com/bhargavamin/contexer/commit/ee9d1380915697a439e1469066b024a31cdbd36c))
+
+
+### Bug Fixes
+
+* **outbox:** close TOCTOU window in drain_outbox final save ([7803625](https://github.com/bhargavamin/contexer/commit/7803625f32baf9569db58dab464cf3f4f71a55eb))
+* **outbox:** drain failure must not block the current share ([4a5fcd8](https://github.com/bhargavamin/contexer/commit/4a5fcd878a038549419d1709245b9f0907dcee21))
+* **outbox:** enqueue failure must not escape share() ([d7b312a](https://github.com/bhargavamin/contexer/commit/d7b312a9c96bd827d4a7eb0f7feb06dd147917bc))
+* **remote:** classify insufficient-scope tool errors as auth failures ([8190ba6](https://github.com/bhargavamin/contexer/commit/8190ba6c9242c46fc06d5831e5c7c3fdc08b080a))
+* **remote:** phrase-level auth-error matching + honest tool-error degradation message ([4082cf1](https://github.com/bhargavamin/contexer/commit/4082cf127cdc20340d1a92b29d52f55cd048c132))
+* **team-context:** preserve non-team scope in partial-overlap branch ([4ad65a6](https://github.com/bhargavamin/contexer/commit/4ad65a6793d892fb738eba1731e4ed245e856e1c))
+* **team-poll:** guard legacy-pending unlink and harden codex migration marker ([eacf882](https://github.com/bhargavamin/contexer/commit/eacf8821267cabbfb8236d4cdcaab3a63f90ac6a))
+* **team-sync:** per-consumer team-poll delivery via sync log + high-water marks ([734704a](https://github.com/bhargavamin/contexer/commit/734704a863832f0389b9b5e534bb18ac6d3f5861))
+* **team-sync:** record render telemetry against a fresh cache snapshot ([570e03e](https://github.com/bhargavamin/contexer/commit/570e03ecc70646d493aaf07807572cb30883bf70))
+* **team-sync:** review fixes - cap-aware status count, sync-start timestamp, de-flaked test ([626f05a](https://github.com/bhargavamin/contexer/commit/626f05aaa9ee92ccedbd2edd87eeee7338382be4))
+
 ## [0.15.0](https://github.com/bhargavamin/contexer/compare/v0.14.2...v0.15.0) (2026-07-05)
 
 
