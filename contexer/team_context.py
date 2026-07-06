@@ -332,7 +332,8 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
         elif lid and overlap >= 0.5:
             # Heavy but partial overlap: keep the full row (may be a genuine divergence, e.g. a
             # different directive on the same topic) but tag the related local id for the reader.
-            lines.append(f"- [scope=team, overlaps local {lid[:8]}]{type_tag} {content}{id_tag}")
+            scope = r.get("scope", "team")
+            lines.append(f"- [scope={scope}, overlaps local {lid[:8]}]{type_tag} {content}{id_tag}")
         else:
             scope = r.get("scope", "team")
             lines.append(f"- [scope={scope}]{type_tag} {content}{id_tag}")

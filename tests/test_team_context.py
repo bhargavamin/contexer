@@ -160,7 +160,7 @@ def test_format_team_section_filters_by_type_and_query(tmp_repo):
 
 # 8 distinct tokens; a team row sharing 5 of them is 5/8 = 0.625 overlap (the 0.5-0.7 tier).
 _LOCAL8 = "alpha beta gamma delta epsilon zeta eta theta"
-_TEAM5 = "alpha beta gamma delta epsilon iota kappa lambda"  # 5/8 = 0.625
+_TEAM_PARTIAL_OVERLAP = "alpha beta gamma delta epsilon iota kappa lambda"  # 5/8 = 0.625
 
 
 def _seed_local(repo, content, session="s1", subtype=""):
@@ -169,10 +169,10 @@ def _seed_local(repo, content, session="s1", subtype=""):
     return did
 
 
-def _one_team_row(repo, content, rid="teamaaaa", rtype="architecture"):
+def _one_team_row(repo, content, rid="teamaaaa", rtype="architecture", scope="team"):
     team_context._save_cache(repo, {"repo_key": "k", "cursor": None, "decisions": [
         {"id": rid, "type": rtype, "content": content, "rationale": None,
-         "repo": None, "agent": None, "scope": "team"}]})
+         "repo": None, "agent": None, "scope": scope}]})
 
 
 def test_dedup_collapses_team_row_identical_to_local(tmp_repo):
@@ -187,12 +187,22 @@ def test_dedup_collapses_team_row_identical_to_local(tmp_repo):
 
 def test_dedup_partial_overlap_renders_full_with_tag(tmp_repo):
     lid = _seed_local(tmp_repo, _LOCAL8)
-    _one_team_row(tmp_repo, _TEAM5, rid="teambbbb")
+    _one_team_row(tmp_repo, _TEAM_PARTIAL_OVERLAP, rid="teambbbb")
     out = team_context.format_team_section(tmp_repo)
     assert f"[scope=team, overlaps local {lid[:8]}]" in out
     assert "iota kappa lambda" in out   # full divergent text stays visible
     assert "ratifies" not in out
     assert "(id=teambbbb)" in out
+
+
+def test_dedup_partial_overlap_preserves_non_team_scope(tmp_repo):
+    # The 0.5-0.7 partial-overlap branch must read `scope` from the row itself, not hardcode
+    # "team" - a non-"team" scope value must pass through unmodified, matching the else branch.
+    _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _TEAM_PARTIAL_OVERLAP, rid="teameeee", scope="org")
+    out = team_context.format_team_section(tmp_repo)
+    assert "[scope=org, overlaps local" in out
+    assert "[scope=team, overlaps local" not in out
 
 
 def test_dedup_unrelated_row_renders_unchanged(tmp_repo):
