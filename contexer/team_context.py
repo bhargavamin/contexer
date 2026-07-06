@@ -91,9 +91,12 @@ def _sync(repo_path: str, profile: config.Profile,
     actually tried the network) records its outcome as a `last_sync` cache key - {"at",
     "ok", "duration_ms", "consecutive_failures"} plus either {"upserted", "removed"} on
     success or {"error"} on failure - so `contexer status` can show when sync last ran and
-    why it degraded, without itself touching the network. `consecutive_failures` resets to
-    0 on success and increments on failure, driving the poll backoff (see _poll_interval).
-    A successful sync also stamps a top-level `last_ok_at` (epoch float) - the freshness
+    why it degraded, without itself touching the network. `at` is stamped once, from
+    `start` (captured before the network call), so it means "when the sync attempt began"
+    for both the success and degraded paths - not end-of-write, which would drift by
+    however long the cache write itself takes. `consecutive_failures` resets to 0 on
+    success and increments on failure, driving the poll backoff (see _poll_interval). A
+    successful sync also stamps a top-level `last_ok_at` (epoch float) - the freshness
     signal `format_team_section` uses to tag its header when the cache has gone stale.
 
     `timeout` (seconds) overrides RemoteStore's default transport timeout - used by the
@@ -121,7 +124,7 @@ def _sync(repo_path: str, profile: config.Profile,
         # decisions/cursor exactly as loaded - a transient outage must never wipe the cache.
         _save_cache(repo_path, {
             **cache,
-            "last_sync": {"at": time.time(), "ok": False, "duration_ms": duration_ms,
+            "last_sync": {"at": start, "ok": False, "duration_ms": duration_ms,
                          "error": "degraded",
                          "consecutive_failures": _consecutive_failures(cache) + 1},
         })
@@ -150,10 +153,10 @@ def _sync(repo_path: str, profile: config.Profile,
         "repo_key": key,
         "cursor": ctx.cursor or cache.get("cursor"),  # null cursor (empty pull) keeps prior
         "decisions": list(by_id.values()),
-        "last_sync": {"at": time.time(), "ok": True, "duration_ms": duration_ms,
+        "last_sync": {"at": start, "ok": True, "duration_ms": duration_ms,
                      "upserted": len(new_rows), "removed": len(removed),
                      "consecutive_failures": 0},
-        "last_ok_at": time.time(),
+        "last_ok_at": start,
     })
     return (new_rows, removed)
 

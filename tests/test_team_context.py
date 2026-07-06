@@ -173,6 +173,36 @@ def test_last_sync_no_cache_file_for_no_origin_repo(team_env, monkeypatch):
     assert not team_context._cache_path(team_env).exists()
 
 
+def test_last_sync_at_is_sync_start_not_end_of_write(team_env, monkeypatch):
+    # `at` must equal the clock reading taken BEFORE the network call, not a later one
+    # taken while computing duration_ms or serialising/writing the cache. Feed a fixed
+    # sequence of clock readings: 1000.0 (start), 1005.0 (right after the network call,
+    # used only for duration_ms). If the code ever reads the clock a THIRD time to stamp
+    # `at` (the bug: end-of-write instead of start-of-sync), that call drains this
+    # iterator and raises StopIteration, failing the test loudly rather than silently
+    # accepting a later timestamp.
+    times = iter([1000.0, 1005.0])
+    monkeypatch.setattr(team_context.time, "time", lambda: next(times))
+    ctx = RemoteContext(decisions=[_rd("t1", "team rule", "team")], deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["at"] == 1000.0  # the start reading, not the post-network one
+    assert last_sync["duration_ms"] == 5000
+
+
+def test_last_sync_at_is_sync_start_on_degraded_path(team_env, monkeypatch):
+    times = iter([2000.0, 2003.0])
+    monkeypatch.setattr(team_context.time, "time", lambda: next(times))
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("down"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    last_sync = cache["last_sync"]
+    assert last_sync["at"] == 2000.0
+    assert last_sync["duration_ms"] == 3000
+
+
 # ── consecutive_failures + last_ok_at (backoff / staleness telemetry) ────────────
 
 def test_success_sets_last_ok_at_and_resets_failures(team_env, monkeypatch):
@@ -474,6 +504,29 @@ def test_session_start_payload_no_status_suffix_without_team(tmp_repo):
     store.update_decision(tmp_repo, "local constraint x", "s1", subtype="constraint")
     payload = store.session_start_payload(tmp_repo)
     assert "| team:" not in payload["status"]
+
+
+def test_session_start_payload_status_suffix_caps_at_display_limit(tmp_repo):
+    # format_team_section only ever renders _TEAM_DISPLAY (25) rows, so a cache holding
+    # more than that must not claim a synced count the model never actually received.
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    decisions = [{"id": f"t{i}", "type": "architecture", "content": f"rule {i}",
+                  "rationale": None, "repo": None, "agent": None, "scope": "team"}
+                 for i in range(30)]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 30 synced (25 shown)")
+
+
+def test_session_start_payload_status_suffix_exact_cap_no_shown_note(tmp_repo):
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    decisions = [{"id": f"t{i}", "type": "architecture", "content": f"rule {i}",
+                  "rationale": None, "repo": None, "agent": None, "scope": "team"}
+                 for i in range(25)]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 25 synced")
+    assert "shown" not in payload["status"]
 
 
 def test_session_start_payload_fresh_clone_shows_team(tmp_repo):

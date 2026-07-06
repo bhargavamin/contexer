@@ -144,11 +144,11 @@ class TestStatusTeamSync:
         slug = _store._slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"repo_key": "k", "cursor": "c1", "decisions": [],
-             "last_sync": {"at": time.time() - 5, "ok": True, "duration_ms": 42,
+             "last_sync": {"at": time.time() - 4, "ok": True, "duration_ms": 42,
                           "upserted": 1, "removed": 0}}))
         status()
         out = capsys.readouterr().out
-        assert "last sync:  ok, 5s ago (42ms)" in out
+        assert "last sync:  ok, 4s ago (42ms)" in out
 
     def test_team_mode_shows_last_sync_failed(self, installed_home, capsys):
         from contexer import store as _store
