@@ -639,3 +639,84 @@ class TestLegacyRepoSettingsCleanup:
 
     def test_no_plugin_warning_on_clean_home(self, clean_home):
         assert claude._stale_plugin_warning(clean_home) is None
+
+
+class TestCaptureTaskStubs:
+    """In-process coverage of the self-retiring capture_task stubs (the E2E class
+    TestStaleCaptureTaskHook exercises them through bash, which coverage can't see)."""
+
+    _STALE_CLAUDE = 'python -c "...claude.capture_task(...)..."'
+    _STALE_CURSOR = 'python -c "...cursor.capture_task(...)..."'
+    _HEALTHY = "echo healthy"
+
+    def test_claude_stub_retires_own_hook(self, clean_home):
+        (clean_home / ".claude").mkdir(exist_ok=True)
+        p = clean_home / ".claude" / "settings.json"
+        p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._STALE_CLAUDE}]},
+            {"hooks": [{"type": "command", "command": self._HEALTHY}]}]}}))
+        assert claude.capture_task("", "") == "{}"
+        ups = json.loads(p.read_text())["hooks"]["UserPromptSubmit"]
+        assert [h["command"] for g in ups for h in g["hooks"]] == [self._HEALTHY]
+
+    def test_claude_stub_heals_codex_hooks_too(self, clean_home):
+        p = clean_home / ".codex" / "hooks.json"
+        p.parent.mkdir()
+        p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._STALE_CLAUDE}]}]}}))
+        assert claude.capture_task("", "") == "{}"
+        assert "capture_task" not in p.read_text()
+
+    def test_cursor_stub_retires_own_hook_and_passes_through(self, clean_home):
+        from contexer.adapters import cursor
+        p = clean_home / ".cursor" / "hooks.json"
+        p.parent.mkdir()
+        p.write_text(json.dumps({"hooks": {"beforeSubmitPrompt": [
+            {"type": "command", "command": self._STALE_CURSOR},
+            {"type": "command", "command": self._HEALTHY}]}}))
+        out = json.loads(cursor.capture_task("", ""))
+        assert isinstance(out, dict)
+        bsp = json.loads(p.read_text())["hooks"]["beforeSubmitPrompt"]
+        assert [h["command"] for h in bsp] == [self._HEALTHY]
+
+    def test_stubs_failsoft_without_configs(self, clean_home):
+        from contexer.adapters import codex, cursor
+        assert claude.capture_task("", "") == "{}"
+        assert json.loads(cursor.capture_task("", ""))
+        codex.retire_capture_task(clean_home)  # must not raise
+
+    def test_retiring_only_hook_leaves_no_empty_keys(self, clean_home):
+        # When the stale hook was the only one, neither a dangling empty event list
+        # nor an empty "hooks" key may remain (Greptile, PR #98) — matching the
+        # clean_legacy_repo_settings behavior.
+        from contexer.adapters import cursor
+        (clean_home / ".claude").mkdir(exist_ok=True)
+        (clean_home / ".codex").mkdir()
+        (clean_home / ".cursor").mkdir()
+        claude_p = clean_home / ".claude" / "settings.json"
+        codex_p = clean_home / ".codex" / "hooks.json"
+        cursor_p = clean_home / ".cursor" / "hooks.json"
+        claude_p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._STALE_CLAUDE}]}]}}))
+        codex_p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._STALE_CLAUDE}]}]}}))
+        cursor_p.write_text(json.dumps({"hooks": {"beforeSubmitPrompt": [
+            {"type": "command", "command": self._STALE_CURSOR}]}}))
+        claude.capture_task("", "")    # heals claude settings + codex hooks.json
+        cursor.capture_task("", "")
+        assert json.loads(claude_p.read_text()) == {}
+        assert json.loads(codex_p.read_text()) == {}
+        assert json.loads(cursor_p.read_text()) == {}
+
+    def test_codex_retire_preserves_foreign_and_handles_corrupt(self, clean_home):
+        from contexer.adapters import codex
+        p = clean_home / ".codex" / "hooks.json"
+        p.parent.mkdir()
+        p.write_text("{corrupt")
+        codex.retire_capture_task(clean_home)          # corrupt: no raise, no change
+        assert p.read_text() == "{corrupt"
+        p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._HEALTHY}]}]}}))
+        before = p.read_text()
+        codex.retire_capture_task(clean_home)          # nothing stale: no churn
+        assert p.read_text() == before

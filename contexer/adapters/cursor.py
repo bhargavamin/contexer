@@ -184,6 +184,36 @@ _HOOK_MARKER_CON = "cursor.capture_constraint"
 _HOOK_MARKER_SS = "cursor.session_start"
 
 
+def capture_task(repo_path: str, raw: str) -> str:
+    """Self-retiring no-op stub for the removed "last task" hook entrypoint (#58).
+
+    Mirrors claude.capture_task: install() strips the capture-task hook on
+    reinstall, but a package-only upgrade leaves the installed beforeSubmitPrompt
+    hook calling this function — without the stub that is an AttributeError
+    traceback on every prompt. Being invoked is proof of the stale hook, so remove
+    it from ~/.cursor/hooks.json and pass the prompt through. Args are unused but
+    keep the installed hook's call signature. Fail-soft."""
+    try:
+        path = Path.home() / ".cursor" / "hooks.json"
+        cfg = base._load_safe(path)
+        hk = cfg.get("hooks")
+        if isinstance(hk, dict) and isinstance(hk.get("beforeSubmitPrompt"), list):
+            bsp = hk["beforeSubmitPrompt"]
+            after = [h for h in bsp
+                     if not (isinstance(h, dict) and _HOOK_MARKER_TASK in h.get("command", ""))]
+            if after != bsp:
+                if after:
+                    hk["beforeSubmitPrompt"] = after
+                else:
+                    hk.pop("beforeSubmitPrompt", None)
+                if not hk:
+                    cfg.pop("hooks", None)
+                base._save(path, cfg)
+    except Exception:
+        pass
+    return json.dumps(format_prompt_passthrough())
+
+
 def _cmd(entry: str) -> str:
     """A Cursor command hook: pass repo via "" (session_start reads workspace_roots from
     stdin); read stdin for prompt/session. Cursor runs hooks from the project root."""
