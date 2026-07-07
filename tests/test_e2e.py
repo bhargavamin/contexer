@@ -1536,6 +1536,15 @@ class TestNonGitProjectDir:
         assert "no context stored" in payload["status"]
         assert not (tmp_home / ".contexer" / ".current_repo").exists()
 
+    def test_deleted_cwd_never_crashes_the_hook(self, tmp_home, monkeypatch):
+        # os.getcwd() raises OSError when the cwd was unlinked; the payload builders
+        # have no outer guard, so the fallback must swallow it (review finding, PR #99).
+        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        monkeypatch.setattr(store.os, "getcwd", lambda: (_ for _ in ()).throw(OSError()))
+        payload = store.session_start_payload("")
+        assert "no context stored" in payload["status"]
+        assert store.bootstrap_prompt_payload("", "hello") is not None
+
     def test_filesystem_root_is_not_a_sane_repo(self):
         assert store._is_sane_repo("/") is False
         assert store._is_sane_repo("//") is False

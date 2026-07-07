@@ -1542,7 +1542,10 @@ def _hook_cwd_repo(repo_path: str) -> str:
     unguarded - callers that anchor the pointer still sanity-check first."""
     if repo_path:
         return repo_path
-    cwd = os.getcwd()
+    try:
+        cwd = os.getcwd()
+    except OSError:  # cwd unlinked since the process started - hooks must never crash
+        return repo_path
     return cwd if _is_sane_repo(cwd) else repo_path
 
 
