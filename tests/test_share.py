@@ -107,8 +107,8 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-9" in msg
-    assert "personal" in msg.lower()
-    assert "team" in msg.lower() and "won't see" in msg.lower()  # honest about visibility
+    assert "team" in msg.lower()
+    assert "approval workflow" in msg.lower()  # honest about visibility (teams launch)
     assert len(fake.calls) == 1
     kw = fake.calls[0]
     assert kw["type"] == "architecture"
@@ -172,7 +172,7 @@ def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share_all(tmp_repo, profile=TEAM)
     assert "3" in msg
-    assert "won't see" in msg.lower()  # honest about visibility, like single share
+    assert "approval workflow" in msg.lower()  # honest about visibility, like single share
     assert [c["decision_id"] for c in fake.calls] == [id1, id2, id3]  # oldest first
     assert all(c["repo"] == "github.com/a/b" for c in fake.calls)
     assert share._load_outbox() == []
@@ -460,7 +460,7 @@ def test_share_survives_drain_failure(tmp_repo, monkeypatch):
 
     monkeypatch.setattr(share, "drain_outbox", boom)
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "Synced decision" in msg
+    assert "Shared decision" in msg
     assert [c["decision_id"] for c in fake.calls] == [did]  # the push still happened
 
 

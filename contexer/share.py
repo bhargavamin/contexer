@@ -1,8 +1,8 @@
 """Explicit share: push a local decision up to the Teams cloud context (C4).
 
 Path B, the write counterpart to team_context.pull. Sharing is an EXPLICIT verb — never
-auto-shares on capture. v1 syncs to your PERSONAL cloud context (push_decision auto-approves
-it); a team `shared_candidate` awaits a team-scoped push endpoint (future Track A).
+auto-shares on capture. Pushes land in your cloud workspace; team visibility follows the
+Teams approval workflow (lead/member roles) rather than being immediate on push.
 
 NOTE: the profile -> RemoteStore -> canonical_repo_key(git origin) boilerplate is duplicated
 with team_context.pull; DRY into one helper once C4 and C5 are both merged.
@@ -176,8 +176,8 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
                     "will retry automatically at the next session start (cloud "
                     "unreachable or auth rejected - see the warning above).")
         sent += 1
-    return (f"Synced {sent} decision(s) to your personal cloud context - "
-            "teammates won't see these until team promotion ships.")
+    return (f"Shared {sent} decision(s) to your team's cloud context - "
+            "teammates' agents pick them up once they clear your team's approval workflow.")
 
 
 def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:
@@ -218,8 +218,7 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
                     "above). Your local decision is unchanged.")
         return ("Share failed: cloud unreachable or auth rejected (see the warning above). "
                 "Queued - it will retry automatically at the next session start.")
-    # Honest about scope: v1 push_decision writes to the CALLER's personal cloud context
-    # only (see module docstring) - teammates get nothing until team promotion (Track A)
-    # ships, so the success message must not imply the decision is visible to the team yet.
-    return (f"Synced decision to your personal cloud context (server id={server_id}) - "
-            "teammates won't see this until team promotion ships.")
+    # Teams is live: visibility to teammates is governed by the approval workflow
+    # (lead/member), so the message points there instead of promising instant sync.
+    return (f"Shared decision to your team's cloud context (server id={server_id}) - "
+            "teammates' agents pick it up once it clears your team's approval workflow.")

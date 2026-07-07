@@ -33,7 +33,7 @@ def test_share_then_other_clone_pulls_it(team_stack):
     server = team_stack
     # Clone A captures a decision locally and shares it up.
     _, did = store.update_decision(CLONE_A, "use postgres for the primary datastore", "sA", subtype="architecture")
-    assert "Synced" in share.share(CLONE_A, profile=TEAM)
+    assert "Shared" in share.share(CLONE_A, profile=TEAM)
     assert did in server.rows  # pushed under the local (stable) decision id
 
     # A lead approves the shared decision (personal -> team-approved).

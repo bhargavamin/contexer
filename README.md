@@ -377,7 +377,7 @@ This is intentional. Every piece of complexity added to a decision store is a pi
 
 ---
 
-## Contexer Teams (early access)
+## Contexer Teams
 
 The open-source Contexer is per-developer. **Contexer Teams** makes your team's engineering and security standards **present in every AI agent** — the same engine, one shared, governed source of truth across the org.
 
@@ -387,15 +387,20 @@ The open-source Contexer is per-developer. **Contexer Teams** makes your team's 
 
 A few people publish the rules; everyone else's agent just consumes them — no team-wide capture discipline required.
 
+Teams is live.
+It includes unlimited team members with OAuth sign-in, a shared decision repository served over the team MCP endpoint, and a role-based approval workflow (lead / member) with confidence scores and supporting evidence on every decision.
+Pricing is $10 per team/month with a 30-day free trial - no credit card required.
+
 > [!NOTE]
 > **Contexer steers, it doesn't enforce — and that distinction matters.**
 > It reliably *tells* every agent your standards at the moment it writes code — the leftmost shift, fewer violations at the source. It does **not** scan code, block commits, or guarantee compliance; your CI, secret scanners, and PR gates still verify and enforce. Contexer makes agents *aware*; it complements your gates, it doesn't replace them.
 
-→ **[Request early access at contexer.ai](https://contexer.ai)** — design-partner teams.
+→ **[Start a 30-day free trial at app.contexer.ai](https://app.contexer.ai)** - or read more at [contexer.ai](https://contexer.ai).
 
 ### Connecting to a team
 
-Once you have access, joining a team is two commands — nothing to hand-edit:
+Sign up (or sign in) at [app.contexer.ai](https://app.contexer.ai) and create or join a team.
+After that, connecting your machine is two commands - nothing to hand-edit:
 
 ```bash
 contexer install     # local setup (same as above)
@@ -410,7 +415,7 @@ Pointing at a self-hosted or local Teams server (for development): set `CONTEXER
 
 ## Limitations
 
-- **Personal, not team.** The open-source store is per-user, per-machine — shared rules don't propagate between developers. Team sync, org-wide rules, and governance live in **Contexer Teams** (early access — see above).
+- **Personal, not team.** The open-source store is per-user, per-machine — shared rules don't propagate between developers. Team sync, org-wide rules, and governance live in **Contexer Teams** (see above).
 - **Cursor parity is partial.** Cursor's `beforeSubmitPrompt` hook can't inject context (only allow/block) and it has no usable compaction hook, so per-prompt rationale injection and compaction save/restore are unavailable there. Cursor steering rides on the session-start nudge plus an always-apply rule file.
 - **Gemini compression is deferred.** Gemini CLI has `PreCompress` but no `PostCompress`; Contexer re-injects stored context at the next prompt rather than immediately after compression.
 - **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch.
