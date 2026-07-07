@@ -172,6 +172,54 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+def _retire_capture_task_hook() -> None:
+    """Remove the pre-#58 capture-task hook group from ~/.claude/settings.json.
+
+    Fail-soft and write-only-on-change, like clean_legacy_repo_settings."""
+    try:
+        path = Path.home() / ".claude" / "settings.json"
+        settings = _load_safe(path)
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            return
+        ups = hooks.get("UserPromptSubmit")
+        if not isinstance(ups, list):
+            return
+        after = _filter_groups(ups, ["claude.capture_task"])
+        if after != ups:
+            if after:
+                hooks["UserPromptSubmit"] = after
+            else:
+                hooks.pop("UserPromptSubmit", None)
+            if not hooks:
+                settings.pop("hooks", None)
+            _save(path, settings)
+    except Exception:
+        pass
+
+
+def capture_task(repo_path: str, raw: str) -> str:
+    """Self-retiring no-op stub for the removed "last task" hook entrypoint (#58).
+
+    install() strips the capture-task hook on reinstall, but a package-only upgrade
+    leaves the installed hook text calling this function — without the stub that is
+    an AttributeError traceback on every prompt (the same failure class as the
+    removed capture_context tool, PR #96). Being invoked is proof of a stale hook,
+    so the stub removes that hook group before returning the silent no-op: the
+    error disappears immediately and the dead per-prompt subprocess stops spawning
+    from the next prompt on. Both hosts that ever wired this exact command are
+    healed — this module's own settings.json here, Codex's hooks.json via its
+    adapter (each module edits only its own file). Args are unused but keep the
+    installed hook's call signature."""
+    _retire_capture_task_hook()
+    try:
+        from contexer.adapters import codex
+        codex.retire_capture_task(Path.home())
+    except Exception:
+        pass
+    return "{}"
+
+
 def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
     """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
 

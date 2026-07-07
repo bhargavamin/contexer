@@ -1454,6 +1454,108 @@ class TestUpgradeFromLegacyInstall:
             "install must tell the user their plugin still ships the removed hook"
 
 
+# ── 14. Stale capture_task hooks after a package-only upgrade ─────────────────
+
+class TestStaleCaptureTaskHook:
+    """The "last task" feature was removed in #58; install() strips its hooks, but a
+    package-only upgrade (no reinstall) leaves the installed hook text calling the
+    removed entrypoint - an AttributeError traceback on every prompt, the same
+    failure class upgrading users reported for capture_context. The entrypoints now
+    exist as self-retiring no-op stubs: invoked (only ever by a stale hook), they
+    return the host's silent no-op AND remove their own hook group, so the next
+    prompt no longer spawns the dead subprocess. Exercised here with the verbatim
+    pre-#58 hook commands, run through bash exactly as each host runs them."""
+
+    # Verbatim pre-#58 hook commands (git history: 686e02a^), with the venv python.
+    def _claude_cmd(self):
+        return ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                f'"{sys.executable}" -c "from contexer.adapters import claude; import sys; '
+                'print(claude.capture_task(sys.argv[1], sys.stdin.read()))" "$REPO" '
+                '# contexer-managed-hook')
+
+    def _codex_cmd(self):
+        return ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+                f'"{sys.executable}" -c "from contexer.adapters import claude; import sys; '
+                'print(claude.capture_task(sys.argv[1], sys.stdin.read()))" "$REPO"')
+
+    def _cursor_cmd(self):
+        return (f'"{sys.executable}" -c "from contexer.adapters import cursor; import sys; '
+                "print(cursor.capture_task('', sys.stdin.read()))\"")
+
+    _HEALTHY = "echo 'healthy contexer capture_constraint hook'"
+
+    def _run(self, tmp_home: Path, command: str) -> str:
+        env = dict(os.environ, HOME=str(tmp_home))
+        proc = subprocess.run(["bash", "-c", command], cwd=tmp_home, env=env,
+                              input='{"prompt": "hello"}', capture_output=True,
+                              text=True, timeout=60)
+        assert proc.returncode == 0, f"stale hook must not error: {proc.stderr}"
+        assert "Traceback" not in proc.stderr
+        return proc.stdout.strip()
+
+    def test_claude_stale_hook_silences_and_retires_itself(self, tmp_home):
+        settings_path = tmp_home / ".claude" / "settings.json"
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._claude_cmd()}]},
+            {"hooks": [{"type": "command", "command": self._HEALTHY}]},
+        ]}}))
+        assert self._run(tmp_home, self._claude_cmd()) == "{}"
+        ups = json.loads(settings_path.read_text())["hooks"]["UserPromptSubmit"]
+        cmds = [h["command"] for g in ups for h in g["hooks"]]
+        assert cmds == [self._HEALTHY], "stale hook gone, healthy hook untouched"
+
+    def test_codex_stale_hook_healed_cross_host(self, tmp_home):
+        # Codex wired the same claude.capture_task command; the stub must heal
+        # ~/.codex/hooks.json no matter which host's stale hook invoked it.
+        codex_hooks = tmp_home / ".codex" / "hooks.json"
+        codex_hooks.parent.mkdir()
+        codex_hooks.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._codex_cmd()}]},
+            {"hooks": [{"type": "command", "command": self._HEALTHY}]},
+        ]}}))
+        assert self._run(tmp_home, self._codex_cmd()) == "{}"
+        ups = json.loads(codex_hooks.read_text())["hooks"]["UserPromptSubmit"]
+        cmds = [h["command"] for g in ups for h in g["hooks"]]
+        assert cmds == [self._HEALTHY]
+
+    def test_cursor_stale_hook_passes_through_and_retires_itself(self, tmp_home):
+        cursor_hooks = tmp_home / ".cursor" / "hooks.json"
+        cursor_hooks.parent.mkdir()
+        cursor_hooks.write_text(json.dumps({"hooks": {"beforeSubmitPrompt": [
+            {"type": "command", "command": self._cursor_cmd()},
+            {"type": "command", "command": self._HEALTHY},
+        ]}}))
+        out = json.loads(self._run(tmp_home, self._cursor_cmd()))
+        assert out.get("continue", True) is not False, "prompt must pass through"
+        bsp = json.loads(cursor_hooks.read_text())["hooks"]["beforeSubmitPrompt"]
+        assert [h["command"] for h in bsp] == [self._HEALTHY]
+
+    def test_stub_is_failsoft_without_any_config(self, tmp_home):
+        # No settings/hooks files at all: the stub must still return the no-op.
+        assert self._run(tmp_home, self._claude_cmd()) == "{}"
+        out = json.loads(self._run(tmp_home, self._cursor_cmd()))
+        assert isinstance(out, dict)
+
+    def test_second_invocation_is_idempotent(self, tmp_home):
+        settings_path = tmp_home / ".claude" / "settings.json"
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._claude_cmd()}]},
+        ]}}))
+        self._run(tmp_home, self._claude_cmd())
+        before = settings_path.read_text()
+        assert self._run(tmp_home, self._claude_cmd()) == "{}"
+        assert settings_path.read_text() == before, "no churn once already retired"
+
+    def test_gemini_needs_no_stub(self):
+        # Gemini's capture_task usage was internal to before_agent - the installed
+        # hook command never referenced it, so upgrading the package upgrades the
+        # behavior. Pin that assumption: the hook entrypoints it DOES wire exist.
+        from contexer.adapters import gemini
+        for entry in ("session_start", "before_agent", "after_write",
+                      "pre_compress", "session_end"):
+            assert callable(getattr(gemini, entry, None)), \
+                f"gemini.{entry} is wired by installed hooks and must exist"
+
 # ── 15. Non-git project directories ───────────────────────────────────────────
 
 class TestNonGitProjectDir:
