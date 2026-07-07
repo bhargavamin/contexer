@@ -1239,3 +1239,216 @@ class TestMainDispatch:
         cli.main()
         monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
         cli.main()  # should not raise
+
+
+# ── 13. Upgrade from a legacy (pre-CLI) install ───────────────────────────────
+
+# Verbatim shape of what the June-2026 from-source installer wrote into the REPO's
+# .claude/settings.json (see git history: bd4d178). Upgrading users reported two
+# symptoms from this exact file: "Unknown tool: capture_context" on every prompt
+# (the tool was removed in #58) and a second, contradictory "no context stored yet"
+# startup message from the dead-clone SessionStart hook.
+def _legacy_repo_settings(clone: str, repo: str) -> dict:
+    return {
+        "hooks": {
+            "SessionStart": [{"hooks": [{
+                "type": "command",
+                "command": (f"uv run --directory {clone} python -c \"import sys,json; "
+                            f"sys.path.insert(0,'{clone}'); import store; "
+                            f"print(json.dumps(store.get_session_start_context('{repo}')))\""),
+                "statusMessage": "Loading session context..."}]}],
+            "PreCompact": [{"hooks": [{
+                "type": "command",
+                "command": ("echo '{\"systemMessage\": \"Contexer: context compaction "
+                            "starting — call update_context for any decisions not yet stored\"}'"),
+                "statusMessage": "Saving decisions before compact..."}]}],
+            "PostCompact": [{"hooks": [{
+                "type": "command",
+                "command": (f"uv run --directory {clone} python -c \"import sys,json; "
+                            f"sys.path.insert(0,'{clone}'); import store; "
+                            "msg='Contexer: no context stored'; "
+                            "print(json.dumps({'systemMessage':msg}))\""),
+                "statusMessage": "Reloading context after compact..."}]}],
+            "UserPromptSubmit": [
+                {"hooks": [{
+                    "type": "mcp_tool", "server": "contexer", "tool": "capture_context",
+                    "input": {"repo_path": repo, "description": "${prompt}"},
+                    "once": True, "statusMessage": "Capturing task..."}]},
+                {"hooks": [{
+                    "type": "command",
+                    "command": ("echo '{\"hookSpecificOutput\": {\"hookEventName\": "
+                                "\"UserPromptSubmit\", \"additionalContext\": \"Reminder: if you "
+                                "make a significant decision, establish a pattern, or document a "
+                                "constraint this turn, call update_context.\"}}'"),
+                    "statusMessage": "Loading context reminder..."}]},
+            ],
+        },
+    }
+
+
+class TestUpgradeFromLegacyInstall:
+    """Full upgrading-user journey: legacy repo-level hooks + legacy home hooks →
+    upgrade → exactly ONE contexer SessionStart hook remains anywhere, no reference
+    to the removed capture_context tool survives, and the REAL installed hook
+    command (run through a shell, as Claude Code runs it) emits exactly one
+    systemMessage and self-heals the repo file."""
+
+    @pytest.fixture
+    def legacy_user(self, tmp_home, monkeypatch):
+        """A user machine mid-upgrade: git repo with legacy repo-level hooks, plus a
+        legacy (be12ecd-era) home settings.json with the old global hooks."""
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+        repo = tmp_home / "work" / "myproject"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text(
+            json.dumps(_legacy_repo_settings("/dead/clone", str(repo)), indent=2))
+        # Legacy home hooks (global era, still pre-CLI): old ss hook, mcp_tool
+        # capture hook, reminder echo, stale allow entry.
+        home_settings = {
+            "hooks": {
+                "SessionStart": [{"hooks": [{
+                    "type": "command",
+                    "command": ("REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && "
+                                "uv run --directory /dead/clone python -c \"import store; "
+                                "print(store.get_session_start_context(''))\" \"$REPO\"")}]}],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "mcp_tool", "server": "contexer",
+                                "tool": "capture_context", "once": True}]},
+                    {"hooks": [{"type": "command", "command":
+                        "echo '... Reminder: if you make a significant decision, establish a "
+                        "pattern, or document a constraint this turn, call update_context.'"}]},
+                ],
+            },
+            "permissions": {"allow": ["mcp__contexer__capture_context"]},
+        }
+        (tmp_home / ".claude" / "settings.json").write_text(json.dumps(home_settings))
+        return repo
+
+    def _contexer_session_start_groups(self, tmp_home, repo) -> list:
+        """All SessionStart hook groups Claude Code would fire for this repo (home +
+        repo-level settings) that belong to contexer."""
+        groups = []
+        for p in (tmp_home / ".claude" / "settings.json",
+                  repo / ".claude" / "settings.json"):
+            if p.exists():
+                groups += json.loads(p.read_text()).get("hooks", {}).get("SessionStart", [])
+        return [g for g in groups if any(
+            "contexer" in str(h).lower() or "store.get_session_start_context" in str(h)
+            for h in g.get("hooks", []))]
+
+    def test_upgrade_leaves_exactly_one_session_start_hook(self, legacy_user, tmp_home, monkeypatch):
+        repo = legacy_user
+        monkeypatch.chdir(repo)   # user runs `contexer install` from their project
+        cli.install()
+        assert len(self._contexer_session_start_groups(tmp_home, repo)) == 1, \
+            "exactly one contexer SessionStart hook may remain — one startup message"
+
+    def test_upgrade_removes_every_capture_context_reference(self, legacy_user, tmp_home, monkeypatch):
+        repo = legacy_user
+        monkeypatch.chdir(repo)
+        cli.install()
+        for p in (tmp_home / ".claude" / "settings.json",
+                  repo / ".claude" / "settings.json"):
+            assert "capture_context" not in p.read_text(), \
+                f"{p} still references the removed capture_context tool"
+
+    def test_upgrade_cleans_repo_settings_and_logs_it(self, legacy_user, tmp_home, monkeypatch):
+        from contexer.adapters import claude as claude_adapter
+        repo = legacy_user
+        monkeypatch.chdir(repo)
+        log = "\n".join(claude_adapter.install(tmp_home))
+        assert "Removed legacy Contexer hooks" in log
+        hooks = json.loads((repo / ".claude" / "settings.json").read_text()).get("hooks", {})
+        assert hooks == {}, "every legacy repo-level hook group was contexer's — all must go"
+
+    def test_uninstall_also_cleans_repo_settings(self, legacy_user, tmp_home, monkeypatch):
+        repo = legacy_user
+        monkeypatch.chdir(repo)
+        cli.install()
+        # Re-seed the legacy file to prove uninstall cleans it independently.
+        (repo / ".claude" / "settings.json").write_text(
+            json.dumps(_legacy_repo_settings("/dead/clone", str(repo))))
+        cli.uninstall()
+        assert "capture_context" not in (repo / ".claude" / "settings.json").read_text()
+
+    def test_stale_permission_pruned_on_upgrade(self, legacy_user, tmp_home, monkeypatch):
+        monkeypatch.chdir(legacy_user)
+        cli.install()
+        allow = json.loads((tmp_home / ".claude" / "settings.json").read_text())["permissions"]["allow"]
+        assert "mcp__contexer__capture_context" not in allow
+        assert "mcp__contexer__update_context" in allow
+
+    def _run_installed_session_start_hook(self, tmp_home, repo) -> dict:
+        """Execute the installed SessionStart hook command exactly as Claude Code does:
+        through a shell, cwd = the repo, stdin = the hook event JSON."""
+        settings = json.loads((tmp_home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for g in settings["hooks"]["SessionStart"]
+                for h in g["hooks"] if h.get("type") == "command"]
+        assert len(cmds) == 1
+        env = dict(os.environ, HOME=str(tmp_home))
+        proc = subprocess.run(
+            ["bash", "-c", cmds[0]], cwd=repo, env=env, input='{"source": "startup"}',
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+
+    def test_real_hook_run_emits_one_message_and_heals_repo(self, legacy_user, tmp_home, monkeypatch):
+        """Package-upgrade-only path (user upgrades the package but never re-runs
+        `contexer install` from the repo): the modern home hook alone, executed for
+        real through bash, must emit exactly one systemMessage AND strip the legacy
+        repo-level hooks via the sync_memory self-heal — so the session after next
+        is down to one startup message with no reinstall."""
+        repo = legacy_user
+        monkeypatch.chdir(tmp_home)      # install runs elsewhere: repo file NOT cleaned here
+        cli.install()
+        assert "capture_context" in (repo / ".claude" / "settings.json").read_text(), \
+            "precondition: legacy repo hooks still present before the session"
+        out = self._run_installed_session_start_hook(tmp_home, repo)
+        assert isinstance(out.get("systemMessage"), str) and out["systemMessage"].count("Contexer:") == 1
+        healed = (repo / ".claude" / "settings.json").read_text()
+        assert "capture_context" not in healed, "hook run must self-heal the repo settings"
+        assert len(self._contexer_session_start_groups(tmp_home, repo)) == 1
+
+    def test_second_session_stays_clean(self, legacy_user, tmp_home, monkeypatch):
+        repo = legacy_user
+        monkeypatch.chdir(tmp_home)
+        cli.install()
+        self._run_installed_session_start_hook(tmp_home, repo)   # session 1: heals
+        before = (repo / ".claude" / "settings.json").read_text()
+        out = self._run_installed_session_start_hook(tmp_home, repo)  # session 2: clean
+        assert out["systemMessage"].count("Contexer:") == 1
+        assert (repo / ".claude" / "settings.json").read_text() == before, \
+            "healing must be idempotent — no churn on an already-clean file"
+
+    def test_home_git_repo_never_cleans_global_settings(self, tmp_home, monkeypatch):
+        """Dotfiles-in-home: HOME itself is a git repo, and the user runs
+        `contexer install` from ~. The cwd's git root then IS the home dir, and
+        ~/.claude/settings.json is the GLOBAL config whose freshly-written modern
+        hooks contain the legacy markers — the cleanup must refuse to touch it
+        (Greptile P1, PR #96: without the _is_sane_repo guard, install stripped
+        the very hooks it had just written)."""
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_home, check=True)
+        monkeypatch.chdir(tmp_home)
+        cli.install()
+        hooks = json.loads((tmp_home / ".claude" / "settings.json").read_text())["hooks"]
+        assert "SessionStart" in hooks, "global SessionStart hook must survive install from ~"
+        assert "PreCompact" in hooks
+        cli.uninstall()   # same guard on the uninstall path — must not raise
+
+    def test_install_log_surfaces_stale_plugin_warning(self, tmp_home):
+        from contexer.adapters import claude as claude_adapter
+        cache = tmp_home / ".claude" / "plugins" / "cache" / "mp" / "contexer" / "0.1.0"
+        (cache / "hooks").mkdir(parents=True)
+        (cache / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {
+            "UserPromptSubmit": [{"hooks": [{"type": "mcp_tool", "server": "contexer",
+                                             "tool": "capture_context"}]}]}}))
+        (tmp_home / ".claude" / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2, "plugins": {"contexer@mp": [{"installPath": str(cache)}]}}))
+        log = "\n".join(claude_adapter.install(tmp_home))
+        assert "claude plugin update contexer" in log, \
+            "install must tell the user their plugin still ships the removed hook"
