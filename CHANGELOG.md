@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.17.0](https://github.com/bhargavamin/contexer/compare/v0.16.1...v0.17.0) (2026-07-07)
+
+
+### Features
+
+* **share:** add contexer share --all to push every decision ([5c02849](https://github.com/bhargavamin/contexer/commit/5c02849b90e26040c8b4a0312051dfe77b8a1403))
+
+
+### Bug Fixes
+
+* **hooks:** resolve non-git project dirs via the hook's own cwd ([d28cb7a](https://github.com/bhargavamin/contexer/commit/d28cb7a3f5d38933ef49e991a64edfa49814b3cf))
+* **hooks:** resolve non-git project dirs via the hook's own cwd ([cefa543](https://github.com/bhargavamin/contexer/commit/cefa5431d6656859623c88c1b8f834f1f227c243))
+* **share:** report exact queued count when the outbox write fails mid-queue ([5c487ef](https://github.com/bhargavamin/contexer/commit/5c487efd9e4c0c56b6ba8761315659613f7ca9c9))
+* **store:** guard _hook_cwd_repo against a deleted working directory ([323828d](https://github.com/bhargavamin/contexer/commit/323828d01f4e0136de820507667c40511580a924))
+
 ## [0.16.1](https://github.com/bhargavamin/contexer/compare/v0.16.0...v0.16.1) (2026-07-07)
 
 
