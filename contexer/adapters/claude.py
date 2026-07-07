@@ -565,10 +565,11 @@ def install(home: Path) -> list[str]:
 
 
 def _stale_plugin_warning(home: Path) -> str | None:
-    """Warn when an installed Contexer *plugin* still ships the removed capture_context
-    mcp_tool hook. Plugin caches belong to Claude Code — `contexer install` must not
-    edit them — so the only lever is telling the user to update/remove the plugin.
-    Fail-soft: any parse problem reads as "no warning"."""
+    """Warn when an installed Contexer plugin still ships the removed capture hook.
+
+    Plugin caches belong to Claude Code — `contexer install` must not edit them — so
+    the only lever is telling the user to update/remove the plugin. Fail-soft: any
+    parse problem reads as "no warning"."""
     try:
         reg = _load_safe(home / ".claude" / "plugins" / "installed_plugins.json")
         plugins = reg.get("plugins")
