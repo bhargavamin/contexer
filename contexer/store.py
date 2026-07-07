@@ -1152,24 +1152,10 @@ def get_pending_decisions(repo_path: str) -> list[dict]:
     ]
 
 
-def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
-    """Return a decision's current shareable fields, or None (C4).
-
-    Resolves `decision_id` (full UUID or 8-char prefix) or, when omitted, the most
-    recently updated decision. Ignored decisions are excluded. Returns the push wire
-    projection {id, type, content, confidence, evidence, source}: `type` is the decision
-    subtype; `evidence` is None when empty so the push omits it."""
-    data = _load(repo_path)
-    decisions = [e for e in data.get("entries", [])
-                 if e.get("type") == "decision" and _entry_status(e) != "ignored"]
-    if not decisions:
-        return None
-    if decision_id:
-        entry = next((e for e in decisions if e.get("id", "").startswith(decision_id)), None)
-    else:
-        entry = max(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp", ""))
-    if entry is None:
-        return None
+def _share_projection(entry: dict) -> dict:
+    """Project a decision entry onto the push wire shape {id, type, content, confidence,
+    evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
+    the push omits it."""
     rev = _current_revision(entry) or {}
     return {
         "id": entry.get("id", ""),
@@ -1179,6 +1165,37 @@ def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
         "evidence": rev.get("evidence") or None,
         "source": rev.get("source"),
     }
+
+
+def _shareable_entries(repo_path: str) -> list[dict]:
+    return [e for e in _load(repo_path).get("entries", [])
+            if e.get("type") == "decision" and _entry_status(e) != "ignored"]
+
+
+def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
+    """Return a decision's current shareable fields, or None (C4).
+
+    Resolves `decision_id` (full UUID or 8-char prefix) or, when omitted, the most
+    recently updated decision. Ignored decisions are excluded."""
+    decisions = _shareable_entries(repo_path)
+    if not decisions:
+        return None
+    if decision_id:
+        entry = next((e for e in decisions if e.get("id", "").startswith(decision_id)), None)
+    else:
+        entry = max(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp", ""))
+    if entry is None:
+        return None
+    return _share_projection(entry)
+
+
+def get_shareable_all(repo_path: str) -> list[dict]:
+    """Every non-ignored decision as a push wire projection, oldest first (C4 --all).
+
+    Ordered by creation timestamp so a bulk share pushes decisions in the order they
+    were made - the server's updatedSince consumers then see them chronologically."""
+    decisions = sorted(_shareable_entries(repo_path), key=lambda e: e.get("timestamp", ""))
+    return [_share_projection(e) for e in decisions]
 
 
 def _format_update_approval(entry: dict) -> str:
