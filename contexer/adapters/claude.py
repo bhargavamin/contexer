@@ -62,9 +62,14 @@ def clean_legacy_repo_settings(repo_path: str) -> bool:
     Removes only hook groups that are recognizably ours (a _LEGACY_REPO_HOOK_MARKERS
     match, or an mcp_tool hook targeting the contexer server); foreign hooks and every
     other key in the file are preserved. Writes only when something was removed.
-    Returns True when the file was modified."""
+    Returns True when the file was modified.
+
+    Guarded by _is_sane_repo so a home directory that is itself a git repo (dotfiles
+    setups) can never select ~/.claude/settings.json — the GLOBAL config, whose modern
+    hooks legitimately contain the legacy markers and would otherwise be stripped.
+    The guard lives here, not at call sites, so every future caller inherits it."""
     try:
-        if not repo_path:
+        if not repo_path or not store._is_sane_repo(repo_path):
             return False
         path = Path(repo_path) / ".claude" / "settings.json"
         if not path.is_file():

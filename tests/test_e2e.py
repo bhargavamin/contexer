@@ -1423,6 +1423,23 @@ class TestUpgradeFromLegacyInstall:
         assert (repo / ".claude" / "settings.json").read_text() == before, \
             "healing must be idempotent — no churn on an already-clean file"
 
+    def test_home_git_repo_never_cleans_global_settings(self, tmp_home, monkeypatch):
+        """Dotfiles-in-home: HOME itself is a git repo, and the user runs
+        `contexer install` from ~. The cwd's git root then IS the home dir, and
+        ~/.claude/settings.json is the GLOBAL config whose freshly-written modern
+        hooks contain the legacy markers — the cleanup must refuse to touch it
+        (Greptile P1, PR #96: without the _is_sane_repo guard, install stripped
+        the very hooks it had just written)."""
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_home, check=True)
+        monkeypatch.chdir(tmp_home)
+        cli.install()
+        hooks = json.loads((tmp_home / ".claude" / "settings.json").read_text())["hooks"]
+        assert "SessionStart" in hooks, "global SessionStart hook must survive install from ~"
+        assert "PreCompact" in hooks
+        cli.uninstall()   # same guard on the uninstall path — must not raise
+
     def test_install_log_surfaces_stale_plugin_warning(self, tmp_home):
         from contexer.adapters import claude as claude_adapter
         cache = tmp_home / ".claude" / "plugins" / "cache" / "mp" / "contexer" / "0.1.0"

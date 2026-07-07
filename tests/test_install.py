@@ -572,6 +572,19 @@ class TestLegacyRepoSettingsCleanup:
         assert claude.clean_legacy_repo_settings(str(repo)) is False
         assert p.read_text() == "{not json"
 
+    def test_refuses_home_directory(self, clean_home):
+        # Dotfiles setups make HOME itself a git repo. ~/.claude/settings.json is the
+        # GLOBAL config whose modern hooks legitimately contain the legacy markers —
+        # the cleaner must refuse the home dir outright (Greptile P1, PR #96).
+        (clean_home / ".claude").mkdir(exist_ok=True)
+        p = clean_home / ".claude" / "settings.json"
+        p.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [{
+            "type": "command",
+            "command": "python -c \"...store.get_session_start_context(...)...\""}]}]}}))
+        before = p.read_text()
+        assert claude.clean_legacy_repo_settings(str(clean_home)) is False
+        assert p.read_text() == before
+
     def test_sync_memory_self_heals(self, clean_home, tmp_path):
         # A plain package upgrade (no `contexer install` re-run) must heal too:
         # sync_memory runs under every already-installed SessionStart hook and is the
