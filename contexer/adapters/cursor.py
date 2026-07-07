@@ -177,6 +177,34 @@ def capture_constraint(repo_path: str, raw: str) -> str:
     return json.dumps(format_prompt_passthrough())
 
 
+def capture_task(repo_path: str, raw: str) -> str:
+    """Self-retiring no-op stub for the removed "last task" hook entrypoint (#58).
+
+    Mirrors claude.capture_task: install() strips the capture-task hook on
+    reinstall, but a package-only upgrade leaves the installed beforeSubmitPrompt
+    hook calling this function — without the stub that is an AttributeError
+    traceback on every prompt. Being invoked is proof of the stale hook, so remove
+    it from ~/.cursor/hooks.json and pass the prompt through. Args are unused but
+    keep the installed hook's call signature. Fail-soft."""
+    try:
+        path = Path.home() / ".cursor" / "hooks.json"
+        cfg = base._load_safe(path)
+        hk = cfg.get("hooks")
+        if isinstance(hk, dict) and isinstance(hk.get("beforeSubmitPrompt"), list):
+            bsp = hk["beforeSubmitPrompt"]
+            after = [h for h in bsp
+                     if not (isinstance(h, dict) and _HOOK_MARKER_TASK in h.get("command", ""))]
+            if after != bsp:
+                if after:
+                    hk["beforeSubmitPrompt"] = after
+                else:
+                    hk.pop("beforeSubmitPrompt", None)
+                base._save(path, cfg)
+    except Exception:
+        pass
+    return json.dumps(format_prompt_passthrough())
+
+
 # ── install / uninstall / status ──────────────────────────────────────────────
 
 _HOOK_MARKER_TASK = "cursor.capture_task"

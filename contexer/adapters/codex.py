@@ -91,6 +91,33 @@ def _read_config_command(home: Path):
 
 # ── install / uninstall / status ───────────────────────────────────────────────────────────
 
+def retire_capture_task(home: Path) -> None:
+    """Remove the pre-#58 capture-task hook group from ~/.codex/hooks.json.
+
+    Called by the claude.capture_task stub: Codex wired the very same
+    `claude.capture_task` command string, so the stub firing may mean the stale
+    hook lives in either host's config. install() also strips it on reinstall;
+    this covers the package-only upgrade path. Fail-soft, writes only on change."""
+    try:
+        path = home / ".codex" / "hooks.json"
+        cfg = base._load_safe(path)
+        hooks = cfg.get("hooks")
+        if not isinstance(hooks, dict):
+            return
+        ups = hooks.get("UserPromptSubmit")
+        if not isinstance(ups, list):
+            return
+        after = base._filter_groups(ups, ["claude.capture_task"])
+        if after != ups:
+            if after:
+                hooks["UserPromptSubmit"] = after
+            else:
+                hooks.pop("UserPromptSubmit", None)
+            base._save(path, cfg)
+    except Exception:
+        pass
+
+
 def install(home: Path) -> list[str]:
     """Wire the Codex MCP server (config.toml) + hooks (hooks.json). Returns log lines."""
     log: list[str] = []
