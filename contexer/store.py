@@ -35,13 +35,19 @@ def _config_dirs() -> set[str]:
 
 
 def _is_sane_repo(path: str) -> bool:
-    """A usable repo path: non-empty, absolute, and not a tool config / home directory."""
+    """A usable repo path: non-empty, absolute, and not a tool config / home directory
+    or the filesystem root."""
     if not path:
         return False
     p = path.strip()
     if not p or not os.path.isabs(p):
         return False
-    return os.path.normpath(p) not in _config_dirs()
+    norm = os.path.normpath(p)
+    # normpath keeps a POSIX-special leading "//", so test for emptiness after
+    # stripping separators rather than comparing to a single "/".
+    if not norm.strip(os.path.sep):
+        return False
+    return norm not in _config_dirs()
 
 
 def _git_root(start: str) -> str:
@@ -1521,6 +1527,25 @@ def _join_context_sections(*parts: str) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _hook_cwd_repo(repo_path: str) -> str:
+    """Fallback repo identity for hook-invoked payload builders: the hook's own cwd.
+
+    Hosts run hooks with cwd = the project directory, and non-git projects are
+    first-class stores (keyed by absolute path - the MCP tools accept any sane dir),
+    so an empty git-root from the hook's shell must not erase the session's identity.
+    0.16.1 bug: in a non-git dir with an existing store, SessionStart said "no context
+    stored - setup offer" while the per-prompt MCP tools (which get the path
+    explicitly) found the store fine. Guarded by _is_sane_repo, so a session opened in
+    a home/config dir keeps the empty repo_path and falls through to the normal
+    resolution chain instead of selecting a junk store. This is NOT the retired
+    `|| pwd` shell fallback: nothing here writes the shared .current_repo pointer
+    unguarded - callers that anchor the pointer still sanity-check first."""
+    if repo_path:
+        return repo_path
+    cwd = os.getcwd()
+    return cwd if _is_sane_repo(cwd) else repo_path
+
+
 def session_start_payload(repo_path: str, source: str = "") -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
@@ -1544,6 +1569,17 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     section` renders at most `_team_display_cap()` rows, so when the cache holds more than
     that the suffix adds `(cap shown)` rather than claiming a count the model never
     actually received."""
+    resolved = _hook_cwd_repo(repo_path)
+    if resolved != repo_path and _is_sane_repo(resolved):
+        # The cwd fallback engaged (non-git project dir): anchor the shared pointer
+        # here, exactly as the installed SessionStart hook does for git repos, so
+        # bare MCP calls (no repo_path) in this session resolve to the same store.
+        try:
+            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            (STORE_DIR / ".current_repo").write_text(resolved)
+        except OSError:
+            pass
+    repo_path = resolved
     payload = _local_session_start_payload(repo_path, source)
     team = _team_section(repo_path, "", "")
     if not team or (source == "resume" and not payload.get("context")):
@@ -1755,6 +1791,7 @@ def session_from_hook_stdin(raw: str) -> str:
 def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     """Neutral UserPromptSubmit bootstrap-fallback content. {"status": "", "context": str}.
     Empty context => emit nothing. Logic unchanged from get_bootstrap_context_prompt."""
+    repo_path = _hook_cwd_repo(repo_path)
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:

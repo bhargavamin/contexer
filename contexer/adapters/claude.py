@@ -142,7 +142,7 @@ def format_post_compact(payload: dict) -> dict:
 def capture_constraint(repo_path: str, raw: str) -> str:
     """UserPromptSubmit (every prompt): auto-store 'always/never/from now on' directives."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
         if not repo:
             return "{}"
         entry_id, content = store.capture_user_constraint(
@@ -160,7 +160,7 @@ def capture_constraint(repo_path: str, raw: str) -> str:
 def rationale(repo_path: str, raw: str) -> str:
     """UserPromptSubmit (every prompt): inject matching decisions for rationale questions."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
         if not repo:
             return "{}"
         ctx = store.get_context_for_prompt(repo, store.prompt_from_hook_stdin(raw))
@@ -184,7 +184,7 @@ def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
     (or vice versa)."""
     try:
         from contexer import team_context
-        new = team_context.poll_for_injection(repo_path, consumer)
+        new = team_context.poll_for_injection(store._hook_cwd_repo(repo_path), consumer)
         if not new:
             return "{}"
         lines = ["Team decisions just approved (now in effect):"]
@@ -218,7 +218,7 @@ def sync_memory(repo_path: str) -> int:
     of newly-stored entries (0 on skip/absence/error). Wired to SessionStart,
     PreCompact, and SessionEnd hooks."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
         if not repo:
             return 0
         # Self-heal: strip hooks a pre-CLI install left in <repo>/.claude/settings.json
