@@ -1555,3 +1555,98 @@ class TestStaleCaptureTaskHook:
                       "pre_compress", "session_end"):
             assert callable(getattr(gemini, entry, None)), \
                 f"gemini.{entry} is wired by installed hooks and must exist"
+
+# ── 15. Non-git project directories ───────────────────────────────────────────
+
+class TestNonGitProjectDir:
+    """Stores are keyed by absolute path - .git is NOT required (the MCP tools accept
+    any sane directory, and real users have large stores for non-git dirs). Reported
+    against 0.16.1: in such a dir, SessionStart said "no context stored - setup offer"
+    while the per-prompt MCP tools found the store fine. The hook's git-root resolution
+    came up empty and nothing fell back to the hook's own cwd (hosts run hooks with
+    cwd = the project dir). These tests run the REAL installed hook commands through
+    bash from a non-git project dir."""
+
+    @pytest.fixture
+    def non_git_project(self, tmp_home, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        proj = tmp_home / "work" / "dashboards"
+        proj.mkdir(parents=True)   # deliberately NOT a git repo
+        store.update_decision(str(proj), "use terraform for dashboard provisioning",
+                              "s1", subtype="architecture")
+        store.update_decision(str(proj), "never hardcode dynatrace api tokens",
+                              "s1", subtype="constraint", created_by="human")
+        return proj
+
+    def _hook_cmds(self, tmp_home, event, marker):
+        settings = json.loads((tmp_home / ".claude" / "settings.json").read_text())
+        return [h["command"] for g in settings["hooks"][event]
+                for h in g["hooks"] if marker in h.get("command", "")]
+
+    def _run(self, tmp_home, cwd, command, stdin):
+        env = dict(os.environ, HOME=str(tmp_home))
+        proc = subprocess.run(["bash", "-c", command], cwd=cwd, env=env, input=stdin,
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+
+    def test_session_start_loads_existing_context_without_git(self, non_git_project, tmp_home):
+        cli.install()
+        cmds = self._hook_cmds(tmp_home, "SessionStart", "get_session_start_context")
+        assert len(cmds) == 1
+        out = self._run(tmp_home, non_git_project, cmds[0], '{"source": "startup"}')
+        msg = out.get("systemMessage", "")
+        assert "no context stored" not in msg, \
+            f"false 'no context' banner in a non-git dir with an existing store: {msg}"
+        assert "loaded" in msg
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        # Constraints are injected eagerly; architecture is deferred behind a count
+        # pointer by design - assert one of each.
+        assert "never hardcode dynatrace api tokens" in ctx.lower()
+        assert "1 architecture" in ctx
+
+    def test_bootstrap_hook_does_not_offer_setup_without_git(self, non_git_project, tmp_home):
+        cli.install()
+        cmds = self._hook_cmds(tmp_home, "UserPromptSubmit", "get_bootstrap_context_prompt")
+        assert len(cmds) == 1
+        out = self._run(tmp_home, non_git_project, cmds[0], '{"prompt": "hello"}')
+        assert out == {}, f"bootstrap must not offer setup when context exists: {out}"
+
+    def test_per_prompt_hooks_resolve_via_cwd_without_git(self, non_git_project, tmp_home,
+                                                          monkeypatch):
+        # capture_constraint and rationale run with repo="" in a non-git dir; they must
+        # resolve the hook's own cwd, not depend on a (possibly stale) shared pointer.
+        from contexer.adapters import claude as claude_adapter
+        (tmp_home / ".contexer" / ".current_repo").write_text(str(tmp_home / "other-repo"))
+        monkeypatch.chdir(non_git_project)
+        out = claude_adapter.rationale(
+            "", json.dumps({"prompt": "why terraform for provisioning?"}))
+        assert "terraform" in json.loads(out).get(
+            "hookSpecificOutput", {}).get("additionalContext", "").lower()
+
+    def test_session_start_fallback_anchors_pointer(self, non_git_project, tmp_home, monkeypatch):
+        monkeypatch.chdir(non_git_project)
+        store.session_start_payload("")
+        assert (tmp_home / ".contexer" / ".current_repo").read_text() == str(non_git_project)
+
+    def test_home_dir_cwd_never_selected(self, tmp_home, monkeypatch):
+        # A session opened in the home directory must NOT select a home-dir store -
+        # the fallback refuses insane dirs and the normal no-context path applies.
+        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        monkeypatch.chdir(tmp_home)
+        payload = store.session_start_payload("")
+        assert "no context stored" in payload["status"]
+        assert not (tmp_home / ".contexer" / ".current_repo").exists()
+
+    def test_deleted_cwd_never_crashes_the_hook(self, tmp_home, monkeypatch):
+        # os.getcwd() raises OSError when the cwd was unlinked; the payload builders
+        # have no outer guard, so the fallback must swallow it (review finding, PR #99).
+        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        monkeypatch.setattr(store.os, "getcwd", lambda: (_ for _ in ()).throw(OSError()))
+        payload = store.session_start_payload("")
+        assert "no context stored" in payload["status"]
+        assert store.bootstrap_prompt_payload("", "hello") is not None
+
+    def test_filesystem_root_is_not_a_sane_repo(self):
+        assert store._is_sane_repo("/") is False
+        assert store._is_sane_repo("//") is False
