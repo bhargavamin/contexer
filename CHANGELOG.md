@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.1](https://github.com/bhargavamin/contexer/compare/v0.16.0...v0.16.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **adapters:** drop empty hooks key on retire; move cursor stub below markers ([1336b35](https://github.com/bhargavamin/contexer/commit/1336b35a2c8c12e6293c6eced158bb24b9c83ba8))
+* **adapters:** self-retiring stubs for removed capture_task hook entrypoints ([f14c29e](https://github.com/bhargavamin/contexer/commit/f14c29e213823613e8fb91eaa383f7d5aab22e75))
+* **adapters:** self-retiring stubs for removed capture_task hook entrypoints ([fc52b1c](https://github.com/bhargavamin/contexer/commit/fc52b1c04b76c098dda9b18f928525814fb6c44a))
+* **claude:** clean legacy pre-CLI hooks left behind by upgrades ([830d816](https://github.com/bhargavamin/contexer/commit/830d816a431f37e68774d74513081efe3277a528))
+* **claude:** clean legacy pre-CLI hooks left behind by upgrades ([ecd7d22](https://github.com/bhargavamin/contexer/commit/ecd7d2285d44c1cf5120068bf5520e1f10e8fe31))
+* **claude:** refuse home dir in legacy repo-settings cleanup ([e3379be](https://github.com/bhargavamin/contexer/commit/e3379bed5a1f0bfe247aa955809b313ad5a1e62b))
+
 ## [0.16.0](https://github.com/bhargavamin/contexer/compare/v0.15.0...v0.16.0) (2026-07-06)
 
 
