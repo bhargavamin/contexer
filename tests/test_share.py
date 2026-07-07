@@ -216,6 +216,30 @@ def test_share_all_failure_enqueues_failed_and_remaining(tmp_repo, monkeypatch):
     assert [e["decision_id"] for e in share._load_outbox()] == [id2, id3]
 
 
+def test_share_all_partial_enqueue_failure_message_is_accurate(tmp_repo, monkeypatch):
+    """If the outbox write itself dies mid-queue, the message must state exactly how
+    many made it into the outbox rather than claim none did (review finding, PR #95)."""
+    _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1",
+                                   subtype="architecture")
+    store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
+    store.update_decision(tmp_repo, "snake case file naming", "s1", subtype="convention")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))  # first push fails -> queue all 3
+    real_enqueue = share._enqueue
+    calls = {"n": 0}
+
+    def flaky_enqueue(payload):
+        if calls["n"] >= 1:
+            raise OSError("disk full")
+        calls["n"] += 1
+        real_enqueue(payload)
+
+    monkeypatch.setattr(share, "_enqueue", flaky_enqueue)
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "queued 1 of the remaining 3" in msg.lower()
+    assert [e["decision_id"] for e in share._load_outbox()] == [id1]
+
+
 def test_share_all_total_failure_queues_everything(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")

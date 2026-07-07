@@ -158,13 +158,20 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
                 source=dec["source"], decision_id=dec["id"]),
             default=None, action="share decision")
         if server_id is None:
+            queued = 0
             try:
                 for rest in decs[idx:]:
                     _enqueue(_payload(rest, key))
+                    queued += 1
             except Exception:
+                # The outbox write itself died mid-queue (e.g. disk error). Report the
+                # exact split - some decisions may already be in the outbox - and how
+                # to retry the ones that are not.
                 return (f"Shared {sent} of {len(decs)} decision(s), then the cloud became "
-                        "unreachable or auth was rejected (see the warning above). The "
-                        "rest could not be queued - your local decisions are unchanged.")
+                        f"unreachable or auth was rejected (see the warning above). Queued "
+                        f"{queued} of the remaining {len(decs) - sent} for retry before the "
+                        "outbox write failed - run `contexer share --all` again to queue "
+                        "the rest; your local decisions are unchanged.")
             return (f"Shared {sent} of {len(decs)} decision(s). The rest are queued and "
                     "will retry automatically at the next session start (cloud "
                     "unreachable or auth rejected - see the warning above).")
