@@ -191,6 +191,8 @@ def _retire_capture_task_hook() -> None:
                 hooks["UserPromptSubmit"] = after
             else:
                 hooks.pop("UserPromptSubmit", None)
+            if not hooks:
+                settings.pop("hooks", None)
             _save(path, settings)
     except Exception:
         pass

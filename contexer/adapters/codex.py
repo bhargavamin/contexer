@@ -113,6 +113,8 @@ def retire_capture_task(home: Path) -> None:
                 hooks["UserPromptSubmit"] = after
             else:
                 hooks.pop("UserPromptSubmit", None)
+            if not hooks:
+                cfg.pop("hooks", None)
             base._save(path, cfg)
     except Exception:
         pass

@@ -685,6 +685,29 @@ class TestCaptureTaskStubs:
         assert json.loads(cursor.capture_task("", ""))
         codex.retire_capture_task(clean_home)  # must not raise
 
+    def test_retiring_only_hook_leaves_no_empty_keys(self, clean_home):
+        # When the stale hook was the only one, neither a dangling empty event list
+        # nor an empty "hooks" key may remain (Greptile, PR #98) — matching the
+        # clean_legacy_repo_settings behavior.
+        from contexer.adapters import cursor
+        (clean_home / ".claude").mkdir(exist_ok=True)
+        (clean_home / ".codex").mkdir()
+        (clean_home / ".cursor").mkdir()
+        claude_p = clean_home / ".claude" / "settings.json"
+        codex_p = clean_home / ".codex" / "hooks.json"
+        cursor_p = clean_home / ".cursor" / "hooks.json"
+        claude_p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._STALE_CLAUDE}]}]}}))
+        codex_p.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._STALE_CLAUDE}]}]}}))
+        cursor_p.write_text(json.dumps({"hooks": {"beforeSubmitPrompt": [
+            {"type": "command", "command": self._STALE_CURSOR}]}}))
+        claude.capture_task("", "")    # heals claude settings + codex hooks.json
+        cursor.capture_task("", "")
+        assert json.loads(claude_p.read_text()) == {}
+        assert json.loads(codex_p.read_text()) == {}
+        assert json.loads(cursor_p.read_text()) == {}
+
     def test_codex_retire_preserves_foreign_and_handles_corrupt(self, clean_home):
         from contexer.adapters import codex
         p = clean_home / ".codex" / "hooks.json"

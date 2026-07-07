@@ -177,6 +177,13 @@ def capture_constraint(repo_path: str, raw: str) -> str:
     return json.dumps(format_prompt_passthrough())
 
 
+# ── install / uninstall / status ──────────────────────────────────────────────
+
+_HOOK_MARKER_TASK = "cursor.capture_task"
+_HOOK_MARKER_CON = "cursor.capture_constraint"
+_HOOK_MARKER_SS = "cursor.session_start"
+
+
 def capture_task(repo_path: str, raw: str) -> str:
     """Self-retiring no-op stub for the removed "last task" hook entrypoint (#58).
 
@@ -199,17 +206,12 @@ def capture_task(repo_path: str, raw: str) -> str:
                     hk["beforeSubmitPrompt"] = after
                 else:
                     hk.pop("beforeSubmitPrompt", None)
+                if not hk:
+                    cfg.pop("hooks", None)
                 base._save(path, cfg)
     except Exception:
         pass
     return json.dumps(format_prompt_passthrough())
-
-
-# ── install / uninstall / status ──────────────────────────────────────────────
-
-_HOOK_MARKER_TASK = "cursor.capture_task"
-_HOOK_MARKER_CON = "cursor.capture_constraint"
-_HOOK_MARKER_SS = "cursor.session_start"
 
 
 def _cmd(entry: str) -> str:
