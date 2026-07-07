@@ -499,3 +499,130 @@ class TestTeamsStatus:
         joined = "\n".join(claude.status_lines(clean_home))
         assert "teams (remote)" in joined
         assert "NOT registered" in joined
+
+
+class TestLegacyRepoSettingsCleanup:
+    """The pre-CLI from-source installer wrote hooks into <repo>/.claude/settings.json —
+    including an mcp_tool hook for the removed capture_context tool ("Unknown tool:
+    capture_context" on every prompt) and a dead-clone SessionStart hook (a second,
+    contradictory "no context stored yet" startup message next to the real one).
+    Upgrades must remove these; everything foreign in the file must survive."""
+
+    _LEGACY_SS = (
+        "uv run --directory /old/clone python -c \"import sys,json; import store; "
+        "print(json.dumps(store.get_session_start_context('/old/repo')))\""
+    )
+    _LEGACY_REMINDER = (
+        "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
+        "\"additionalContext\": \"Reminder: if you make a significant decision, establish "
+        "a pattern, or document a constraint this turn, call update_context.\"}}'"
+    )
+    _FOREIGN = "echo 'someone elses hook'"
+
+    def _seed_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "settings.json").write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": self._LEGACY_SS}]}],
+                "PreCompact": [{"hooks": [{"type": "command", "command":
+                    "echo '{\"systemMessage\": \"Contexer: context compaction starting\"}'"}]}],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "mcp_tool", "server": "contexer",
+                                "tool": "capture_context", "once": True,
+                                "input": {"repo_path": "/old/repo"}}]},
+                    {"hooks": [{"type": "command", "command": self._LEGACY_REMINDER}]},
+                    {"hooks": [{"type": "command", "command": self._FOREIGN}]},
+                ],
+            },
+            "enabledPlugins": {"foreign-plugin": True},
+        }))
+        return repo
+
+    def test_removes_contexer_hooks_preserves_foreign(self, tmp_path):
+        repo = self._seed_repo(tmp_path)
+        assert claude.clean_legacy_repo_settings(str(repo)) is True
+        out = json.loads((repo / ".claude" / "settings.json").read_text())
+        hooks = out.get("hooks", {})
+        assert "SessionStart" not in hooks
+        assert "PreCompact" not in hooks
+        remaining = [h for grp in hooks["UserPromptSubmit"] for h in grp["hooks"]]
+        assert [h.get("command") for h in remaining] == [self._FOREIGN]
+        assert not any(h.get("type") == "mcp_tool" for h in remaining)
+        assert out["enabledPlugins"] == {"foreign-plugin": True}
+
+    def test_noop_when_no_settings_file(self, tmp_path):
+        assert claude.clean_legacy_repo_settings(str(tmp_path / "repo")) is False
+
+    def test_noop_on_foreign_only_file(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        p = repo / ".claude" / "settings.json"
+        p.write_text(json.dumps({"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": self._FOREIGN}]}]}}))
+        before = p.read_text()
+        assert claude.clean_legacy_repo_settings(str(repo)) is False
+        assert p.read_text() == before
+
+    def test_corrupt_file_left_alone(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        p = repo / ".claude" / "settings.json"
+        p.write_text("{not json")
+        assert claude.clean_legacy_repo_settings(str(repo)) is False
+        assert p.read_text() == "{not json"
+
+    def test_sync_memory_self_heals(self, clean_home, tmp_path):
+        # A plain package upgrade (no `contexer install` re-run) must heal too:
+        # sync_memory runs under every already-installed SessionStart hook and is the
+        # seam that strips the legacy repo-level hooks for whatever repo the session opens.
+        repo = self._seed_repo(tmp_path)
+        claude.sync_memory(str(repo))
+        hooks = json.loads((repo / ".claude" / "settings.json").read_text()).get("hooks", {})
+        assert "SessionStart" not in hooks
+        assert not any(h.get("type") == "mcp_tool"
+                       for grp in hooks.get("UserPromptSubmit", []) for h in grp["hooks"])
+
+    def test_install_prunes_stale_capture_context_permission(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"permissions": {"allow": [
+            "mcp__contexer__capture_context", "mcp__contexer__update_context"]}}))
+        install()
+        allow = json.loads(settings_path.read_text())["permissions"]["allow"]
+        assert "mcp__contexer__capture_context" not in allow
+        assert "mcp__contexer__update_context" in allow
+
+    def test_install_strips_legacy_reminder_echo(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._LEGACY_REMINDER}]}]}}))
+        install()
+        ups = json.loads(settings_path.read_text())["hooks"]["UserPromptSubmit"]
+        cmds = [h.get("command", "") for grp in ups for h in grp.get("hooks", [])]
+        assert not any("Reminder: if you make a significant decision" in c for c in cmds)
+
+    def test_uninstall_strips_legacy_reminder_echo(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": self._LEGACY_REMINDER}]}]}}))
+        uninstall()
+        hooks = json.loads(settings_path.read_text()).get("hooks", {})
+        assert "UserPromptSubmit" not in hooks
+
+    def test_stale_plugin_warning(self, clean_home):
+        plug = clean_home / ".claude" / "plugins"
+        cache = plug / "cache" / "mp" / "contexer" / "0.1.0"
+        (cache / "hooks").mkdir(parents=True)
+        (cache / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {
+            "UserPromptSubmit": [{"hooks": [{"type": "mcp_tool", "server": "contexer",
+                                             "tool": "capture_context"}]}]}}))
+        (plug / "installed_plugins.json").write_text(json.dumps({
+            "version": 2, "plugins": {"contexer@mp": [{"installPath": str(cache)}]}}))
+        warning = claude._stale_plugin_warning(clean_home)
+        assert warning and "capture_context" in warning
+
+    def test_no_plugin_warning_on_clean_home(self, clean_home):
+        assert claude._stale_plugin_warning(clean_home) is None

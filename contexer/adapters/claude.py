@@ -11,6 +11,7 @@ from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
     _filter_groups,
+    _hooks_of,
     _in_groups,
     _load,
     _load_safe,
@@ -38,6 +39,63 @@ def _teams_url() -> str:
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall
 # recognize and replace stale hooks (e.g. a dead from-source `uv run --directory`).
 _HOOK_SENTINEL = "contexer-managed-hook"
+
+# Fingerprints of hooks the pre-CLI from-source installer (scripts/install.sh, June 2026)
+# wrote into a REPO's .claude/settings.json — before hooks went global (be12ecd). Modern
+# installs only manage ~/.claude/settings.json, so an upgrade left these behind: the stale
+# SessionStart hook runs a dead clone via `uv run --directory` (second, contradictory
+# "no context stored yet" startup message next to the real one) and the stale mcp_tool
+# hook calls the removed `capture_context` tool ("Unknown tool" error on every prompt).
+# Modern hooks are never written to repo-level settings, so these substrings can only
+# match hooks we owned; anything else in the file is foreign and must survive.
+_LEGACY_REPO_HOOK_MARKERS = [
+    "Contexer:",                                   # inline SessionStart/PreCompact/PostCompact echoes
+    "get_session_start_context",                   # repo-level SessionStart (dead-clone uv run)
+    "capture_context",                             # mcp_tool hook for the removed tool
+    "Reminder: if you make a significant decision",  # unconditional every-prompt reminder echo
+]
+
+
+def clean_legacy_repo_settings(repo_path: str) -> bool:
+    """Strip legacy Contexer hooks from <repo>/.claude/settings.json. Fail-soft, silent.
+
+    Removes only hook groups that are recognizably ours (a _LEGACY_REPO_HOOK_MARKERS
+    match, or an mcp_tool hook targeting the contexer server); foreign hooks and every
+    other key in the file are preserved. Writes only when something was removed.
+    Returns True when the file was modified."""
+    try:
+        if not repo_path:
+            return False
+        path = Path(repo_path) / ".claude" / "settings.json"
+        if not path.is_file():
+            return False
+        settings = _load_safe(path)
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            return False
+        changed = False
+        for event in list(hooks):
+            before = hooks[event]
+            if not isinstance(before, list):
+                continue
+            after = _filter_groups(before, _LEGACY_REPO_HOOK_MARKERS)
+            after = [grp for grp in after if not any(
+                isinstance(h, dict) and h.get("type") == "mcp_tool"
+                and h.get("server") == "contexer"
+                for h in _hooks_of(grp))]
+            if after != before:
+                changed = True
+                if after:
+                    hooks[event] = after
+                else:
+                    hooks.pop(event)
+        if changed:
+            if not hooks:
+                settings.pop("hooks", None)
+            _save(path, settings)
+        return changed
+    except Exception:
+        return False
 
 
 def is_present(home: Path) -> bool:
@@ -158,6 +216,12 @@ def sync_memory(repo_path: str) -> int:
         repo = store._resolve_repo(repo_path)
         if not repo:
             return 0
+        # Self-heal: strip hooks a pre-CLI install left in <repo>/.claude/settings.json
+        # (stale second startup message + "Unknown tool: capture_context" every prompt).
+        # This lives here — not only in install() — because sync_memory is the one
+        # adapter entrypoint every installed SessionStart hook already calls, so a plain
+        # package upgrade heals each repo the user opens without requiring a reinstall.
+        clean_legacy_repo_settings(repo)
         mem = _memory_dir(repo)
         if mem is None:
             return 0
@@ -435,6 +499,13 @@ def install(home: Path) -> list[str]:
         ups = _filter_groups(ups, ["claude.capture_task"])
         hooks["UserPromptSubmit"] = ups
 
+    # Retire the legacy unconditional reminder echo (pre-CLI installs): the
+    # .pending_capture anchor delivers the same reminder deterministically and only
+    # when files actually changed, so the every-prompt echo is pure duplicate context.
+    if _in_groups(ups, "Reminder: if you make a significant decision"):
+        ups = _filter_groups(ups, ["Reminder: if you make a significant decision"])
+        hooks["UserPromptSubmit"] = ups
+
     if not _in_groups(ups, "claude.capture_constraint"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for constraint directives...", "command": cap_con}]})
@@ -455,6 +526,11 @@ def install(home: Path) -> list[str]:
     ]:
         if p not in allow:
             allow.append(p)
+    # Prune allow entries for tools that no longer exist (capture_context was removed
+    # with the "last task" feature) — harmless but confusing when users audit settings.
+    for stale in ("mcp__contexer__capture_context",):
+        while stale in allow:
+            allow.remove(stale)
 
     # Global /bootstrap command (~/.claude/commands/bootstrap.md) — a project-level
     # command file only works inside that repo, so the command ships in the package
@@ -470,7 +546,44 @@ def install(home: Path) -> list[str]:
 
     _save(settings_json, settings)
     log.append("  ✓ Hooks and permissions written to ~/.claude/settings.json")
+
+    # Upgrade hygiene: a pre-CLI install wrote hooks into the REPO's .claude/settings.json.
+    # Clean the repo we're being run from (sync_memory self-heals every other repo the
+    # user opens a session in), and warn about a stale plugin install we cannot edit.
+    repo = store._git_root(os.getcwd())
+    if repo and clean_legacy_repo_settings(repo):
+        log.append(f"  ✓ Removed legacy Contexer hooks from {repo}/.claude/settings.json")
+    plugin_warning = _stale_plugin_warning(home)
+    if plugin_warning:
+        log.append(plugin_warning)
     return log
+
+
+def _stale_plugin_warning(home: Path) -> str | None:
+    """Warn when an installed Contexer *plugin* still ships the removed capture_context
+    mcp_tool hook. Plugin caches belong to Claude Code — `contexer install` must not
+    edit them — so the only lever is telling the user to update/remove the plugin.
+    Fail-soft: any parse problem reads as "no warning"."""
+    try:
+        reg = _load_safe(home / ".claude" / "plugins" / "installed_plugins.json")
+        plugins = reg.get("plugins")
+        if not isinstance(plugins, dict):
+            return None
+        for name, installs in plugins.items():
+            if not str(name).startswith("contexer@"):
+                continue
+            for inst in installs if isinstance(installs, list) else []:
+                if not isinstance(inst, dict):
+                    continue
+                hooks_file = Path(inst.get("installPath", "")) / "hooks" / "hooks.json"
+                if hooks_file.is_file() and "capture_context" in hooks_file.read_text():
+                    return ("  ! Outdated Contexer plugin detected (calls the removed "
+                            "capture_context tool). Run `claude plugin update contexer` "
+                            "or uninstall the plugin — its hooks fire in addition to "
+                            "the ones installed here.")
+    except Exception:
+        return None
+    return None
 
 
 def uninstall(home: Path) -> list[str]:
@@ -509,6 +622,7 @@ def uninstall(home: Path) -> list[str]:
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
             "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
                                  "claude.capture_task", "claude.capture_constraint", "claude.rationale",
+                                 "Reminder: if you make a significant decision",
                                  _HOOK_SENTINEL],
         }
         for event, markers in event_markers.items():
@@ -546,6 +660,12 @@ def uninstall(home: Path) -> list[str]:
     if cmd_path.exists() and _BOOTSTRAP_CMD_MARKER in cmd_path.read_text():
         cmd_path.unlink()
         log.append("  ✓ /bootstrap command removed from ~/.claude/commands/")
+
+    # Also remove legacy pre-CLI hooks from the repo we're being run from (the old
+    # from-source installer wrote into <repo>/.claude/settings.json, not the home dir).
+    repo = store._git_root(os.getcwd())
+    if repo and clean_legacy_repo_settings(repo):
+        log.append(f"  ✓ Removed legacy Contexer hooks from {repo}/.claude/settings.json")
 
     return log
 
