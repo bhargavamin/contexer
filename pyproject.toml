@@ -38,6 +38,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["contexer"]
 
+[tool.uv]
+# Pin a uv floor so an older uv can't silently rewrite uv.lock back to an
+# earlier `revision` (revision 3 / upload-time metadata landed in the uv 0.8.x
+# line). Without this the lockfile flip-flops between revisions on every sync.
+required-version = ">=0.8.0"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
