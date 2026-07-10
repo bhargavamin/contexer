@@ -32,7 +32,7 @@
 </p>
 
 <p align="center">
-  <strong>🚀 Now live — <a href="https://contexer.ai">Contexer Personal Cloud &amp; Teams</a></strong><br>
+  <strong>🚀 Now live — <a href="https://contexer.ai/teams">Contexer Personal Cloud &amp; Teams</a></strong><br>
   <sub>Sync your engineering decisions across every machine, and share a team decision layer that every agent on your team reads from.</sub>
 </p>
 
