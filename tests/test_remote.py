@@ -285,6 +285,91 @@ def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
     assert "unreachable" not in err
 
 
+# ── reactive 401 refresh + bounded one-retry ─────────────────────────────────────
+
+def _seq_call(*outcomes):
+    """A fake _call_tool that yields `outcomes` in order (raise if an Exception).
+
+    Records the (endpoint, token, ...) args of each call on `.calls` so tests can assert
+    the retry used the refreshed token and how many times the transport was hit."""
+    it = iter(outcomes)
+
+    def fake(*args, **kwargs):
+        fake.calls.append(args)
+        out = next(it)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    fake.calls = []
+    return fake
+
+
+def _team_store():
+    """A RemoteStore carrying a Profile (as from_profile builds it) so the reactive path is live."""
+    prof = Profile(mode="team", endpoint="https://t/mcp", token="tok")
+    return RemoteStore("https://t/mcp", "tok", profile=prof)
+
+
+def test_401_triggers_one_refresh_and_retry(monkeypatch):
+    """An expired bearer mid-session: one refresh + one retry, transparently succeeding."""
+    fake = _seq_call(_http_error(401), _result(structured={"result": []}))
+    monkeypatch.setattr(remote, "_call_tool", fake)
+    calls = []
+    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: calls.append(p) or "new-tok")
+
+    store = _team_store()
+    ctx = store.get_context()
+
+    assert isinstance(ctx, RemoteContext)
+    assert store._token == "new-tok"        # swapped in
+    assert len(calls) == 1                   # exactly one refresh
+    assert len(fake.calls) == 2              # original + one retry
+    assert fake.calls[1][1] == "new-tok"     # retry used the refreshed token
+
+
+def test_401_without_profile_does_not_retry(monkeypatch):
+    """Direct construction (no Profile) keeps the old behavior: 401 → RemoteAuthError, no refresh."""
+    fake = _seq_call(_http_error(401))
+    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: pytest.fail("must not refresh without a profile"))
+    with pytest.raises(RemoteAuthError):
+        RemoteStore("https://t/mcp", "tok").get_context()
+    assert len(fake.calls) == 1
+
+
+def test_401_refresh_yields_no_new_token_surfaces(monkeypatch):
+    """If refresh can't produce a *new* token (same/None), surface the auth error — no retry."""
+    fake = _seq_call(_http_error(401))
+    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: None)
+    with pytest.raises(RemoteAuthError):
+        _team_store().get_context()
+    assert len(fake.calls) == 1              # no retry
+
+
+def test_401_retry_still_401_surfaces(monkeypatch):
+    """A genuinely dead token: refresh returns something new, retry still 401 → surface, no loop."""
+    fake = _seq_call(_http_error(401), _http_error(401))
+    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: "new-tok")
+    with pytest.raises(RemoteAuthError):
+        _team_store().get_context()
+    assert len(fake.calls) == 2              # exactly one retry, then stop (bounded)
+
+
+def test_authz_tool_error_is_not_reactively_refreshed(monkeypatch):
+    """A server-side authz/scope denial (isError result) is NOT a transport 401 — a refresh can't
+    fix it, so refresh_now must never be called for it."""
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text("This token lacks the 'write' scope required.")], is_error=True),
+    )
+    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: pytest.fail("authz denial must not refresh"))
+    with pytest.raises(RemoteAuthError):
+        _team_store().push_decision(type="constraint", content="c", repo=None)
+
+
 # ── content parsing edge (SDK returns dict content items in some transports) ──────
 
 def test_push_decision_reads_dict_content_item(monkeypatch):

@@ -64,10 +64,14 @@ class RemoteContext:
 class RemoteStore:
     """MCP client to the Teams sync endpoint. Construct directly or via ``from_profile``."""
 
-    def __init__(self, endpoint: str, token: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
+    def __init__(self, endpoint: str, token: str, *, timeout: float = _DEFAULT_TIMEOUT,
+                 profile: "Profile | None" = None) -> None:
         self._endpoint = endpoint
         self._token = token
         self._timeout = timeout
+        # Carried only when built via from_profile — the reactive 401 refresh needs it to
+        # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
+        self._profile = profile
 
     @classmethod
     def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
@@ -82,7 +86,7 @@ class RemoteStore:
         token = auth.resolve_token(profile)  # OAuth (login) token, refreshed; else static config token
         if not token:
             return None
-        return cls(profile.endpoint, token, timeout=timeout)
+        return cls(profile.endpoint, token, timeout=timeout, profile=profile)
 
     def push_decision(self, *, type: str, content: str, repo: str | None,
                       rationale: str | None = None, agent: str | None = None,
@@ -147,18 +151,41 @@ class RemoteStore:
             cursor=structured.get("cursor"),
         )
 
-    def _invoke(self, name: str, arguments: dict):
-        """Call one Teams tool, mapping any transport failure to a typed RemoteStoreError."""
+    def _invoke(self, name: str, arguments: dict, *, _refreshed: bool = False):
+        """Call one Teams tool, mapping any transport failure to a typed RemoteStoreError.
+
+        On a transport 401/403 (an expired/rejected bearer), attempt exactly ONE token
+        refresh + retry: the access token may have expired mid-session (the token is frozen
+        at construction). This is bounded — `_refreshed` gates it so we never loop, and it
+        only fires for the transport-auth path, not for a server-side authz/scope denial
+        (which a refresh can't fix). If refresh yields no *new* token, the original auth
+        error surfaces (→ with_local_fallback's "run contexer login")."""
         try:
             result = _call_tool(self._endpoint, self._token, name, arguments, self._timeout)
         except RemoteStoreError:
             raise
         except Exception as exc:  # network / transport / anyio group -> typed, catchable
-            raise _classify(exc) from exc
+            err = _classify(exc)
+            if isinstance(err, RemoteAuthError) and not _refreshed and self._refresh_token():
+                return self._invoke(name, arguments, _refreshed=True)
+            raise err from exc
         if getattr(result, "isError", False):
             message = _first_text(getattr(result, "content", None)) or f"{name} failed"
             raise _classify_tool_error(message)
         return result
+
+    def _refresh_token(self) -> bool:
+        """Reactively refresh the bearer after a 401. Returns True (and swaps self._token)
+        only when a genuinely *new* token was obtained — so the caller retries at most once
+        and a stale/unchanged token doesn't trigger a pointless retry. Never raises."""
+        if self._profile is None:
+            return False
+        from contexer import auth
+        new = auth.refresh_now(self._profile)
+        if new and new != self._token:
+            self._token = new
+            return True
+        return False
 
 
 # ── Offline / auth-failure degradation (C8) ──────────────────────────────────────

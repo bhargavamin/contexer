@@ -191,6 +191,104 @@ def test_resolve_token_refresh_failure_falls_back(creds_env, monkeypatch):
     assert auth.resolve_token(prof) == "static"
 
 
+# ── single-flight refresh (the ~1h family-revocation regression) ────────────────────
+
+def test_refresh_single_flight_only_one_network_refresh(creds_env, monkeypatch):
+    """Two concurrent refreshers must NOT both spend the single-use refresh token.
+
+    The advisory lock serializes them; the second re-reads the freshly-rotated creds under
+    the lock and short-circuits — so ``_refresh`` (the network POST) fires exactly once."""
+    import threading
+
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "old",
+                      "refresh_token": "r", "expires_at": time.time() - 10})
+
+    calls = []
+    barrier = threading.Barrier(2)
+
+    def fake_refresh(te, cid, rt):
+        calls.append(rt)
+        return {"access_token": "new", "refresh_token": "r2", "expires_in": 3600}
+
+    monkeypatch.setattr(auth, "_refresh", fake_refresh)
+
+    results = {}
+
+    def worker(key):
+        barrier.wait()  # release both threads into _locked_refresh together
+        results[key] = auth.resolve_token(TEAM)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(calls) == 1, "refresh token must be spent exactly once (no family revocation)"
+    assert results[0] == results[1] == "new"
+    assert auth._load_creds()["refresh_token"] == "r2"  # rotated token persisted
+
+
+def test_refresh_skipped_when_serialization_unavailable(creds_env, monkeypatch):
+    """On a non-POSIX runtime (no fcntl → store._store_lock can't actually serialize), refreshing
+    the single-use token unserialized risks family revocation. So we must NOT refresh — degrade to
+    the static/None token instead (the caller surfaces the re-login warning)."""
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "old",
+                      "refresh_token": "r", "expires_at": time.time() - 10})
+    monkeypatch.setattr(store, "fcntl", None)  # simulate a platform without advisory locks
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("must not refresh without a real lock"))
+    prof = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token="static")
+    assert auth.resolve_token(prof) == "static"
+
+
+# ── refresh_now (reactive path seam) ────────────────────────────────────────────────
+
+def test_refresh_now_forces_refresh(creds_env, monkeypatch):
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "old",
+                      "refresh_token": "r", "expires_at": time.time() - 10})
+    monkeypatch.setattr(auth, "_refresh",
+                        lambda te, cid, rt: {"access_token": "new", "refresh_token": "r2", "expires_in": 3600})
+    assert auth.refresh_now(TEAM) == "new"
+    assert auth._load_creds()["refresh_token"] == "r2"
+
+
+def test_refresh_now_double_check_skips_network_when_already_fresh(creds_env, monkeypatch):
+    """If creds are already valid (a concurrent process just refreshed), refresh_now returns
+    the current token WITHOUT a network call — this is what prevents the double-spend."""
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "fresh",
+                      "refresh_token": "r", "expires_at": time.time() + 3600})
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("must not hit the network"))
+    assert auth.refresh_now(TEAM) == "fresh"
+
+
+def test_refresh_now_falls_back_on_failure(creds_env, monkeypatch):
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "old",
+                      "refresh_token": "r", "expires_at": time.time() - 10})
+
+    def boom(*a):
+        raise RuntimeError("refresh token revoked")
+
+    monkeypatch.setattr(auth, "_refresh", boom)
+    prof = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token="static")
+    assert auth.refresh_now(prof) == "static"
+
+
+def test_locked_refresh_issuer_mismatch_falls_back(creds_env, monkeypatch):
+    """Defensive re-read inside the lock: if the stored creds don't belong to this profile's
+    issuer, fall back to the static token without touching the network."""
+    auth._save_creds({"issuer": "http://other", "client_id": "c",
+                      "token_endpoint": "http://other/token", "access_token": "x",
+                      "refresh_token": "r", "expires_at": time.time() - 10})
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("must not refresh for a foreign issuer"))
+    prof = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token="static")
+    assert auth.refresh_now(prof) == "static"
+
+
 # ── login / logout ───────────────────────────────────────────────────────────────
 
 def _stub_oauth(monkeypatch, *, discover=None):
