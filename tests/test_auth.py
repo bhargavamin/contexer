@@ -230,6 +230,19 @@ def test_refresh_single_flight_only_one_network_refresh(creds_env, monkeypatch):
     assert auth._load_creds()["refresh_token"] == "r2"  # rotated token persisted
 
 
+def test_refresh_skipped_when_serialization_unavailable(creds_env, monkeypatch):
+    """On a non-POSIX runtime (no fcntl → store._store_lock can't actually serialize), refreshing
+    the single-use token unserialized risks family revocation. So we must NOT refresh — degrade to
+    the static/None token instead (the caller surfaces the re-login warning)."""
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
+                      "token_endpoint": "http://localhost:8080/token", "access_token": "old",
+                      "refresh_token": "r", "expires_at": time.time() - 10})
+    monkeypatch.setattr(store, "fcntl", None)  # simulate a platform without advisory locks
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("must not refresh without a real lock"))
+    prof = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token="static")
+    assert auth.resolve_token(prof) == "static"
+
+
 # ── refresh_now (reactive path seam) ────────────────────────────────────────────────
 
 def test_refresh_now_forces_refresh(creds_env, monkeypatch):

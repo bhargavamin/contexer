@@ -155,6 +155,13 @@ def _locked_refresh(profile: Profile) -> str | None:
 
     Returns the usable access token, or ``profile.token`` (static/None) when refresh is
     impossible or fails. Never raises."""
+    if store.fcntl is None:
+        # No POSIX advisory lock available (non-POSIX runtime): store._store_lock would yield
+        # WITHOUT serializing, so two processes could double-spend the single-use refresh token
+        # and trip the server's replay detection → token-family revocation. Refreshing a
+        # single-use secret UNSERIALIZED is worse than not refreshing: degrade to the static/None
+        # token (the caller then surfaces the re-login warning) rather than risk the credentials.
+        return profile.token
     with store._store_lock(".team_auth"):
         creds = _load_creds()
         if not _creds_match(creds, profile):
