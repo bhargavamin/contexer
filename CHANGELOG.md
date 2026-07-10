@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.1](https://github.com/bhargavamin/contexer/compare/v0.17.0...v0.17.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **auth:** don't refresh the single-use token when serialization is unavailable ([31e2f06](https://github.com/bhargavamin/contexer/commit/31e2f066dcf8e39a47b6c4e5f8269cc1a467546e))
+* **auth:** serialize OAuth token refresh to stop single-use refresh-token double-spend ([9efd596](https://github.com/bhargavamin/contexer/commit/9efd596d859df7d5d2ee374dd0e951ec36325fe1))
+* **auth:** serialize OAuth token refresh to stop single-use refresh-token double-spend ([81f436a](https://github.com/bhargavamin/contexer/commit/81f436aa9bcf1151a7ca8c2056e9c65b2a931af9))
+* stop uv.lock revision flapping between 2 and 3 ([3bcec2d](https://github.com/bhargavamin/contexer/commit/3bcec2dc08c9c32e76e75b7725b43218ccb360cb))
+* stop uv.lock revision flapping between 2 and 3 ([aa810c2](https://github.com/bhargavamin/contexer/commit/aa810c2891f3d45033d056d2ff72dce3b6b1f306))
+
 ## [0.17.0](https://github.com/bhargavamin/contexer/compare/v0.16.1...v0.17.0) (2026-07-07)
 
 

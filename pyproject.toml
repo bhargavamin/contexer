@@ -1,6 +1,6 @@
 [project]
 name = "contexer"
-version = "0.17.0"
+version = "0.17.1"
 description = "MCP server that preserves decisions and context across AI coding sessions"
 readme = "README.md"
 requires-python = ">=3.12"
