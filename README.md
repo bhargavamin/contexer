@@ -31,6 +31,11 @@
   <a href="https://discord.gg/Fk6JSaW4p">Discord</a>
 </p>
 
+<p align="center">
+  <strong>🚀 Now live — <a href="https://contexer.ai/teams">Contexer Personal Cloud &amp; Teams</a></strong><br>
+  <sub>Sync your engineering decisions across every machine, and share a team decision layer that every agent on your team reads from.</sub>
+</p>
+
 ---
 
 # Contexer
