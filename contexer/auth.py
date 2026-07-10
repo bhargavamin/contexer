@@ -12,7 +12,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import secrets
 import socket
 import sys
@@ -46,9 +45,10 @@ def _load_creds() -> dict | None:
 
 def _save_creds(creds: dict) -> None:
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    path = _creds_path()
-    path.write_text(json.dumps(creds, indent=2), encoding="utf-8")
-    os.chmod(path, 0o600)  # tokens are secrets — owner-only
+    # Atomic write (unique temp + os.replace); mkstemp yields 0o600, so the creds file
+    # is never torn or world-readable even mid-write — critical when a refresher process
+    # and the foreground process persist rotated tokens concurrently.
+    store._atomic_write(_creds_path(), json.dumps(creds, indent=2))
 
 
 def _pkce() -> tuple[str, str]:
@@ -136,13 +136,30 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def resolve_token(profile: Profile) -> str | None:
-    """The bearer RemoteStore should use for this profile, or None.
+def _creds_match(creds: dict | None, profile: Profile) -> bool:
+    """True when stored creds belong to this profile's endpoint issuer."""
+    return bool(
+        creds and profile.endpoint
+        and creds.get("issuer") == _issuer_from_endpoint(profile.endpoint)
+    )
 
-    Prefers a stored OAuth token for this endpoint's issuer (refreshing when expired);
-    falls back to the static config.toml token, then None. Never raises."""
-    creds = _load_creds()
-    if creds and profile.endpoint and creds.get("issuer") == _issuer_from_endpoint(profile.endpoint):
+
+def _locked_refresh(profile: Profile) -> str | None:
+    """Refresh the access token under a cross-process lock, double-checked.
+
+    The refresh token is SINGLE-USE and rotates: two processes refreshing with the same
+    token trips the server's compromise detection and revokes the whole token family. So
+    the read-check-refresh-write is serialized with an advisory lock, and — after acquiring
+    it — we re-read the creds: if another process already refreshed while we waited, we use
+    that fresh access token instead of spending our (now-stale) refresh token again.
+
+    Returns the usable access token, or ``profile.token`` (static/None) when refresh is
+    impossible or fails. Never raises."""
+    with store._store_lock(".team_auth"):
+        creds = _load_creds()
+        if not _creds_match(creds, profile):
+            return profile.token
+        # Double-check: a concurrent process may have refreshed while we held for the lock.
         if creds.get("expires_at", 0) > time.time() + _EXPIRY_SKEW:
             return creds.get("access_token")
         refresh_token = creds.get("refresh_token")
@@ -154,11 +171,32 @@ def resolve_token(profile: Profile) -> str | None:
             return profile.token  # refresh failed — degrade to the static token (or None)
         creds["access_token"] = tok.get("access_token", creds.get("access_token"))
         if tok.get("refresh_token"):
-            creds["refresh_token"] = tok["refresh_token"]
+            creds["refresh_token"] = tok["refresh_token"]  # persist the rotated (single-use) token
         creds["expires_at"] = time.time() + tok.get("expires_in", 3600)
         _save_creds(creds)
         return creds["access_token"]
+
+
+def resolve_token(profile: Profile) -> str | None:
+    """The bearer RemoteStore should use for this profile, or None.
+
+    Prefers a stored OAuth token for this endpoint's issuer (refreshing when expired);
+    falls back to the static config.toml token, then None. Never raises."""
+    creds = _load_creds()
+    if _creds_match(creds, profile):
+        if creds.get("expires_at", 0) > time.time() + _EXPIRY_SKEW:
+            return creds.get("access_token")  # happy path: valid token, no lock, no network
+        return _locked_refresh(profile)
     return profile.token
+
+
+def refresh_now(profile: Profile) -> str | None:
+    """Force a refresh (reactive path: called after a 401), single-flight and double-checked.
+
+    Shares `_locked_refresh`, so a concurrent process that already refreshed short-circuits
+    us without a second network call. Returns the (possibly newly-refreshed) access token, or
+    the static/None fallback. Never raises — the caller decides whether the token changed."""
+    return _locked_refresh(profile)
 
 
 def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma: no cover - interactive (browser + blocking loopback server)
