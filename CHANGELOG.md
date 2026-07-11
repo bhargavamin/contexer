@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.17.2](https://github.com/bhargavamin/contexer/compare/v0.17.1...v0.17.2) (2026-07-11)
+
+
+### Bug Fixes
+
+* **server:** bound share_decision's worker wait with a timeout backstop ([5e5b493](https://github.com/bhargavamin/contexer/commit/5e5b493a53fa9f88a42f74c7f5b03492075a7219))
+* **server:** make share_decision async so it never blocks the event loop ([d5d4809](https://github.com/bhargavamin/contexer/commit/d5d4809bafce080f5e60a586b3d75e35f223a384))
+* **server:** make share_decision async so MCP shares don't freeze/fail on the event loop ([08d813d](https://github.com/bhargavamin/contexer/commit/08d813d03ed5c355c76391d5c258d2cf05a9c630))
+
 ## [0.17.1](https://github.com/bhargavamin/contexer/compare/v0.17.0...v0.17.1) (2026-07-10)
 
 
