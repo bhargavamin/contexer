@@ -76,3 +76,25 @@ def test_share_decision_does_not_block_the_event_loop(monkeypatch):
     asyncio.run(driver())
     assert "tick" in order
     assert order.index("tick") < order.index("share_done")
+
+
+def test_share_decision_times_out_without_hanging(monkeypatch):
+    # A wedged share() (transport never returns) must not hang the tool: within the bounded
+    # wait it returns a local-first degradation message instead of blocking forever. The
+    # worker keeps running in the background (Python can't cancel a blocking thread), which
+    # is why the fake sleeps a bounded 0.3s so the test process doesn't hang on exit.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
+    started = threading.Event()
+
+    def wedged_share(repo, decision_id):
+        started.set()
+        time.sleep(0.3)  # outlives the 0.03s backstop
+        return "late"
+
+    monkeypatch.setattr(share_mod, "share", wedged_share)
+
+    result = asyncio.run(server.share_decision("d", "/repo"))
+    assert started.is_set()          # the offload did start
+    assert result != "late"          # but the tool did NOT wait for it
+    assert "Saved locally" in result and "did not respond" in result
