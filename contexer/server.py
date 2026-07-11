@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import uuid
@@ -94,7 +95,7 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
 
 
 @mcp.tool()
-def share_decision(decision_id: str = "", repo_path: str = "") -> str:
+async def share_decision(decision_id: str = "", repo_path: str = "") -> str:
     """Explicitly push a local decision up to your team cloud context (never auto-shares).
 
     decision_id: the decision to share (full id or 8-char prefix); omit to share the most
@@ -104,7 +105,14 @@ def share_decision(decision_id: str = "", repo_path: str = "") -> str:
     if not resolved:
         return "Skipped — repo path not detected."
     from contexer import share as _share
-    return _share.share(resolved, decision_id)
+
+    # share() is synchronous and does blocking network I/O (RemoteStore -> asyncio.run).
+    # This is the ONE MCP tool that reaches the network from inside FastMCP's event loop, so
+    # run its blocking body on a worker thread the loop AWAITS rather than calling it inline
+    # (which would freeze the whole server for the round-trip and, since asyncio.run can't run
+    # inside a running loop, previously failed outright and misreported "endpoint unreachable").
+    # Off the loop there is no running loop, so share()'s own asyncio.run works unchanged.
+    return await asyncio.to_thread(_share.share, resolved, decision_id)
 
 
 @mcp.tool()
