@@ -431,6 +431,9 @@ Pointing at a self-hosted or local Teams server (for development): set `CONTEXER
 | `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, Codex, and/or Gemini CLI) |
 | `contexer install --target claude\|cursor\|codex\|gemini\|all` | Install for a specific tool only, or all |
 | `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each |
+| `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
+| `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
+| `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |

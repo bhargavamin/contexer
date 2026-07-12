@@ -765,8 +765,8 @@ class TestSessionStartBreakdown:
         store.update_decision(tmp_repo, "Always use uv not pip", SESSION_ID_SS, "convention")
         result = store.get_session_start_context(tmp_repo)
         msg = result["systemMessage"]
-        assert "constraint" in msg
-        assert "convention" in msg
+        assert "pending" in msg  # constraint is pending -> count-only notice
+        assert "convention" in msg  # convention (suggested) loads as a project rule
 
     def test_arch_shown_as_on_demand(self, tmp_repo):
         store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION_ID_SS, "architecture")
@@ -779,7 +779,7 @@ class TestSessionStartBreakdown:
         store.update_decision(tmp_repo, "Never commit untested code", SESSION_ID_SS, "constraint")
         result = store.get_session_start_context(tmp_repo)
         msg = result["systemMessage"]
-        assert "constraint" in msg
+        assert "pending" in msg  # the lone pending constraint surfaces as a count
 
     def test_mixed_pre_loaded_and_deferred(self, tmp_repo):
         store.update_decision(tmp_repo, "Never commit secrets", SESSION_ID_SS, "constraint")
@@ -1797,7 +1797,7 @@ class TestSuggestedUpdate:
         pending_ids = [e["id"] for e in store.get_pending_decisions(tmp_repo)]
         assert eid in pending_ids
         prompt = store.get_pending_approval_prompt(tmp_repo, eid)
-        assert "Engineering Decision Updated" in prompt
+        assert "pending review" in prompt
         assert "/api/v2/rollback" in prompt
         assert "Dismiss" in prompt
 
@@ -2093,7 +2093,7 @@ class TestGetPendingApprovalPrompt:
         data = store._load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
         prompt = store.get_pending_approval_prompt(tmp_repo, eid)
-        assert "Engineering Decision Detected" in prompt
+        assert "pending review" in prompt
         assert "AWS" in prompt
         assert "Confidence:" in prompt
         assert "approve_decision" in prompt
@@ -2165,7 +2165,7 @@ class TestSessionStartWithPending:
         store.update_decision(tmp_repo, "Never create public S3 buckets anywhere", SESSION_ID_CONF, "constraint")
         result = store.get_session_start_context(tmp_repo)
         msg = result["systemMessage"]
-        assert "constraint" in msg
+        assert "pending review" in msg  # count-only pending notice
         assert "pending" in msg.lower()
 
     def test_pending_decisions_excluded_from_project_rules_injection(self, tmp_repo):
@@ -2212,3 +2212,71 @@ class TestCaptureUserConstraintFields:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "approved"
         assert entry["created_by"] == "human"
+
+
+class TestReviewPendingAndSharePreview:
+    """Direct coverage for the on-demand review list and the cloud-push dry-run preview."""
+
+    def test_format_pending_review_lists_id_content_actions(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never deploy on Fridays", "s1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        eid = store.get_pending_decisions(tmp_repo)[0]["id"][:8]
+        assert "pending your review" in out
+        assert "Never deploy on Fridays" in out
+        assert "approve_decision" in out
+        assert eid in out
+
+    def test_format_pending_review_empty(self, tmp_repo):
+        assert store.format_pending_review(tmp_repo) == "Nothing pending review."
+
+    def test_approve_decision_resolves_8char_prefix(self, tmp_repo):
+        # review_pending shows 8-char ids in its approve_decision(...) instructions; approving
+        # by that short id must resolve (Greptile: exact-only match returned 'not found').
+        _ok, eid = store.update_decision(tmp_repo, "Never deploy on Fridays", "s", "constraint")
+        ok, msg = store.approve_decision(tmp_repo, eid[:8], "approve")
+        assert ok, msg
+        assert not any(e["id"] == eid for e in store.get_pending_decisions(tmp_repo))
+
+    def test_format_pending_review_caps_large_backlog(self, tmp_repo):
+        # #1: a big backlog must not dump every decision — cap like get_context, point overflow
+        # to `contexer review`. Build entries directly to bypass the novelty filter.
+        data = store._load(tmp_repo)
+        for i in range(30):
+            data["entries"].append(
+                store._new_decision_entry(f"Decision number {i} unique text {i}", "s",
+                                          "constraint", status="pending_approval"))
+        store._save(tmp_repo, data)
+        out = store.format_pending_review(tmp_repo)
+        assert f"showing {store._FILTERED_DISPLAY} of 30" in out
+        assert "contexer review" in out
+        assert out.count("approve_decision") == store._FILTERED_DISPLAY  # only the shown ones
+
+    def test_format_share_preview_shows_content_endpoint_and_confirm(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "Use Redis for caching" in out
+        assert "PERSONAL cloud" in out
+        assert "confirm=true" in out
+        assert "skip_confirm" in out
+
+    def test_format_share_preview_nothing_to_share(self, tmp_repo):
+        assert "Nothing to share" in store.format_share_preview(tmp_repo, "no-such-id")
+
+    def test_format_shareable_list(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for primary storage", "s1", "architecture")
+        out = store.format_shareable_list(tmp_repo)
+        assert "available to share" in out
+        assert "Use Postgres for primary storage" in out
+        assert "share_decision" in out
+
+    def test_format_shareable_list_empty(self, tmp_repo):
+        assert store.format_shareable_list(tmp_repo) == "No decisions available to share."
+
+    def test_format_share_preview_multi_lists_all_selected(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        store.update_decision(tmp_repo, "Store blobs in object storage", "s1", "architecture")
+        ids = [e["id"][:8] for e in store._load(tmp_repo)["entries"]]
+        out = store.format_share_preview(tmp_repo, ",".join(ids))
+        assert "2 decisions" in out
+        assert "Use Redis for caching" in out and "Store blobs in object storage" in out

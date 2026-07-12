@@ -203,14 +203,14 @@ class TestSessionStartPermutations:
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "pending" in ctx.lower()
-        assert "constraint" in ctx.lower()
+        assert "review_pending" in ctx
         assert "Global rules" not in ctx
 
     def test_no_global_repo_has_decisions_status_line(self):
         _add_repo("Never commit without tests", "constraint")
         result = store.get_session_start_context(REPO)
         msg = result["systemMessage"]
-        assert "constraint" in msg
+        assert "pending review" in msg
         assert "global rule" not in msg
 
     def test_both_global_and_repo_injects_both_sections(self):
@@ -222,7 +222,7 @@ class TestSessionStartPermutations:
         assert "Global rules" in ctx
         assert "conventional commits" in ctx
         assert "pending" in ctx.lower()
-        assert "constraint" in ctx.lower()
+        assert "review_pending" in ctx
 
     def test_both_global_and_repo_global_comes_first(self):
         # Global rules section should appear before the pending notice.
@@ -240,7 +240,7 @@ class TestSessionStartPermutations:
         result = store.get_session_start_context(REPO)
         msg = result["systemMessage"]
         assert "global rule" in msg
-        assert "constraint" in msg
+        assert "pending review" in msg  # repo constraint is pending -> count-only
 
     def test_deferred_decisions_mentioned_in_context(self):
         _add_repo("Chose REST over GraphQL for external API", "architecture")

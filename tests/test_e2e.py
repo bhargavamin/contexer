@@ -248,7 +248,7 @@ class TestSessionStart:
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "pending" in ctx.lower()
-        assert "constraint" in ctx.lower()
+        assert "review_pending" in ctx  # count-only notice points to the on-demand tool
 
     def test_constraints_injected_eagerly(self, tmp_repo):
         # Constraints require approval before injection; they appear in the pending notice.
@@ -257,7 +257,7 @@ class TestSessionStart:
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "pending" in ctx.lower()
-        assert "constraint" in ctx.lower()
+        assert "review_pending" in ctx
 
     def test_architecture_deferred_not_in_session_start(self, tmp_repo):
         store.update_decision(tmp_repo, "Use FastAPI for HTTP", SESSION, "architecture")

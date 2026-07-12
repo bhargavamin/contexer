@@ -96,3 +96,31 @@ def test_non_string_token_raises(config_path):
     config_path.write_text("token = 123")
     with pytest.raises(ConfigError):
         load_profile()
+
+
+# ── skip_confirm (personal-cloud push confirmation opt-out) ──────────────────────
+
+def test_skip_confirm_defaults_false(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\n')
+    assert load_profile().skip_confirm is False
+
+
+def test_skip_confirm_true_parsed(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\nskip_confirm = true\n')
+    assert load_profile().skip_confirm is True
+
+
+def test_skip_confirm_invalid_type_raises(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('skip_confirm = "yes"\n')
+    with pytest.raises(ConfigError):
+        load_profile()
+
+
+def test_write_team_profile_preserves_skip_confirm(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\nskip_confirm = true\n')
+    config.write_team_profile("http://new/mcp")  # e.g. `contexer login` re-writes config
+    assert load_profile().skip_confirm is True

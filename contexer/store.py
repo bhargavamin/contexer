@@ -1082,7 +1082,12 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
+        # Resolve exact id first, then an 8-char prefix — consistent with replace_id and
+        # get_shareable, so the short ids shown by review_pending/get_context are approvable.
         entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
+        if entry is None and entry_id:
+            entry = next((e for e in data["entries"]
+                          if e.get("id", "").startswith(entry_id)), None)
         if entry is None:
             return False, f"Decision {entry_id!r} not found."
 
@@ -1152,6 +1157,37 @@ def get_pending_decisions(repo_path: str) -> list[dict]:
     ]
 
 
+def format_pending_review(repo_path: str) -> str:
+    """Render every decision awaiting the developer as an identified list — id + subtype +
+    content + the action to take — for the in-session `review_pending` tool (the conversational
+    twin of the `contexer review` terminal command). Content IS shown here: this is the
+    on-demand surface, pulled only when the developer asks to review, so it is where the detail
+    belongs (unlike the deliberately terse SessionStart count)."""
+    pending = get_pending_decisions(repo_path)
+    if not pending:
+        return "Nothing pending review."
+    total = len(pending)
+    shown = pending[:_FILTERED_DISPLAY]  # cap like get_context, so a big backlog can't flood context
+    header = f"{_pl(total, 'decision')} pending your review"
+    if total > len(shown):
+        header += f" — showing {len(shown)} of {total}; run `contexer review` for the rest"
+    lines = [header + ":\n"]
+    for d in shown:
+        eid = (d.get("id") or "")[:8]
+        st = d.get("subtype") or "decision"
+        prop = d.get("proposed_revision")
+        if prop:
+            lines.append(f"- {eid} [{st}] update")
+            lines.append(f'    current:  "{_current_content(d)}"')
+            lines.append(f'    detected: "{prop.get("content", "")}"')
+            lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
+        else:
+            lines.append(f'- {eid} [{st}] "{_current_content(d)}"')
+            lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
+    lines.append("\nReview each with the developer before approving.")
+    return "\n".join(lines)
+
+
 def _share_projection(entry: dict) -> dict:
     """Project a decision entry onto the push wire shape {id, type, content, confidence,
     evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
@@ -1198,6 +1234,76 @@ def get_shareable_all(repo_path: str) -> list[dict]:
     return [_share_projection(e) for e in decisions]
 
 
+# A personal-cloud push is OUTWARD — the single source of this warning clause, shared by the
+# MCP preview (format_share_preview) and the CLI preview (cli._confirm_share) so the wording
+# can't drift between the two surfaces.
+_SHARE_OUTWARD_WARNING = "this leaves your machine and may be cached/indexed even if later deleted"
+
+
+def _share_item_line(proj: dict, maxlen: int = 0) -> str:
+    """One '<id8> [type] "content"' preview line for a share projection. Content truncated to
+    `maxlen` (0 = full). Shared by the MCP and CLI push previews so both render identically."""
+    content = proj.get("content", "")
+    if maxlen and len(content) > maxlen:
+        content = content[:maxlen] + "…"
+    return f'  {(proj.get("id") or "")[:8]} [{proj.get("type") or "decision"}] "{content}"'
+
+
+def format_shareable_list(repo_path: str) -> str:
+    """Numbered/identified list of decisions available to share (id + type + content), so the
+    developer can pick which to share when they haven't named one. The agent shows this and the
+    developer selects conversationally; capped like get_context so a big store can't flood context."""
+    items = get_shareable_all(repo_path)
+    if not items:
+        return "No decisions available to share."
+    total = len(items)
+    shown = items[:_FILTERED_DISPLAY]
+    header = f"{_pl(total, 'decision')} available to share"
+    if total > len(shown):
+        header += f" — showing {len(shown)} of {total}, run `contexer share` in a terminal for the rest"
+    lines = [header + ". Tell me which to share, then I'll preview and confirm:\n"]
+    for it in shown:
+        lines.append(_share_item_line(it))
+    lines.append('\nShare the selected: share_decision(decision_id="<id>[,<id2>…]") '
+                 "— previews first; add confirm=true to send.")
+    return "\n".join(lines)
+
+
+def _resolve_share_projections(repo_path: str, decision_id: str) -> list[dict]:
+    """Resolve a possibly comma-separated `decision_id` to shareable projections (order and
+    duplicates preserved as given; empty -> the single most-recent decision)."""
+    ids = [i.strip() for i in decision_id.split(",") if i.strip()]
+    if not ids:
+        proj = get_shareable(repo_path, "")
+        return [proj] if proj else []
+    return [p for p in (get_shareable(repo_path, i) for i in ids) if p is not None]
+
+
+def format_share_preview(repo_path: str, decision_id: str = "", profile=None) -> str:
+    """Dry-run preview of what a personal-cloud push would send — a pure local read, NO network.
+    Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
+    see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
+    id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml."""
+    projs = _resolve_share_projections(repo_path, decision_id)
+    if not projs:
+        return "Nothing to share — no matching decision found."
+    from contexer.config import default_endpoint, load_profile
+    endpoint = (profile or load_profile()).endpoint or default_endpoint()
+    ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
+    lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}) — "
+             f"{_SHARE_OUTWARD_WARNING}:\n"]
+    lines += [_share_item_line(p) for p in projs]
+    lines += [
+        "",
+        "Confirm with the developer before sending.",
+        f'  • Proceed:  share_decision(decision_id="{ids_csv}", confirm=true)',
+        "  • Cancel:   do nothing",
+        '  • Stop asking: set `skip_confirm = true` in ~/.contexer/config.toml '
+        '(or the developer says "always share without asking").',
+    ]
+    return "\n".join(lines)
+
+
 def _format_update_approval(entry: dict) -> str:
     """Approval prompt for a Suggested Update - current revision vs the detected change."""
     prop = entry.get("proposed_revision") or {}
@@ -1207,21 +1313,19 @@ def _format_update_approval(entry: dict) -> str:
     eid = entry["id"]
     rev = entry.get("revision", 1)
     return (
-        f"Engineering Decision Updated - pending your approval\n\n"
+        f"Engineering decision update recorded — pending review (id={eid}). "
+        f"The current revision stays trusted until approved.\n\n"
         f"Current (revision {rev}):\n  \"{entry.get('content', '')}\"\n\n"
         f"Detected:\n  \"{prop.get('content', '')}\"\n\n"
         f"Confidence: {score}%\n"
         f"Evidence:\n{factor_lines}\n\n"
-        f"IMPORTANT: Show this to the developer and wait for their response:\n\n"
-        f"  [Y] Approve - call approve_decision(entry_id=\"{eid}\", action=\"approve\")"
-        f"  (creates revision {rev + 1}, preserves history)\n"
-        f"  [E] Edit    - call approve_decision(entry_id=\"{eid}\", action=\"edit\","
-        f" content=\"<corrected text>\")\n"
-        f"  [S] Skip    - call approve_decision(entry_id=\"{eid}\", action=\"skip\")"
-        f"  (keep the suggestion for later)\n"
-        f"  [D] Dismiss - call approve_decision(entry_id=\"{eid}\", action=\"dismiss\")"
-        f"  (discard, keep current)\n\n"
-        f"Or the developer can run `contexer review` in their terminal to review later."
+        f"This does not block your current work. Surface it to the developer for approval at a "
+        f"natural point (no need to interrupt), then:\n"
+        f"  [Y] Approve - approve_decision(entry_id=\"{eid}\", action=\"approve\")  (revision {rev + 1}, history kept)\n"
+        f"  [E] Edit    - approve_decision(entry_id=\"{eid}\", action=\"edit\", content=\"<corrected text>\")\n"
+        f"  [S] Skip    - approve_decision(entry_id=\"{eid}\", action=\"skip\")  (keep for later)\n"
+        f"  [D] Dismiss - approve_decision(entry_id=\"{eid}\", action=\"dismiss\")  (discard, keep current)\n"
+        f"(They can also review later in a terminal with `contexer review`.)"
     )
 
 
@@ -1244,16 +1348,17 @@ def get_pending_approval_prompt(repo_path: str, entry_id: str | None) -> str:
     content = entry.get("content", "")
     eid = entry["id"]
     return (
-        f"Engineering Decision Detected — pending your approval\n\n"
+        f"Engineering decision recorded — pending review (id={eid}), not yet trusted.\n\n"
         f"\"{content}\"\n\n"
         f"Confidence: {score}%\n"
         f"Evidence:\n{factor_lines}\n\n"
-        f"IMPORTANT: Show this to the developer and wait for their response:\n\n"
-        f"  [Y] Approve — call approve_decision(entry_id=\"{eid}\", action=\"approve\")\n"
-        f"  [E] Edit    — call approve_decision(entry_id=\"{eid}\", action=\"edit\","
-        f" content=\"<corrected text>\")\n"
-        f"  [N] Ignore  — call approve_decision(entry_id=\"{eid}\", action=\"ignore\")\n\n"
-        f"Or the developer can run `contexer review` in their terminal to review later."
+        f"This does NOT affect any session until approved, and it does not block your current "
+        f"work. Surface it to the developer for approval at a natural point (no need to "
+        f"interrupt), then:\n"
+        f"  [Y] Approve — approve_decision(entry_id=\"{eid}\", action=\"approve\")\n"
+        f"  [E] Edit    — approve_decision(entry_id=\"{eid}\", action=\"edit\", content=\"<corrected text>\")\n"
+        f"  [N] Ignore  — approve_decision(entry_id=\"{eid}\", action=\"ignore\")\n"
+        f"(They can also review later in a terminal with `contexer review`.)"
     )
 
 
@@ -1698,21 +1803,17 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
             "Call get_context BEFORE reading files for any question about architecture, "
             "design decisions, rationale, or patterns."
         )
-    if pending or with_proposals:
-        pending_by_type: dict[str, int] = {}
-        for d in pending:
-            st = d.get("subtype") or "decision"
-            pending_by_type[st] = pending_by_type.get(st, 0) + 1
-        pending_parts = [_pl(cnt, st) for st, cnt in sorted(pending_by_type.items())]
-        notice_parts = []
-        if pending_parts:
-            notice_parts.append(f"{', '.join(pending_parts)} pending your approval")
-        if with_proposals:
-            notice_parts.append(f"{_pl(len(with_proposals), 'suggested update')} awaiting review")
+    # Count-only, deliberately terse: a startup should not dump every pending decision's
+    # content (overwhelming). The identified list is pulled on demand via `review_pending`
+    # (in-session) or `contexer review` (terminal); the per-decision content is surfaced at
+    # capture time, not here.
+    total_pending = len(pending) + len(with_proposals)
+    if total_pending:
         sys_parts.append(
-            f"{'; '.join(notice_parts)}. "
-            "Run `contexer review` in your terminal or call approve_decision() "
-            "after reviewing each with the developer."
+            f"{_pl(total_pending, 'decision')} pending your review (recorded, not yet "
+            "trusted — not listed here to keep startup light). Offer to show them to the "
+            "developer when appropriate: call review_pending to list them, then "
+            "approve_decision — or they can run `contexer review` in a terminal."
         )
 
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
@@ -1734,16 +1835,11 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
         sentences.append(f"{', '.join(loaded_parts)} loaded")
     if deferred_count > 0:
         sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
-    if pending or with_proposals:
-        review_parts = []
-        if pending:
-            pending_by_type_str = ", ".join(
-                _pl(cnt, st) for st, cnt in sorted(pending_by_type.items())
-            )
-            review_parts.append(f"{pending_by_type_str} pending approval")
-        if with_proposals:
-            review_parts.append(f"{_pl(len(with_proposals), 'suggested update')} awaiting review")
-        sentences.append(f"{'; '.join(review_parts)} - run `contexer review`")
+    if total_pending:
+        sentences.append(
+            f"{_pl(total_pending, 'decision')} pending review — say 'review pending' "
+            "or run `contexer review`"
+        )
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
     return {"status": status, "context": "\n".join(sys_parts)}

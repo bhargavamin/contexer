@@ -35,7 +35,7 @@ def test_share_decision_offloads_blocking_body_off_the_loop(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo/x")
     seen = {}
 
-    def fake_share(repo, decision_id):
+    def fake_share(repo, decision_id, **kw):
         seen["thread"] = threading.current_thread()
         seen["args"] = (repo, decision_id)
         return "shared srv-1"
@@ -44,7 +44,7 @@ def test_share_decision_offloads_blocking_body_off_the_loop(monkeypatch):
 
     async def driver():
         seen["loop_thread"] = threading.current_thread()
-        return await server.share_decision("dec-42", "/repo/x")
+        return await server.share_decision("dec-42", "/repo/x", confirm=True)
 
     result = asyncio.run(driver())
     assert result == "shared srv-1"
@@ -58,7 +58,7 @@ def test_share_decision_does_not_block_the_event_loop(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     order = []
 
-    def slow_share(repo, decision_id):
+    def slow_share(repo, decision_id, **kw):
         time.sleep(0.2)  # stands in for a slow network round-trip
         order.append("share_done")
         return "ok"
@@ -71,7 +71,7 @@ def test_share_decision_does_not_block_the_event_loop(monkeypatch):
             order.append("tick")
 
     async def driver():
-        await asyncio.gather(server.share_decision("d", "/repo"), ticker())
+        await asyncio.gather(server.share_decision("d", "/repo", confirm=True), ticker())
 
     asyncio.run(driver())
     assert "tick" in order
@@ -87,14 +87,125 @@ def test_share_decision_times_out_without_hanging(monkeypatch):
     monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
     started = threading.Event()
 
-    def wedged_share(repo, decision_id):
+    def wedged_share(repo, decision_id, **kw):
         started.set()
         time.sleep(0.3)  # outlives the 0.03s backstop
         return "late"
 
     monkeypatch.setattr(share_mod, "share", wedged_share)
 
-    result = asyncio.run(server.share_decision("d", "/repo"))
+    result = asyncio.run(server.share_decision("d", "/repo", confirm=True))
     assert started.is_set()          # the offload did start
     assert result != "late"          # but the tool did NOT wait for it
     assert "Saved locally" in result and "did not respond" in result
+
+
+# ── cloud-push preview gate + review_pending ─────────────────────────────────────
+from contexer import config as _config_mod
+
+
+def test_share_decision_previews_by_default_without_pushing(monkeypatch):
+    # confirm=False (default) + skip_confirm off -> preview only, NOTHING is pushed.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    # Team-configured + authenticated: the preview gate only fires when a push could actually happen.
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
+    monkeypatch.setattr(server.store, "format_share_preview", lambda r, d, profile=None: "PREVIEW-TEXT")
+    pushed = {"n": 0}
+    monkeypatch.setattr(share_mod, "share", lambda *a, **k: pushed.__setitem__("n", pushed["n"] + 1))
+
+    result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
+    assert result == "PREVIEW-TEXT"
+    assert pushed["n"] == 0  # dry run — nothing left the machine
+
+
+def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
+    # A developer who set skip_confirm bypasses the preview even with confirm=False.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(skip_confirm=True))
+    monkeypatch.setattr(share_mod, "share", lambda repo, dec, **k: "pushed")
+
+    result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
+    assert result == "pushed"
+
+
+def test_share_decision_local_mode_skips_preview(monkeypatch):
+    # #2: with no team configured, don't preview a push that would no-op — go straight to share().
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile", lambda *a, **k: _config_mod.Profile())  # local
+    previewed = {"n": 0}
+    monkeypatch.setattr(server.store, "format_share_preview",
+                        lambda *a, **k: previewed.__setitem__("n", previewed["n"] + 1) or "PREVIEW")
+    monkeypatch.setattr(share_mod, "share", lambda repo, dec, **k: "not configured")
+
+    result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
+    assert result == "not configured"
+    assert previewed["n"] == 0  # never previewed in local mode
+
+
+def test_share_decision_team_no_token_skips_preview(monkeypatch):
+    # #B: team mode + endpoint but no resolvable token -> from_profile None -> no misleading preview.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: None)
+    previewed = {"n": 0}
+    monkeypatch.setattr(server.store, "format_share_preview",
+                        lambda *a, **k: previewed.__setitem__("n", 1) or "PREVIEW")
+    monkeypatch.setattr(share_mod, "share_ids", lambda repo, ids, **k: "not configured")
+
+    result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
+    assert result == "not configured"
+    assert previewed["n"] == 0  # never advertised a push that can't happen
+
+
+def test_review_pending_returns_identified_list(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "format_pending_review", lambda r: "PENDING-LIST")
+    assert server.review_pending("/repo") == "PENDING-LIST"
+
+
+def test_review_pending_no_repo(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "")
+    assert server.review_pending("") == "No repo path detected."
+
+
+def test_list_shareable_returns_list(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "format_shareable_list", lambda r: "SHAREABLE-LIST")
+    assert server.list_shareable("/repo") == "SHAREABLE-LIST"
+
+
+def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
+    got = {}
+
+    def fake_preview(r, d, profile=None):
+        got["decision_id"] = d
+        return "PREVIEW"
+
+    monkeypatch.setattr(server.store, "format_share_preview", fake_preview)
+    result = asyncio.run(server.share_decision("ab12,cd34", "/repo"))
+    assert result == "PREVIEW"
+    assert got["decision_id"] == "ab12,cd34"  # the comma-separated selection flows to preview
+
+
+def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    got = {}
+
+    def fake_share_ids(repo, ids, **k):
+        got["ids"] = ids
+        return "done"
+
+    monkeypatch.setattr(share_mod, "share_ids", fake_share_ids)
+    result = asyncio.run(server.share_decision(" ab12 , cd34 ,", "/repo", confirm=True))
+    assert got["ids"] == ["ab12", "cd34"]  # parsed, trimmed, blanks dropped
+    assert result == "done"
