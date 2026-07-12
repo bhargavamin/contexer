@@ -46,8 +46,10 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                   attached to the live decision and returns an approval prompt - the current
                   revision stays trusted until the developer approves.
 
-    IMPORTANT: If this returns an 'Engineering Decision Detected/Updated' approval prompt, show
-    it to the developer immediately and wait for their response before continuing. Do NOT ignore it.
+    If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
+    does not block your work — keep going. Surface it to the developer for approval at a natural
+    point (call approve_decision when they respond, or they can run `contexer review`); never
+    discard it silently. Use review_pending to list everything awaiting review with its content.
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
@@ -81,6 +83,18 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
 
 
 @mcp.tool()
+def review_pending(repo_path: str = "") -> str:
+    """List decisions awaiting the developer's review — brand-new pending-approval decisions and
+    suggested updates — each with its id and full content, so you can surface them conversationally
+    and approve via approve_decision. The in-session equivalent of the `contexer review` terminal
+    command. Call this when the developer asks to review, or when SessionStart reported items pending."""
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return "No repo path detected."
+    return store.format_pending_review(resolved)
+
+
+@mcp.tool()
 def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limit: int = 0) -> str:
     """Returns stored context for the current repository. Call this when the task requires project context.
 
@@ -104,15 +118,31 @@ _SHARE_TIMEOUT = 30.0
 
 
 @mcp.tool()
-async def share_decision(decision_id: str = "", repo_path: str = "") -> str:
+async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bool = False) -> str:
     """Explicitly push a local decision up to your team cloud context (never auto-shares).
 
     decision_id: the decision to share (full id or 8-char prefix); omit to share the most
     recent decision. Syncs to your PERSONAL cloud context today; true team review arrives
-    with a team-scoped push endpoint."""
+    with a team-scoped push endpoint.
+    confirm: safety gate. When false (default) this PREVIEWS what would be sent and does NOT
+    push — show the preview to the developer and call again with confirm=true to actually send.
+    Pushing is an outward action (leaves the machine), so it is confirmed by default; a developer
+    who set skip_confirm in config.toml bypasses the preview."""
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
+    from contexer import config as _config
+
+    profile = _config.load_profile()  # loaded once, reused by the preview and the push
+    # Safe-by-default: a personal-cloud push is OUTWARD (the decision leaves the machine and may
+    # be cached/indexed even if later deleted). Preview only when sharing is actually configured
+    # (team mode + endpoint) — otherwise share() reports the not-configured no-op itself, and
+    # previewing a push that can't happen would mislead. When configured, the first call PREVIEWS
+    # (pure local read, no network) and requires confirm=True to send, unless skip_confirm is set.
+    team_configured = profile.mode == "team" and bool(profile.endpoint)
+    if not confirm and not profile.skip_confirm and team_configured:
+        return store.format_share_preview(resolved, decision_id, profile=profile)
+
     from contexer import share as _share
 
     # share() is synchronous and does blocking network I/O (RemoteStore -> asyncio.run).
@@ -130,7 +160,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "") -> str:
     # is lost. Fully reclaiming a wedged connection needs async-native transport (follow-up).
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_share.share, resolved, decision_id),
+            asyncio.to_thread(_share.share, resolved, decision_id, profile=profile),
             timeout=_SHARE_TIMEOUT,
         )
     except TimeoutError:

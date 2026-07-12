@@ -36,6 +36,10 @@ class Profile:
     mode: Mode = "local"
     endpoint: str | None = None
     token: str | None = None
+    # Opt-out of the personal-cloud push confirmation. Default False = review-before-push is
+    # ON (share_decision previews first). Set `skip_confirm = true` in config.toml to always
+    # push without the preview.
+    skip_confirm: bool = False
 
 
 def load_profile(path: Path | None = None) -> Profile:
@@ -61,7 +65,13 @@ def load_profile(path: Path | None = None) -> Profile:
     endpoint = _opt_str(data, "endpoint", config_path)
     token = _opt_str(data, "token", config_path)
 
-    return Profile(mode=mode, endpoint=endpoint, token=token)
+    skip_confirm = data.get("skip_confirm", False)
+    if not isinstance(skip_confirm, bool):
+        raise ConfigError(
+            f"invalid skip_confirm in {config_path}: expected true/false, "
+            f"got {type(skip_confirm).__name__}")
+
+    return Profile(mode=mode, endpoint=endpoint, token=token, skip_confirm=skip_confirm)
 
 
 def write_team_profile(endpoint: str, path: Path | None = None) -> None:
@@ -73,6 +83,8 @@ def write_team_profile(endpoint: str, path: Path | None = None) -> None:
     lines = ['mode = "team"', f"endpoint = {_toml_str(endpoint)}"]
     if existing.token:
         lines.append(f"token = {_toml_str(existing.token)}")
+    if existing.skip_confirm:  # preserve the push-confirm opt-out across `contexer login`
+        lines.append("skip_confirm = true")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n")
     config_path.chmod(0o600)  # may hold a bearer token — owner-only, like .team_auth.json

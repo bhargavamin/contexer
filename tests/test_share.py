@@ -486,17 +486,45 @@ def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
 def test_cli_share_prints_result(monkeypatch, capsys):
     from contexer import cli
     monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
-    monkeypatch.setattr(share, "share", lambda repo, decision_id="": f"shared {decision_id or 'latest'}")
-    cli.share_cmd(["abc123"])
+    monkeypatch.setattr(share, "share", lambda repo, decision_id="", **kw: f"shared {decision_id or 'latest'}")
+    cli.share_cmd(["abc123", "--yes"])  # --yes bypasses the push-confirm preview
     assert "abc123" in capsys.readouterr().out
 
 
 def test_cli_share_all_flag(monkeypatch, capsys):
     from contexer import cli
     monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
-    monkeypatch.setattr(share, "share_all", lambda repo: "shared all of them")
-    cli.share_cmd(["--all"])
+    monkeypatch.setattr(share, "share_all", lambda repo, **kw: "shared all of them")
+    cli.share_cmd(["--all", "--yes"])
     assert "shared all of them" in capsys.readouterr().out
+
+
+def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
+    # Without --yes, share_cmd previews and asks; answering 'n' pushes nothing.
+    from contexer import cli, config
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    monkeypatch.setattr(store, "get_shareable",
+                        lambda repo, did="": {"id": "abc12345", "type": "constraint", "content": "never X"})
+    pushed = {"n": 0}
+    monkeypatch.setattr(share, "share", lambda *a, **k: pushed.__setitem__("n", pushed["n"] + 1))
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    cli.share_cmd(["abc12345"])
+    out = capsys.readouterr().out
+    assert "never X" in out and "Cancelled" in out
+    assert pushed["n"] == 0
+
+
+def test_cli_share_nothing_to_share_no_false_cancel(monkeypatch, capsys):
+    # #4: an empty share prints only 'Nothing to share', not a contradictory 'Cancelled'.
+    from contexer import cli, config
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    monkeypatch.setattr(store, "get_shareable", lambda repo, did="": None)
+    cli.share_cmd(["missing"])
+    out = capsys.readouterr().out
+    assert "Nothing to share" in out
+    assert "Cancelled" not in out
 
 
 def test_cli_share_all_with_id_rejected(monkeypatch, capsys):

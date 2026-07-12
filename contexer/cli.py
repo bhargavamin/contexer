@@ -471,11 +471,12 @@ def share_cmd(rest: list | None = None) -> None:
     Must be run inside a git repository."""
     import os
 
-    from contexer import share, store
+    from contexer import config, share, store
 
     rest = rest or []
+    yes = "--yes" in rest or "-y" in rest
     share_all = "--all" in rest
-    ids = [a for a in rest if a != "--all"]
+    ids = [a for a in rest if a not in ("--all", "--yes", "-y")]
     if share_all and ids:
         print("Pass either an id or --all, not both.", file=sys.stderr)
         sys.exit(1)
@@ -483,10 +484,52 @@ def share_cmd(rest: list | None = None) -> None:
     if not repo:
         print("No git repo detected - run `contexer share` inside a repository.", file=sys.stderr)
         sys.exit(1)
+
+    # Confirm-before-push (outward action). --yes or config skip_confirm bypasses the preview.
+    profile = config.load_profile()  # loaded once, reused by the push below
+    if not (yes or profile.skip_confirm):
+        decision = _confirm_share(repo, share_all, ids)
+        if decision is None:   # nothing to share — _confirm_share already said so
+            return
+        if not decision:       # developer declined
+            print("Cancelled — nothing was pushed.")
+            return
+
     if share_all:
-        print(share.share_all(repo))
+        print(share.share_all(repo, profile=profile))
     else:
-        print(share.share(repo, ids[0] if ids else ""))
+        print(share.share(repo, ids[0] if ids else "", profile=profile))
+
+
+def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
+    """Preview what a personal-cloud push would send and ask to proceed. Returns True to push,
+    False if the developer declined, None if there is nothing to share (message already printed).
+    Pure local read — no network happens until the caller actually calls share()."""
+    from contexer import store
+
+    if share_all:
+        items = store.get_shareable_all(repo)
+        if not items:
+            print("Nothing to share.")
+            return None
+        print(f"\nAbout to push {len(items)} decision(s) to your PERSONAL cloud — "
+              f"{store._SHARE_OUTWARD_WARNING}:\n")
+        for it in items[:10]:
+            print(store._share_item_line(it, maxlen=80))
+        if len(items) > 10:
+            print(f"  …and {len(items) - 10} more")
+    else:
+        proj = store.get_shareable(repo, ids[0] if ids else "")
+        if proj is None:
+            print("Nothing to share — no matching decision found.")
+            return None
+        print(f"\nAbout to push to your PERSONAL cloud — {store._SHARE_OUTWARD_WARNING}:\n")
+        print(store._share_item_line(proj))
+    try:
+        return input("\nPush to cloud? [y/N]: ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
 
 
 def login_cmd(rest: list | None = None) -> None:
