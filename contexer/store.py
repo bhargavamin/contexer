@@ -993,16 +993,45 @@ def _promote_proposal(entry: dict, content: str | None = None) -> None:
     entry.pop("proposed_revision", None)
 
 
-def _touch_pending_review() -> None:
-    """Drop the global ~/.contexer/.pending_review flag — the next-prompt hook consumes it to
-    nudge the developer to review pending decisions mid-session. Global (not per-slug) because
-    the shell consumers (claude/codex anchor) can't compute the sha1 slug, and each host writes +
-    consumes on the same machine. Fail-soft: a flag-write error must never break capture."""
+_PENDING_REVIEW_NUDGE = (
+    "Contexer: decision(s) are pending your review. At a natural pause, offer to show them "
+    "(call review_pending) and approve via approve_decision (entry_id=all clears the shown "
+    "set); they stay inactive until approved."
+)
+
+
+def _pending_review_flag(repo_path: str) -> Path:
+    """Per-repo flag path — a pending decision in repo A must never nudge a session in repo B."""
+    return STORE_DIR / f".pending_review_{_slug(repo_path)}"
+
+
+def _touch_pending_review(repo_path: str) -> None:
+    """Drop the per-repo .pending_review flag — the next-prompt consumer (pending_review_nudge)
+    reads it to nudge the developer to review pending decisions mid-session. Fail-soft: a
+    flag-write error must never break capture."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        (STORE_DIR / ".pending_review").touch()
+        _pending_review_flag(repo_path).touch()
     except OSError:
         pass
+
+
+def pending_review_nudge(repo_path: str) -> str | None:
+    """Per-prompt consumer for the pending-review flag. Returns the one-time nudge text (and
+    clears the flag) ONLY when THIS repo has a freshly-set flag AND still has decisions awaiting
+    review — so a flag left by an already-approved decision, or by a different repo, never
+    produces a false nudge. Returns None otherwise. Fail-soft (never raises)."""
+    try:
+        repo = _resolve_repo(repo_path)
+        if not repo:
+            return None
+        flag = _pending_review_flag(repo)
+        if not flag.exists():
+            return None
+        flag.unlink(missing_ok=True)  # fire once; a new pending decision re-arms it
+        return _PENDING_REVIEW_NUDGE if get_pending_decisions(repo) else None
+    except OSError:
+        return None
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
@@ -1049,7 +1078,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     target["proposed_revision"] = _build_proposal(
                         target, content, subtype, session_id, now)
                     _save(repo_path, data)
-                    _touch_pending_review()  # a Suggested Update now awaits review (after save)
+                    _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"]
                 # Trivial change (pattern/convention, or any human/scan/bootstrap change) →
                 # apply immediately as a new approved revision. History is preserved: the
@@ -1073,7 +1102,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
         if _entry_status(entry) == "pending_approval":
-            _touch_pending_review()  # a brand-new decision awaits review (after save)
+            _touch_pending_review(repo_path)  # a brand-new decision awaits review (after save)
         return True, entry["id"]
 
 

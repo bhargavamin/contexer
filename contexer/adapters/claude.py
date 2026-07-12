@@ -172,6 +172,20 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+def review_nudge(repo_path: str, raw: str) -> str:
+    """UserPromptSubmit (every prompt): if THIS repo has a decision newly pending review AND still
+    has pending ones, inject a one-time nudge. store.pending_review_nudge is per-repo and verifies
+    the store, so an already-approved or cross-repo flag yields nothing. Codex reuses this verbatim."""
+    try:
+        nudge = store.pending_review_nudge(store._hook_cwd_repo(repo_path))
+        if not nudge:
+            return "{}"
+        return json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": nudge}})
+    except Exception:
+        return "{}"
+
+
 def _retire_capture_task_hook() -> None:
     """Remove the pre-#58 capture-task hook group from ~/.claude/settings.json.
 
@@ -407,20 +421,12 @@ def install(home: Path) -> list[str]:
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
-    # Consume the global .pending_review flag (dropped by store.update_decision when a decision
-    # awaits the developer) and nudge to review it mid-session — mirrors the .pending_capture
-    # anchor. Nudge text has no inner double quotes so the single-quoted echo stays valid.
-    review_cmd = (
-        "FLAG=\"$HOME/.contexer/.pending_review\"; "
-        "if [ -f \"$FLAG\" ]; then "
-        "rm -f \"$FLAG\"; "
-        "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
-        "\"additionalContext\": \"Contexer: decision(s) are pending your review. At a natural "
-        "pause, offer to show them (call review_pending) and approve via approve_decision "
-        "(entry_id=all clears the shown set); they stay inactive until approved.\"}}'; "
-        "else echo '{}'; fi"
-        f" # {_HOOK_SENTINEL}"
-    )
+    # Nudge to review decisions pending the developer (dropped by store.update_decision). A Python
+    # entrypoint (not pure shell) so it is per-repo and can verify the store still has something
+    # pending — no false nudge for an already-approved or cross-repo flag.
+    review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                  f'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     contexer_bin = shutil.which("contexer") or "contexer"
 
@@ -583,7 +589,7 @@ def install(home: Path) -> list[str]:
     if not _in_groups(ups, "claude.team_poll"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
-    if not _in_groups(ups, ".pending_review"):
+    if not _in_groups(ups, "claude.review_nudge"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
 
@@ -692,7 +698,7 @@ def uninstall(home: Path) -> list[str]:
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
-            "UserPromptSubmit": [".current_repo", ".pending_capture", ".pending_review",
+            "UserPromptSubmit": [".current_repo", ".pending_capture", "claude.review_nudge",
                                  "get_bootstrap_context_prompt",
                                  "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                                  "Reminder: if you make a significant decision",

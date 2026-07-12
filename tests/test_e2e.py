@@ -106,29 +106,25 @@ class TestInstall:
     def test_pending_review_hook_registered(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
-        assert _in_groups(ups, ".pending_review")
+        assert _in_groups(ups, "claude.review_nudge")
 
     def test_uninstall_removes_pending_review_hook(self, tmp_home):
         cli.install()
         cli.uninstall()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
-        assert not _in_groups(ups, ".pending_review")
+        assert not _in_groups(ups, "claude.review_nudge")
 
-    def test_pending_review_hook_emits_valid_json(self, tmp_home):
-        # Runtime check: the shell echo must be valid JSON (a malformed nudge would silently
-        # break every prompt). Executes the actual installed command with/without the flag.
-        import subprocess
-        cli.install()
-        cmd = next(h["command"] for g in _settings(tmp_home)["hooks"]["UserPromptSubmit"]
-                   for h in g["hooks"] if ".pending_review" in h.get("command", ""))
-        (tmp_home / ".contexer").mkdir(exist_ok=True)
-        (tmp_home / ".contexer" / ".pending_review").touch()
-        out = subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
-        payload = json.loads(out)  # raises if the echo is malformed
-        assert "pending your review" in payload["hookSpecificOutput"]["additionalContext"]
-        assert not (tmp_home / ".contexer" / ".pending_review").exists()  # consumed
-        out2 = subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
-        assert json.loads(out2) == {}  # no flag -> silent no-op
+    def test_review_nudge_entrypoint_fires_once_and_verifies(self, tmp_home, tmp_path, monkeypatch):
+        # The hook calls claude.review_nudge (a Python entrypoint) which returns valid JSON only
+        # when the repo actually has pending decisions, and fires once (flag consumed).
+        from contexer import store
+        from contexer.adapters import claude
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        repo = str(tmp_path / "repo")
+        store.update_decision(repo, "Never deploy on Fridays", "s", "constraint")
+        out = json.loads(claude.review_nudge(repo, "{}"))
+        assert "pending your review" in out["hookSpecificOutput"]["additionalContext"]
+        assert json.loads(claude.review_nudge(repo, "{}")) == {}  # flag consumed -> silent
 
     def test_capture_constraint_command_hook_registered(self, tmp_home):
         cli.install()
