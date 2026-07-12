@@ -103,6 +103,29 @@ class TestInstall:
                        if ".current_repo" in str(h)]
         assert any(".pending_capture" in c for c in anchor_cmds)
 
+    def test_pending_review_hook_registered(self, tmp_home):
+        cli.install()
+        ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
+        assert _in_groups(ups, "claude.review_nudge")
+
+    def test_uninstall_removes_pending_review_hook(self, tmp_home):
+        cli.install()
+        cli.uninstall()
+        ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
+        assert not _in_groups(ups, "claude.review_nudge")
+
+    def test_review_nudge_entrypoint_fires_once_and_verifies(self, tmp_home, tmp_path, monkeypatch):
+        # The hook calls claude.review_nudge (a Python entrypoint) which returns valid JSON only
+        # when the repo actually has pending decisions, and fires once (flag consumed).
+        from contexer import store
+        from contexer.adapters import claude
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        repo = str(tmp_path / "repo")
+        store.update_decision(repo, "Never deploy on Fridays", "s", "constraint")
+        out = json.loads(claude.review_nudge(repo, "{}"))
+        assert "pending your review" in out["hookSpecificOutput"]["additionalContext"]
+        assert json.loads(claude.review_nudge(repo, "{}")) == {}  # flag consumed -> silent
+
     def test_capture_constraint_command_hook_registered(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])

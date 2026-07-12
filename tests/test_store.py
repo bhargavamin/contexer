@@ -2229,6 +2229,62 @@ class TestReviewPendingAndSharePreview:
     def test_format_pending_review_empty(self, tmp_repo):
         assert store.format_pending_review(tmp_repo) == "Nothing pending review."
 
+
+class TestPendingReviewFlag:
+    """update_decision drops a PER-REPO .pending_review flag ONLY when it creates a state that
+    awaits the developer (a new pending_approval entry, or a freshly-attached proposed_revision),
+    so the next-prompt consumer can nudge mid-session. Auto/suggested captures and no-ops must not."""
+
+    def test_new_pending_constraint_drops_flag(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never call the API without a request-id", "s", "constraint")
+        assert store._pending_review_flag(tmp_repo).exists()
+
+    def test_suggested_architecture_no_flag(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s", "architecture")
+        assert not store._pending_review_flag(tmp_repo).exists()
+
+    def test_human_auto_decision_no_flag(self, tmp_repo):
+        store.update_decision(tmp_repo, "Always use uv, not pip", "s", "convention", created_by="human")
+        assert not store._pending_review_flag(tmp_repo).exists()
+
+    def test_significant_update_drops_flag(self, tmp_repo):
+        _ok, base = store.update_decision(tmp_repo, "Use Postgres for storage", "s",
+                                          "architecture", created_by="human")
+        assert not store._pending_review_flag(tmp_repo).exists()
+        store.update_decision(tmp_repo, "Use MySQL for storage", "s", "architecture", replace_id=base)
+        assert store._pending_review_flag(tmp_repo).exists()
+
+    def test_noop_update_no_flag(self, tmp_repo):
+        _ok, base = store.update_decision(tmp_repo, "Use Postgres for storage", "s",
+                                          "architecture", created_by="human")
+        store.update_decision(tmp_repo, "Use Postgres for storage", "s", "architecture", replace_id=base)
+        assert not store._pending_review_flag(tmp_repo).exists()
+
+    # ── pending_review_nudge (verified, per-repo consumer) ──────────────────────────
+    def test_nudge_fires_and_clears_when_pending(self, tmp_repo):
+        store.update_decision(tmp_repo, "Never deploy on Fridays", "s", "constraint")
+        nudge = store.pending_review_nudge(tmp_repo)
+        assert nudge and "pending your review" in nudge
+        assert not store._pending_review_flag(tmp_repo).exists()  # fired once, cleared
+
+    def test_nudge_none_after_approve(self, tmp_repo):
+        # Greptile #1: flag set, then decision approved before the next prompt -> no false nudge.
+        _ok, eid = store.update_decision(tmp_repo, "Never deploy on Fridays", "s", "constraint")
+        store.approve_decision(tmp_repo, eid, "approve")
+        assert store.pending_review_nudge(tmp_repo) is None
+        assert not store._pending_review_flag(tmp_repo).exists()
+
+    def test_nudge_none_without_flag(self, tmp_repo):
+        assert store.pending_review_nudge(tmp_repo) is None
+
+    def test_nudge_is_repo_scoped(self, tmp_repo, tmp_path):
+        # Greptile #2: a pending decision in repo A must not nudge a session in repo B.
+        repo_b = str(tmp_path / "repo_b")
+        store.update_decision(tmp_repo, "Never deploy on Fridays", "s", "constraint")
+        assert store.pending_review_nudge(repo_b) is None            # B sees nothing
+        assert store._pending_review_flag(tmp_repo).exists()         # A's flag untouched
+        assert store.pending_review_nudge(tmp_repo)                  # A still nudges
+
     def test_approve_decisions_batch_single_transaction(self, tmp_repo):
         # Batched approve: per-id results (failures surfaced), one load+save, no per-id rewrite.
         store.update_decision(tmp_repo, "Never log PII", "s", "constraint")

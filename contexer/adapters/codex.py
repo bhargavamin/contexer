@@ -169,6 +169,11 @@ def install(home: Path) -> list[str]:
         "ToolSearch(query=select:mcp__contexer__update_context).\"}}'; "
         "else echo '{}'; fi"
     )
+    # Nudge to review decisions pending the developer. Reuses claude.review_nudge (codex-parity):
+    # a Python entrypoint so it is per-repo and verifies the store — no false / cross-repo nudge.
+    review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                  'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO"')
     cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO"')
@@ -280,6 +285,9 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, "claude.team_poll"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
+    if not base._in_groups(ups, "claude.review_nudge"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
 
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.codex/hooks.json")
@@ -293,7 +301,8 @@ _EVENT_MARKERS = {
     "Stop":             [".pending_capture"],
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],
-    "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
+    "UserPromptSubmit": [".current_repo", ".pending_capture", "claude.review_nudge",
+                         "get_bootstrap_context_prompt",
                          "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                          "claude.team_poll"],
 }

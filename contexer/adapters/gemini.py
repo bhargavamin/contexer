@@ -105,6 +105,14 @@ def before_agent(repo_path: str, raw: str) -> str:
             pending.unlink(missing_ok=True)
             contexts.append(_REMINDER)
 
+        # A decision awaiting the developer's review — independent of the reload/edit reminders
+        # (a reload re-injects get_context, which EXCLUDES pending decisions, so the nudge must
+        # still fire). store.pending_review_nudge is per-repo and verifies the store still has
+        # something pending, so an approved-away or cross-repo flag yields nothing.
+        review = store.pending_review_nudge(repo)
+        if review:
+            contexts.append(review)
+
         # Fix 5: when no stable session identity exists, always run bootstrap
         # (idempotent - returns empty when context already stored).
         marker = _session_marker(raw)

@@ -109,6 +109,34 @@ class TestGeminiRuntime:
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
         assert not (store.STORE_DIR / ".gemini_pending_reload").exists()
 
+    def test_pending_review_flag_injects_nudge(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        store.update_decision(repo, "Never deploy on Fridays", "s1", "constraint")  # sets per-repo flag
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "pending your review" in context
+        assert not store._pending_review_flag(repo).exists()  # consumed
+
+    def test_no_pending_review_flag_no_nudge(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s2", "prompt": "continue"})
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "pending your review" not in context
+
+    def test_reload_still_fires_review_nudge(self, home, tmp_path):
+        # Greptile #3: a reload reloads get_context (which EXCLUDES pending decisions), so the
+        # review nudge must still fire — not be silently swallowed by the reload branch.
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        store.update_decision(repo, "Never deploy on Fridays", "s1", "constraint")
+        gemini.pre_compress(repo, raw)  # sets the reload flag
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "pending your review" in context  # fires despite the reload
+        assert not store._pending_review_flag(repo).exists()
+
     def test_clear_does_not_reset_first_prompt_marker(self, home, tmp_path):
         # The first-prompt marker gates the once-per-session bootstrap offer; /clear must
         # not delete it, or bootstrap would be re-offered mid-session.
