@@ -2229,6 +2229,14 @@ class TestReviewPendingAndSharePreview:
     def test_format_pending_review_empty(self, tmp_repo):
         assert store.format_pending_review(tmp_repo) == "Nothing pending review."
 
+    def test_approve_decision_resolves_8char_prefix(self, tmp_repo):
+        # review_pending shows 8-char ids in its approve_decision(...) instructions; approving
+        # by that short id must resolve (Greptile: exact-only match returned 'not found').
+        _ok, eid = store.update_decision(tmp_repo, "Never deploy on Fridays", "s", "constraint")
+        ok, msg = store.approve_decision(tmp_repo, eid[:8], "approve")
+        assert ok, msg
+        assert not any(e["id"] == eid for e in store.get_pending_decisions(tmp_repo))
+
     def test_format_pending_review_caps_large_backlog(self, tmp_repo):
         # #1: a big backlog must not dump every decision — cap like get_context, point overflow
         # to `contexer review`. Build entries directly to bypass the novelty filter.

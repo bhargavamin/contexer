@@ -147,13 +147,15 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     from contexer import config as _config
 
     profile = _config.load_profile()  # loaded once, reused by the preview and the push
+    from contexer.remote import RemoteStore
+
     # Safe-by-default: a personal-cloud push is OUTWARD (the decision leaves the machine and may
-    # be cached/indexed even if later deleted). Preview only when sharing is actually configured
-    # (team mode + endpoint) — otherwise share() reports the not-configured no-op itself, and
-    # previewing a push that can't happen would mislead. When configured, the first call PREVIEWS
-    # (pure local read, no network) and requires confirm=True to send, unless skip_confirm is set.
-    team_configured = profile.mode == "team" and bool(profile.endpoint)
-    if not confirm and not profile.skip_confirm and team_configured:
+    # be cached/indexed even if later deleted). Preview only when a push could ACTUALLY happen —
+    # the SAME configured/authenticated check as the push path (team mode + endpoint + a resolvable
+    # token), so we never advertise a push that would no-op. Otherwise share() reports the
+    # not-configured result itself. This pushes nothing; from_profile may refresh an expired token
+    # exactly as the push would, but sends no decision. confirm=True / skip_confirm bypass the gate.
+    if not confirm and not profile.skip_confirm and RemoteStore.from_profile(profile) is not None:
         return store.format_share_preview(resolved, decision_id, profile=profile)
 
     from contexer import share as _share

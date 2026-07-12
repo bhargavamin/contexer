@@ -1082,7 +1082,12 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
+        # Resolve exact id first, then an 8-char prefix — consistent with replace_id and
+        # get_shareable, so the short ids shown by review_pending/get_context are approvable.
         entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
+        if entry is None and entry_id:
+            entry = next((e for e in data["entries"]
+                          if e.get("id", "").startswith(entry_id)), None)
         if entry is None:
             return False, f"Decision {entry_id!r} not found."
 

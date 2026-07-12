@@ -107,9 +107,10 @@ from contexer import config as _config_mod
 def test_share_decision_previews_by_default_without_pushing(monkeypatch):
     # confirm=False (default) + skip_confirm off -> preview only, NOTHING is pushed.
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
-    # Team-configured profile: the preview gate only fires when sharing is actually set up.
+    # Team-configured + authenticated: the preview gate only fires when a push could actually happen.
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
     monkeypatch.setattr(server.store, "format_share_preview", lambda r, d, profile=None: "PREVIEW-TEXT")
     pushed = {"n": 0}
     monkeypatch.setattr(share_mod, "share", lambda *a, **k: pushed.__setitem__("n", pushed["n"] + 1))
@@ -144,6 +145,22 @@ def test_share_decision_local_mode_skips_preview(monkeypatch):
     assert previewed["n"] == 0  # never previewed in local mode
 
 
+def test_share_decision_team_no_token_skips_preview(monkeypatch):
+    # #B: team mode + endpoint but no resolvable token -> from_profile None -> no misleading preview.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: None)
+    previewed = {"n": 0}
+    monkeypatch.setattr(server.store, "format_share_preview",
+                        lambda *a, **k: previewed.__setitem__("n", 1) or "PREVIEW")
+    monkeypatch.setattr(share_mod, "share_ids", lambda repo, ids, **k: "not configured")
+
+    result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
+    assert result == "not configured"
+    assert previewed["n"] == 0  # never advertised a push that can't happen
+
+
 def test_review_pending_returns_identified_list(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server.store, "format_pending_review", lambda r: "PENDING-LIST")
@@ -165,6 +182,7 @@ def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
     got = {}
 
     def fake_preview(r, d, profile=None):
