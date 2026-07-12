@@ -66,20 +66,35 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
 @mcp.tool()
 def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
-    """Approve, edit, skip, ignore, or dismiss a decision pending developer approval.
+    """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review.
 
-    entry_id: the ID returned by update_context when a decision required approval
+    entry_id: a decision id (full or 8-char prefix); a comma-separated list to act on several
+              at once ("id1,id2,id3"); or "all" (or "*") to act on EVERY pending decision — so
+              the developer can clear the whole backlog in one gesture after reviewing.
     action: 'approve' - accept (a Suggested Update is promoted to a new revision, history kept)
             | 'edit' - correct and approve | 'skip' - keep pending for later
             | 'dismiss' - discard a Suggested Update, keep the current revision
             | 'ignore' - suppress a new decision permanently
-    content: required when action='edit' — the corrected decision text
+    content: required when action='edit' — the corrected decision text (single decision only)
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    ok, msg = store.approve_decision(resolved, entry_id, action, content)
-    return msg
+    if entry_id.strip().lower() in ("all", "*"):
+        ids = [d["id"] for d in store.get_pending_decisions(resolved)]
+        if not ids:
+            return "Nothing pending review."
+    else:
+        ids = [i.strip() for i in entry_id.split(",") if i.strip()]
+    if not ids:
+        return "No decision id given."
+    if len(ids) == 1:
+        return store.approve_decision(resolved, ids[0], action, content)[1]
+    # Bulk: 'edit' needs per-decision content, so it's single-only.
+    if action == "edit":
+        return "Bulk 'edit' isn't supported — edit decisions one at a time."
+    lines = [f"  {i[:8]}: {store.approve_decision(resolved, i, action, content)[1]}" for i in ids]
+    return f"Applied '{action}' to {len(ids)} decisions:\n" + "\n".join(lines)
 
 
 @mcp.tool()

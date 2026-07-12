@@ -172,6 +172,34 @@ def test_review_pending_no_repo(monkeypatch):
     assert server.review_pending("") == "No repo path detected."
 
 
+def test_approve_decision_bulk_ids_and_all(monkeypatch, tmp_path):
+    from contexer import store
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    repo = "/bulk/repo"
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    for c in ("Never commit secrets", "Never log PII", "Never disable TLS verification"):
+        store.update_decision(repo, c, "s", "constraint")
+    ids = [d["id"][:8] for d in store.get_pending_decisions(repo)]
+    # comma-separated bulk: approve the first two
+    out = server.approve_decision(f"{ids[0]},{ids[1]}", "approve")
+    assert "Applied 'approve' to 2 decisions" in out
+    assert len(store.get_pending_decisions(repo)) == 1
+    # "all" clears the remainder in one gesture
+    server.approve_decision("all", "approve")
+    assert store.get_pending_decisions(repo) == []
+
+
+def test_approve_decision_bulk_edit_rejected(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    assert "Bulk 'edit' isn't supported" in server.approve_decision("a,b", "edit", content="x")
+
+
+def test_approve_decision_all_nothing_pending(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "get_pending_decisions", lambda r: [])
+    assert server.approve_decision("all", "approve") == "Nothing pending review."
+
+
 def test_list_shareable_returns_list(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server.store, "format_shareable_list", lambda r: "SHAREABLE-LIST")

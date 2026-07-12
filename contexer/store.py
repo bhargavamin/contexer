@@ -22,6 +22,7 @@ _SCHEMA_VERSION = 2               # bumped when the on-disk entry shape changes;
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
+_BACKLOG_ESCALATE = 10            # pending-review count at which surfacing tone firms up
 
 
 # Directories that must never be treated as a repo. A poisoned .current_repo pointing at
@@ -1184,7 +1185,9 @@ def format_pending_review(repo_path: str) -> str:
         else:
             lines.append(f'- {eid} [{st}] "{_current_content(d)}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
-    lines.append("\nReview each with the developer before approving.")
+    lines.append("\nReview each with the developer before approving. To clear several at once, "
+                 'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
+                 "for the whole list.")
     return "\n".join(lines)
 
 
@@ -1809,12 +1812,17 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
     # capture time, not here.
     total_pending = len(pending) + len(with_proposals)
     if total_pending:
-        sys_parts.append(
+        notice = (
             f"{_pl(total_pending, 'decision')} pending your review (recorded, not yet "
             "trusted — not listed here to keep startup light). Offer to show them to the "
             "developer when appropriate: call review_pending to list them, then "
             "approve_decision — or they can run `contexer review` in a terminal."
         )
+        if total_pending >= _BACKLOG_ESCALATE:
+            notice += (" This backlog is growing — proactively offer to clear it this session; "
+                       'after the developer reviews, approve_decision(entry_id="all", '
+                       'action="approve") clears the lot.')
+        sys_parts.append(notice)
 
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
@@ -1836,10 +1844,12 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
     if deferred_count > 0:
         sentences.append(f"{_pl(deferred_count, 'architecture decision')} will be loaded on demand")
     if total_pending:
-        sentences.append(
-            f"{_pl(total_pending, 'decision')} pending review — say 'review pending' "
-            "or run `contexer review`"
-        )
+        if total_pending >= _BACKLOG_ESCALATE:
+            sentences.append(f"{_pl(total_pending, 'decision')} pending review are piling up "
+                             "— worth clearing (say 'review pending')")
+        else:
+            sentences.append(f"{_pl(total_pending, 'decision')} pending review — say "
+                             "'review pending' or run `contexer review`")
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
     return {"status": status, "context": "\n".join(sys_parts)}

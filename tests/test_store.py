@@ -2229,6 +2229,17 @@ class TestReviewPendingAndSharePreview:
     def test_format_pending_review_empty(self, tmp_repo):
         assert store.format_pending_review(tmp_repo) == "Nothing pending review."
 
+    def test_session_start_escalates_growing_backlog(self, tmp_repo):
+        data = store._load(tmp_repo)
+        for i in range(store._BACKLOG_ESCALATE + 2):
+            data["entries"].append(
+                store._new_decision_entry(f"Constraint {i} distinct text {i}", "s",
+                                          "constraint", status="pending_approval"))
+        store._save(tmp_repo, data)
+        result = store.get_session_start_context(tmp_repo)
+        assert "piling up" in result["systemMessage"]
+        assert 'entry_id="all"' in result["hookSpecificOutput"]["additionalContext"]
+
     def test_approve_decision_resolves_8char_prefix(self, tmp_repo):
         # review_pending shows 8-char ids in its approve_decision(...) instructions; approving
         # by that short id must resolve (Greptile: exact-only match returned 'not found').
@@ -2249,7 +2260,8 @@ class TestReviewPendingAndSharePreview:
         out = store.format_pending_review(tmp_repo)
         assert f"showing {store._FILTERED_DISPLAY} of 30" in out
         assert "contexer review" in out
-        assert out.count("approve_decision") == store._FILTERED_DISPLAY  # only the shown ones
+        # only the shown items are listed (each is a '- <id> …' bullet)
+        assert sum(1 for ln in out.splitlines() if ln.startswith("- ")) == store._FILTERED_DISPLAY
 
     def test_format_share_preview_shows_content_endpoint_and_confirm(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
