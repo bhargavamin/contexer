@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.18.0](https://github.com/bhargavamin/contexer/compare/v0.17.2...v0.18.0) (2026-07-12)
+
+
+### Features
+
+* **review:** bulk approve + escalating backlog nudge (Phase 2, increment 1) ([ff24990](https://github.com/bhargavamin/contexer/commit/ff2499016bab1991295110d4522c653d6d9dcf38))
+* **review:** deterministic .pending_review mid-session nudge ([#112](https://github.com/bhargavamin/contexer/issues/112)) ([905ce06](https://github.com/bhargavamin/contexer/commit/905ce065c03b72b48ff27fd8dbeb3fcb482d82c1))
+* **review:** deterministic .pending_review mid-session nudge (issue [#112](https://github.com/bhargavamin/contexer/issues/112)) ([60918c8](https://github.com/bhargavamin/contexer/commit/60918c8e5f88b57f83368ba85fca80cf96a3e249))
+* **review:** non-blocking pending-review UX + confirm-before-push ([6cdefc0](https://github.com/bhargavamin/contexer/commit/6cdefc02246abef57394582d8a4579ad133ae3ac))
+* **review:** non-blocking pending-review UX + confirm-before-push ([5cdc33a](https://github.com/bhargavamin/contexer/commit/5cdc33ad08bd96eb35e221f6d0325ccb74f4758e))
+* **review:** Phase 2 — bulk approve + backlog escalation (anti-pile-up) ([0c51afd](https://github.com/bhargavamin/contexer/commit/0c51afd6d121e33a3d7cee6a3374b4e848295522))
+* **share:** pick-and-multi-select instead of guessing a decision id ([aa31189](https://github.com/bhargavamin/contexer/commit/aa311899825f803449b71dd0efd7b3da226dd23c))
+
+
+### Bug Fixes
+
+* **review,share:** resolve id prefixes on approve; gate preview on auth; stabilize latency bench ([8d9d03c](https://github.com/bhargavamin/contexer/commit/8d9d03c24aff297841bf58fb0794cb954dc121d7))
+* **review:** per-repo + verified pending-review nudge (Greptile [#113](https://github.com/bhargavamin/contexer/issues/113)) ([25166bc](https://github.com/bhargavamin/contexer/commit/25166bc745aced146ba14bf80f557ddc0788a431))
+* **review:** safe + atomic bulk approve (code-review + Greptile) ([9ba08af](https://github.com/bhargavamin/contexer/commit/9ba08af145157782929263a8217d758f5d296291))
+
 ## [0.17.2](https://github.com/bhargavamin/contexer/compare/v0.17.1...v0.17.2) (2026-07-11)
 
 
