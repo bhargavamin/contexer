@@ -397,6 +397,29 @@ class TestBootstrapInstructions:
         assert "insight='medium'" in full_text
 
 
+class TestBootstrapAutomaticStorage:
+    """bootstrap_context now self-stores detected facts and measured conventions
+    (apply=True default) — the handler instructions must reflect that: no more
+    per-fact choreography telling the model to store what the tool already stored."""
+
+    def test_handlers_do_not_instruct_per_fact_storage(self, tmp_repo):
+        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "store each inferred fact" not in full_text.lower()
+        assert "confirm and store" not in full_text.lower()
+        assert "do NOT re-store" in full_text
+
+    def test_handlers_mention_automatic_storage_and_counts(self, tmp_repo):
+        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
+        assert "stored automatically" in full_text
+        assert "stored/pending counts" in full_text
+
+    def test_resume_mining_does_not_instruct_per_fact_storage(self, tmp_repo):
+        ctx = "\n".join(store._build_resume_mining_context(tmp_repo))
+        assert "stored automatically" in ctx
+        assert "store only the scan facts" not in ctx.lower()
+        assert "never invent" in ctx
+
+
 # ── 4d. Offer variants by detected insight ────────────────────────────────────
 
 class TestOfferVariants:
@@ -643,7 +666,7 @@ class TestReactionMatrix:
                 result = store.bootstrap_scan(repo, insight=insight)
                 gaps = result["gaps"]
                 label = f"{Path(repo).name} × insight={insight!r}"
-                assert 1 <= len(gaps) <= 10, f"{label}: {len(gaps)} gaps"
+                assert 1 <= len(gaps) <= 8, f"{label}: {len(gaps)} gaps"
                 assert result["insight"] in {"low", "medium", "high"}, label
                 for g in gaps:
                     assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
@@ -860,14 +883,17 @@ class TestPatternPromotion:
         assert entry["subtype"] == "architecture"
         assert entry.get("occurrence_count") == 2
 
-    def test_bootstrap_scan_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
+    def test_bootstrap_scan_no_longer_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
+        # Validation-placement and error-handling were the only "pattern" gaps, and both
+        # were deleted (bootstrap redesign): they're now measured by the miner instead
+        # of asked. A web-framework repo must no longer produce a pattern gap.
         Path(tmp_repo).mkdir()
         (Path(tmp_repo) / "pyproject.toml").write_text(
             '[project]\nname = "api"\ndependencies = ["fastapi", "boto3", "stripe"]\n'
         )
         result = store.bootstrap_scan(tmp_repo, insight="high")
         pattern_gaps = [g for g in result["gaps"] if g["subtype"] == "pattern"]
-        assert pattern_gaps, "high-insight web repo should produce at least one pattern gap"
+        assert not pattern_gaps, "validation/error-handling gaps were removed in favor of mining"
 
     def test_distinct_session_ids_tracked(self, tmp_repo):
         """Each hit from a new session is recorded; same session is not double-listed."""
@@ -1162,11 +1188,14 @@ class TestBootstrapScan:
 
     def test_full_on_bare_repo_still_interviews(self, tmp_repo):
         """'full' is explicit opt-in to an interview — a simple repo must not collapse it
-        to a single question; the author's head holds decisions no scan can reach."""
+        to a single question; the author's head holds decisions no scan can reach.
+        Floor is 3 (not 4): the generic "conventions" filler is redundant once mining
+        measures conventions directly, so the un-mined bootstrap_scan() path here still
+        gets it, but the guaranteed minimum itself dropped by one."""
         result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert len(result["gaps"]) >= 4
+        assert len(result["gaps"]) >= 3
         subtypes = {g["subtype"] for g in result["gaps"]}
-        assert {"architecture", "convention", "constraint"} <= subtypes
+        assert {"architecture", "convention"} <= subtypes
 
     def test_signal_rich_repo_gets_no_interview_padding(self, tmp_repo):
         Path(tmp_repo).mkdir()
@@ -1182,6 +1211,39 @@ class TestBootstrapScan:
     def test_interview_floor_not_applied_below_high(self, tmp_repo):
         assert len(store.bootstrap_scan(tmp_repo, insight="low")["gaps"]) == 1
         assert len(store.bootstrap_scan(tmp_repo, insight="medium")["gaps"]) == 2
+
+
+# ── 10b. bootstrap_apply flow (bootstrap redesign — core wiring) ─────────────
+
+class TestBootstrapApplyFlow:
+    def test_session_start_after_apply_shows_rules_not_menu(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "mod.py").write_text(
+            "\n".join(f"def fn_snake_{i}():\n    pass\n" for i in range(25))
+        )
+        store.bootstrap_apply(tmp_repo, "sess-flow")
+
+        payload = store.session_start_payload(tmp_repo)
+
+        assert "Project rules" in payload["context"]
+        assert "no project context stored" not in payload["context"].lower()
+
+    def test_confidence_factors_include_observed_in_repository(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "mod.py").write_text(
+            "\n".join(f"def fn_snake_{i}():\n    pass\n" for i in range(25))
+        )
+        store.bootstrap_apply(tmp_repo, "sess-flow")
+
+        data = store._load(tmp_repo)
+        entry = next(
+            e for e in data["entries"]
+            if e["type"] == "decision" and "snake_case" in e["content"]
+        )
+        current_rev = next(
+            r for r in entry["revisions"] if r["revision_id"] == entry["current_revision_id"]
+        )
+        assert "Observed in repository" in current_rev["evidence"]
 
 
 # ── 11. Uninstall ─────────────────────────────────────────────────────────────
