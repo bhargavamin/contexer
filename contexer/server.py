@@ -66,20 +66,53 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
 @mcp.tool()
 def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
-    """Approve, edit, skip, ignore, or dismiss a decision pending developer approval.
+    """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review.
 
-    entry_id: the ID returned by update_context when a decision required approval
+    entry_id: a decision id (full or 8-char prefix); a comma-separated list to act on several
+              at once ("id1,id2,id3"); or "all" (or "*") to act on EVERY pending decision — so
+              the developer can clear the whole backlog in one gesture after reviewing.
     action: 'approve' - accept (a Suggested Update is promoted to a new revision, history kept)
             | 'edit' - correct and approve | 'skip' - keep pending for later
             | 'dismiss' - discard a Suggested Update, keep the current revision
             | 'ignore' - suppress a new decision permanently
-    content: required when action='edit' — the corrected decision text
+    content: required when action='edit' — the corrected decision text (single decision only)
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    ok, msg = store.approve_decision(resolved, entry_id, action, content)
-    return msg
+    hidden = 0
+    if entry_id.strip().lower() in ("all", "*"):
+        pending = store.get_pending_decisions(resolved)
+        # Only act on decisions that review_pending actually SHOWED (its display cap). Approving
+        # beyond the cap would trust decisions the developer never saw — so "all" clears the shown
+        # set and reports the remainder rather than silently approving unseen content.
+        shown = pending[:store._FILTERED_DISPLAY]
+        ids = [d["id"] for d in shown]
+        hidden = len(pending) - len(shown)
+        if not ids:
+            return "Nothing pending review."
+    else:
+        ids = [i.strip() for i in entry_id.split(",") if i.strip()]
+    if not ids:
+        return "No decision id given."
+    if len(ids) == 1 and not hidden:
+        return store.approve_decision(resolved, ids[0], action, content)[1]
+    # Bulk: 'edit' needs per-decision content, so it's single-only.
+    if action == "edit":
+        return "Bulk 'edit' isn't supported — edit decisions one at a time."
+    results = store.approve_decisions(resolved, ids, action, content)  # one atomic transaction
+    succeeded = sum(1 for _i, ok, _m in results if ok)
+    failed = len(results) - succeeded
+    header = f"Applied '{action}' to {succeeded} of {len(results)} decision(s)"
+    if failed:
+        header += f" ({failed} failed — see below)"
+    body = "\n".join(f"  {i[:8]}: {m}" for i, _ok, m in results)
+    tail = ""
+    if hidden:
+        tail = (f"\n\n{hidden} more pending decision(s) were NOT touched — 'all' only acts on the "
+                f"{store._FILTERED_DISPLAY} shown by review_pending. Run review_pending again to "
+                "review and clear the rest.")
+    return f"{header}:\n{body}{tail}"
 
 
 @mcp.tool()

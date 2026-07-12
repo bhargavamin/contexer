@@ -172,6 +172,66 @@ def test_review_pending_no_repo(monkeypatch):
     assert server.review_pending("") == "No repo path detected."
 
 
+def test_approve_decision_bulk_ids_and_all(monkeypatch, tmp_path):
+    from contexer import store
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    repo = "/bulk/repo"
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    for c in ("Never commit secrets", "Never log PII", "Never disable TLS verification"):
+        store.update_decision(repo, c, "s", "constraint")
+    ids = [d["id"][:8] for d in store.get_pending_decisions(repo)]
+    # comma-separated bulk: approve the first two
+    out = server.approve_decision(f"{ids[0]},{ids[1]}", "approve")
+    assert "Applied 'approve' to 2 of 2" in out
+    assert len(store.get_pending_decisions(repo)) == 1
+    # "all" clears the remainder in one gesture
+    server.approve_decision("all", "approve")
+    assert store.get_pending_decisions(repo) == []
+
+
+def test_approve_all_caps_to_displayed_never_approves_unseen(monkeypatch, tmp_path):
+    # Greptile #1: 'all' must only act on what review_pending SHOWED (the display cap), never
+    # trust decisions beyond the cap that the developer never saw.
+    from contexer import store
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    repo = "/cap/repo"
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    data = store._load(repo)
+    for i in range(store._FILTERED_DISPLAY + 2):  # 27 pending, cap is 25
+        data["entries"].append(store._new_decision_entry(
+            f"Constraint {i} distinct text {i}", "s", "constraint", status="pending_approval"))
+    store._save(repo, data)
+
+    out = server.approve_decision("all", "approve")
+    assert f"to {store._FILTERED_DISPLAY} of {store._FILTERED_DISPLAY}" in out
+    assert "2 more pending" in out
+    assert len(store.get_pending_decisions(repo)) == 2  # the 2 unseen stay pending
+
+
+def test_approve_decision_bulk_reports_failures(monkeypatch, tmp_path):
+    # Greptile #2: a stale/invalid id in a bulk call must not read as success.
+    from contexer import store
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    repo = "/fail/repo"
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    _ok, eid = store.update_decision(repo, "Never commit secrets", "s", "constraint")
+
+    out = server.approve_decision(f"{eid[:8]},bogus99", "approve")
+    assert "Applied 'approve' to 1 of 2 decision(s) (1 failed" in out
+    assert "not found" in out.lower()
+
+
+def test_approve_decision_bulk_edit_rejected(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    assert "Bulk 'edit' isn't supported" in server.approve_decision("a,b", "edit", content="x")
+
+
+def test_approve_decision_all_nothing_pending(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "get_pending_decisions", lambda r: [])
+    assert server.approve_decision("all", "approve") == "Nothing pending review."
+
+
 def test_list_shareable_returns_list(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server.store, "format_shareable_list", lambda r: "SHAREABLE-LIST")
