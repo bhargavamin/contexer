@@ -18,6 +18,13 @@ _REMINDER = (
     "(1) any NEW architecture/pattern/constraint/convention decisions; "
     "(2) any EXISTING approach you applied again (the server deduplicates)."
 )
+# Nudge for the global ~/.contexer/.pending_review flag (dropped by store.update_decision when a
+# decision awaits the developer). Count-less and identical to the claude/codex anchor nudge.
+_REVIEW_NUDGE = (
+    "Contexer: decision(s) are pending your review. At a natural pause, offer to show them "
+    "(call review_pending) and approve via approve_decision (entry_id=all clears the shown "
+    "set); they stay inactive until approved."
+)
 
 
 def is_present(home: Path) -> bool:
@@ -96,14 +103,25 @@ def before_agent(repo_path: str, raw: str) -> str:
         # When both flags are present, consume the capture flag silently.
         reload_flag = store.STORE_DIR / _PENDING_RELOAD
         pending = store.STORE_DIR / _PENDING_CAPTURE
+        review_flag = store.STORE_DIR / ".pending_review"
         if reload_flag.exists():
             reload_flag.unlink(missing_ok=True)
             pending.unlink(missing_ok=True)
+            # A post-compression reload re-injects the full SessionStart context (which already
+            # carries the pending-review count), so consume the review flag silently — no dup nudge.
+            review_flag.unlink(missing_ok=True)
             payload = store.post_compact_payload(repo)
             contexts.extend(part for part in (payload.get("status"), payload.get("context")) if part)
         elif pending.exists():
             pending.unlink(missing_ok=True)
             contexts.append(_REMINDER)
+
+        # A decision awaiting the developer's review (dropped by store.update_decision) — independent
+        # of the file-edit reminder above, so it can coexist with it. Skipped after a reload (which
+        # already re-surfaced the count and consumed this flag).
+        if review_flag.exists():
+            review_flag.unlink(missing_ok=True)
+            contexts.append(_REVIEW_NUDGE)
 
         # Fix 5: when no stable session identity exists, always run bootstrap
         # (idempotent - returns empty when context already stored).

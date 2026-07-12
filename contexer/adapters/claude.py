@@ -407,6 +407,21 @@ def install(home: Path) -> list[str]:
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
+    # Consume the global .pending_review flag (dropped by store.update_decision when a decision
+    # awaits the developer) and nudge to review it mid-session — mirrors the .pending_capture
+    # anchor. Nudge text has no inner double quotes so the single-quoted echo stays valid.
+    review_cmd = (
+        "FLAG=\"$HOME/.contexer/.pending_review\"; "
+        "if [ -f \"$FLAG\" ]; then "
+        "rm -f \"$FLAG\"; "
+        "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
+        "\"additionalContext\": \"Contexer: decision(s) are pending your review. At a natural "
+        "pause, offer to show them (call review_pending) and approve via approve_decision "
+        "(entry_id=all clears the shown set); they stay inactive until approved.\"}}'; "
+        "else echo '{}'; fi"
+        f" # {_HOOK_SENTINEL}"
+    )
+
     contexer_bin = shutil.which("contexer") or "contexer"
 
     # MCP server (~/.claude.json)
@@ -568,6 +583,9 @@ def install(home: Path) -> list[str]:
     if not _in_groups(ups, "claude.team_poll"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
+    if not _in_groups(ups, ".pending_review"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
 
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for p in [
@@ -674,7 +692,8 @@ def uninstall(home: Path) -> list[str]:
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
-            "UserPromptSubmit": [".current_repo", ".pending_capture", "get_bootstrap_context_prompt",
+            "UserPromptSubmit": [".current_repo", ".pending_capture", ".pending_review",
+                                 "get_bootstrap_context_prompt",
                                  "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                                  "Reminder: if you make a significant decision",
                                  _HOOK_SENTINEL],

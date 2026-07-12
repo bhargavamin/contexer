@@ -109,6 +109,34 @@ class TestGeminiRuntime:
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
         assert not (store.STORE_DIR / ".gemini_pending_reload").exists()
 
+    def test_pending_review_flag_injects_nudge(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        store._touch_pending_review()  # the store drops this when a pending decision is created
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "pending your review" in context
+        assert not (store.STORE_DIR / ".pending_review").exists()  # consumed
+
+    def test_no_pending_review_flag_no_nudge(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s2", "prompt": "continue"})
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "pending your review" not in context
+
+    def test_reload_suppresses_review_nudge_and_consumes_flag(self, home, tmp_path):
+        # A post-compression reload re-injects the pending count itself, so the separate review
+        # nudge is skipped and the flag consumed silently (no double surfacing).
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        store._touch_pending_review()
+        gemini.pre_compress(repo, raw)  # sets the reload flag
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "clears the shown set" not in context  # the nudge phrase is suppressed
+        assert not (store.STORE_DIR / ".pending_review").exists()  # consumed silently
+
     def test_clear_does_not_reset_first_prompt_marker(self, home, tmp_path):
         # The first-prompt marker gates the once-per-session bootstrap offer; /clear must
         # not delete it, or bootstrap would be re-offered mid-session.

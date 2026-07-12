@@ -103,6 +103,33 @@ class TestInstall:
                        if ".current_repo" in str(h)]
         assert any(".pending_capture" in c for c in anchor_cmds)
 
+    def test_pending_review_hook_registered(self, tmp_home):
+        cli.install()
+        ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
+        assert _in_groups(ups, ".pending_review")
+
+    def test_uninstall_removes_pending_review_hook(self, tmp_home):
+        cli.install()
+        cli.uninstall()
+        ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])
+        assert not _in_groups(ups, ".pending_review")
+
+    def test_pending_review_hook_emits_valid_json(self, tmp_home):
+        # Runtime check: the shell echo must be valid JSON (a malformed nudge would silently
+        # break every prompt). Executes the actual installed command with/without the flag.
+        import subprocess
+        cli.install()
+        cmd = next(h["command"] for g in _settings(tmp_home)["hooks"]["UserPromptSubmit"]
+                   for h in g["hooks"] if ".pending_review" in h.get("command", ""))
+        (tmp_home / ".contexer").mkdir(exist_ok=True)
+        (tmp_home / ".contexer" / ".pending_review").touch()
+        out = subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+        payload = json.loads(out)  # raises if the echo is malformed
+        assert "pending your review" in payload["hookSpecificOutput"]["additionalContext"]
+        assert not (tmp_home / ".contexer" / ".pending_review").exists()  # consumed
+        out2 = subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+        assert json.loads(out2) == {}  # no flag -> silent no-op
+
     def test_capture_constraint_command_hook_registered(self, tmp_home):
         cli.install()
         ups = _settings(tmp_home).get("hooks", {}).get("UserPromptSubmit", [])

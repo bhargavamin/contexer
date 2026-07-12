@@ -53,6 +53,21 @@ class TestCodexInstall:
                        "claude.capture_constraint", "claude.rationale", ".pending_capture"):
             assert marker in joined
 
+    def test_pending_review_hook_registered(self, home):
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+        assert any(".pending_review" in c for c in cmds)
+
+    def test_pending_review_in_event_markers(self):
+        assert ".pending_review" in codex._EVENT_MARKERS["UserPromptSubmit"]
+
+    def test_uninstall_removes_pending_review(self, home):
+        codex.install(home)
+        codex.uninstall(home)
+        ups = _hooks(home).get("hooks", {}).get("UserPromptSubmit", [])
+        cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])]
+        assert not any(".pending_review" in c for c in cmds)
+
     # ── T2: team sync ────────────────────────────────────────────────────────────
 
     def test_session_start_pulls_team(self, home):

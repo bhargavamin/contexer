@@ -44,6 +44,20 @@ class TestCursorInstall:
         cmds = [h["command"] for h in hooks["hooks"]["sessionStart"]]
         assert any(sys.executable in c for c in cmds)
 
+    def test_rule_body_mentions_pending_review(self):
+        # Cursor can't inject per-prompt context, so the pending-review nudge rides the
+        # always-apply .mdc rule (Cursor re-injects it natively every prompt).
+        assert "review_pending" in cursor._RULE_BODY
+
+    def test_ensure_rule_file_refreshes_stale_managed_body(self, tmp_path):
+        repo = tmp_path / "ws"
+        rules = repo / ".cursor" / "rules"
+        rules.mkdir(parents=True)
+        rule = rules / cursor._RULE_FILENAME
+        rule.write_text(f"<!-- {cursor.base._BOOTSTRAP_CMD_MARKER} -->\nstale body\n")  # ours, outdated
+        cursor._ensure_rule_file(str(repo))
+        assert "review_pending" in rule.read_text()  # refreshed to current body
+
     def test_install_idempotent(self, home):
         cursor.install(home)
         cursor.install(home)
