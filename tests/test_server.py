@@ -153,3 +153,41 @@ def test_review_pending_returns_identified_list(monkeypatch):
 def test_review_pending_no_repo(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "")
     assert server.review_pending("") == "No repo path detected."
+
+
+def test_list_shareable_returns_list(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "format_shareable_list", lambda r: "SHAREABLE-LIST")
+    assert server.list_shareable("/repo") == "SHAREABLE-LIST"
+
+
+def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    got = {}
+
+    def fake_preview(r, d, profile=None):
+        got["decision_id"] = d
+        return "PREVIEW"
+
+    monkeypatch.setattr(server.store, "format_share_preview", fake_preview)
+    result = asyncio.run(server.share_decision("ab12,cd34", "/repo"))
+    assert result == "PREVIEW"
+    assert got["decision_id"] == "ab12,cd34"  # the comma-separated selection flows to preview
+
+
+def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(_config_mod, "load_profile",
+                        lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
+    got = {}
+
+    def fake_share_ids(repo, ids, **k):
+        got["ids"] = ids
+        return "done"
+
+    monkeypatch.setattr(share_mod, "share_ids", fake_share_ids)
+    result = asyncio.run(server.share_decision(" ab12 , cd34 ,", "/repo", confirm=True))
+    assert got["ids"] == ["ab12", "cd34"]  # parsed, trimmed, blanks dropped
+    assert result == "done"

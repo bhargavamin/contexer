@@ -2254,3 +2254,21 @@ class TestReviewPendingAndSharePreview:
 
     def test_format_share_preview_nothing_to_share(self, tmp_repo):
         assert "Nothing to share" in store.format_share_preview(tmp_repo, "no-such-id")
+
+    def test_format_shareable_list(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for primary storage", "s1", "architecture")
+        out = store.format_shareable_list(tmp_repo)
+        assert "available to share" in out
+        assert "Use Postgres for primary storage" in out
+        assert "share_decision" in out
+
+    def test_format_shareable_list_empty(self, tmp_repo):
+        assert store.format_shareable_list(tmp_repo) == "No decisions available to share."
+
+    def test_format_share_preview_multi_lists_all_selected(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        store.update_decision(tmp_repo, "Store blobs in object storage", "s1", "architecture")
+        ids = [e["id"][:8] for e in store._load(tmp_repo)["entries"]]
+        out = store.format_share_preview(tmp_repo, ",".join(ids))
+        assert "2 decisions" in out
+        assert "Use Redis for caching" in out and "Store blobs in object storage" in out

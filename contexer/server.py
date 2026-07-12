@@ -95,6 +95,18 @@ def review_pending(repo_path: str = "") -> str:
 
 
 @mcp.tool()
+def list_shareable(repo_path: str = "") -> str:
+    """List decisions available to push to your personal cloud, each with its id and content, so
+    the developer can pick which to share. Use this when the developer wants to share but hasn't
+    named a decision — show the list, let them choose, then call share_decision with the chosen
+    id(s) (comma-separated for a multi-select)."""
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return "No repo path detected."
+    return store.format_shareable_list(resolved)
+
+
+@mcp.tool()
 def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limit: int = 0) -> str:
     """Returns stored context for the current repository. Call this when the task requires project context.
 
@@ -121,9 +133,10 @@ _SHARE_TIMEOUT = 30.0
 async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bool = False) -> str:
     """Explicitly push a local decision up to your team cloud context (never auto-shares).
 
-    decision_id: the decision to share (full id or 8-char prefix); omit to share the most
-    recent decision. Syncs to your PERSONAL cloud context today; true team review arrives
-    with a team-scoped push endpoint.
+    decision_id: the decision(s) to share — a full id / 8-char prefix, or a comma-separated
+    selection ("ab12cd34,ef56gh78") to share several at once; omit to share the most recent.
+    Use list_shareable first when the developer hasn't named which decision. Syncs to your
+    PERSONAL cloud context today; true team review arrives with a team-scoped push endpoint.
     confirm: safety gate. When false (default) this PREVIEWS what would be sent and does NOT
     push — show the preview to the developer and call again with confirm=true to actually send.
     Pushing is an outward action (leaves the machine), so it is confirmed by default; a developer
@@ -145,6 +158,8 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
 
     from contexer import share as _share
 
+    ids = [i.strip() for i in decision_id.split(",") if i.strip()]  # multi-select support
+
     # share() is synchronous and does blocking network I/O (RemoteStore -> asyncio.run).
     # This is the ONE MCP tool that reaches the network from inside FastMCP's event loop, so
     # run its blocking body on a worker thread the loop AWAITS rather than calling it inline
@@ -160,7 +175,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     # is lost. Fully reclaiming a wedged connection needs async-native transport (follow-up).
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_share.share, resolved, decision_id, profile=profile),
+            asyncio.to_thread(_share.share_ids, resolved, ids, profile=profile),
             timeout=_SHARE_TIMEOUT,
         )
     except TimeoutError:

@@ -223,3 +223,14 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
     # ships, so the success message must not imply the decision is visible to the team yet.
     return (f"Synced decision to your personal cloud context (server id={server_id}) - "
             "teammates won't see this until team promotion ships.")
+
+
+def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
+    """Share a selection of decisions (a multi-pick), returning a combined status. An empty list
+    shares the most recent (delegates to share('')). Each id goes through share() so the outbox +
+    local-first guarantees apply per decision; the loaded profile is threaded through to avoid
+    re-reading config.toml per id."""
+    profile = profile or load_profile()
+    if not decision_ids:
+        return share(repo_path, "", profile=profile)
+    return "\n".join(share(repo_path, did, profile=profile) for did in decision_ids)

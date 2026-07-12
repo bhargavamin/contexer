@@ -1244,26 +1244,59 @@ def _share_item_line(proj: dict, maxlen: int = 0) -> str:
     return f'  {(proj.get("id") or "")[:8]} [{proj.get("type") or "decision"}] "{content}"'
 
 
+def format_shareable_list(repo_path: str) -> str:
+    """Numbered/identified list of decisions available to share (id + type + content), so the
+    developer can pick which to share when they haven't named one. The agent shows this and the
+    developer selects conversationally; capped like get_context so a big store can't flood context."""
+    items = get_shareable_all(repo_path)
+    if not items:
+        return "No decisions available to share."
+    total = len(items)
+    shown = items[:_FILTERED_DISPLAY]
+    header = f"{_pl(total, 'decision')} available to share"
+    if total > len(shown):
+        header += f" — showing {len(shown)} of {total}, run `contexer share` in a terminal for the rest"
+    lines = [header + ". Tell me which to share, then I'll preview and confirm:\n"]
+    for it in shown:
+        lines.append(_share_item_line(it))
+    lines.append('\nShare the selected: share_decision(decision_id="<id>[,<id2>…]") '
+                 "— previews first; add confirm=true to send.")
+    return "\n".join(lines)
+
+
+def _resolve_share_projections(repo_path: str, decision_id: str) -> list[dict]:
+    """Resolve a possibly comma-separated `decision_id` to shareable projections (order and
+    duplicates preserved as given; empty -> the single most-recent decision)."""
+    ids = [i.strip() for i in decision_id.split(",") if i.strip()]
+    if not ids:
+        proj = get_shareable(repo_path, "")
+        return [proj] if proj else []
+    return [p for p in (get_shareable(repo_path, i) for i in ids) if p is not None]
+
+
 def format_share_preview(repo_path: str, decision_id: str = "", profile=None) -> str:
     """Dry-run preview of what a personal-cloud push would send — a pure local read, NO network.
     Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
-    see exactly what would be sent, and to where, before confirming. `profile` is passed in by the
-    caller to avoid re-reading config.toml."""
-    proj = get_shareable(repo_path, decision_id)
-    if proj is None:
+    see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
+    id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml."""
+    projs = _resolve_share_projections(repo_path, decision_id)
+    if not projs:
         return "Nothing to share — no matching decision found."
     from contexer.config import default_endpoint, load_profile
     endpoint = (profile or load_profile()).endpoint or default_endpoint()
-    eid = (proj.get("id") or "")[:8]
-    return (
-        f"Ready to push to your PERSONAL cloud ({endpoint}) — {_SHARE_OUTWARD_WARNING}:\n\n"
-        f"{_share_item_line(proj)}\n\n"
-        f"Confirm with the developer before sending.\n"
-        f'  • Proceed:  share_decision(decision_id="{eid}", confirm=true)\n'
-        f"  • Cancel:   do nothing\n"
-        f'  • Stop asking: set `skip_confirm = true` in ~/.contexer/config.toml '
-        f'(or the developer says "always share without asking").'
-    )
+    ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
+    lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}) — "
+             f"{_SHARE_OUTWARD_WARNING}:\n"]
+    lines += [_share_item_line(p) for p in projs]
+    lines += [
+        "",
+        "Confirm with the developer before sending.",
+        f'  • Proceed:  share_decision(decision_id="{ids_csv}", confirm=true)',
+        "  • Cancel:   do nothing",
+        '  • Stop asking: set `skip_confirm = true` in ~/.contexer/config.toml '
+        '(or the developer says "always share without asking").',
+    ]
+    return "\n".join(lines)
 
 
 def _format_update_approval(entry: dict) -> str:

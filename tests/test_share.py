@@ -515,6 +515,59 @@ def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
     assert pushed["n"] == 0
 
 
+def test_share_ids_shares_each_selected(monkeypatch):
+    calls = []
+    monkeypatch.setattr(share, "share", lambda repo, did="", **k: calls.append(did) or f"ok:{did}")
+    out = share.share_ids("/repo", ["a", "b"], profile=TEAM)
+    assert calls == ["a", "b"]
+    assert "ok:a" in out and "ok:b" in out
+
+
+def test_share_ids_empty_shares_most_recent(monkeypatch):
+    monkeypatch.setattr(share, "share", lambda repo, did="", **k: f"recent:{did}")
+    assert share.share_ids("/repo", [], profile=TEAM) == "recent:"
+
+
+def _three_shareable(monkeypatch):
+    from contexer import config
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: [
+        {"id": "aaa11111", "type": "constraint", "content": "never X"},
+        {"id": "bbb22222", "type": "architecture", "content": "use Y"},
+        {"id": "ccc33333", "type": "convention", "content": "do Z"},
+    ])
+
+
+def test_cli_share_no_args_picker_multi_select(monkeypatch, capsys):
+    from contexer import cli
+    _three_shareable(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "1,3")
+    got = {}
+
+    def fake_ids(repo, ids, **k):
+        got["ids"] = ids
+        return "pushed 2"
+
+    monkeypatch.setattr(share, "share_ids", fake_ids)
+    cli.share_cmd([])  # no id, no --all -> numbered picker
+    out = capsys.readouterr().out
+    assert got["ids"] == ["aaa11111", "ccc33333"]  # selection 1,3 -> those ids
+    assert "pushed 2" in out
+
+
+def test_cli_share_picker_cancel(monkeypatch, capsys):
+    from contexer import cli
+    _three_shareable(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+    pushed = {"n": 0}
+    monkeypatch.setattr(share, "share_ids", lambda *a, **k: pushed.__setitem__("n", 1))
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert "Cancelled" in out
+    assert pushed["n"] == 0
+
+
 def test_cli_share_nothing_to_share_no_false_cancel(monkeypatch, capsys):
     # #4: an empty share prints only 'Nothing to share', not a contradictory 'Cancelled'.
     from contexer import cli, config

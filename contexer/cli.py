@@ -485,9 +485,21 @@ def share_cmd(rest: list | None = None) -> None:
         print("No git repo detected - run `contexer share` inside a repository.", file=sys.stderr)
         sys.exit(1)
 
-    # Confirm-before-push (outward action). --yes or config skip_confirm bypasses the preview.
+    # Confirm-before-push (outward action). --yes or config skip_confirm bypasses the prompts.
     profile = config.load_profile()  # loaded once, reused by the push below
-    if not (yes or profile.skip_confirm):
+    bypass = yes or profile.skip_confirm
+
+    # No id and no --all: don't guess ('most recent') — show a numbered picker so the developer
+    # sees the options and multi-selects. Selecting IS the confirm, so we push directly.
+    if not share_all and not ids and not bypass:
+        picked = _pick_shareable(repo)
+        if not picked:
+            print("Cancelled — nothing was pushed.")
+            return
+        print(share.share_ids(repo, picked, profile=profile))
+        return
+
+    if not bypass:
         decision = _confirm_share(repo, share_all, ids)
         if decision is None:   # nothing to share — _confirm_share already said so
             return
@@ -499,6 +511,36 @@ def share_cmd(rest: list | None = None) -> None:
         print(share.share_all(repo, profile=profile))
     else:
         print(share.share(repo, ids[0] if ids else "", profile=profile))
+
+
+def _pick_shareable(repo: str) -> list:
+    """Interactive numbered multi-select of shareable decisions. Returns the chosen ids ([] to
+    cancel / nothing to share). Pure local read; no network until the caller pushes."""
+    from contexer import store
+
+    items = store.get_shareable_all(repo)
+    if not items:
+        print("No decisions available to share.")
+        return []
+    shown = items[:store._FILTERED_DISPLAY]
+    print(f"\nShareable decisions — pushing sends them to your PERSONAL cloud "
+          f"({store._SHARE_OUTWARD_WARNING}):\n")
+    for i, it in enumerate(shown, 1):
+        print(f"  {i}. " + store._share_item_line(it, maxlen=80).strip())
+    if len(items) > len(shown):
+        print(f"  …and {len(items) - len(shown)} more (share by id)")
+    try:
+        raw = input("\nSelect to share [e.g. 1,3 | all | q]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return []
+    if raw == "all":
+        return [it.get("id") or "" for it in shown]
+    picked = []
+    for tok in raw.replace(" ", "").split(","):
+        if tok.isdigit() and 1 <= int(tok) <= len(shown):
+            picked.append(shown[int(tok) - 1].get("id") or "")
+    return picked
 
 
 def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
