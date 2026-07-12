@@ -80,21 +80,39 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
+    hidden = 0
     if entry_id.strip().lower() in ("all", "*"):
-        ids = [d["id"] for d in store.get_pending_decisions(resolved)]
+        pending = store.get_pending_decisions(resolved)
+        # Only act on decisions that review_pending actually SHOWED (its display cap). Approving
+        # beyond the cap would trust decisions the developer never saw — so "all" clears the shown
+        # set and reports the remainder rather than silently approving unseen content.
+        shown = pending[:store._FILTERED_DISPLAY]
+        ids = [d["id"] for d in shown]
+        hidden = len(pending) - len(shown)
         if not ids:
             return "Nothing pending review."
     else:
         ids = [i.strip() for i in entry_id.split(",") if i.strip()]
     if not ids:
         return "No decision id given."
-    if len(ids) == 1:
+    if len(ids) == 1 and not hidden:
         return store.approve_decision(resolved, ids[0], action, content)[1]
     # Bulk: 'edit' needs per-decision content, so it's single-only.
     if action == "edit":
         return "Bulk 'edit' isn't supported — edit decisions one at a time."
-    lines = [f"  {i[:8]}: {store.approve_decision(resolved, i, action, content)[1]}" for i in ids]
-    return f"Applied '{action}' to {len(ids)} decisions:\n" + "\n".join(lines)
+    results = store.approve_decisions(resolved, ids, action, content)  # one atomic transaction
+    succeeded = sum(1 for _i, ok, _m in results if ok)
+    failed = len(results) - succeeded
+    header = f"Applied '{action}' to {succeeded} of {len(results)} decision(s)"
+    if failed:
+        header += f" ({failed} failed — see below)"
+    body = "\n".join(f"  {i[:8]}: {m}" for i, _ok, m in results)
+    tail = ""
+    if hidden:
+        tail = (f"\n\n{hidden} more pending decision(s) were NOT touched — 'all' only acts on the "
+                f"{store._FILTERED_DISPLAY} shown by review_pending. Run review_pending again to "
+                "review and clear the rest.")
+    return f"{header}:\n{body}{tail}"
 
 
 @mcp.tool()

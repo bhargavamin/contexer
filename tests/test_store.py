@@ -2229,6 +2229,15 @@ class TestReviewPendingAndSharePreview:
     def test_format_pending_review_empty(self, tmp_repo):
         assert store.format_pending_review(tmp_repo) == "Nothing pending review."
 
+    def test_approve_decisions_batch_single_transaction(self, tmp_repo):
+        # Batched approve: per-id results (failures surfaced), one load+save, no per-id rewrite.
+        store.update_decision(tmp_repo, "Never log PII", "s", "constraint")
+        store.update_decision(tmp_repo, "Never disable TLS verification", "s", "constraint")
+        ids = [d["id"] for d in store.get_pending_decisions(tmp_repo)]
+        results = store.approve_decisions(tmp_repo, ids + ["bogus"], "approve")
+        assert [ok for _i, ok, _m in results] == [True, True, False]
+        assert store.get_pending_decisions(tmp_repo) == []  # both real ones cleared atomically
+
     def test_session_start_escalates_growing_backlog(self, tmp_repo):
         data = store._load(tmp_repo)
         for i in range(store._BACKLOG_ESCALATE + 2):

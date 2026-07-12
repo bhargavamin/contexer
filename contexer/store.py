@@ -1083,68 +1083,93 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
-        # Resolve exact id first, then an 8-char prefix — consistent with replace_id and
-        # get_shareable, so the short ids shown by review_pending/get_context are approvable.
-        entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
-        if entry is None and entry_id:
-            entry = next((e for e in data["entries"]
-                          if e.get("id", "").startswith(entry_id)), None)
-        if entry is None:
-            return False, f"Decision {entry_id!r} not found."
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Suggested Update flow: the live decision stays trusted; we act on the proposal.
-        if entry.get("proposed_revision"):
-            if action == "skip":
-                return True, "Skipped - the suggested update is kept for later review."
-            if action in ("dismiss", "ignore"):
-                rev = entry.get("revision", 1)
-                entry.pop("proposed_revision", None)
-                _save(repo_path, data)
-                return True, f"Dismissed - kept current revision {rev}."
-            # approve or edit → promote the proposal to a new revision (history preserved).
-            # Set the approval fields FIRST so the new revision's snapshotted confidence
-            # reflects the developer approval; _promote_proposal computes + syncs the cache.
-            entry["status"] = "approved"
-            entry["approved_at"] = now
-            entry["approved_by"] = "human"
-            _promote_proposal(entry, content if action == "edit" else None)
+        ok, msg, changed = _apply_approval(
+            data, entry_id, action, content, datetime.now(timezone.utc).isoformat())
+        if changed:
             _save(repo_path, data)
-            stored = _current_content(entry)
-            preview = stored[:80] + ("..." if len(stored) > 80 else "")
-            verb = "Updated and approved" if action == "edit" else "Approved"
-            return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\""
+        return ok, msg
 
-        # New-decision pending_approval flow. The decision already has revision 1; approval
-        # blesses it in place (no new revision - there is no prior version to preserve yet).
+
+def _apply_approval(data: dict, entry_id: str, action: str, content: str,
+                    now: str) -> tuple[bool, str, bool]:
+    """Apply ONE approval action to `data` in memory — no lock, no load, no save. Returns
+    (success, message, changed); `changed` lets the caller save only when something mutated, and
+    lets `approve_decisions` batch many actions into a single load+save. Resolves an exact id
+    first, then an 8-char prefix (consistent with replace_id / get_shareable)."""
+    entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
+    if entry is None and entry_id:
+        entry = next((e for e in data["entries"] if e.get("id", "").startswith(entry_id)), None)
+    if entry is None:
+        return False, f"Decision {entry_id!r} not found.", False
+
+    # Suggested Update flow: the live decision stays trusted; we act on the proposal.
+    if entry.get("proposed_revision"):
         if action == "skip":
-            return True, "Skipped."
-
-        if action in ("ignore", "dismiss"):
-            entry["status"] = "ignored"
-            _save(repo_path, data)
-            return True, "Ignored. This decision will not surface again."
-
-        cur = _current_revision(entry)
-        if action == "edit" and cur is not None:
-            cur["content"] = _normalize_content(content)
-
+            return True, "Skipped - the suggested update is kept for later review.", False
+        if action in ("dismiss", "ignore"):
+            rev = entry.get("revision", 1)
+            entry.pop("proposed_revision", None)
+            return True, f"Dismissed - kept current revision {rev}.", True
+        # approve or edit → promote the proposal to a new revision (history preserved).
+        # Set the approval fields FIRST so the new revision's snapshotted confidence
+        # reflects the developer approval; _promote_proposal computes + syncs the cache.
         entry["status"] = "approved"
         entry["approved_at"] = now
         entry["approved_by"] = "human"
-        if cur is not None:
-            cur["approved_at"] = now
-            score, factors = _compute_confidence(entry)
-            cur["confidence_score"] = score
-            cur["evidence"] = factors
-        _sync_decision_cache(entry)
-        _save(repo_path, data)
-
-        stored_content = _current_content(entry)
-        preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
+        _promote_proposal(entry, content if action == "edit" else None)
+        stored = _current_content(entry)
+        preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
-        return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\""
+        return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\"", True
+
+    # New-decision pending_approval flow. The decision already has revision 1; approval
+    # blesses it in place (no new revision - there is no prior version to preserve yet).
+    if action == "skip":
+        return True, "Skipped.", False
+    if action in ("ignore", "dismiss"):
+        entry["status"] = "ignored"
+        return True, "Ignored. This decision will not surface again.", True
+
+    cur = _current_revision(entry)
+    if action == "edit" and cur is not None:
+        cur["content"] = _normalize_content(content)
+    entry["status"] = "approved"
+    entry["approved_at"] = now
+    entry["approved_by"] = "human"
+    if cur is not None:
+        cur["approved_at"] = now
+        score, factors = _compute_confidence(entry)
+        cur["confidence_score"] = score
+        cur["evidence"] = factors
+    _sync_decision_cache(entry)
+    stored_content = _current_content(entry)
+    preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
+    verb = "Updated and approved" if action == "edit" else "Approved"
+    return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\"", True
+
+
+def approve_decisions(repo_path: str, entry_ids: list, action: str,
+                      content: str = "") -> list[tuple[str, bool, str]]:
+    """Apply `action` to several decisions in ONE store transaction — load once, save once —
+    so a bulk clear is atomic and O(1) writes, not one whole-file rewrite per id. Returns
+    [(entry_id, success, message), ...] so the caller reports accurate per-id results (a stale or
+    invalid id fails without faking success). 'edit' is single-only (it needs per-decision
+    content) and is rejected here."""
+    if action not in ("approve", "ignore", "skip", "dismiss"):
+        return [(i, False, f"Bulk action {action!r} not supported (edit is single-only).")
+                for i in entry_ids]
+    results: list[tuple[str, bool, str]] = []
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        now = datetime.now(timezone.utc).isoformat()
+        changed_any = False
+        for eid in entry_ids:
+            ok, msg, changed = _apply_approval(data, eid, action, content, now)
+            changed_any = changed_any or changed
+            results.append((eid, ok, msg))
+        if changed_any:
+            _save(repo_path, data)
+    return results
 
 
 def get_pending_decisions(repo_path: str) -> list[dict]:
