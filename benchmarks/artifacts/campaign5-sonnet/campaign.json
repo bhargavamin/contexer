@@ -1,0 +1,14 @@
+{
+  "model": "claude-sonnet-5",
+  "seed": 0,
+  "reps": 3,
+  "conditions": [
+    "without",
+    "agentsmd",
+    "claudemd",
+    "claudemd_agentsmd",
+    "with"
+  ],
+  "managed_settings_present": false,
+  "started_at": "2026-07-13T19:28:13.867410+00:00"
+}

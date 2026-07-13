@@ -1,0 +1,56 @@
+"""Synthetic fixture repos for the A/B benchmark. Seeded and generated so the
+code cannot exist in any model's training data (leakage guard)."""
+import subprocess
+from pathlib import Path
+
+_PYPROJECT = """[project]
+name = "svc-{seed}-webapi"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi", "sqlalchemy", "pytest"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+addopts = "-q"
+"""
+
+
+def _sh(*args: str, cwd: Path) -> None:
+    subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+
+
+def _commit(dest: Path, msg: str, *git_args: str) -> None:
+    _sh("git", "-c", "user.email=fixture@bench.local", "-c", "user.name=Bench",
+        "-c", "commit.gpgsign=false", "commit", *git_args, "-q", "-m", msg, cwd=dest)
+
+
+def build_webapi(dest: Path, seed: int = 0) -> Path:
+    app, tests = dest / "app", dest / "tests"
+    app.mkdir(parents=True)
+    tests.mkdir()
+    (dest / "pyproject.toml").write_text(_PYPROJECT.format(seed=seed))
+    (app / "__init__.py").write_text("")
+
+    core = ["import json", "import os", "", ""]
+    for i in range(25):
+        core += [
+            f"def fetch_record_{seed}_{i}(record_id: int) -> dict:",
+            f'    """Fetches record {i} for service {seed}."""',
+            f'    return {{"id": record_id, "slot": {i}}}',
+            "", "",
+        ]
+    (app / f"svc_{seed}_core.py").write_text("\n".join(core))
+
+    body = "\n".join(
+        f"def test_fetch_{seed}_{i}():\n    assert {i} + 1 == {i + 1}\n" for i in range(25))
+    for n in range(3):
+        (tests / f"test_svc_{n}.py").write_text(body)
+
+    _sh("git", "init", "-q", cwd=dest)
+    for i in range(22):
+        _commit(dest, f"feat: add capability {seed}-{i}", "--allow-empty")
+    _sh("git", "add", "-A", cwd=dest)
+    _commit(dest, "feat: service scaffold")
+    return dest

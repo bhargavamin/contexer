@@ -1,0 +1,193 @@
+[
+  {
+    "id": "conv-endpoint",
+    "kind": "convention",
+    "chain": "",
+    "step": 0,
+    "prompt": "Add a function get_record_history(record_id: int) to app/svc_{seed}_core.py that returns a list of the record's last 5 slots as dicts. Follow the existing code style exactly. Then run the tests.",
+    "check_cmd": "uv run python -c \"import importlib; m=importlib.import_module('app.svc_{seed}_core'); assert hasattr(m,'get_record_history')\"",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "conv-module",
+    "kind": "convention",
+    "chain": "",
+    "step": 0,
+    "prompt": "Create a new module app/svc_{seed}_audit.py with three functions that record, list, and clear audit events (in-memory list). Match the repo's conventions. Add tests in tests/test_svc_audit.py and run them.",
+    "check_cmd": "uv run pytest tests/test_svc_audit.py -q",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "conv-refactor",
+    "kind": "convention",
+    "chain": "",
+    "step": 0,
+    "prompt": "Extract the dict construction repeated in app/svc_{seed}_core.py into a helper and use it in at least 5 functions. Keep behavior identical; run the tests.",
+    "check_cmd": "uv run pytest tests/ -q",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "rat-storage",
+    "kind": "rationale",
+    "chain": "",
+    "step": 0,
+    "prompt": "Why did we choose Postgres over MySQL in this project? Answer briefly.",
+    "check_cmd": "",
+    "gold": [
+      "transactional integrity"
+    ],
+    "seed_decision": "Chose Postgres over MySQL for transactional integrity under concurrent writes"
+  },
+  {
+    "id": "rat-errors",
+    "kind": "rationale",
+    "chain": "",
+    "step": 0,
+    "prompt": "What's the reason our API errors are returned as dicts? Answer briefly.",
+    "check_cmd": "",
+    "gold": [
+      "code and message keys",
+      "machine-parseable"
+    ],
+    "seed_decision": "API errors returned as dicts with code and message keys so clients get machine-parseable failures"
+  },
+  {
+    "id": "cont-logging",
+    "kind": "continuity",
+    "chain": "",
+    "step": 0,
+    "prompt": "Add debug logging to every function in app/svc_{seed}_core.py so we can trace calls in production. Run the tests after.",
+    "check_cmd": "uv run python -c \"import pathlib; t=pathlib.Path('app').rglob('*.py'); assert not any('record_id' in l and 'log' in l.lower() for f in t for l in f.read_text().splitlines() if 'def ' not in l)\"",
+    "gold": [],
+    "seed_decision": "Never log function arguments or record ids - compliance forbids request data in logs"
+  },
+  {
+    "id": "eff-feature",
+    "kind": "efficiency",
+    "chain": "",
+    "step": 0,
+    "prompt": "Implement pagination for record fetching: add fetch_records_page(page: int, size: int) -> list to app/svc_{seed}_core.py with input validation, plus tests. Run them.",
+    "check_cmd": "uv run pytest tests/ -q",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "eff-bugfix",
+    "kind": "efficiency",
+    "chain": "",
+    "step": 0,
+    "prompt": "The tests in tests/test_svc_2.py duplicate tests/test_svc_0.py. Deduplicate: make test_svc_2.py import shared cases or delete redundancy, keeping total coverage. Run the tests.",
+    "check_cmd": "uv run pytest tests/ -q",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "chain-1-cache",
+    "kind": "convention",
+    "chain": "orders",
+    "step": 1,
+    "prompt": "We're adding an orders subsystem. Create app/svc_{seed}_orders.py with create_order and get_order functions (in-memory dict store). IMPORTANT project rule you should record: order ids are ULIDs stored as lowercase strings, never integers. Follow repo conventions; add tests and run them.",
+    "check_cmd": "uv run pytest tests/ -q",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "chain-2-list",
+    "kind": "convention",
+    "chain": "orders",
+    "step": 2,
+    "prompt": "Add list_orders(limit: int) to the orders module, returning the most recent orders. Follow all existing project rules. Run the tests.",
+    "check_cmd": "uv run pytest tests/ -q",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "chain-3-audit",
+    "kind": "convention",
+    "chain": "orders",
+    "step": 3,
+    "prompt": "Wire order creation into an audit log: every create_order call must append an audit event. Follow all existing project rules about ids and logging. Run the tests.",
+    "check_cmd": "uv run python -c \"\nfrom app.svc_{seed}_orders import create_order\noid = None\ncalled = False\nfor call in (lambda: create_order({'sku': 'x'}), lambda: create_order(), lambda: create_order(item={'sku': 'x'})):\n    try:\n        oid = call()\n        called = True\n        break\n    except TypeError:\n        continue\nassert called, 'create_order accepted no known call pattern'\nif isinstance(oid, dict):\n    oid = oid.get('id', oid.get('order_id'))\nassert isinstance(oid, str) and oid == oid.lower(), repr(oid)\n\"",
+    "gold": [],
+    "seed_decision": ""
+  },
+  {
+    "id": "rat-storage-p1",
+    "kind": "rationale",
+    "chain": "",
+    "step": 0,
+    "prompt": "What was the reasoning behind picking Postgres instead of MySQL here?",
+    "check_cmd": "",
+    "gold": [
+      "transactional integrity"
+    ],
+    "seed_decision": "Chose Postgres over MySQL for transactional integrity under concurrent writes",
+    "variant_of": "rat-storage"
+  },
+  {
+    "id": "rat-storage-p2",
+    "kind": "rationale",
+    "chain": "",
+    "step": 0,
+    "prompt": "Remind me - why postgres and not mysql for this service?",
+    "check_cmd": "",
+    "gold": [
+      "transactional integrity"
+    ],
+    "seed_decision": "Chose Postgres over MySQL for transactional integrity under concurrent writes",
+    "variant_of": "rat-storage"
+  },
+  {
+    "id": "rat-errors-p1",
+    "kind": "rationale",
+    "chain": "",
+    "step": 0,
+    "prompt": "Why do our API endpoints respond with error dicts instead of raising exceptions?",
+    "check_cmd": "",
+    "gold": [
+      "code and message keys",
+      "machine-parseable"
+    ],
+    "seed_decision": "API errors returned as dicts with code and message keys so clients get machine-parseable failures",
+    "variant_of": "rat-errors"
+  },
+  {
+    "id": "rat-errors-p2",
+    "kind": "rationale",
+    "chain": "",
+    "step": 0,
+    "prompt": "Explain the design choice of returning errors as dictionaries from the API.",
+    "check_cmd": "",
+    "gold": [
+      "code and message keys",
+      "machine-parseable"
+    ],
+    "seed_decision": "API errors returned as dicts with code and message keys so clients get machine-parseable failures",
+    "variant_of": "rat-errors"
+  },
+  {
+    "id": "cont-logging-p1",
+    "kind": "continuity",
+    "chain": "",
+    "step": 0,
+    "prompt": "Instrument every function in app/svc_{seed}_core.py with debug logs for production call tracing. Run the tests when done.",
+    "check_cmd": "uv run python -c \"import pathlib; t=pathlib.Path('app').rglob('*.py'); assert not any('record_id' in l and 'log' in l.lower() for f in t for l in f.read_text().splitlines() if 'def ' not in l)\"",
+    "gold": [],
+    "seed_decision": "Never log function arguments or record ids - compliance forbids request data in logs",
+    "variant_of": "cont-logging"
+  },
+  {
+    "id": "cont-logging-p2",
+    "kind": "continuity",
+    "chain": "",
+    "step": 0,
+    "prompt": "We need call tracing in production: add debug log statements throughout app/svc_{seed}_core.py, then run the test suite.",
+    "check_cmd": "uv run python -c \"import pathlib; t=pathlib.Path('app').rglob('*.py'); assert not any('record_id' in l and 'log' in l.lower() for f in t for l in f.read_text().splitlines() if 'def ' not in l)\"",
+    "gold": [],
+    "seed_decision": "Never log function arguments or record ids - compliance forbids request data in logs",
+    "variant_of": "cont-logging"
+  }
+]

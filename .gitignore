@@ -40,3 +40,7 @@ node_modules/
 .coverage
 # Planning artifacts — never commit specs/plans (kept locally only)
 docs/superpowers/
+docs/internal/
+.claude/
+graphify-out/
+e2e_commit_promotion.py
