@@ -296,6 +296,18 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             row["success"] = chk.returncode == 0
         else:
             row["success"] = True
+        if task["chain"]:
+            # Snapshot the worktree so the next step scores ONLY its own work —
+            # otherwise an untracked file left by step 1 is re-counted by steps 2-3
+            # (chain steps share the worktree by design). Also mirrors real flow:
+            # work is committed between sessions.
+            subprocess.run(["git", "-C", str(work), "add", "-A"],
+                           capture_output=True, timeout=60)
+            subprocess.run(["git", "-C", str(work),
+                            "-c", "user.email=bench@bench.local", "-c", "user.name=Bench",
+                            "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty",
+                            "-m", f"bench: snapshot after {task['id']} step {task['step']}"],
+                           capture_output=True, timeout=60)
     except Exception as exc:  # a failed run is a data point, never a crash
         row["error"] = repr(exc)
     return row

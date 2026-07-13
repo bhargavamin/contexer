@@ -249,3 +249,29 @@ class TestCheckIsolation:
         row = json.loads(out.read_text().splitlines()[0])
         assert row["error"] == ""
         assert row["success"] is True  # HOME inside the check is the throwaway one
+
+
+STUB_VIOLATE_ONCE = """#!/bin/sh
+mkdir -p app 2>/dev/null || true
+[ -f app/stub_bad.py ] || printf 'def BadCamel(x):\\n    return x\\n' > app/stub_bad.py
+cat <<'EOF2'
+{"result": "done", "usage": {"input_tokens": 100, "output_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, "total_cost_usd": 0.001, "num_turns": 1, "duration_ms": 5, "session_id": "stub"}
+EOF2
+"""
+
+
+class TestChainScoringIsolation:
+    def test_untracked_step1_file_not_rescored_by_later_steps(self, tmp_path):
+        # Step 1 leaves an untracked violating file; the worktree is snapshot-committed
+        # between steps, so steps 2-3 must score zero violations for it (P1).
+        p = tmp_path / "claude"
+        p.write_text(STUB_VIOLATE_ONCE)
+        p.chmod(p.stat().st_mode | 0o111)
+        out = run_campaign(tmp_path / "c", reps=1,
+                           task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
+                           claude_cmd=str(p), seed=5, conditions=("without",))
+        rows = [json.loads(l) for l in out.read_text().splitlines()]
+        by_step = {r["step"]: r for r in rows}
+        assert by_step[1]["violations"] >= 1   # the bad file is step 1's work
+        assert by_step[2]["violations"] == 0   # not re-counted
+        assert by_step[3]["violations"] == 0
