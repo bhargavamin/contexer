@@ -230,3 +230,22 @@ class TestRunCampaign:
         real_home = os.environ.get("HOME")
         run_campaign(tmp_path / "d", reps=1, task_ids=["rat-storage"], claude_cmd=stub_claude, seed=5)
         assert os.environ.get("HOME") == real_home
+
+
+class TestCheckIsolation:
+    def test_check_cmd_runs_in_isolated_env(self, tmp_path, stub_claude, monkeypatch):
+        # success must be judged in the same isolated HOME the session saw — a check
+        # that would only pass against the developer's real HOME must fail (P2).
+        import benchmarks.run as run_mod
+        real_home = os.environ["HOME"]
+        tasks = [{"id": "env-probe", "kind": "convention", "chain": "", "step": 0,
+                  "prompt": "noop", "gold": [], "seed_decision": "",
+                  "check_cmd": f'test "$HOME" != "{real_home}" && test -n "$HOME"'}]
+        tf = tmp_path / "tasks.json"
+        tf.write_text(json.dumps(tasks))
+        monkeypatch.setattr(run_mod, "TASKS_FILE", tf)
+        out = run_campaign(tmp_path / "o", reps=1, task_ids=["env-probe"],
+                           claude_cmd=stub_claude, seed=5, conditions=("without",))
+        row = json.loads(out.read_text().splitlines()[0])
+        assert row["error"] == ""
+        assert row["success"] is True  # HOME inside the check is the throwaway one

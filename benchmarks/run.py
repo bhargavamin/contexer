@@ -259,6 +259,10 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
                 _condition_b_setup(str(work), home, task["seed_decision"])
         rx.reset()
         row["ts"] = time.time()  # stamped when the session starts (post-setup)
+        # Pre-session HEAD: sessions may commit their edits, which would vanish
+        # from a live `git diff HEAD` — score against where the repo started.
+        base_sha = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip() or "HEAD"
         res = _run_session(str(work), prompt, claude_cmd,
                            _session_env(home, rx.port), model)
         if res.get("_error"):
@@ -280,11 +284,15 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
                                row["tokens_cache_read"] + row["tokens_cache_write"])
         time.sleep(1.5 if rx.port else 0)  # let the final OTel export flush
         _telemetry_check(row, rx.snapshot())
-        row["violations"] = score.count_violations(score.changed_files(str(work)), baseline)
+        row["violations"] = score.count_violations(
+            score.changed_files(str(work), base_sha), baseline)
         row["rationale"] = score.rationale_score(res.get("result", ""), task["gold"])
         row["result_snippet"] = str(res.get("result", ""))[:300]
         if check_cmd:
-            chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True, timeout=600)
+            # Same isolated env as the session: success must never come from
+            # developer-local HOME/uv/python configuration the session couldn't see.
+            chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
+                                 timeout=600, env=_session_env(home, 0))
             row["success"] = chk.returncode == 0
         else:
             row["success"] = True
