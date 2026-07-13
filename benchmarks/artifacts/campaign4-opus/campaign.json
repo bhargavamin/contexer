@@ -1,0 +1,13 @@
+{
+  "model": "claude-opus-4-8",
+  "seed": 0,
+  "reps": 8,
+  "conditions": [
+    "without",
+    "claudemd",
+    "with",
+    "claudemd_with"
+  ],
+  "managed_settings_present": false,
+  "started_at": "2026-07-13T16:37:07.821254+00:00"
+}

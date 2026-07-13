@@ -27,6 +27,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#cost">Cost</a> ·
+  <a href="docs/benchmark.md">Benchmark</a> ·
   <a href="docs/install.md">Docs</a> ·
   <a href="https://discord.gg/Fk6JSaW4p">Discord</a>
 </p>
@@ -34,6 +35,11 @@
 <p align="center">
   <strong>🚀 Now live — <a href="https://contexer.ai/teams">Contexer Personal Cloud &amp; Teams</a></strong><br>
   <sub>Sync your engineering decisions across every machine, and share a team decision layer that every agent on your team reads from.</sub>
+</p>
+
+<p align="center">
+  <strong>📊 Measured, not claimed — <a href="docs/benchmark.md">read the benchmark</a></strong><br>
+  <sub>540 live Claude Code sessions, two models, six memory conditions: recorded decisions answer "why" questions in <strong>1 turn instead of 6 at ~5&times; fewer tokens</strong>, and stored rules are followed <strong>8/8 vs 0/8</strong> without memory. Deterministic scoring, independent validation, adversarial review — negative findings included, raw data in the repo.</sub>
 </p>
 
 ---

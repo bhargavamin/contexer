@@ -1,0 +1,7 @@
+{
+  "model": "claude-sonnet-5",
+  "seed": 0,
+  "reps": 3,
+  "managed_settings_present": false,
+  "started_at": "2026-07-13T14:34:01.884201+00:00"
+}
