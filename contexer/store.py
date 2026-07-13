@@ -1569,22 +1569,35 @@ def _insight_cache_path(repo_path: str) -> Path:
     return STORE_DIR / f".insight_{_slug(repo_path)}"
 
 
+def _insight_cache_key(repo_path: str) -> tuple:
+    """The cheap invariants a cached insight depends on: user.email and HEAD. Two git
+    calls instead of _detect_insight's ~6 — and a changed email or a re-cloned/rewound
+    repo invalidates the cache immediately instead of after the TTL."""
+    return _git(repo_path, "config", "user.email"), _git(repo_path, "rev-parse", "HEAD")
+
+
 def _cached_insight(repo_path: str) -> tuple[str, bool]:
-    """TTL-cached _detect_insight. Cache hit = zero git subprocesses. Fail-soft:
-    any read/parse error falls through to fresh detection; write errors are ignored."""
+    """TTL-cached _detect_insight, validated against the current git identity/HEAD.
+    Cache hit = 2 git subprocesses instead of ~6. Fail-soft: any read/parse error
+    falls through to a fresh detection; write errors are ignored."""
     path = _insight_cache_path(repo_path)
+    key = None
     try:
         cached = json.loads(path.read_text())
         level, decisive, ts = cached["level"], cached["decisive"], cached["ts"]
         if level in _INSIGHT_ORDER and isinstance(decisive, bool) and \
                 time.time() - ts < _INSIGHT_CACHE_TTL:
-            return level, decisive
+            key = _insight_cache_key(repo_path)
+            if [cached.get("email"), cached.get("head")] == list(key):
+                return level, decisive
     except (OSError, ValueError, KeyError, TypeError):
         pass  # missing, corrupt, or expired — fall through to a fresh detection
     level, decisive = _detect_insight(repo_path)
     try:
+        email, head = key if key is not None else _insight_cache_key(repo_path)
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        path.write_text(json.dumps({"level": level, "decisive": decisive, "ts": time.time()}))
+        path.write_text(json.dumps({"level": level, "decisive": decisive,
+                                    "ts": time.time(), "email": email, "head": head}))
     except OSError:
         pass
     return level, decisive
@@ -2695,7 +2708,11 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
 
     # Tests — only if no test framework detected AND not a simple/docs repo AND the
     # miner didn't already measure a test convention (asking would be redundant).
-    mined_tests = any(m.get("content", "").startswith(("Tests ", "Test files")) for m in mined)
+    # Layout-only evidence ("Tests live in tests/") isn't enough — ad-hoc test files
+    # don't answer whether testing is in scope. Require a measured style/framework
+    # signal (assert-style dominance or fixtures) before skipping the question.
+    mined_tests = any("test functions" in m.get("content", "")
+                      or "Pytest fixtures" in m.get("content", "") for m in mined)
     if not sig["has_tests"] and not is_simple and not mined_tests:
         gaps.append(_gap(
             assumption="No automated test framework detected",
@@ -2749,7 +2766,10 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         any("Architecture" in i or "layered" in i for i in inferred) or
         len(inferred) > 5
     )
-    if has_team_signals and not is_simple and len(mined) < 3:
+    # Config facts (line length, hook ids) don't answer branching/PR/ownership norms —
+    # only measured source conventions ("% of N ...") show how the team actually works.
+    mined_source_convs = sum(1 for m in mined if "% of" in m.get("content", ""))
+    if has_team_signals and not is_simple and mined_source_convs < 3:
         gaps.append(_gap(
             assumption="Team conventions not captured in config files",
             question="Any branching model, PR process, or unwritten norms beyond what's in config files?",
@@ -2854,8 +2874,14 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
         data = _load(repo_path)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
 
-        stored = pending = skipped = 0
+        skipped = 0
         changed = False
+        # Ids of entries appended this call, by born status. Counts are derived from
+        # the post-trim survivors: near MAX_ENTRIES, _keep_top can evict a fresh entry
+        # (pin_last protects only the final one), and reporting an evicted entry as
+        # "stored" would be a lie.
+        new_approved: list[str] = []
+        new_pending: list[str] = []
 
         # Consolidated stack entry — one sentence for every inferred fact, truncated to
         # 400 chars at a "; " boundary so a dependency-heavy repo can't blow past a
@@ -2869,7 +2895,7 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
                 entry = _new_decision_entry(sentence, session_id, "architecture", created_by="scan")
                 data["entries"].append(entry)
                 decisions.append(entry)
-                stored += 1
+                new_approved.append(entry["id"])
                 changed = True
             else:
                 skipped += 1
@@ -2888,12 +2914,16 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
             decisions.append(entry)
             changed = True
             if item["tier"] == "high":
-                stored += 1
+                new_approved.append(entry["id"])
             else:
-                pending += 1
+                new_pending.append(entry["id"])
 
+        stored, pending = len(new_approved), len(new_pending)
         if changed:
             data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+            surviving = {e["id"] for e in data["entries"]}
+            stored = sum(1 for i in new_approved if i in surviving)
+            pending = sum(1 for i in new_pending if i in surviving)
             _save(repo_path, data)
             if pending:
                 _touch_pending_review(repo_path)  # medium-tier items await review (after save)

@@ -764,9 +764,20 @@ class TestBootstrapScan:
         # fire, but a mined test convention makes asking redundant.
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        mined = [{"content": "Tests live in tests/", "subtype": "convention", "tier": "high"}]
+        mined = [{"content": "Tests use plain pytest asserts (94% of 61 test functions)",
+                  "subtype": "convention", "tier": "high"}]
         result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
         assert not any("automated testing" in q.lower() for q in _gap_questions(result))
+
+    def test_mined_test_layout_alone_does_not_suppress_tests_gap(self, tmp_repo):
+        # Layout-only evidence (ad-hoc test files) doesn't prove testing is in scope —
+        # the question must still be asked (Greptile #114).
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
+        mined = [{"content": "Tests live in tests/ (3 test files)",
+                  "subtype": "convention", "tier": "high"}]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert any("automated testing" in q.lower() for q in _gap_questions(result))
 
     def test_mined_ci_convention_suppresses_ci_gap(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -783,11 +794,34 @@ class TestBootstrapScan:
         (src / "services").mkdir(parents=True)
         (src / "models").mkdir(parents=True)
         mined = [
-            {"content": f"Mined fact {i}", "subtype": "convention", "tier": "high"}
+            {"content": f"Functions use style {i} ({90 + i}% of 100 functions)",
+             "subtype": "convention", "tier": "high"}
             for i in range(3)
         ]
         result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
         assert not any(
+            "branch" in q.lower() or "team" in q.lower() or "pr" in q.lower()
+            for q in _gap_questions(result)
+        )
+
+    def test_mined_config_facts_do_not_suppress_team_conventions_gap(self, tmp_repo):
+        # Config-encoded facts (line length, hook ids) say nothing about branching,
+        # PR flow, or ownership — the team question must survive (Greptile #114).
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        src = Path(tmp_repo) / "src"
+        (src / "api").mkdir(parents=True)
+        (src / "services").mkdir(parents=True)
+        (src / "models").mkdir(parents=True)
+        mined = [
+            {"content": "Line length 100 enforced by ruff (pyproject.toml)",
+             "subtype": "convention", "tier": "high"},
+            {"content": "Pre-commit hooks run: ruff, trailing-whitespace (.pre-commit-config.yaml)",
+             "subtype": "convention", "tier": "high"},
+            {"content": "Mypy strict mode required (pyproject.toml)",
+             "subtype": "convention", "tier": "high"},
+        ]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert any(
             "branch" in q.lower() or "team" in q.lower() or "pr" in q.lower()
             for q in _gap_questions(result)
         )
@@ -926,6 +960,33 @@ class TestBootstrapApply:
             e["type"] == "decision" and e.get("created_by") == "scan" and e.get("subtype") == "constraint"
             for e in data["entries"]
         )
+
+    def test_stored_counts_reflect_post_trim_survivors(self, tmp_repo, monkeypatch):
+        # Near MAX_ENTRIES, _keep_top can evict freshly-appended bootstrap entries
+        # (pin_last protects only the final one). The returned counts must reflect
+        # what actually survived, never what was appended (Greptile #114 P1).
+        monkeypatch.setattr(store, "MAX_ENTRIES", 3)
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
+        )
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        for i, f in enumerate(["filler decision alpha topic", "filler decision bravo topic",
+                               "filler decision charlie topic"]):
+            store.update_decision(tmp_repo, f, f"seed-{i}")
+
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+
+        data = store._load(tmp_repo)
+        surviving_scan = sum(1 for e in data["entries"]
+                             if e["type"] == "decision" and e.get("created_by") == "scan"
+                             and e.get("status") == "approved")
+        surviving_pending = sum(1 for e in data["entries"]
+                                if e["type"] == "decision" and e.get("created_by") == "scan"
+                                and e.get("status") == "pending_approval")
+        assert result["stored"] == surviving_scan
+        assert result["pending"] == surviving_pending
+        assert len(data["entries"]) <= store.MAX_ENTRIES
 
     def test_max_entries_respected(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "MAX_ENTRIES", 5)
@@ -2586,11 +2647,45 @@ class TestInsightCache:
     def test_cache_hit_skips_git(self, git_repo, monkeypatch):
         calls = self._counting_git(monkeypatch)
         first = store._cached_insight(git_repo)
-        assert calls["n"] > 0  # first call is a real detection
+        assert calls["n"] > 2  # first call is a real detection (~6 git calls)
         calls["n"] = 0
         second = store._cached_insight(git_repo)
-        assert calls["n"] == 0  # cache hit — zero git subprocesses
+        # cache hit = exactly the 2 cheap validation calls (user.email + HEAD),
+        # never a full re-detection
+        assert calls["n"] == 2
         assert second == first
+
+    def test_changed_email_invalidates_cache(self, git_repo, monkeypatch):
+        store._cached_insight(git_repo)  # warm the cache
+        subprocess.run(["git", "config", "user.email", "someone-else@test.local"],
+                       cwd=git_repo, check=True)
+        seen = {}
+        real_detect = store._detect_insight
+
+        def spying_detect(repo_path):
+            seen["called"] = True
+            return real_detect(repo_path)
+
+        monkeypatch.setattr(store, "_detect_insight", spying_detect)
+        store._cached_insight(git_repo)
+        assert seen.get("called")  # identity changed — cache must not be trusted
+
+    def test_changed_head_invalidates_cache(self, git_repo, monkeypatch):
+        store._cached_insight(git_repo)  # warm the cache
+        subprocess.run(
+            ["git", "-c", "user.email=me@test.local", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "c2"],
+            cwd=git_repo, check=True)
+        seen = {}
+        real_detect = store._detect_insight
+
+        def spying_detect(repo_path):
+            seen["called"] = True
+            return real_detect(repo_path)
+
+        monkeypatch.setattr(store, "_detect_insight", spying_detect)
+        store._cached_insight(git_repo)
+        assert seen.get("called")  # history moved — cache must not be trusted
 
     def test_expired_cache_redetects(self, git_repo, monkeypatch):
         path = store._insight_cache_path(git_repo)
@@ -2624,7 +2719,12 @@ class TestInsightCache:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         path = store._insight_cache_path(tmp_repo)
-        path.write_text(json.dumps({"level": "high", "decisive": True, "ts": time.time()}))
+        # The stored key must match what _insight_cache_key returns at read time or
+        # the cache is (rightly) distrusted. Derive it — `git config user.email`
+        # falls back to global config even outside a repo, so it isn't simply None.
+        email, head = store._insight_cache_key(tmp_repo)
+        path.write_text(json.dumps({"level": "high", "decisive": True, "ts": time.time(),
+                                    "email": email, "head": head}))
 
         def fail_if_called(repo_path):
             raise AssertionError("_detect_insight must not run when a fresh cache exists")
