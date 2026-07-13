@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.19.0](https://github.com/bhargavamin/contexer/compare/v0.18.0...v0.19.0) (2026-07-13)
+
+
+### Features
+
+* **bench:** A/B benchmark harness, findings doc, and campaign data ([eb50c15](https://github.com/bhargavamin/contexer/commit/eb50c151da42be666340cbb7d84f74ed42f23d05))
+* **bootstrap:** deterministic convention mining with evidence-tiered trust ([4bc136a](https://github.com/bhargavamin/contexer/commit/4bc136a4fafe4dbb666d6f1f711ea7d92ff4e529))
+* **bootstrap:** deterministic convention mining with evidence-tiered trust ([21c501e](https://github.com/bhargavamin/contexer/commit/21c501e33021d4239bd358c8f73895e20ebbcc78))
+
+
+### Bug Fixes
+
+* **bench:** address Greptile review on [#116](https://github.com/bhargavamin/contexer/issues/116) ([71a1fb6](https://github.com/bhargavamin/contexer/commit/71a1fb652d8e4ee4d0967a1ea08cd88ce0a81ceb))
+* **bench:** snapshot worktree between chain steps (Greptile [#116](https://github.com/bhargavamin/contexer/issues/116) P1) ([cc34237](https://github.com/bhargavamin/contexer/commit/cc34237fdd73f12d4dcee465efef08d6deaed026))
+* **bootstrap:** address Greptile review on [#114](https://github.com/bhargavamin/contexer/issues/114) ([966e512](https://github.com/bhargavamin/contexer/commit/966e5129b149c959dd234e5b791e9623f7dfa0ff))
+
+
+### Documentation
+
+* benchmark highlights and link at top of README ([790e1a8](https://github.com/bhargavamin/contexer/commit/790e1a8eb32d81c74359787837f939bc84789148))
+
 ## [0.18.0](https://github.com/bhargavamin/contexer/compare/v0.17.2...v0.18.0) (2026-07-12)
 
 
