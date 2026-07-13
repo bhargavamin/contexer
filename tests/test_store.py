@@ -1,5 +1,8 @@
 """Tests for core store.py logic — filtering, storage, context output, and bootstrap scan."""
 import json
+import os
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -753,6 +756,254 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo, insight="high")
         purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
         assert "payment" in purpose_gap["assumption"].lower()
+
+    # ── mined-suppression (bootstrap redesign) ─────────────────────────────────
+
+    def test_mined_test_convention_suppresses_tests_gap(self, tmp_repo):
+        # pyproject.toml (real code repo) + no test config -> tests gap would normally
+        # fire, but a mined test convention makes asking redundant.
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
+        mined = [{"content": "Tests use plain pytest asserts (94% of 61 test functions)",
+                  "subtype": "convention", "tier": "high"}]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert not any("automated testing" in q.lower() for q in _gap_questions(result))
+
+    def test_mined_test_layout_alone_does_not_suppress_tests_gap(self, tmp_repo):
+        # Layout-only evidence (ad-hoc test files) doesn't prove testing is in scope —
+        # the question must still be asked (Greptile #114).
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
+        mined = [{"content": "Tests live in tests/ (3 test files)",
+                  "subtype": "convention", "tier": "high"}]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert any("automated testing" in q.lower() for q in _gap_questions(result))
+
+    def test_mined_ci_convention_suppresses_ci_gap(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
+        mined = [{"content": "CI runs: pytest, ruff check (from ci.yml)",
+                  "subtype": "convention", "tier": "high"}]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert not any("build or deploy" in q.lower() for q in _gap_questions(result))
+
+    def test_mined_three_or_more_suppresses_team_conventions_gap(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        src = Path(tmp_repo) / "src"
+        (src / "api").mkdir(parents=True)
+        (src / "services").mkdir(parents=True)
+        (src / "models").mkdir(parents=True)
+        mined = [
+            {"content": f"Functions use style {i} ({90 + i}% of 100 functions)",
+             "subtype": "convention", "tier": "high"}
+            for i in range(3)
+        ]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert not any(
+            "branch" in q.lower() or "team" in q.lower() or "pr" in q.lower()
+            for q in _gap_questions(result)
+        )
+
+    def test_mined_config_facts_do_not_suppress_team_conventions_gap(self, tmp_repo):
+        # Config-encoded facts (line length, hook ids) say nothing about branching,
+        # PR flow, or ownership — the team question must survive (Greptile #114).
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        src = Path(tmp_repo) / "src"
+        (src / "api").mkdir(parents=True)
+        (src / "services").mkdir(parents=True)
+        (src / "models").mkdir(parents=True)
+        mined = [
+            {"content": "Line length 100 enforced by ruff (pyproject.toml)",
+             "subtype": "convention", "tier": "high"},
+            {"content": "Pre-commit hooks run: ruff, trailing-whitespace (.pre-commit-config.yaml)",
+             "subtype": "convention", "tier": "high"},
+            {"content": "Mypy strict mode required (pyproject.toml)",
+             "subtype": "convention", "tier": "high"},
+        ]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert any(
+            "branch" in q.lower() or "team" in q.lower() or "pr" in q.lower()
+            for q in _gap_questions(result)
+        )
+
+    def test_mined_none_behaves_like_today(self, tmp_repo):
+        # mined=None (every existing direct caller) must match mined=[] exactly - no
+        # suppression, identical gap set.
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
+        with_none = store.bootstrap_scan(tmp_repo, insight="high", mined=None)
+        with_empty = store.bootstrap_scan(tmp_repo, insight="high", mined=[])
+        assert _gap_questions(with_none) == _gap_questions(with_empty)
+        assert any("automated testing" in q.lower() for q in _gap_questions(with_none))
+
+
+# ── bootstrap_apply (bootstrap redesign — core wiring) ───────────────────────
+
+SESSION_ID_BA = "test-ba-session"
+
+
+def _snake_file(n_snake: int, n_bad: int = 0) -> str:
+    """A Python module of plain functions - mirrors test_miner.py's `_funcs` helper so
+    the naming-convention stat lands on the same tier boundaries exercised there."""
+    lines = [f"def fn_snake_{i}():\n    pass\n" for i in range(n_snake)]
+    lines += [f"def fnBad{i}():\n    pass\n" for i in range(n_bad)]
+    return "\n".join(lines)
+
+
+class TestBootstrapApply:
+    def test_consolidated_stack_entry_not_per_fact(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\nrequires-python = ">=3.12"\n'
+            'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n'
+        )
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        decisions = [e for e in store._load(tmp_repo)["entries"] if e["type"] == "decision"]
+        stack_entries = [d for d in decisions if d["content"].startswith("Stack: ")]
+        assert len(stack_entries) == 1
+        inferred_facts = set(result["inferred"])
+        assert not any(d["content"] in inferred_facts for d in decisions)
+
+    def test_high_tier_mined_stored_approved_scan(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        entry = next(
+            e for e in store._load(tmp_repo)["entries"]
+            if e["type"] == "decision" and "snake_case" in e["content"]
+        )
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "scan"
+        assert entry["subtype"] == "convention"
+        assert "%" in entry["content"]
+        assert result["stored"] >= 1
+
+    def test_medium_tier_mined_stored_pending_approval(self, tmp_repo):
+        # NOT 'suggested': suggested entries inject at session start and never surface
+        # in review_pending — a 60-89% signal must wait for the developer instead.
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        entry = next(
+            e for e in store._load(tmp_repo)["entries"]
+            if e["type"] == "decision" and "snake_case" in e["content"]
+        )
+        assert entry["status"] == "pending_approval"
+        assert result["pending"] >= 1
+
+    def test_medium_tier_surfaces_in_review_and_arms_nudge(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
+        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        pending = store.get_pending_decisions(tmp_repo)
+        assert any("snake_case" in e["content"] for e in pending)
+        assert store._pending_review_flag(tmp_repo).exists()
+
+    def test_single_save_for_batch(self, tmp_repo, monkeypatch):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
+        )
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        calls = []
+        real_save = store._save
+
+        def counting_save(repo_path, data):
+            calls.append(1)
+            return real_save(repo_path, data)
+
+        monkeypatch.setattr(store, "_save", counting_save)
+        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        assert len(calls) == 1
+
+    def test_second_call_is_noop(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
+        )
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        before = {e["id"]: e.get("occurrence_count", 1) for e in store._load(tmp_repo)["entries"]}
+
+        result2 = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+
+        after = {e["id"]: e.get("occurrence_count", 1) for e in store._load(tmp_repo)["entries"]}
+        assert result2["stored"] == 0
+        assert result2["pending"] == 0
+        assert result2["skipped"] > 0
+        assert before == after
+
+    def test_empty_repo_no_crash(self, tmp_repo):
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        assert result["stored"] == 0
+        assert result["pending"] == 0
+        assert result["skipped"] == 0
+
+    def test_return_shape(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        for key in ("inferred", "gaps", "insight", "insight_source", "decisive",
+                    "stored", "pending", "skipped"):
+            assert key in result
+
+    def test_never_stores_constraint_from_mining(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\n'
+            'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n\n'
+            '[tool.ruff]\nline-length = 100\n\n[tool.mypy]\nstrict = true\n'
+        )
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+        data = store._load(tmp_repo)
+        assert not any(
+            e["type"] == "decision" and e.get("created_by") == "scan" and e.get("subtype") == "constraint"
+            for e in data["entries"]
+        )
+
+    def test_stored_counts_reflect_post_trim_survivors(self, tmp_repo, monkeypatch):
+        # Near MAX_ENTRIES, _keep_top can evict freshly-appended bootstrap entries
+        # (pin_last protects only the final one). The returned counts must reflect
+        # what actually survived, never what was appended (Greptile #114 P1).
+        monkeypatch.setattr(store, "MAX_ENTRIES", 3)
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
+        )
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        for i, f in enumerate(["filler decision alpha topic", "filler decision bravo topic",
+                               "filler decision charlie topic"]):
+            store.update_decision(tmp_repo, f, f"seed-{i}")
+
+        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+
+        data = store._load(tmp_repo)
+        surviving_scan = sum(1 for e in data["entries"]
+                             if e["type"] == "decision" and e.get("created_by") == "scan"
+                             and e.get("status") == "approved")
+        surviving_pending = sum(1 for e in data["entries"]
+                                if e["type"] == "decision" and e.get("created_by") == "scan"
+                                and e.get("status") == "pending_approval")
+        assert result["stored"] == surviving_scan
+        assert result["pending"] == surviving_pending
+        assert len(data["entries"]) <= store.MAX_ENTRIES
+
+    def test_max_entries_respected(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "MAX_ENTRIES", 5)
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text(
+            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
+        )
+        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+        fillers = ["filler decision alpha topic", "filler decision bravo topic",
+                   "filler decision charlie topic", "filler decision delta topic"]
+        for i, f in enumerate(fillers):
+            store.update_decision(tmp_repo, f, f"seed-{i}")
+
+        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
+
+        data = store._load(tmp_repo)
+        assert len(data["entries"]) <= store.MAX_ENTRIES
 
 
 # ── session start subtype breakdown (v0.4.0) ─────────────────────────────────
@@ -2357,3 +2608,129 @@ class TestPendingReviewFlag:
         out = store.format_share_preview(tmp_repo, ",".join(ids))
         assert "2 decisions" in out
         assert "Use Redis for caching" in out and "Store blobs in object storage" in out
+
+
+# ── insight-detection caching (_cached_insight) ───────────────────────────────
+
+class TestInsightCache:
+    """_cached_insight wraps _detect_insight with a per-repo TTL cache file so repeated
+    SessionStart/bootstrap-fallback/bootstrap_scan calls don't re-run ~6 git subprocesses."""
+
+    @pytest.fixture
+    def git_repo(self, tmp_path, monkeypatch):
+        """Real git repo with global/system git config isolated; returns its path."""
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+        repo = tmp_path / "gitrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=me@test.local", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "c"],
+            cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "me@test.local"], cwd=repo, check=True)
+        return str(repo)
+
+    def _counting_git(self, monkeypatch):
+        # Wraps the real store._git so call sites still get real answers, just counted.
+        real_git = store._git
+        calls = {"n": 0}
+
+        def counting(repo_path, *args):
+            calls["n"] += 1
+            return real_git(repo_path, *args)
+
+        monkeypatch.setattr(store, "_git", counting)
+        return calls
+
+    def test_cache_hit_skips_git(self, git_repo, monkeypatch):
+        calls = self._counting_git(monkeypatch)
+        first = store._cached_insight(git_repo)
+        assert calls["n"] > 2  # first call is a real detection (~6 git calls)
+        calls["n"] = 0
+        second = store._cached_insight(git_repo)
+        # cache hit = exactly the 2 cheap validation calls (user.email + HEAD),
+        # never a full re-detection
+        assert calls["n"] == 2
+        assert second == first
+
+    def test_changed_email_invalidates_cache(self, git_repo, monkeypatch):
+        store._cached_insight(git_repo)  # warm the cache
+        subprocess.run(["git", "config", "user.email", "someone-else@test.local"],
+                       cwd=git_repo, check=True)
+        seen = {}
+        real_detect = store._detect_insight
+
+        def spying_detect(repo_path):
+            seen["called"] = True
+            return real_detect(repo_path)
+
+        monkeypatch.setattr(store, "_detect_insight", spying_detect)
+        store._cached_insight(git_repo)
+        assert seen.get("called")  # identity changed — cache must not be trusted
+
+    def test_changed_head_invalidates_cache(self, git_repo, monkeypatch):
+        store._cached_insight(git_repo)  # warm the cache
+        subprocess.run(
+            ["git", "-c", "user.email=me@test.local", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "c2"],
+            cwd=git_repo, check=True)
+        seen = {}
+        real_detect = store._detect_insight
+
+        def spying_detect(repo_path):
+            seen["called"] = True
+            return real_detect(repo_path)
+
+        monkeypatch.setattr(store, "_detect_insight", spying_detect)
+        store._cached_insight(git_repo)
+        assert seen.get("called")  # history moved — cache must not be trusted
+
+    def test_expired_cache_redetects(self, git_repo, monkeypatch):
+        path = store._insight_cache_path(git_repo)
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        stale_ts = time.time() - store._INSIGHT_CACHE_TTL - 1
+        path.write_text(json.dumps({"level": "low", "decisive": False, "ts": stale_ts}))
+        calls = self._counting_git(monkeypatch)
+        store._cached_insight(git_repo)
+        assert calls["n"] > 0  # expired entry — falls through to a fresh _detect_insight
+        refreshed = json.loads(path.read_text())
+        assert refreshed["ts"] > stale_ts
+
+    def test_corrupt_cache_fails_soft(self, git_repo):
+        path = store._insight_cache_path(git_repo)
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        path.write_bytes(b"\xff\x00not json")
+        level, decisive = store._cached_insight(git_repo)
+        assert level in store._INSIGHT_ORDER
+        assert isinstance(decisive, bool)
+
+    def test_cache_is_per_repo_slug(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        repo_a, repo_b = str(tmp_path / "repo_a"), str(tmp_path / "repo_b")
+        store._cached_insight(repo_a)
+        store._cached_insight(repo_b)
+        path_a, path_b = store._insight_cache_path(repo_a), store._insight_cache_path(repo_b)
+        assert path_a != path_b
+        assert path_a.exists() and path_b.exists()
+
+    def test_bootstrap_scan_uses_cache(self, tmp_repo, monkeypatch):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        path = store._insight_cache_path(tmp_repo)
+        # The stored key must match what _insight_cache_key returns at read time or
+        # the cache is (rightly) distrusted. Derive it — `git config user.email`
+        # falls back to global config even outside a repo, so it isn't simply None.
+        email, head = store._insight_cache_key(tmp_repo)
+        path.write_text(json.dumps({"level": "high", "decisive": True, "ts": time.time(),
+                                    "email": email, "head": head}))
+
+        def fail_if_called(repo_path):
+            raise AssertionError("_detect_insight must not run when a fresh cache exists")
+
+        monkeypatch.setattr(store, "_detect_insight", fail_if_called)
+        result = store.bootstrap_scan(tmp_repo, "")
+        assert result["insight"] == "high"
+        assert result["insight_source"] == "auto"
+        assert result["decisive"] is True

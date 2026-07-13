@@ -222,8 +222,13 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
 
 
 @mcp.tool()
-def bootstrap_context(repo_path: str = "", insight: str = "") -> str:
-    """Scans a repo for inferable decisions and gap questions, filtered by how much
+def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True) -> str:
+    """Detected facts and measured conventions are stored automatically (idempotent —
+    re-calls skip already-known items); the result carries 'stored'/'pending'/'skipped'
+    counts plus any residual gap questions ('pending' items await `contexer review`).
+    Set apply=false for a read-only preview that stores nothing.
+
+    Scans a repo for inferable decisions and gap questions, filtered by how much
     insight the user has into the repo.
 
     insight: 'high' — user wrote or maintains the repo: confirm inferred items with
@@ -238,6 +243,8 @@ def bootstrap_context(repo_path: str = "", insight: str = "") -> str:
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return json.dumps({"error": "repo path not detected"})
+    if apply:
+        return json.dumps(store.bootstrap_apply(resolved, SESSION_ID, insight), indent=2)
     return json.dumps(store.bootstrap_scan(resolved, insight), indent=2)
 
 

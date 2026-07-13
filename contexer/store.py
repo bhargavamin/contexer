@@ -1562,6 +1562,47 @@ def _detect_insight(repo_path: str) -> tuple[str, bool]:
     return "low", False  # zero commits could also be an email mismatch — ask
 
 
+_INSIGHT_CACHE_TTL = 24 * 3600  # git signals drift slowly — a day-old read is still trustworthy
+
+
+def _insight_cache_path(repo_path: str) -> Path:
+    return STORE_DIR / f".insight_{_slug(repo_path)}"
+
+
+def _insight_cache_key(repo_path: str) -> tuple:
+    """The cheap invariants a cached insight depends on: user.email and HEAD. Two git
+    calls instead of _detect_insight's ~6 — and a changed email or a re-cloned/rewound
+    repo invalidates the cache immediately instead of after the TTL."""
+    return _git(repo_path, "config", "user.email"), _git(repo_path, "rev-parse", "HEAD")
+
+
+def _cached_insight(repo_path: str) -> tuple[str, bool]:
+    """TTL-cached _detect_insight, validated against the current git identity/HEAD.
+    Cache hit = 2 git subprocesses instead of ~6. Fail-soft: any read/parse error
+    falls through to a fresh detection; write errors are ignored."""
+    path = _insight_cache_path(repo_path)
+    key = None
+    try:
+        cached = json.loads(path.read_text())
+        level, decisive, ts = cached["level"], cached["decisive"], cached["ts"]
+        if level in _INSIGHT_ORDER and isinstance(decisive, bool) and \
+                time.time() - ts < _INSIGHT_CACHE_TTL:
+            key = _insight_cache_key(repo_path)
+            if [cached.get("email"), cached.get("head")] == list(key):
+                return level, decisive
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # missing, corrupt, or expired — fall through to a fresh detection
+    level, decisive = _detect_insight(repo_path)
+    try:
+        email, head = key if key is not None else _insight_cache_key(repo_path)
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        path.write_text(json.dumps({"level": level, "decisive": decisive,
+                                    "ts": time.time(), "email": email, "head": head}))
+    except OSError:
+        pass
+    return level, decisive
+
+
 def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
     """Instructions for a repo question asked as the first prompt: ANSWER it, then store
     findings — never a blocking menu. Insight-tailored using the commit signal Contexer
@@ -1593,7 +1634,7 @@ def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
 
 
 def _build_bootstrap_context(repo_path: str) -> list[str]:
-    level, decisive = _detect_insight(repo_path)
+    level, decisive = _cached_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
 
@@ -1664,27 +1705,35 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         "Output the offer. Then stop completely. Do NOT call bootstrap_context yet."
         f" Do NOT start the user's task. Wait for them to reply {replies}.",
         "Once the user replies:",
-        "If quick (or yes) → call bootstrap_context with insight='high'. Ask ONLY the first gap question"
-        " (purpose). Store the answer with update_context using the gap's subtype. Stop — do not ask more.",
-        "If full (guided) → call bootstrap_context with insight='high'. For each inferred item confirm and store"
-        " with update_context(subtype='architecture'). For each gap question ask the user one at a time."
-        " After each answer, re-evaluate remaining gaps — if the purpose answer reveals a docs-only,"
-        " portfolio, personal, or learning repo, skip tests/CI/deploy/compliance/exclusion gaps."
-        " Store each answer as a separate update_context call using the gap's subtype."
-        " Write each stored entry as a single plain sentence, max 15 words, no em dashes, no filler phrases."
-        " Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD pipeline planned or needed for this repo.'",
-        "If some (works with the repo but didn't build it) → call bootstrap_context with insight='medium'."
-        " Store each inferred fact directly via update_context (subtype='architecture', no confirmation)."
-        " Ask the returned gap questions one at a time (purpose and the user's goal) and store each answer."
-        " Same sentence style: plain, max 15 words.",
+        "If quick (or yes) → call bootstrap_context with insight='high'. It scans the codebase and stores"
+        " detected facts and measured conventions automatically — do NOT re-store them. Report the"
+        " stored/pending counts in one line, e.g. 'Contexer: stored 6, 2 pending review.' Ask ONLY the"
+        " first gap question (purpose); store the answer with update_context using the gap's subtype."
+        " Stop — do not ask more.",
+        "If full (guided) → call bootstrap_context with insight='high'. Detected facts and measured"
+        " conventions are stored automatically — do NOT re-store them. Report the stored/pending counts"
+        " in one line. Then ask each remaining gap question one at a time: lead with the gap's"
+        " assumption and ask \"Correct?\". After each answer, re-evaluate remaining gaps — if the"
+        " purpose answer reveals a docs-only, portfolio, personal, or learning repo, skip"
+        " tests/CI/deploy/compliance/exclusion gaps. Store each answer as a separate update_context"
+        " call using the gap's subtype. Write each stored entry as a single plain sentence, max 15"
+        " words, no em dashes, no filler phrases. Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD"
+        " pipeline planned or needed for this repo.' Stop when the gaps are done.",
+        "If some (works with the repo but didn't build it) → call bootstrap_context with"
+        " insight='medium'. Detected facts and measured conventions are stored automatically — do NOT"
+        " re-store them. Report the stored/pending counts in one line. Ask the returned gap questions"
+        " one at a time (purpose and the user's goal) and store each answer. Same sentence style:"
+        " plain, max 15 words.",
         "If scan (first time seeing this repo) → call bootstrap_context with insight='low'."
         " The user cannot answer questions about this repo's history or conventions — do NOT quiz them."
-        " Store each inferred fact directly via update_context using subtype='architecture'"
-        " (no confirmation needed: the facts come from the code, the user cannot validate them)."
-        " Read the README and any docs/ to determine the repo's purpose and store it."
-        " Ask only the single gap question returned (what the user plans to do here) and store the answer."
-        " Same sentence style: plain, max 15 words.",
+        " Detected facts and measured conventions are stored automatically — do NOT re-store them."
+        " Report the stored/pending counts in one line. Ask only the single gap question returned"
+        " (what the user plans to do here) and store the answer. Same sentence style: plain, max 15"
+        " words.",
         "If no or skip → proceed with their original request directly, do not mention bootstrap again.",
+        "After any handler's tool call: if the result shows pending > 0, mention once that"
+        " measured-but-unratified conventions await review — say 'run `contexer review` when"
+        " convenient' — and never block on it.",
         "Purpose question — never echo it back: if the user's original message itself asked what"
         " this repo does, do NOT ask them the purpose gap question. Read the README and code,"
         " answer their question with your own summary, then ask 'Did I get that right —"
@@ -1707,12 +1756,14 @@ def _build_resume_mining_context(repo_path: str) -> list[str]:
         "1. Review the visible conversation for decisions already made — technology"
         " choices, constraints, conventions, approaches chosen over alternatives."
         " Store each via update_context with the right subtype and the original reasoning.",
-        "2. Call bootstrap_context (no insight argument) and store each inferred fact"
-        " via update_context(subtype='architecture') — baseline repo facts from the code.",
+        "2. Call bootstrap_context (no insight argument) — repo facts and measured conventions"
+        " are stored automatically; do NOT re-store them.",
         "3. Tell the user in one line how many decisions were stored, e.g."
         " 'Contexer: stored 4 decisions from this conversation.'",
         "4. Then continue with the user's request as normal.",
-        "If the conversation contains no decisions, store only the scan facts — never invent.",
+        "If the conversation contains no decisions, store nothing else yourself — the scan"
+        " already stored repo facts and conventions automatically; never invent decisions"
+        " that weren't actually discussed.",
     ]
 
 
@@ -2000,7 +2051,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
         if flagged == repo_path:
             resume_flag.unlink(missing_ok=True)
             return {"status": "", "context": ""}
-    level, decisive = _detect_insight(repo_path)
+    level, decisive = _cached_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
     if _is_newcomer_question(prompt):
@@ -2245,11 +2296,15 @@ def _infer_purpose(name: str, readme_summary: str) -> str:
     return f"\"{name}\" — type not obvious from name alone"
 
 
-def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
+def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None) -> dict:
+    """mined: convention/pattern items already measured by miner.mine_conventions (see
+    bootstrap_apply). None (all direct callers) behaves exactly like [] — no suppression -
+    so this stays backward-compatible for every caller that doesn't pass it."""
+    mined = mined or []
     if insight in _INSIGHT_ORDER:
         insight_source, decisive = "user", True
     else:
-        insight, decisive = _detect_insight(repo_path)
+        insight, decisive = _cached_insight(repo_path)
         insight_source = "auto"
     root = Path(repo_path)
     data = _load(repo_path)
@@ -2651,8 +2706,14 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
 
     is_simple = sig["is_simple_repo"]
 
-    # Tests — only if no test framework detected AND not a simple/docs repo
-    if not sig["has_tests"] and not is_simple:
+    # Tests — only if no test framework detected AND not a simple/docs repo AND the
+    # miner didn't already measure a test convention (asking would be redundant).
+    # Layout-only evidence ("Tests live in tests/") isn't enough — ad-hoc test files
+    # don't answer whether testing is in scope. Require a measured style/framework
+    # signal (assert-style dominance or fixtures) before skipping the question.
+    mined_tests = any("test functions" in m.get("content", "")
+                      or "Pytest fixtures" in m.get("content", "") for m in mined)
+    if not sig["has_tests"] and not is_simple and not mined_tests:
         gaps.append(_gap(
             assumption="No automated test framework detected",
             question="Is automated testing in scope?",
@@ -2660,8 +2721,10 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
             subtype="convention",
         ))
 
-    # CI — only if no CI config found AND not a simple/docs repo
-    if not sig["has_ci"] and not is_simple:
+    # CI — only if no CI config found AND not a simple/docs repo AND the miner didn't
+    # already measure the CI pipeline commands.
+    mined_ci = any(m.get("content", "").startswith("CI runs:") for m in mined)
+    if not sig["has_ci"] and not is_simple and not mined_ci:
         gaps.append(_gap(
             assumption="No CI/CD config found in this repo",
             question="Is there a build or deploy pipeline, or is one planned?",
@@ -2696,12 +2759,17 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
             subtype="constraint",
         ))
 
-    # Team conventions — only if architecture signals suggest a team wrote this
+    # Team conventions — only if architecture signals suggest a team wrote this AND the
+    # miner didn't already surface >=3 conventions (the developer corrects those at
+    # review instead of dictating team norms upfront).
     has_team_signals = (
         any("Architecture" in i or "layered" in i for i in inferred) or
         len(inferred) > 5
     )
-    if has_team_signals and not is_simple:
+    # Config facts (line length, hook ids) don't answer branching/PR/ownership norms —
+    # only measured source conventions ("% of N ...") show how the team actually works.
+    mined_source_convs = sum(1 for m in mined if "% of" in m.get("content", ""))
+    if has_team_signals and not is_simple and mined_source_convs < 3:
         gaps.append(_gap(
             assumption="Team conventions not captured in config files",
             question="Any branching model, PR process, or unwritten norms beyond what's in config files?",
@@ -2732,34 +2800,18 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
             subtype="constraint",
         ))
 
-    # Validation placement — only if a web framework is present
-    has_web_framework = _has_dep(
-        "fastapi", "flask", "django", "express", "hono", "elysia", "fastify",
-        "next", "nuxt", "remix", "svelte", "aiohttp", "starlette",
-    )
-    if has_web_framework and not is_simple:
-        gaps.append(_gap(
-            assumption="Input validation placement not documented",
-            question="Where does input validation live — at the HTTP boundary, in the service layer, or both?",
-            hint="e.g. Pydantic models at the route layer only; or service layer validates too; or middleware",
-            subtype="pattern",
-            min_insight="high",
-        ))
-
-    # Error handling — only if production signals exist
-    if has_production_signals:
-        gaps.append(_gap(
-            assumption="Error handling approach not documented",
-            question="How are errors surfaced — exceptions bubble up, result types, or error middleware?",
-            hint="e.g. raise HTTPException at route layer; Result[T, E] types; global exception handler",
-            subtype="pattern",
-            min_insight="high",
-        ))
+    # Validation placement and error handling gaps are DELETED (not merely suppressed):
+    # bootstrap_apply's mining pass now measures actual error-handling conventions
+    # (custom exception classes, bare-except rate) straight from the source, so asking
+    # is no longer needed here at all.
 
     # Interview floor for repo authors: signal-conditional gaps collapse to almost
     # nothing on simple repos (no config to scan), but 'full' is an explicit opt-in
-    # to an interview — the author's head holds decisions no scan can reach.
-    if user_rank == _INSIGHT_ORDER["high"] and len(gaps) < 4:
+    # to an interview — the author's head holds decisions no scan can reach. Floor
+    # dropped from 4 to 3: the generic "conventions" filler below is redundant once
+    # the miner has actually measured conventions, so one fewer filler is needed to
+    # reach a healthy minimum.
+    if user_rank == _INSIGHT_ORDER["high"] and len(gaps) < 3:
         interview = [
             _gap(
                 assumption="Non-obvious decisions exist only in the author's head",
@@ -2767,20 +2819,24 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
                 hint="e.g. 'argparse over click to avoid deps'; 'rejected async — overkill here'",
                 subtype="architecture",
             ),
-            _gap(
+        ]
+        if not mined:
+            # Only ask the generic conventions question when nothing was measured —
+            # once mined conventions exist, the developer corrects those at review
+            # instead of dictating conventions upfront through this filler.
+            interview.append(_gap(
                 assumption="No coding or workflow conventions captured",
                 question="Any conventions future sessions should respect — naming, structure, commit style, how you like code written?",
                 hint="e.g. 'single file until it hurts'; 'conventional commits'; 'comments only for why'",
                 subtype="convention",
-            ),
-            _gap(
-                assumption="No working rules for Claude captured",
-                question="Any rules for how Claude should work in this repo — always do, never touch, check before changing?",
-                hint="e.g. 'always run tests before commit'; 'never edit data/'; 'ask before adding deps'",
-                subtype="constraint",
-            ),
-        ]
-        gaps.extend(interview[:4 - len(gaps)])
+            ))
+        interview.append(_gap(
+            assumption="No working rules for Claude captured",
+            question="Any rules for how Claude should work in this repo — always do, never touch, check before changing?",
+            hint="e.g. 'always run tests before commit'; 'never edit data/'; 'ask before adding deps'",
+            subtype="constraint",
+        ))
+        gaps.extend(interview[:3 - len(gaps)])
 
     gaps = [g for g in gaps if user_rank >= _INSIGHT_ORDER[g["min_insight"]]]
     return {
@@ -2791,3 +2847,85 @@ def bootstrap_scan(repo_path: str, insight: str = "") -> dict:
         "insight_source": insight_source,
         "decisive": decisive,
     }
+
+
+def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
+    """Scan + mine + persist in one step: bootstrap_scan's read-only preview, made
+    idempotent and self-storing. This is the core-wiring entrypoint bootstrap_context
+    calls by default (apply=True) so a bootstrap actually writes something instead of
+    only ever returning a preview.
+
+    Stores exactly ONE consolidated "Stack: ..." decision for all inferred repo facts
+    (never one entry per fact — that would flood the store with ~15 near-useless
+    entries for a single scan) plus one decision per measured convention/pattern from
+    miner.mine_conventions, tier-gated: high tier is measured strongly enough to be
+    born approved (created_by='scan' already classifies auto -> approved via
+    _classify_level); medium tier is 'pending_approval' — NOT 'suggested', because
+    suggested entries inject at session start (merely tagged) and never surface in
+    review_pending, which is the opposite of what a 60-89% signal deserves: held out
+    of every session until the developer ratifies it in `contexer review`.
+    Mined items are skip-don't-bump on dedup — re-deriving the same measurement on a
+    later call is not an independent rediscovery, so occurrence_count is left alone."""
+    from contexer import miner              # function-level: mirrors _team_section's
+                                              # cycle-avoidance style used elsewhere here.
+    with _store_lock(_slug(repo_path)):
+        mined = miner.mine_conventions(repo_path)
+        result = bootstrap_scan(repo_path, insight, mined=mined)
+        data = _load(repo_path)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+
+        skipped = 0
+        changed = False
+        # Ids of entries appended this call, by born status. Counts are derived from
+        # the post-trim survivors: near MAX_ENTRIES, _keep_top can evict a fresh entry
+        # (pin_last protects only the final one), and reporting an evicted entry as
+        # "stored" would be a lie.
+        new_approved: list[str] = []
+        new_pending: list[str] = []
+
+        # Consolidated stack entry — one sentence for every inferred fact, truncated to
+        # 400 chars at a "; " boundary so a dependency-heavy repo can't blow past a
+        # sane entry size.
+        if result["inferred"]:
+            sentence = "Stack: " + "; ".join(result["inferred"])
+            if len(sentence) > 400:
+                cut = sentence.rfind("; ", 0, 400)
+                sentence = sentence[:cut] if cut > 0 else sentence[:400]
+            if _find_match(sentence, decisions) is None:
+                entry = _new_decision_entry(sentence, session_id, "architecture", created_by="scan")
+                data["entries"].append(entry)
+                decisions.append(entry)
+                new_approved.append(entry["id"])
+                changed = True
+            else:
+                skipped += 1
+
+        # Mined conventions/patterns, one decision each. Appended to both `data["entries"]`
+        # and the local `decisions` list so later items in this same batch dedup against
+        # earlier ones (e.g. two near-identical mined stats never both get stored).
+        for item in mined:
+            if _find_match(item["content"], decisions) is not None:
+                skipped += 1
+                continue
+            status = "" if item["tier"] == "high" else "pending_approval"
+            entry = _new_decision_entry(item["content"], session_id, item["subtype"],
+                                        created_by="scan", status=status)
+            data["entries"].append(entry)
+            decisions.append(entry)
+            changed = True
+            if item["tier"] == "high":
+                new_approved.append(entry["id"])
+            else:
+                new_pending.append(entry["id"])
+
+        stored, pending = len(new_approved), len(new_pending)
+        if changed:
+            data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+            surviving = {e["id"] for e in data["entries"]}
+            stored = sum(1 for i in new_approved if i in surviving)
+            pending = sum(1 for i in new_pending if i in surviving)
+            _save(repo_path, data)
+            if pending:
+                _touch_pending_review(repo_path)  # medium-tier items await review (after save)
+
+    return {**result, "stored": stored, "pending": pending, "skipped": skipped}
