@@ -1,0 +1,15 @@
+{
+  "model": "claude-sonnet-5",
+  "seed": 0,
+  "reps": 1,
+  "conditions": [
+    "contexer_pre_v1",
+    "contexer_v1"
+  ],
+  "contexer_sources": {
+    "contexer_pre_v1": "/private/tmp/claude-501/-Users-bhargavamin-repos-personal-contexer/51b5cc3e-2dc9-4cc4-9dcd-42949411eea6/scratchpad/contexer-main",
+    "contexer_v1": "/Users/bhargavamin/repos/personal/contexer"
+  },
+  "managed_settings_present": false,
+  "started_at": "2026-07-14T21:39:37.881094+00:00"
+}
