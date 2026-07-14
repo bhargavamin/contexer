@@ -129,7 +129,7 @@ def before_agent(repo_path: str, raw: str) -> str:
                 f"Auto-stored as constraint: '{content}'. Acknowledge this briefly to the user."
             )
 
-        rationale = store.get_context_for_prompt(repo, prompt)
+        rationale = store.get_context_for_prompt(repo, prompt, session_id)
         if rationale:
             contexts.append(rationale)
         return _output("BeforeAgent", contexts)

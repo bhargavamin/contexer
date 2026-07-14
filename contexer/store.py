@@ -1797,7 +1797,7 @@ def _hook_cwd_repo(repo_path: str) -> str:
     return cwd if _is_sane_repo(cwd) else repo_path
 
 
-def session_start_payload(repo_path: str, source: str = "") -> dict:
+def session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
 
@@ -1819,7 +1819,10 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     unchanged beyond the existing team-section join. The suffix is cap-aware: `format_team_
     section` renders at most `_team_display_cap()` rows, so when the cache holds more than
     that the suffix adds `(cap shown)` rather than claiming a count the model never
-    actually received."""
+    actually received.
+
+    session_id (Retrieval V1 Part B): optional, "" preserves every existing caller. Threaded
+    through to `_local_session_start_payload` for compact-source working-set rehydration."""
     resolved = _hook_cwd_repo(repo_path)
     if resolved != repo_path and _is_sane_repo(resolved):
         # The cwd fallback engaged (non-git project dir): anchor the shared pointer
@@ -1831,7 +1834,7 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
         except OSError:
             pass
     repo_path = resolved
-    payload = _local_session_start_payload(repo_path, source)
+    payload = _local_session_start_payload(repo_path, source, session_id)
     team = _team_section(repo_path, "", "")
     if not team or (source == "resume" and not payload.get("context")):
         return payload
@@ -1848,11 +1851,17 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     }
 
 
-def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
+def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
-    is unchanged from the original get_session_start_context."""
+    is unchanged from the original get_session_start_context.
+
+    session_id (Retrieval V1 Part B): "" preserves every existing caller. On a compact
+    source with a session id, the working set built up before compaction is rehydrated
+    (content of the most-recently-injected decisions) after the normal rules injection —
+    additionalContext re-injection doesn't otherwise know what the pre-compaction router
+    already surfaced this session."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
@@ -1878,6 +1887,7 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
         }
 
     resume_flag.unlink(missing_ok=True)
+    _gc_stale_session_files()
 
     if not decisions:
         lines = _build_bootstrap_context(repo_path)
@@ -1947,6 +1957,20 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
                        'action="approve") clears the lot.')
         sys_parts.append(notice)
 
+    # B1: size-gated standing topic map — a one-line overview once the store is big
+    # enough that "call get_context before reading files" alone stops being actionable.
+    standing_map = _standing_topic_map(repo_path, decisions)
+    if standing_map:
+        sys_parts.append(standing_map)
+
+    # B2: compact re-injects the normal rules above; also rehydrate the CONTENT of the
+    # working set the router built up pre-compaction, since additionalContext replay
+    # otherwise loses which decisions were already surfaced this session.
+    if source == "compact" and session_id:
+        rehydrated = _rehydrate_working_set(repo_path, session_id)
+        if rehydrated:
+            sys_parts.append(rehydrated)
+
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
     patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
@@ -1978,11 +2002,14 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
     return {"status": status, "context": "\n".join(sys_parts)}
 
 
-def get_session_start_context(repo_path: str, source: str = "") -> dict:
+def get_session_start_context(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Claude Code SessionStart hook output. Thin envelope over session_start_payload —
-    kept for back-compat with installed hooks and the existing test suite."""
+    kept for back-compat with installed hooks and the existing test suite.
+
+    session_id (Retrieval V1 Part B): "" preserves every existing caller (Codex/Cursor
+    still call this without it)."""
     from contexer.adapters import claude
-    return claude.format_session_start(session_start_payload(repo_path, source))
+    return claude.format_session_start(session_start_payload(repo_path, source, session_id))
 
 
 # The article is OPTIONAL — "what is repo doing?" (no this/the) is just as much a newcomer
@@ -2330,6 +2357,119 @@ def _retrieval_log(repo_path: str, event: dict) -> None:
             lines = lines[-_RETRIEVAL_LOG_CAP:]
         _atomic_write(path, "\n".join(lines) + "\n")
     except OSError:
+        pass
+
+
+# ── Retrieval V1 Part B: session-start integration (standing map, compact rehydration,
+# working-set GC, follow-through logging) ──────────────────────────────────────────────
+_STANDING_MAP_MIN_DECISIONS = 20   # below this, a topic map is more noise than signal
+_STANDING_MAP_TOP_N = 6            # top-N topics by count shown in the map line
+_REHYDRATE_CAP = 10                # most-recently-injected working-set decisions replayed
+_WS_GC_AGE_SECONDS = 7 * 24 * 3600  # working-set/log files older than this are stale sessions
+_FOLLOWUP_WINDOW_SECONDS = 30 * 60  # a pointer counts as "followed through" within this window
+
+
+def _standing_topic_map(repo_path: str, decisions: list) -> str:
+    """Size-gated one-liner: topic counts from the index sidecar, read-only (never
+    rebuilt here). '' below _STANDING_MAP_MIN_DECISIONS stored decisions, or when the
+    index isn't readable."""
+    if len(decisions) < _STANDING_MAP_MIN_DECISIONS:
+        return ""
+    index = _read_retrieval_index(repo_path)
+    if index is None:
+        return ""
+    counts: dict[str, int] = {}
+    for doc in index.get("docs", {}).values():
+        if doc.get("status") not in ("approved", "suggested"):
+            continue
+        for t in doc.get("topics", []):
+            counts[t] = counts.get(t, 0) + 1
+    if not counts:
+        return ""
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:_STANDING_MAP_TOP_N]
+    parts = ", ".join(f"{t}({n})" for t, n in top)
+    return f"Stored decisions by topic: {parts} — fetch with get_context(query=<topic>)."
+
+
+def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
+    """The content of at most the _REHYDRATE_CAP most-recently-injected working-set
+    decisions (current content, active statuses only), under a heading. '' when there is
+    no session id / working set / nothing still active to show."""
+    ids = working_set_ids(repo_path, session_id)
+    if not ids:
+        return ""
+    recent = ids[-_REHYDRATE_CAP:]
+    data = _load(repo_path)
+    by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    lines = []
+    for did in recent:
+        e = by_id.get(did)
+        if not e or _entry_status(e) not in ("approved", "suggested"):
+            continue
+        subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {_current_content(e)}")
+    if not lines:
+        return ""
+    return "## Rehydrated working context:\n" + "\n".join(lines)
+
+
+def _gc_stale_session_files() -> None:
+    """At non-resume session start: drop working-set dedup files and retrieval logs whose
+    session is well over — old enough that dedup/history no longer matters. Fail-soft,
+    a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2)."""
+    try:
+        cutoff = time.time() - _WS_GC_AGE_SECONDS
+        for pattern in (".ws_*.json", ".retrieval_*.jsonl"):
+            for p in STORE_DIR.glob(pattern):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+
+def _recent_pointer_event(repo_path: str) -> dict | None:
+    """Most recent 'pointer' log event for this repo within the follow-through window, or
+    None. Read-only — never touches the log. Fail-soft."""
+    path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    cutoff = time.time() - _FOLLOWUP_WINDOW_SECONDS
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("e") != "pointer":
+            continue
+        # Lines are appended in order — the first pointer found scanning backwards is the
+        # most recent; if it's already outside the window, nothing older qualifies either.
+        return event if event.get("ts", 0) >= cutoff else None
+    return None
+
+
+def log_followup_if_matching(repo_path: str, query: str) -> None:
+    """Server-side hook for the get_context tool: log-only, never changes the returned
+    context. When a 'pointer' nudge was logged for this repo within the follow-through
+    window and `query` matches one of its topics, append a 'followup' event — a deterministic
+    usage signal for whether pointers actually get chased. Fail-soft."""
+    if not query:
+        return
+    try:
+        event = _recent_pointer_event(repo_path)
+        if not event:
+            return
+        topics = set(event.get("topics", []))
+        query_topics = set(_derive_topics(query)) | {query.strip().lower()}
+        if topics & query_topics:
+            _retrieval_log(repo_path, {"e": "followup", "query": query, "ts": time.time()})
+    except Exception:
         pass
 
 

@@ -150,7 +150,11 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
-    return store.get_context(resolved, query, entry_type, limit)
+    result = store.get_context(resolved, query, entry_type, limit)
+    # Follow-through log (Retrieval V1 Part B): if a recent pointer nudge for this repo
+    # matches this query's topic, record it. Log-only — never changes the result above.
+    store.log_followup_if_matching(resolved, query)
+    return result
 
 
 # Coarse upper bound for the whole share() round-trip (drain outbox + push the new decision,

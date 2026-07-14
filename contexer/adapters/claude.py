@@ -158,12 +158,16 @@ def capture_constraint(repo_path: str, raw: str) -> str:
 
 
 def rationale(repo_path: str, raw: str) -> str:
-    """UserPromptSubmit (every prompt): inject matching decisions for rationale questions."""
+    """UserPromptSubmit (every prompt): inject matching decisions for rationale questions.
+
+    Passes the host's session id (Retrieval V1 Part B) so the BM25 router's working set
+    can dedup repeat injections within a session; Codex reuses this verbatim."""
     try:
         repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
         if not repo:
             return "{}"
-        ctx = store.get_context_for_prompt(repo, store.prompt_from_hook_stdin(raw))
+        session_id = store.session_from_hook_stdin(raw)
+        ctx = store.get_context_for_prompt(repo, store.prompt_from_hook_stdin(raw), session_id)
         if not ctx:
             return "{}"
         return json.dumps({"hookSpecificOutput": {
@@ -336,7 +340,7 @@ def install(home: Path) -> list[str]:
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; store.STORE_DIR.mkdir(exist_ok=True); "
+        "repo=sys.argv[1]; raw=sys.stdin.read(); store.STORE_DIR.mkdir(exist_ok=True); "
         # Only record a sane repo — never poison the pointer with a config/home dir.
         "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
         # Import any memory-tool facts before building context (crash-recovery net:
@@ -345,7 +349,10 @@ def install(home: Path) -> list[str]:
         # Refresh team context (Path B, C5) before building the session context —
         # fail-soft so a sync hiccup never breaks the session.
         "_c.pull_team(repo); "
-        "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
+        # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
+        # rehydration; "" on hosts/events that omit it, preserving today's behavior.
+        "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
+        "store.session_from_hook_stdin(raw))))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
@@ -458,11 +465,12 @@ def install(home: Path) -> list[str]:
     hooks = settings.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: old SessionStart hook didn't read the session source from stdin, or
-    # predates memory-tool sync; replace it so the current ss_code (which calls
-    # sync_memory) is installed.
+    # Migrate: old SessionStart hook didn't read the session source from stdin,
+    # predates memory-tool sync, or predates session-id threading (compact-source
+    # working-set rehydration); replace it so the current ss_code is installed.
     if _in_groups(ss, "get_session_start_context") and not (
-            _in_groups(ss, "source_from_hook_stdin") and _in_groups(ss, "sync_memory")):
+            _in_groups(ss, "source_from_hook_stdin") and _in_groups(ss, "sync_memory")
+            and _in_groups(ss, "session_from_hook_stdin")):
         ss = _filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):

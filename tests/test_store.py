@@ -2971,3 +2971,180 @@ class TestRetrievalLog:
         # append still succeeds (fail-soft rewrite), never raises
         store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["api"], "sid": "s", "ts": 1})
         assert path.exists()
+
+
+# ── Retrieval V1 (Part B): session-start integration ────────────────────────────────
+
+# Distinct-enough-to-avoid-novelty-dedup filler so a store can clear the 20-decision gate
+# for the standing-map tests without colliding with RV1_CORPUS content.
+RV1_EXTRA = [
+    ("The billing service uses stripe webhooks for payment reconciliation", "architecture"),
+    ("Search indexing runs nightly through a cron job in the etl pipeline", "convention"),
+    ("Feature flags are managed through launchdarkly for gradual rollout", "pattern"),
+    ("Error monitoring reports crash telemetry to sentry", "convention"),
+    ("The notification worker retries failed emails three times", "pattern"),
+    ("User uploads are stored in an s3 bucket with versioning enabled", "architecture"),
+    ("Rate limiting caps external calls at 100 requests per minute", "constraint"),
+    ("The admin dashboard uses server side rendering for faster loads", "pattern"),
+    ("Background jobs run through a sidekiq style queue worker", "architecture"),
+    ("Analytics events are batched before being sent to the warehouse", "convention"),
+    ("The mobile app syncs offline changes using a conflict free merge", "pattern"),
+    ("Internationalization strings are loaded from json locale files", "convention"),
+]
+
+
+class TestStandingTopicMap:
+    def test_map_appears_at_20_plus_decisions(self, tmp_repo):
+        assert len(RV1_CORPUS) + len(RV1_EXTRA) >= 20
+        _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" in ctx
+        assert "get_context(query=" in ctx
+
+    def test_map_absent_below_20(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)  # 10 decisions — below the gate
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" not in ctx
+
+    def test_map_absent_when_index_missing(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
+        store._index_path(tmp_repo).unlink()  # simulate a missing index sidecar
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" not in ctx
+
+
+class TestCompactRehydration:
+    def test_rehydrates_capped_and_active_only(self, tmp_repo):
+        items = RV1_CORPUS + RV1_EXTRA  # 22 mutually-distinct decisions, nothing deduped
+        ids_by_content = _seed_rv1(tmp_repo, items)
+        ids = [ids_by_content[c] for c, _ in items]
+        assert all(ids)  # sanity: no novelty-filter dedup collapsed any of these
+        sid = "sess-compact"
+        # Ignore one of the 10 most-recently-injected ids — it must never be rehydrated
+        # even though it's in the working set.
+        ignored_id = ids[13]  # RV1_EXTRA[3] — "...crash telemetry to sentry", within the last 10
+        store.approve_decision(tmp_repo, ignored_id, "ignore")
+        store._ws_add(tmp_repo, sid, ids)  # simulate all 22 injected earlier this session
+
+        result = store.get_session_start_context(tmp_repo, "compact", sid)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "## Rehydrated working context" in ctx
+        section = ctx.split("## Rehydrated working context:")[1]
+        assert section.count("\n- [") <= 10
+        assert "sentry" not in section  # ids[13]'s content — excluded (ignored, not active)
+
+    def test_no_session_id_no_rehydration(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
+        result = store.get_session_start_context(tmp_repo, "compact")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Rehydrated working context" not in ctx
+
+    def test_no_working_set_no_rehydration(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
+        result = store.get_session_start_context(tmp_repo, "compact", "sess-empty-ws")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Rehydrated working context" not in ctx
+
+
+class TestWorkingSetGC:
+    def test_gc_removes_stale_and_keeps_fresh(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        slug = store._slug(tmp_repo)
+        stale_ws = store.STORE_DIR / f".ws_{slug}_stale.json"
+        fresh_ws = store.STORE_DIR / f".ws_{slug}_fresh.json"
+        stale_log = store.STORE_DIR / f".retrieval_{slug}.jsonl"
+        stale_ws.write_text('{"injected": [], "ts": 0}')
+        fresh_ws.write_text('{"injected": [], "ts": 0}')
+        stale_log.write_text('{"e": "pointer"}\n')
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_ws, (old, old))
+        os.utime(stale_log, (old, old))
+        # fresh_ws keeps the mtime from the write above (just now)
+
+        store._gc_stale_session_files()
+
+        assert not stale_ws.exists()
+        assert not stale_log.exists()
+        assert fresh_ws.exists()
+
+    def test_gc_runs_at_non_resume_session_start(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        stale_ws = store.STORE_DIR / f".ws_{store._slug(tmp_repo)}_old.json"
+        stale_ws.write_text('{"injected": [], "ts": 0}')
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_ws, (old, old))
+        store.get_session_start_context(tmp_repo)  # non-resume start
+        assert not stale_ws.exists()
+
+    def test_gc_skipped_on_resume(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        stale_ws = store.STORE_DIR / f".ws_{store._slug(tmp_repo)}_old.json"
+        stale_ws.write_text('{"injected": [], "ts": 0}')
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_ws, (old, old))
+        store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
+        store.get_session_start_context(tmp_repo, "resume")
+        assert stale_ws.exists()  # resume takes the early-return path — GC never runs
+
+
+class TestRationaleSessionIdPlumbing:
+    def test_rationale_passes_session_id_dedups_second_prompt(self, tmp_repo):
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-1",
+        })
+        first = json.loads(claude.rationale(tmp_repo, raw))
+        assert "additionalContext" in first["hookSpecificOutput"]
+        assert "auto-fetched" in first["hookSpecificOutput"]["additionalContext"]
+        second = json.loads(claude.rationale(tmp_repo, raw))  # same prompt, same session
+        second_ctx = second.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "auto-fetched" not in second_ctx  # already in the working set -> not re-injected
+
+    def test_different_session_id_reinjects(self, tmp_repo):
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw_a = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-a",
+        })
+        raw_b = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-b",
+        })
+        claude.rationale(tmp_repo, raw_a)
+        second = json.loads(claude.rationale(tmp_repo, raw_b))
+        assert "additionalContext" in second["hookSpecificOutput"]
+
+
+class TestFollowThroughLog:
+    def test_followup_logged_on_matching_query(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-follow")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        assert json.loads(path.read_text().splitlines()[-1])["e"] == "pointer"
+
+        store.log_followup_if_matching(tmp_repo, "db")
+
+        events = [json.loads(l) for l in path.read_text().splitlines() if l]
+        assert events[-1]["e"] == "followup"
+        assert events[-1]["query"] == "db"
+
+    def test_no_followup_when_topic_does_not_match(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-follow2")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        before = path.read_text()
+
+        store.log_followup_if_matching(tmp_repo, "frontend")
+
+        assert path.read_text() == before  # no matching topic -> nothing appended
+
+    def test_no_pointer_no_followup_no_crash(self, tmp_repo):
+        store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        assert not path.exists()
