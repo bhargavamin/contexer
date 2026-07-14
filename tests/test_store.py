@@ -2973,6 +2973,162 @@ class TestRetrievalLog:
         assert path.exists()
 
 
+def _ignore(repo, eid):
+    data = store._load(repo)
+    for e in data["entries"]:
+        if e["id"] == eid:
+            e["status"] = "ignored"
+    store._save(repo, data)
+
+
+# ── Retrieval V1 review findings: indexed path must dominate legacy ─────────────
+
+class TestIndexStatusFilter:
+    def test_ignored_and_pending_not_indexed(self, tmp_repo):
+        _, ig = store.update_decision(tmp_repo, "Use postgres for the ledger storage layer",
+                                      RV1_SESSION, "architecture")
+        _ignore(tmp_repo, ig)
+        # a constraint is born pending_approval — also excluded from the index
+        store.update_decision(tmp_repo, "Never log postgres credentials in plaintext",
+                              RV1_SESSION, "constraint")
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx["n_docs"] == 0
+
+    def test_approved_wins_over_ignored(self, tmp_repo):
+        _, ig = store.update_decision(tmp_repo, "JWT tokens are validated in middleware auth checks",
+                                      RV1_SESSION, "architecture")
+        _ignore(tmp_repo, ig)
+        store.update_decision(tmp_repo,
+                              "We rejected long-lived jwt refresh cookies for middleware security reasons",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "why do we use jwt tokens in middleware?")
+        assert "rejected long-lived" in result                 # approved content injected
+        assert "validated in middleware auth checks" not in result   # ignored never surfaces
+
+
+class TestBM25PrefixAndDigits:
+    def test_prefix_query_matches_indexed_token(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL as the primary database with SQLAlchemy",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "why did we pick postgres for storage?")
+        assert "PostgreSQL" in result       # 'postgres' prefix-expanded to 'postgresql'
+
+    def test_digit_bearing_term_reaches_ranker(self, tmp_repo):
+        store.update_decision(tmp_repo, "We deploy the service on k8s clusters through helm charts",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "why did we pick k8s for this?")
+        assert "k8s" in result              # digit-bearing term survives tokenization
+
+    def test_bm25_prefix_expansion_aggregates_df(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        idx = store._read_retrieval_index(tmp_repo)
+        # 'postgres' is absent as an exact token but 'postgres'-prefixed tokens exist
+        ranked = store._bm25_rank(["postgres"], idx)
+        assert ranked and ranked[0][2] == 1
+
+
+class TestProjectRelaxation:
+    def test_project_single_keyword_injects_content(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL as the primary database with SQLAlchemy",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "what is the goal for the database layer?")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "PostgreSQL" in result
+
+
+class TestArtifactRouteGate:
+    def test_prose_slashes_are_not_routes(self):
+        for prose in ("light/dark mode", "read/write splitting", "either/or choice"):
+            assert store._ARTIFACT_ROUTE_RE.findall(prose) == [], prose
+            assert store._extract_artifacts(prose) == [], prose
+
+    def test_real_route_matches(self):
+        assert store._ARTIFACT_ROUTE_RE.findall("GET /api/users/{id} returns json") == ["/api/users/{id}"]
+        arts = store._extract_artifacts("GET /api/users/{id} returns json")
+        assert "users" in arts and "api" in arts
+
+    def test_artifact_only_prompt_no_global_leak(self, tmp_repo):
+        # An index must exist (a repo decision) so the BM25 path — not legacy — runs.
+        store.update_decision(tmp_repo, "The cart service owns checkout totals",
+                              RV1_SESSION, "architecture", created_by="human")
+        store.update_global_decision("Always rename modules using git mv to preserve history",
+                                     RV1_SESSION, "convention")
+        # not rationale, not project — only an artifact (utils.py). Legacy was silent here.
+        assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
+
+
+class TestTopicAliasRetry:
+    def test_bare_topic_query_falls_back_to_aliases(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # No decision literally contains 'db', but the pointer nudge suggests query='db'.
+        result = store.get_context(tmp_repo, query="db")
+        assert "Alembic" in result                      # postgres/migration alias hit
+        assert "No matching decisions" not in result
+
+    def test_literal_match_unchanged_when_present(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        result = store.get_context(tmp_repo, query="jwt")
+        assert "JWT refresh tokens" in result
+
+    def test_no_result_query_logs_no_followup(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # Arm a fresh pointer for the db topic.
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-fu")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        before = path.read_text().count('"followup"')
+        # A get_context that found nothing must not log a follow-through, even in-window.
+        store.log_followup_if_matching(tmp_repo, "db", found=False)
+        assert path.read_text().count('"followup"') == before
+        # A genuine hit does log one.
+        store.log_followup_if_matching(tmp_repo, "db", found=True)
+        assert path.read_text().count('"followup"') == before + 1
+
+
+class TestWsPathSanitized:
+    def test_slashed_session_id_stays_in_store_dir(self, tmp_repo):
+        sid = "proj/abc123"
+        p = store._ws_path(tmp_repo, sid)
+        assert p.parent == store.STORE_DIR          # no nested path escape
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert first.startswith("[Contexer: auto-fetched for this question]")
+        assert p.exists()                           # ws file created directly in STORE_DIR
+        second = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert "auto-fetched" not in second         # dedup works across calls with that id
+
+
+# Two distinct docs (below the 70% novelty threshold) covering every hit class.
+DOMINANCE_CORPUS = [
+    ("We chose PostgreSQL as the primary database for ACID order processing across the data layer", "architecture"),
+    ("The session catches OperationalError from app/db/session.py and retries on the pool", "architecture"),
+]
+
+
+class TestIndexDominatesLegacy:
+    """Pins the primary (indexed) path to never inject less than its legacy fallback."""
+
+    @pytest.mark.parametrize("prompt,needle,is_miss", [
+        ("why did we choose postgresql for storage?", "PostgreSQL", False),   # rationale exact-token
+        ("why did we pick postgres here?", "PostgreSQL", False),              # rationale prefix-form
+        ("what is the goal for the database layer?", "PostgreSQL", False),    # project single keyword
+        ("Traceback:\napp/db/session.py raised OperationalError", "OperationalError", False),  # artifact paste
+        ("refactor the helper function", "", True),                          # task/miss
+        ("why do birds fly south?", "", True),                               # rationale word, no domain match
+    ])
+    def test_indexed_at_least_as_good_as_legacy(self, tmp_repo, prompt, needle, is_miss):
+        for content, subtype in DOMINANCE_CORPUS:
+            store.update_decision(tmp_repo, content, RV1_SESSION, subtype, created_by="human")
+        indexed = store.get_context_for_prompt(tmp_repo, prompt)
+        store._index_path(tmp_repo).unlink(missing_ok=True)   # force the legacy path
+        legacy = store.get_context_for_prompt(tmp_repo, prompt)
+        if is_miss:
+            assert indexed == "" and legacy == ""
+        else:
+            if needle in legacy:                              # never worse than fallback
+                assert needle in indexed
+            assert needle in indexed                          # and the indexed path actually recalls it
+
+
 # ── Retrieval V1 (Part B): session-start integration ────────────────────────────────
 
 # Distinct-enough-to-avoid-novelty-dedup filler so a store can clear the 20-decision gate

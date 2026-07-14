@@ -116,7 +116,10 @@ class TestClaudeCaptureEntrypoints:
         assert claude.capture_constraint(tmp_repo, raw) == "{}"
 
     def test_rationale_injects_when_decisions_match(self, populated_repo):
-        raw = _json.dumps({"prompt": "why did we choose JWT for authentication?"})
+        # Targets the fixture's retrievable (suggested) decision. The JWT entry classifies
+        # as pending_approval and is deliberately not auto-injected (only approved/suggested
+        # decisions reach the index — pending ones surface via review_pending).
+        raw = _json.dumps({"prompt": "why did we choose bcrypt for password hashing?"})
         out = _json.loads(claude.rationale(populated_repo, raw))
         assert "additionalContext" in out["hookSpecificOutput"]
 

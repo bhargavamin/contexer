@@ -2184,7 +2184,9 @@ _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
 _ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|md|toml|yaml|json)\b")
 _ARTIFACT_DOTTED_RE = re.compile(r"\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+\b")
 _ARTIFACT_EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b")
-_ARTIFACT_ROUTE_RE = re.compile(r"/[a-z][\w/{}-]+")
+# Two+ path segments required: a lone slash in prose ("light/dark", "read/write",
+# "either/or") is not a route, but "/api/users/{id}" is.
+_ARTIFACT_ROUTE_RE = re.compile(r"/[a-z][\w{}-]*(?:/[\w{}-]+)+")
 
 
 def _index_tokens(text: str) -> list[str]:
@@ -2217,6 +2219,12 @@ def _build_retrieval_index(data: dict) -> dict:
         did = e.get("id")
         if not did:
             continue
+        # Index only what get_context can hand back: ignored / pending_approval decisions
+        # would rank as top hits then render as nothing (and advertise unretrievable
+        # topics in weak pointers).
+        status = _entry_status(e)
+        if status not in ("approved", "suggested"):
+            continue
         content = _current_content(e)
         toks = _index_tokens(content)
         tf: dict[str, int] = {}
@@ -2227,7 +2235,7 @@ def _build_retrieval_index(data: dict) -> dict:
         total_len += len(toks)
         docs[did] = {
             "tf": tf, "len": len(toks), "topics": _derive_topics(content),
-            "subtype": e.get("subtype", ""), "status": _entry_status(e),
+            "subtype": e.get("subtype", ""), "status": status,
         }
     n_docs = len(docs)
     avgdl = (total_len / n_docs) if n_docs else 0.0
@@ -2274,6 +2282,18 @@ def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]
     qweight: dict[str, int] = {}
     for kw in keywords:
         qweight[kw] = qweight.get(kw, 0) + 1
+    # Resolve each query term to the corpus token(s) it scores against. An exact df hit maps
+    # to itself; a term absent from df expands to every indexed token having it as a prefix
+    # (restores legacy \b-prefix matching — 'postgres' must match a doc holding only
+    # 'postgresql'). Aggregated df is capped at n_docs so idf stays non-negative.
+    resolved: dict[str, tuple[list[str], int]] = {}
+    for term in qweight:
+        if term in df:
+            resolved[term] = ([term], df[term])
+            continue
+        pref = [t for t in df if t.startswith(term)]
+        if pref:
+            resolved[term] = (pref, min(sum(df[t] for t in pref), n_docs))
     ranked: list[tuple[str, float, int]] = []
     for did, doc in docs.items():
         tf = doc.get("tf", {})
@@ -2281,11 +2301,14 @@ def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]
         score = 0.0
         hits = 0
         for term, w in qweight.items():
-            f = tf.get(term, 0)
+            r = resolved.get(term)
+            if not r:
+                continue
+            toks_for, n_t = r
+            f = sum(tf.get(t, 0) for t in toks_for)
             if not f:
                 continue
             hits += 1
-            n_t = df.get(term, 0)
             idf = math.log(1 + (n_docs - n_t + 0.5) / (n_t + 0.5))
             denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * (dl / avgdl if avgdl else 1))
             score += w * idf * (f * (_BM25_K1 + 1) / denom)
@@ -2314,7 +2337,10 @@ def _extract_artifacts(prompt: str) -> list[str]:
 
 
 def _ws_path(repo_path: str, session_id: str) -> Path:
-    return STORE_DIR / f".ws_{_slug(repo_path)}_{session_id[:32]}.json"
+    # Sanitize before embedding: a session id like 'proj/abc' must not create a
+    # nested path or escape STORE_DIR.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:32]
+    return STORE_DIR / f".ws_{_slug(repo_path)}_{safe}.json"
 
 
 def working_set_ids(repo_path: str, session_id: str) -> list[str]:
@@ -2454,12 +2480,15 @@ def _recent_pointer_event(repo_path: str) -> dict | None:
     return None
 
 
-def log_followup_if_matching(repo_path: str, query: str) -> None:
+def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> None:
     """Server-side hook for the get_context tool: log-only, never changes the returned
     context. When a 'pointer' nudge was logged for this repo within the follow-through
     window and `query` matches one of its topics, append a 'followup' event — a deterministic
-    usage signal for whether pointers actually get chased. Fail-soft."""
-    if not query:
+    usage signal for whether pointers actually get chased. Fail-soft.
+
+    `found`: whether the get_context call actually returned decisions. A no-result query is
+    not an honest follow-through, so it is never logged."""
+    if not query or not found:
         return
     try:
         event = _recent_pointer_event(repo_path)
@@ -2559,7 +2588,12 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
     if not is_rationale and not is_project and not artifacts:
         return ""
 
-    query_terms = keywords + artifacts + artifacts   # artifacts double-weighted
+    # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
+    # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
+    # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
+    # overview/global fallbacks below — only this vector changes.
+    art_tokens = _index_tokens(" ".join(artifacts))
+    query_terms = _index_tokens(prompt) + art_tokens + art_tokens   # artifacts double-weighted
     ranked = _bm25_rank(query_terms, index)
     ws = set(working_set_ids(repo_path, session_id))
     ranked = [r for r in ranked if r[0] not in ws]
@@ -2568,14 +2602,12 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
         top_score = ranked[0][1]
         strong: list[str] = []
         for did, score, hits in ranked[:_STRONG_CANDIDATES]:
-            is_strong = score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS
-            if did == ranked[0][0] and ranked[0][2] >= _STRONG_MIN_HITS:
-                is_strong = True   # the top hit is always strong once it clears the hit bar
-            if is_strong:
+            if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
                 strong.append(did)
-        # Rationale boost: a single-keyword "why X?" often yields one doc with one hit —
-        # relax to hits>=1 on the top candidate so today's rationale recall is preserved.
-        if not strong and is_rationale and ranked[0][2] >= 1:
+        # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
+        # yields one doc with one hit — relax to hits>=1 on the top candidate so legacy's
+        # full-content recall for both prompt classes is preserved.
+        if not strong and (is_rationale or is_project) and ranked[0][2] >= 1:
             strong = [ranked[0][0]]
         strong = strong[:_STRONG_CAP]
         if strong:
@@ -2605,21 +2637,24 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
             return (f"[Contexer] Related stored decisions: {parts} — "
                     f"call get_context(query='{ordered_topics[0]}') if relevant.")
 
-    # Overview fallback stays exactly as today (project questions with no domain keyword).
-    if is_project:
-        non_project_kws = [
-            k for k in ordered_kws
-            if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
-        ]
-        if not non_project_kws:
-            data = _load(repo_path)
-            if data.get("entries"):
-                result = get_context(repo_path)
-                if "No context stored" not in result:
-                    return f"[Contexer: project context]\n{result}"
-
-    # Global-store fallback, identical to the legacy tail.
-    return _global_prompt_lookup(ordered_kws)
+    # Overview + global fallbacks run ONLY for rationale/project prompts — legacy was silent
+    # on an artifact-only prompt that produced no strong hit and no pointer, so we stay silent.
+    if is_rationale or is_project:
+        # Overview fallback stays exactly as today (project questions with no domain keyword).
+        if is_project:
+            non_project_kws = [
+                k for k in ordered_kws
+                if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
+            ]
+            if not non_project_kws:
+                data = _load(repo_path)
+                if data.get("entries"):
+                    result = get_context(repo_path)
+                    if "No context stored" not in result:
+                        return f"[Contexer: project context]\n{result}"
+        # Global-store fallback, identical to the legacy tail.
+        return _global_prompt_lookup(ordered_kws)
+    return ""
 
 
 def _team_section(repo_path: str, query: str, entry_type: str) -> str:
@@ -2676,7 +2711,17 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
 
     if query:
         pat = _query_pattern(query)
-        decisions = [d for d in decisions if pat.search(d.get("content", ""))]
+        matched = [d for d in decisions if pat.search(d.get("content", ""))]
+        # Topic-alias retry: a literal miss on a bare topic name (the pointer nudge suggests
+        # get_context(query='db')) falls back to any of that topic's alias tokens, so the
+        # suggested call actually returns the postgres/alembic decisions instead of nothing.
+        if not matched and query.lower() in _TOPIC_ALIASES:
+            aliases = _TOPIC_ALIASES[query.lower()]
+            matched = [
+                d for d in decisions
+                if set(re.findall(r"[a-z0-9]+", d.get("content", "").lower())) & aliases
+            ]
+        decisions = matched
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
 
