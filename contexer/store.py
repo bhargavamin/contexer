@@ -2102,19 +2102,30 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
     return claude.format_bootstrap_prompt(bootstrap_prompt_payload(repo_path, prompt))
 
 
-def post_compact_payload(repo_path: str) -> dict:
-    """Neutral PostCompact content. {"status": str, "context": str}."""
+def post_compact_payload(repo_path: str, session_id: str = "") -> dict:
+    """Neutral PostCompact content. {"status": str, "context": str}.
+
+    session_id (Retrieval V1 compact-reload parity): "" preserves every existing caller.
+    When set, appends the rehydrated content of this session's pre-compaction working set
+    (via _rehydrate_working_set — same helper Claude's SessionStart(compact) path uses) so
+    Gemini's before_agent reload and Codex's post-compact path get the same rehydration
+    Claude gets, instead of losing the router's pre-compaction state on replay."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if not decisions:
         return {"status": "", "context": "\n".join(_build_bootstrap_context(repo_path))}
-    return {"status": "Contexer: context reloaded after compaction", "context": get_context(repo_path)}
+    context = get_context(repo_path)
+    if session_id:
+        rehydrated = _rehydrate_working_set(repo_path, session_id)
+        if rehydrated:
+            context = f"{context}\n\n{rehydrated}" if context else rehydrated
+    return {"status": "Contexer: context reloaded after compaction", "context": context}
 
 
-def get_post_compact_context(repo_path: str) -> dict:
-    """Claude PostCompact output. Back-compat envelope."""
+def get_post_compact_context(repo_path: str, session_id: str = "") -> dict:
+    """Claude/Codex PostCompact output. Back-compat envelope."""
     from contexer.adapters import claude
-    return claude.format_post_compact(post_compact_payload(repo_path))
+    return claude.format_post_compact(post_compact_payload(repo_path, session_id))
 
 
 _RATIONALE_WORDS = frozenset({
@@ -2521,23 +2532,39 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _global_prompt_lookup(ordered_kws: list[str]) -> str:
+# Structured classification of an injection, replacing the old startswith/regex scrape of
+# the rendered text (claude.rationale used to reverse-engineer this from the string; now the
+# router hands it over directly). "" kind means no injection.
+_EMPTY_META = {"kind": "", "count": 0, "topics": []}
+
+
+def _rendered_meta(kind: str, text: str) -> dict:
+    """Count of rendered '- ' lines + derived topics, computed from the SAME text that gets
+    injected — matches what the old regex/line-count scrape produced, for kinds "strong"/
+    "overview"/"global" (they all rendered through the same get_context()-style line format)."""
+    count = sum(1 for line in text.splitlines() if line.startswith("- "))
+    return {"kind": kind, "count": count, "topics": _derive_topics(text)}
+
+
+def _global_prompt_lookup(ordered_kws: list[str]) -> tuple[str, dict]:
     """The global-store fallback shared by the legacy and BM25 router paths."""
     for kw in ordered_kws:
         result = get_global_context(query=kw)
         if "No matching" not in result and "No global context" not in result:
-            return f"[Contexer: auto-fetched from global context]\n{result}"
-    return ""
+            text = f"[Contexer: auto-fetched from global context]\n{result}"
+            return text, _rendered_meta("global", text)
+    return "", dict(_EMPTY_META)
 
 
-def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: bool) -> str:
+def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: bool) -> tuple[str, dict]:
     """Today's exact per-prompt lookup, preserved verbatim for the index-absent path."""
     data = _load(repo_path)
     if data.get("entries"):
         for kw in ordered_kws:
             result = get_context(repo_path, query=kw)
             if "No matching decisions" not in result and "No context stored" not in result:
-                return f"[Contexer: auto-fetched for this question]\n{result}"
+                text = f"[Contexer: auto-fetched for this question]\n{result}"
+                return text, _rendered_meta("strong", text)
 
         # Overview fallback: only when the prompt has NO domain-specific keywords beyond
         # the project-context trigger word itself. Generic referential words like "repo",
@@ -2550,15 +2577,16 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
             if not non_project_kws:
                 result = get_context(repo_path)
                 if "No context stored" not in result:
-                    return f"[Contexer: project context]\n{result}"
+                    text = f"[Contexer: project context]\n{result}"
+                    return text, _rendered_meta("overview", text)
 
     return _global_prompt_lookup(ordered_kws)
 
 
-def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> str:
-    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
-    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
-    Searches repo decisions first; falls back to global decisions."""
+def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
+    """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
+    "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} — structured data for
+    a caller's status line (claude.rationale) instead of scraping the rendered text."""
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
 
@@ -2578,7 +2606,7 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
     index = _read_retrieval_index(repo_path)
     if index is None:
         if not is_rationale and not is_project:
-            return ""
+            return "", dict(_EMPTY_META)
         return _legacy_prompt_context(repo_path, ordered_kws, is_project)
 
     # BM25 path. The router fires on rationale/project questions AND on artifact-bearing
@@ -2586,7 +2614,7 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
     # a prose-only, non-rationale prompt stays silent, exactly like today.
     artifacts = _extract_artifacts(prompt)
     if not is_rationale and not is_project and not artifacts:
-        return ""
+        return "", dict(_EMPTY_META)
 
     # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
@@ -2616,8 +2644,9 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
                 _ws_add(repo_path, session_id, strong)
                 # Suffix (not part of the pinned header prefix): without it the model
                 # narrates "I'll pull this from Contexer" and re-fetches what it already has.
-                return ("[Contexer: auto-fetched for this question] "
+                text = ("[Contexer: auto-fetched for this question] "
                         f"(already in context — no get_context call needed)\n{rendered}")
+                return text, _rendered_meta("strong", text)
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
     # a ~15-token pointer instead of full content.
@@ -2634,8 +2663,10 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
             parts = ", ".join(f"{t}({counts[t]})" for t in ordered_topics)
             _retrieval_log(repo_path, {"e": "pointer", "topics": sorted(prompt_topics),
                                        "sid": session_id, "ts": time.time()})
-            return (f"[Contexer] Related stored decisions: {parts} — "
+            text = (f"[Contexer] Related stored decisions: {parts} — "
                     f"call get_context(query='{ordered_topics[0]}') if relevant.")
+            meta = {"kind": "pointer", "count": sum(counts.values()), "topics": ordered_topics}
+            return text, meta
 
     # Overview + global fallbacks run ONLY for rationale/project prompts — legacy was silent
     # on an artifact-only prompt that produced no strong hit and no pointer, so we stay silent.
@@ -2651,10 +2682,25 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
                 if data.get("entries"):
                     result = get_context(repo_path)
                     if "No context stored" not in result:
-                        return f"[Contexer: project context]\n{result}"
+                        text = f"[Contexer: project context]\n{result}"
+                        return text, _rendered_meta("overview", text)
         # Global-store fallback, identical to the legacy tail.
         return _global_prompt_lookup(ordered_kws)
-    return ""
+    return "", dict(_EMPTY_META)
+
+
+def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> str:
+    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
+    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
+    Searches repo decisions first; falls back to global decisions."""
+    return _get_context_for_prompt(repo_path, prompt, session_id)[0]
+
+
+def get_context_for_prompt_with_meta(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
+    """Same as get_context_for_prompt but also returns structured metadata about the
+    injection — {"kind": ..., "count": int, "topics": [...]} — so a caller (claude.rationale)
+    can build a status line without scraping the rendered text."""
+    return _get_context_for_prompt(repo_path, prompt, session_id)
 
 
 def _team_section(repo_path: str, query: str, entry_type: str) -> str:

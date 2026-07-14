@@ -1579,6 +1579,34 @@ class TestPostCompactPayload:
         assert "reloaded after compaction" in p["status"].lower()
         assert p["context"] != ""
 
+    def test_session_id_rehydrates_working_set(self, tmp_repo):
+        # Codex/Gemini compact-reload parity: session_id threads through to
+        # _rehydrate_working_set so this session's pre-compaction router state survives
+        # replay, same as Claude's SessionStart(compact) path.
+        from contexer import store
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "postcompact-sess"
+        store.get_context_for_prompt(
+            tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        p = store.post_compact_payload(tmp_repo, sid)
+        assert "Rehydrated working context" in p["context"]
+
+    def test_no_session_id_omits_rehydration(self, populated_repo):
+        from contexer import store
+        p = store.post_compact_payload(populated_repo)
+        assert "Rehydrated working context" not in p["context"]
+
+    def test_get_post_compact_context_threads_session_id(self, tmp_repo):
+        # Codex's entrypoint (claude.format_post_compact envelope) must pass session_id
+        # through to post_compact_payload, not silently drop it.
+        from contexer import store
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "codex-postcompact-sess"
+        store.get_context_for_prompt(
+            tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        out = store.get_post_compact_context(tmp_repo, sid)
+        assert "Rehydrated working context" in out["systemMessage"]
+
 
 # ── review regression: corruption recovery, slug injectivity, query matching ──
 
@@ -2898,6 +2926,46 @@ class TestBM25Router:
         _seed_rv1(tmp_repo, RV1_CORPUS)
         assert store.get_context_for_prompt(tmp_repo, "refactor the helper function") == ""
         assert store.get_context_for_prompt(tmp_repo, "why do birds fly south?") == ""
+
+
+class TestContextForPromptMeta:
+    """get_context_for_prompt_with_meta hands back structured data instead of a caller
+    (claude.rationale) having to scrape the rendered text."""
+
+    def test_strong_hit_kind_and_count(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "why do jwt refresh tokens live in cookies?")
+        assert meta["kind"] == "strong"
+        assert meta["count"] == 1
+        assert "auth" in meta["topics"]
+
+    def test_pointer_kind_and_topics(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "why the schema design here?")
+        assert meta["kind"] == "pointer"
+        assert "db" in meta["topics"]
+        assert meta["count"] >= 1
+
+    def test_miss_kind_empty(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        text, meta = store.get_context_for_prompt_with_meta(tmp_repo, "refactor the helper function")
+        assert text == ""
+        assert meta == {"kind": "", "count": 0, "topics": []}
+
+    @pytest.mark.parametrize("prompt", [
+        "why do jwt refresh tokens live in cookies?",
+        "why the schema design here?",
+        "refactor the helper function",
+        "why did we choose docker helm ci for the layer?",
+    ])
+    def test_drift_pin_matches_public_api(self, tmp_repo, prompt):
+        # get_context_for_prompt and get_context_for_prompt_with_meta must never diverge —
+        # both are thin wrappers over the same private implementation.
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        assert store.get_context_for_prompt(tmp_repo, prompt) == \
+            store.get_context_for_prompt_with_meta(tmp_repo, prompt)[0]
 
 
 class TestWorkingSet:

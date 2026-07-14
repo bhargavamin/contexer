@@ -172,23 +172,24 @@ def rationale(repo_path: str, raw: str) -> str:
         if not repo:
             return "{}"
         session_id = store.session_from_hook_stdin(raw)
-        ctx = store.get_context_for_prompt(repo, store.prompt_from_hook_stdin(raw), session_id)
+        ctx, meta = store.get_context_for_prompt_with_meta(
+            repo, store.prompt_from_hook_stdin(raw), session_id)
         if not ctx:
             return "{}"
         # systemMessage is user-facing only (the model never sees it): name WHAT was
         # recalled so retrieval is observable, not spooky. Cost is flagged on exception —
         # a token estimate appears only when the injection is big enough to care about.
+        # Built from the router's structured meta, not scraped from the rendered text.
         est = max(1, len(ctx) // 4)
-        if ctx.startswith("[Contexer] Related"):
-            topics = re.findall(r"(\w+)\(\d+\)", ctx)
+        topics = meta.get("topics") or []
+        if meta.get("kind") == "pointer":
             msg = "Contexer: pointed at related decisions"
             if topics:
                 msg += f" ({', '.join(topics[:3])})"
         else:
-            n = sum(1 for line in ctx.splitlines() if line.startswith("- "))
+            n = meta.get("count", 0)
             noun = "decision" if n == 1 else "decisions"
             msg = f"Contexer: recalled {n} {noun}" if n else "Contexer: injected stored context"
-            topics = store._derive_topics(ctx)
             if n and topics:
                 msg += f" ({', '.join(topics[:3])})"
         if est > _COST_NOTE_TOKENS:
