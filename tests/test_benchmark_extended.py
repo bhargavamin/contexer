@@ -414,7 +414,9 @@ NOISY_PROMPTS = [
     ("why RSC over CSR for rendering?",
      False, "✓ fixed: \bover no longer matches 'coverage'; 'rendering' not stored → correct miss"),
     ("what is the reason for the repo pattern?",
-     True,  "✓ 'repo'(4) substring-matches 'repository'; 'pattern'(7) also matches"),
+     False, "Retrieval V1: BM25 tokenizes exactly — 'repo' no longer substring-matches "
+            "'repository' and no stored decision contains the token 'pattern' → correct miss "
+            "(this entry previously pinned the old substring internals)"),
 ]
 
 class TestRealisticPromptNoise:

@@ -1055,9 +1055,13 @@ class TestProjectContextOverviewFallback:
     def test_domain_keyword_in_purpose_question_uses_query_not_overview(self, tmp_repo):
         store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION_ID_SS, "architecture")
         result = store.get_context_for_prompt(tmp_repo, "what is the purpose of the postgres schema?")
-        # "postgres" is a domain keyword — should search, not dump full overview
+        # "postgres" is a domain keyword — should search, never dump the full overview.
+        # (Retrieval V1: BM25 tokenizes exactly, so "postgres" no longer substring-matches
+        # "PostgreSQL"; it routes via the shared `db` topic — a decision hit or a topic
+        # pointer, but never the "[Contexer: project context]" overview.)
         if result:
-            assert "PostgreSQL" in result or "postgres" in result.lower()
+            assert "project context" not in result.lower()
+            assert "postgres" in result.lower() or "db" in result.lower()
 
     def test_scope_without_domain_keywords_triggers_overview(self, tmp_repo):
         store.update_decision(tmp_repo, "Handles payment processing for e-commerce", SESSION_ID_SS, "architecture")
@@ -2734,3 +2738,236 @@ class TestInsightCache:
         assert result["insight"] == "high"
         assert result["insight_source"] == "auto"
         assert result["decisive"] is True
+
+
+# ── Retrieval V1 (Part A): topic router — index, BM25, working set, log ────────
+
+RV1_SESSION = "rv1-session"
+
+
+def _seed_rv1(repo, items):
+    """items: list of (content, subtype). Returns {content: decision_id}."""
+    ids = {}
+    for content, subtype in items:
+        _, eid = store.update_decision(repo, content, RV1_SESSION, subtype)
+        ids[content] = eid
+    return ids
+
+
+# A store spanning the topic facets, used by the BM25 router tests.
+RV1_CORPUS = [
+    ("Postgres migrations run through Alembic; the session layer catches OperationalError and retries on the pool", "architecture"),
+    ("REST endpoints under the orders route return a JSON response envelope", "pattern"),
+    ("JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies", "architecture"),
+    ("React components use CSS modules for styling across the dashboard", "pattern"),
+    ("Docker images are built in CI and released through Helm charts", "convention"),
+    ("Pytest fixtures live in conftest and mocks use the responses library", "convention"),
+    ("Settings load from a TOML file validated at startup", "convention"),
+    ("An in-process cache trims latency on the hot product listing path", "architecture"),
+    ("Secrets are injected from the vault and inputs sanitized against injection", "constraint"),
+    ("The service is organized as thin controllers delegating to a domain layer", "architecture"),
+]
+
+
+class TestDeriveTopics:
+    def test_single_alias_hit(self):
+        assert store._derive_topics("we migrated the postgres schema for orders") == ["db"]
+
+    def test_multi_topic_sorted(self):
+        topics = store._derive_topics("the react component calls a rest endpoint")
+        assert topics == ["api", "frontend"]  # sorted, both facets present
+
+    def test_no_alias_returns_empty(self):
+        assert store._derive_topics("a plain sentence about widgets and gadgets") == []
+
+    def test_case_insensitive(self):
+        assert store._derive_topics("Using JWT for LOGIN flows") == ["auth"]
+
+
+class TestRetrievalIndex:
+    def test_written_by_save_on_update_decision(self, tmp_repo):
+        store.update_decision(tmp_repo, "We chose postgres for the orders schema", RV1_SESSION, "architecture")
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx is not None
+        assert idx["v"] == 1 and idx["n_docs"] == 1
+        (doc,) = idx["docs"].values()
+        assert "db" in doc["topics"]
+        assert "postgres" in doc["tf"]
+
+    def test_reflects_current_content_after_revision(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use redis for caching the product feed", RV1_SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = data["entries"][0]
+        store._append_revision(entry, "Use memcached for caching the product feed now", source="human")
+        store._save(tmp_repo, data)
+        (doc,) = store._read_retrieval_index(tmp_repo)["docs"].values()
+        assert "memcached" in doc["tf"]      # current content indexed
+        assert "redis" not in doc["tf"]      # superseded content dropped
+
+    def test_missing_returns_none_and_creates_no_file(self, tmp_repo):
+        assert store._read_retrieval_index(tmp_repo) is None
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_corrupt_returns_none(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        store._index_path(tmp_repo).write_text("{ not json")
+        assert store._read_retrieval_index(tmp_repo) is None
+
+    def test_wrong_version_returns_none(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        p = store._index_path(tmp_repo)
+        payload = json.loads(p.read_text())
+        payload["v"] = 2
+        p.write_text(json.dumps(payload))
+        assert store._read_retrieval_index(tmp_repo) is None
+
+    def test_indexes_only_decisions(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        data = store._load(tmp_repo)
+        data["entries"].append({"type": "task", "id": "task-1", "content": "a task not a decision"})
+        store._save(tmp_repo, data)
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx["n_docs"] == 1
+        assert "task-1" not in idx["docs"]
+
+
+class TestBM25Router:
+    def _id_by(self, ids, needle):
+        return next(v for k, v in ids.items() if needle in k)
+
+    def test_strong_match_injects_content_with_header(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        result = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens live in cookies?")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "JWT" in result and "cookies" in result
+
+    def test_bm25_two_term_beats_one_term_noise(self, tmp_repo):
+        ids = _seed_rv1(tmp_repo, RV1_CORPUS + [
+            ("orders are archived nightly to cold storage", "convention"),
+            ("orders list uses cursor pagination with opaque cursors", "pattern"),
+        ])
+        idx = store._read_retrieval_index(tmp_repo)
+        ranked = store._bm25_rank(["orders", "pagination"], idx)
+        top_id = ranked[0][0]
+        assert top_id == self._id_by(ids, "cursor pagination")   # 2 term hits wins
+        assert ranked[0][2] == 2
+
+    def test_relative_threshold_weak_second_not_injected(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # "docker helm ci" hits the deploy doc on 3 terms; "layer" is a lone weak term
+        # shared by other docs — it must not be injected as content alongside the strong hit.
+        result = store.get_context_for_prompt(tmp_repo, "why did we choose docker helm ci for the layer?")
+        assert "Docker images" in result
+        assert "domain layer" not in result          # weak single-term doc excluded
+        assert result.count("\n- ") + result.count("]\n- ") >= 0  # structural sanity
+
+    def test_strong_cap_is_three(self, tmp_repo):
+        _seed_rv1(tmp_repo, [
+            ("caching alpha reduces the checkout latency budget", "architecture"),
+            ("caching beta improves the profile latency budget", "architecture"),
+            ("caching gamma speeds the search latency budget", "architecture"),
+            ("caching delta trims the report latency budget", "architecture"),
+        ])
+        result = store.get_context_for_prompt(tmp_repo, "why does caching latency budget matter?")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert result.count("\n- [") == 3           # capped at 3 rendered decisions
+
+    def test_artifact_extraction_routes_paste_to_db(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        prompt = "fix this bug\n\nTraceback: app/db/session.py raised OperationalError in the pool"
+        result = store.get_context_for_prompt(tmp_repo, prompt)
+        assert "OperationalError" in result          # routed via artifacts, prose named no topic
+        assert "Alembic" in result
+
+    def test_rationale_boost_preserves_single_keyword_hit(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # "alembic" hits exactly one doc with a single term — the rationale boost keeps it.
+        result = store.get_context_for_prompt(tmp_repo, "why alembic?")
+        assert result != ""
+        assert "Alembic" in result
+
+    def test_weak_topic_overlap_returns_pointer(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # "why the schema design?" — "schema" is a db alias but matches no doc token exactly,
+        # so no strong content; the db topic still overlaps stored docs → a pointer.
+        result = store.get_context_for_prompt(tmp_repo, "why the schema design here?")
+        assert result.startswith("[Contexer] Related stored decisions:")
+        assert "db(" in result
+
+    def test_miss_returns_empty(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        assert store.get_context_for_prompt(tmp_repo, "refactor the helper function") == ""
+        assert store.get_context_for_prompt(tmp_repo, "why do birds fly south?") == ""
+
+
+class TestWorkingSet:
+    def test_second_identical_prompt_not_reinjected(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "sess-ws"
+        first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert first.startswith("[Contexer: auto-fetched for this question]")
+        second = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert "auto-fetched" not in second          # already in the working set → not re-injected
+
+    def test_different_session_reinjects(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", "sess-a")
+        other = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", "sess-b")
+        assert other.startswith("[Contexer: auto-fetched for this question]")
+
+    def test_empty_session_no_dedup_no_file(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        a = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?")
+        b = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?")
+        assert a == b and a.startswith("[Contexer: auto-fetched for this question]")
+        assert store._ws_path(tmp_repo, "").exists() is False
+
+    def test_working_set_ids_public_helper(self, tmp_repo):
+        ids = _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "sess-helper"
+        store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        jwt_id = next(v for k, v in ids.items() if "JWT" in k)
+        assert jwt_id in store.working_set_ids(tmp_repo, sid)
+        assert store.working_set_ids(tmp_repo, "") == []
+
+
+class TestLegacyFallback:
+    def test_rationale_hit_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "We chose postgres over mongo for ACID transactions", RV1_SESSION, "architecture")
+        monkeypatch.setattr(store, "_read_retrieval_index", lambda repo: None)
+        result = store.get_context_for_prompt(tmp_repo, "why did we choose postgres?")
+        expected = "[Contexer: auto-fetched for this question]\n" + store.get_context(tmp_repo, query="postgres")
+        assert result == expected
+
+    def test_miss_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "We chose postgres over mongo", RV1_SESSION, "architecture")
+        monkeypatch.setattr(store, "_read_retrieval_index", lambda repo: None)
+        assert store.get_context_for_prompt(tmp_repo, "add a new endpoint here") == ""
+
+
+class TestRetrievalLog:
+    def test_pointer_event_appended(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-log")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        assert path.exists()
+        events = [json.loads(l) for l in path.read_text().splitlines() if l]
+        assert events[-1]["e"] == "pointer"
+        assert "db" in events[-1]["topics"]
+        assert events[-1]["sid"] == "sess-log"
+
+    def test_log_cap_enforced(self, tmp_repo):
+        for i in range(store._RETRIEVAL_LOG_CAP + 25):
+            store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["db"], "sid": "s", "ts": i})
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        lines = [l for l in path.read_text().splitlines() if l]
+        assert len(lines) == store._RETRIEVAL_LOG_CAP
+        assert json.loads(lines[-1])["ts"] == store._RETRIEVAL_LOG_CAP + 24  # tail kept
+
+    def test_corrupt_log_ignored(self, tmp_repo):
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        path.write_text("not\x00valid json line\n")
+        # append still succeeds (fail-soft rewrite), never raises
+        store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["api"], "sid": "s", "ts": 1})
+        assert path.exists()

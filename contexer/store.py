@@ -165,6 +165,9 @@ def _atomic_write(path: Path, text: str) -> None:
 def _save(repo_path: str, data: dict) -> None:
     path = _store_path(repo_path)
     _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+    # The retrieval index is a disposable sidecar maintained ONLY here — every store
+    # writer already holds the store lock, so per-prompt readers never rebuild it.
+    _write_retrieval_index(repo_path, data)
 
 
 @contextlib.contextmanager
@@ -2121,31 +2124,245 @@ _OVERVIEW_GENERIC_WORDS = frozenset({
 })
 
 
-def get_context_for_prompt(repo_path: str, prompt: str) -> str:
-    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
-    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
-    Searches repo decisions first; falls back to global decisions."""
-    words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
-    word_set = set(words_raw)
+# ── Retrieval V1: topic router (lexical BM25 index + working set + injection ladder) ──
+#
+# Topic → alias words. A decision (or prompt) is tagged with a topic when its lowercase
+# tokens hit >=1 alias. Derived only — never stored on the entry (the index sidecar owns
+# topics). Aliases are the listed words only; the bare topic name is NOT auto-added.
+_TOPIC_ALIASES: dict[str, frozenset] = {
+    "db": frozenset({"postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
+                     "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
+    "api": frozenset({"endpoint", "endpoints", "rest", "route", "routes", "request",
+                      "response", "http", "graphql"}),
+    "auth": frozenset({"jwt", "oauth", "login", "token", "tokens", "session", "sessions"}),
+    "frontend": frozenset({"react", "component", "components", "css", "ui", "dom"}),
+    "deploy": frozenset({"docker", "kubernetes", "k8s", "ci", "terraform", "helm", "release"}),
+    "testing": frozenset({"pytest", "test", "tests", "fixture", "fixtures", "mock", "coverage"}),
+    "config": frozenset({"toml", "yaml", "env", "settings"}),
+    "perf": frozenset({"cache", "latency", "optimize"}),
+    "security": frozenset({"secret", "vulnerability", "sanitize", "injection"}),
+}
 
-    is_rationale = bool(word_set & _RATIONALE_WORDS)
-    is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
+# BM25 tuning (Robertson/Sparck-Jones defaults — corpus is <=500 short jargon sentences).
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+# Injection ladder — RELATIVE thresholds (never absolute cross-repo scores).
+_STRONG_CANDIDATES = 5      # top-k considered for a strong (content) injection
+_STRONG_SCORE_FRAC = 0.5    # a candidate is strong only within this fraction of the top score
+_STRONG_MIN_HITS = 2        # ...and with at least this many distinct query-term hits
+_STRONG_CAP = 3             # never inject more than this many decisions per prompt
+_RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
 
-    if not is_rationale and not is_project:
-        return ""
+# Artifact extraction: signal-rich tokens pulled from a paste even when the prose is empty.
+_ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|md|toml|yaml|json)\b")
+_ARTIFACT_DOTTED_RE = re.compile(r"\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+\b")
+_ARTIFACT_EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b")
+_ARTIFACT_ROUTE_RE = re.compile(r"/[a-z][\w/{}-]+")
 
-    # Extract content keywords: alpha-only, length >= 3, not stop words.
-    # >= 3 (not > 3) captures short tech terms: jwt, api, sdk, k8s, sql, gcp, aws.
-    keywords = [
-        w for w in words_raw
-        if len(w) >= 3 and w not in _QUERY_STOP_WORDS and w.isalpha()
-    ]
-    ordered_kws = sorted(set(keywords), key=len, reverse=True)[:3]
 
-    # Search repo decisions first (longest keyword = most specific match).
-    # Rationale questions use the default (non-active-only) mode: the AI should see
-    # pending decisions too (with [pending] tag) so it can answer "why" questions even
-    # for decisions not yet approved. Only session-start injection restricts to active.
+def _index_tokens(text: str) -> list[str]:
+    """Lowercase, punctuation-stripped, alnum tokens of length >=3, minus stop words.
+    The single tokenization used by both the index and the BM25 query side (distinct from
+    the novelty filter's set-based `_tokenize`)."""
+    toks = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return [t for t in toks if len(t) >= 3 and t not in _QUERY_STOP_WORDS]
+
+
+def _derive_topics(content: str) -> list[str]:
+    """Sorted topics with >=1 alias hit in `content`. Derived, never persisted."""
+    toks = set(re.findall(r"[a-z0-9]+", (content or "").lower()))
+    return sorted(t for t, aliases in _TOPIC_ALIASES.items() if toks & aliases)
+
+
+def _index_path(repo_path: str) -> Path:
+    return STORE_DIR / f".retrieval_index_{_slug(repo_path)}.json"
+
+
+def _build_retrieval_index(data: dict) -> dict:
+    """Build the BM25 index payload from a loaded store. Indexes only `decision` entries,
+    over their CURRENT content."""
+    docs: dict[str, dict] = {}
+    df: dict[str, int] = {}
+    total_len = 0
+    for e in data.get("entries", []):
+        if e.get("type") != "decision":
+            continue
+        did = e.get("id")
+        if not did:
+            continue
+        content = _current_content(e)
+        toks = _index_tokens(content)
+        tf: dict[str, int] = {}
+        for t in toks:
+            tf[t] = tf.get(t, 0) + 1
+        for t in tf:
+            df[t] = df.get(t, 0) + 1
+        total_len += len(toks)
+        docs[did] = {
+            "tf": tf, "len": len(toks), "topics": _derive_topics(content),
+            "subtype": e.get("subtype", ""), "status": _entry_status(e),
+        }
+    n_docs = len(docs)
+    avgdl = (total_len / n_docs) if n_docs else 0.0
+    return {"v": 1, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
+
+
+def _write_retrieval_index(repo_path: str, data: dict) -> None:
+    """Persist the index sidecar. Fail-soft — a missing index just triggers the legacy
+    per-prompt path, never a crash."""
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        _atomic_write(_index_path(repo_path), json.dumps(_build_retrieval_index(data)))
+    except OSError:
+        pass
+
+
+def _read_retrieval_index(repo_path: str) -> dict | None:
+    """Read the index sidecar. None on missing / corrupt / wrong-version. NEVER rebuilds
+    or creates the file (the reader is strictly read-only)."""
+    path = _index_path(repo_path)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("docs"), dict):
+        return None
+    return data
+
+
+def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]:
+    """BM25-score every indexed doc against `keywords` (which may repeat — repeats raise
+    that term's query weight). Returns (decision_id, score, distinct_term_hits) sorted by
+    score desc. Terms absent from the corpus contribute nothing."""
+    import math
+    docs = index.get("docs", {})
+    df = index.get("df", {})
+    n_docs = index.get("n_docs", 0) or 0
+    avgdl = index.get("avgdl", 0.0) or 0.0
+    if not docs or not keywords:
+        return []
+    # Query-term weights: a repeated keyword (e.g. a double-weighted artifact) counts twice.
+    qweight: dict[str, int] = {}
+    for kw in keywords:
+        qweight[kw] = qweight.get(kw, 0) + 1
+    ranked: list[tuple[str, float, int]] = []
+    for did, doc in docs.items():
+        tf = doc.get("tf", {})
+        dl = doc.get("len", 0) or 0
+        score = 0.0
+        hits = 0
+        for term, w in qweight.items():
+            f = tf.get(term, 0)
+            if not f:
+                continue
+            hits += 1
+            n_t = df.get(term, 0)
+            idf = math.log(1 + (n_docs - n_t + 0.5) / (n_t + 0.5))
+            denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * (dl / avgdl if avgdl else 1))
+            score += w * idf * (f * (_BM25_K1 + 1) / denom)
+        if hits:
+            ranked.append((did, score, hits))
+    ranked.sort(key=lambda r: r[1], reverse=True)
+    return ranked
+
+
+def _extract_artifacts(prompt: str) -> list[str]:
+    """Signal tokens pulled from a paste: file paths (segmented), dotted module paths,
+    CamelCase *Error/*Exception names, and route-shaped strings. Lowercased, len>=3."""
+    if not prompt:
+        return []
+    raw: list[str] = []
+    raw += _ARTIFACT_PATH_RE.findall(prompt)
+    raw += _ARTIFACT_DOTTED_RE.findall(prompt)
+    raw += _ARTIFACT_EXC_RE.findall(prompt)
+    raw += _ARTIFACT_ROUTE_RE.findall(prompt)
+    out: list[str] = []
+    for m in raw:
+        for seg in re.split(r"[^a-zA-Z0-9]+", m.lower()):
+            if len(seg) >= 3:
+                out.append(seg)
+    return out
+
+
+def _ws_path(repo_path: str, session_id: str) -> Path:
+    return STORE_DIR / f".ws_{_slug(repo_path)}_{session_id[:32]}.json"
+
+
+def working_set_ids(repo_path: str, session_id: str) -> list[str]:
+    """Decision ids already injected this session (fail-soft; [] when no session id)."""
+    if not session_id:
+        return []
+    try:
+        data = json.loads(_ws_path(repo_path, session_id).read_text(encoding="utf-8"))
+        ids = data.get("injected") if isinstance(data, dict) else None
+        return ids if isinstance(ids, list) else []
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return []
+
+
+def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
+    """Record injected ids for this session so they are not re-injected. Skipped (and no
+    file created) when session_id is empty — dedup off, still correct."""
+    if not session_id or not ids:
+        return
+    existing = working_set_ids(repo_path, session_id)
+    merged = existing + [i for i in ids if i not in existing]
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        _atomic_write(_ws_path(repo_path, session_id),
+                      json.dumps({"injected": merged, "ts": time.time()}))
+    except OSError:
+        pass
+
+
+def _retrieval_log(repo_path: str, event: dict) -> None:
+    """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
+    path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        lines: list[str] = []
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()
+        lines.append(json.dumps(event))
+        if len(lines) > _RETRIEVAL_LOG_CAP:
+            lines = lines[-_RETRIEVAL_LOG_CAP:]
+        _atomic_write(path, "\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
+    """Render the given decisions in the same line format `get_context` uses. Skips
+    ignored / missing entries; empty string when nothing renders."""
+    data = _load(repo_path)
+    by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    lines: list[str] = []
+    for did in ids:
+        e = by_id.get(did)
+        if not e or _entry_status(e) == "ignored":
+            continue
+        subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
+        st = _entry_status(e)
+        status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
+        entry_id = e.get("id", "")[:8]
+        id_tag = f" (id={entry_id})" if entry_id else ""
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {_current_content(e)}{id_tag}")
+    return "\n".join(lines)
+
+
+def _global_prompt_lookup(ordered_kws: list[str]) -> str:
+    """The global-store fallback shared by the legacy and BM25 router paths."""
+    for kw in ordered_kws:
+        result = get_global_context(query=kw)
+        if "No matching" not in result and "No global context" not in result:
+            return f"[Contexer: auto-fetched from global context]\n{result}"
+    return ""
+
+
+def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: bool) -> str:
+    """Today's exact per-prompt lookup, preserved verbatim for the index-absent path."""
     data = _load(repo_path)
     if data.get("entries"):
         for kw in ordered_kws:
@@ -2156,7 +2373,6 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
         # Overview fallback: only when the prompt has NO domain-specific keywords beyond
         # the project-context trigger word itself. Generic referential words like "repo",
         # "project", "app" don't count — they just mean "this thing we're discussing."
-        # Real domain keywords (e.g. "docker", "react", "postgres") block the overview.
         if is_project:
             non_project_kws = [
                 k for k in ordered_kws
@@ -2167,13 +2383,100 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
                 if "No context stored" not in result:
                     return f"[Contexer: project context]\n{result}"
 
-    # Fall back to global decisions when repo search yields nothing
-    for kw in ordered_kws:
-        result = get_global_context(query=kw)
-        if "No matching" not in result and "No global context" not in result:
-            return f"[Contexer: auto-fetched from global context]\n{result}"
+    return _global_prompt_lookup(ordered_kws)
 
-    return ""
+
+def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> str:
+    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
+    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
+    Searches repo decisions first; falls back to global decisions."""
+    words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
+    word_set = set(words_raw)
+
+    is_rationale = bool(word_set & _RATIONALE_WORDS)
+    is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
+
+    # Extract content keywords: alpha-only, length >= 3, not stop words.
+    # >= 3 (not > 3) captures short tech terms: jwt, api, sdk, k8s, sql, gcp, aws.
+    keywords = [
+        w for w in words_raw
+        if len(w) >= 3 and w not in _QUERY_STOP_WORDS and w.isalpha()
+    ]
+    ordered_kws = sorted(set(keywords), key=len, reverse=True)[:3]
+
+    # No index (missing / corrupt / wrong version) → today's EXACT legacy behavior,
+    # including the rationale/project gate. The reader never rebuilds the index.
+    index = _read_retrieval_index(repo_path)
+    if index is None:
+        if not is_rationale and not is_project:
+            return ""
+        return _legacy_prompt_context(repo_path, ordered_kws, is_project)
+
+    # BM25 path. The router fires on rationale/project questions AND on artifact-bearing
+    # prompts (a stack-trace paste is signal-rich even when the prose names no topic);
+    # a prose-only, non-rationale prompt stays silent, exactly like today.
+    artifacts = _extract_artifacts(prompt)
+    if not is_rationale and not is_project and not artifacts:
+        return ""
+
+    query_terms = keywords + artifacts + artifacts   # artifacts double-weighted
+    ranked = _bm25_rank(query_terms, index)
+    ws = set(working_set_ids(repo_path, session_id))
+    ranked = [r for r in ranked if r[0] not in ws]
+
+    if ranked:
+        top_score = ranked[0][1]
+        strong: list[str] = []
+        for did, score, hits in ranked[:_STRONG_CANDIDATES]:
+            is_strong = score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS
+            if did == ranked[0][0] and ranked[0][2] >= _STRONG_MIN_HITS:
+                is_strong = True   # the top hit is always strong once it clears the hit bar
+            if is_strong:
+                strong.append(did)
+        # Rationale boost: a single-keyword "why X?" often yields one doc with one hit —
+        # relax to hits>=1 on the top candidate so today's rationale recall is preserved.
+        if not strong and is_rationale and ranked[0][2] >= 1:
+            strong = [ranked[0][0]]
+        strong = strong[:_STRONG_CAP]
+        if strong:
+            rendered = _render_prompt_decisions(repo_path, strong)
+            if rendered:
+                _ws_add(repo_path, session_id, strong)
+                return f"[Contexer: auto-fetched for this question]\n{rendered}"
+
+    # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
+    # a ~15-token pointer instead of full content.
+    prompt_topics = set(_derive_topics(prompt + " " + " ".join(artifacts)))
+    if prompt_topics:
+        counts: dict[str, int] = {}
+        for did, doc in index.get("docs", {}).items():
+            if did in ws:
+                continue
+            for t in set(doc.get("topics", [])) & prompt_topics:
+                counts[t] = counts.get(t, 0) + 1
+        if counts:
+            ordered_topics = sorted(counts, key=lambda t: (-counts[t], t))
+            parts = ", ".join(f"{t}({counts[t]})" for t in ordered_topics)
+            _retrieval_log(repo_path, {"e": "pointer", "topics": sorted(prompt_topics),
+                                       "sid": session_id, "ts": time.time()})
+            return (f"[Contexer] Related stored decisions: {parts} — "
+                    f"call get_context(query='{ordered_topics[0]}') if relevant.")
+
+    # Overview fallback stays exactly as today (project questions with no domain keyword).
+    if is_project:
+        non_project_kws = [
+            k for k in ordered_kws
+            if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
+        ]
+        if not non_project_kws:
+            data = _load(repo_path)
+            if data.get("entries"):
+                result = get_context(repo_path)
+                if "No context stored" not in result:
+                    return f"[Contexer: project context]\n{result}"
+
+    # Global-store fallback, identical to the legacy tail.
+    return _global_prompt_lookup(ordered_kws)
 
 
 def _team_section(repo_path: str, query: str, entry_type: str) -> str:
