@@ -157,6 +157,11 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+# Injection cost is surfaced on exception, not routinely: below this estimate the
+# systemMessage names what was recalled but stays silent about tokens.
+_COST_NOTE_TOKENS = 150
+
+
 def rationale(repo_path: str, raw: str) -> str:
     """UserPromptSubmit (every prompt): inject matching decisions for rationale questions.
 
@@ -170,13 +175,26 @@ def rationale(repo_path: str, raw: str) -> str:
         ctx = store.get_context_for_prompt(repo, store.prompt_from_hook_stdin(raw), session_id)
         if not ctx:
             return "{}"
-        # systemMessage is user-facing only (the model never sees it): tell the developer
-        # what was injected and its rough cost, so retrieval is observable, not spooky.
+        # systemMessage is user-facing only (the model never sees it): name WHAT was
+        # recalled so retrieval is observable, not spooky. Cost is flagged on exception —
+        # a token estimate appears only when the injection is big enough to care about.
         est = max(1, len(ctx) // 4)
-        kind = ("pointer to related stored decisions"
-                if ctx.startswith("[Contexer] Related") else "stored decisions auto-injected")
+        if ctx.startswith("[Contexer] Related"):
+            topics = re.findall(r"(\w+)\(\d+\)", ctx)
+            msg = "Contexer: pointed at related decisions"
+            if topics:
+                msg += f" ({', '.join(topics[:3])})"
+        else:
+            n = sum(1 for line in ctx.splitlines() if line.startswith("- "))
+            noun = "decision" if n == 1 else "decisions"
+            msg = f"Contexer: recalled {n} {noun}" if n else "Contexer: injected stored context"
+            topics = store._derive_topics(ctx)
+            if n and topics:
+                msg += f" ({', '.join(topics[:3])})"
+        if est > _COST_NOTE_TOKENS:
+            msg += f" · ~{est} tokens"
         return json.dumps({
-            "systemMessage": f"Contexer: {kind} (~{est} tokens added to this prompt).",
+            "systemMessage": msg,
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
     except Exception:

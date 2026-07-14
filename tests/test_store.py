@@ -3106,8 +3106,9 @@ class TestRationaleSessionIdPlumbing:
         assert "auto-fetched" not in second_ctx  # already in the working set -> not re-injected
 
     def test_injection_is_observable(self, tmp_repo):
-        # The developer sees WHAT happened and its rough cost (systemMessage, user-facing);
-        # the model is told the fetch already happened so it doesn't re-call get_context.
+        # The developer sees WHAT was recalled (systemMessage, user-facing); a routine
+        # small injection stays silent about cost. The model is told the fetch already
+        # happened so it doesn't re-call get_context.
         from contexer.adapters import claude
         _seed_rv1(tmp_repo, RV1_CORPUS)
         raw = json.dumps({
@@ -3115,11 +3116,28 @@ class TestRationaleSessionIdPlumbing:
             "session_id": "claude-sess-obs",
         })
         out = json.loads(claude.rationale(tmp_repo, raw))
-        assert "tokens added to this prompt" in out["systemMessage"]
-        assert "~" in out["systemMessage"]
+        msg = out["systemMessage"]
+        assert msg.startswith("Contexer: recalled 1 decision")
+        assert "tokens" not in msg  # small injection -> cost note suppressed
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert ctx.startswith("[Contexer: auto-fetched for this question]")
         assert "no get_context call needed" in ctx
+
+    def test_large_injection_flags_cost(self, tmp_repo):
+        # Cost-on-exception: only an injection above _COST_NOTE_TOKENS carries the estimate.
+        from contexer.adapters import claude
+        long_tail = " because " + " ".join(f"reason{i} pooling latency" for i in range(80))
+        store.update_decision(
+            tmp_repo, "Chose postgres for the orders database" + long_tail,
+            RV1_SESSION, "architecture", created_by="scan")
+        raw = json.dumps({
+            "prompt": "why did we choose postgres for the orders database?",
+            "session_id": "claude-sess-big",
+        })
+        out = json.loads(claude.rationale(tmp_repo, raw))
+        msg = out["systemMessage"]
+        assert msg.startswith("Contexer: recalled 1 decision")
+        assert "· ~" in msg and "tokens" in msg
 
     def test_no_injection_no_system_message(self, tmp_repo):
         from contexer.adapters import claude
