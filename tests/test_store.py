@@ -3105,6 +3105,28 @@ class TestRationaleSessionIdPlumbing:
         second_ctx = second.get("hookSpecificOutput", {}).get("additionalContext", "")
         assert "auto-fetched" not in second_ctx  # already in the working set -> not re-injected
 
+    def test_injection_is_observable(self, tmp_repo):
+        # The developer sees WHAT happened and its rough cost (systemMessage, user-facing);
+        # the model is told the fetch already happened so it doesn't re-call get_context.
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-obs",
+        })
+        out = json.loads(claude.rationale(tmp_repo, raw))
+        assert "tokens added to this prompt" in out["systemMessage"]
+        assert "~" in out["systemMessage"]
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("[Contexer: auto-fetched for this question]")
+        assert "no get_context call needed" in ctx
+
+    def test_no_injection_no_system_message(self, tmp_repo):
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw = json.dumps({"prompt": "hello there", "session_id": "claude-sess-quiet"})
+        assert claude.rationale(tmp_repo, raw) == "{}"
+
     def test_different_session_id_reinjects(self, tmp_repo):
         from contexer.adapters import claude
         _seed_rv1(tmp_repo, RV1_CORPUS)

@@ -2582,7 +2582,10 @@ def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") ->
             rendered = _render_prompt_decisions(repo_path, strong)
             if rendered:
                 _ws_add(repo_path, session_id, strong)
-                return f"[Contexer: auto-fetched for this question]\n{rendered}"
+                # Suffix (not part of the pinned header prefix): without it the model
+                # narrates "I'll pull this from Contexer" and re-fetches what it already has.
+                return ("[Contexer: auto-fetched for this question] "
+                        f"(already in context — no get_context call needed)\n{rendered}")
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
     # a ~15-token pointer instead of full content.

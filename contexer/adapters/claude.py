@@ -170,8 +170,15 @@ def rationale(repo_path: str, raw: str) -> str:
         ctx = store.get_context_for_prompt(repo, store.prompt_from_hook_stdin(raw), session_id)
         if not ctx:
             return "{}"
-        return json.dumps({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+        # systemMessage is user-facing only (the model never sees it): tell the developer
+        # what was injected and its rough cost, so retrieval is observable, not spooky.
+        est = max(1, len(ctx) // 4)
+        kind = ("pointer to related stored decisions"
+                if ctx.startswith("[Contexer] Related") else "stored decisions auto-injected")
+        return json.dumps({
+            "systemMessage": f"Contexer: {kind} (~{est} tokens added to this prompt).",
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
     except Exception:
         return "{}"
 
