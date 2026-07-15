@@ -66,15 +66,20 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
 @mcp.tool()
 def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
-    """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review.
+    """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review — or
+    retire an already-trusted (approved/suggested) decision with 'ignore'.
 
     entry_id: a decision id (full or 8-char prefix); a comma-separated list to act on several
               at once ("id1,id2,id3"); or "all" (or "*") to act on EVERY pending decision — so
-              the developer can clear the whole backlog in one gesture after reviewing.
+              the developer can clear the whole backlog in one gesture after reviewing ("all"
+              only reaches pending decisions, not active ones — ignore those by id).
     action: 'approve' - accept (a Suggested Update is promoted to a new revision, history kept)
             | 'edit' - correct and approve | 'skip' - keep pending for later
             | 'dismiss' - discard a Suggested Update, keep the current revision
-            | 'ignore' - suppress a new decision permanently
+            | 'ignore' - suppress a new decision permanently, OR retire an already-trusted
+              decision (e.g. to consolidate an overlap-report cluster — full history is kept,
+              only status flips to 'ignored'). 'approve'/'edit'/'dismiss'/'skip' remain
+              pending-only: an already-approved decision cannot be re-approved.
     content: required when action='edit' — the corrected decision text (single decision only)
     """
     resolved = store._resolve_repo(repo_path)

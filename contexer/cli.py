@@ -23,7 +23,8 @@ Commands:
                 use --target claude|cursor|codex|gemini|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
-  review        Interactively approve, edit, or ignore pending engineering decisions.
+  review        Interactively approve, edit, or ignore pending engineering decisions;
+                also surfaces possibly-overlapping rules for manual consolidation.
   share         Push local decisions to your team cloud context: share [id | --all] (default: latest).
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
@@ -203,6 +204,7 @@ def review() -> None:
     pending = store.get_pending_decisions(repo_path)
     if not pending:
         print("No decisions pending approval.")
+        _print_overlap_section(repo_path)
         return
 
     print(f"\n{len(pending)} decision(s) pending approval for {Path(repo_path).name}\n")
@@ -289,6 +291,28 @@ def review() -> None:
     if skipped:
         parts.append(f"{skipped} skipped")
     print(f"Review complete: {', '.join(parts) if parts else 'nothing changed'}.")
+    _print_overlap_section(repo_path)
+
+
+def _print_overlap_section(repo_path: str) -> None:
+    """Tail of `contexer review`: read-only report of possibly-overlapping
+    constraint/convention rules, for manual consolidation. Silent when clean —
+    never merges or deletes."""
+    from contexer import store
+
+    clusters = store.overlap_report(repo_path)
+    if not clusters:
+        return
+    print(f"\nPossibly overlapping rules ({len(clusters)} cluster(s)):\n")
+    for i, cluster in enumerate(clusters, 1):
+        print(f"Cluster {i} ({len(cluster)} rules):")
+        for d in cluster:
+            print(f'  {d["id"]}  [{d["subtype"]}, {d["status"]}]  "{d["content"]}"')
+        print()
+    print("To consolidate: keep the best rule (edit its wording via your agent or "
+          "update_context with replace_id if it needs cleanup) and retire the rest with "
+          "approve_decision(entry_id, action=\"ignore\") — ignore now works on approved "
+          "rules too, not just pending ones. Contexer never merges or deletes automatically.")
 
 
 def reinstall() -> None:

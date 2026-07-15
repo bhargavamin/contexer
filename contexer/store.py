@@ -1401,14 +1401,20 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 
 def approve_decision(repo_path: str, entry_id: str, action: str,
                      content: str = "") -> tuple[bool, str]:
-    """Approve, edit, skip, ignore, or dismiss a decision awaiting the developer.
+    """Approve, edit, skip, ignore, or dismiss a decision awaiting the developer — or
+    retire an already-trusted one.
 
-    Handles two cases:
+    Handles three cases:
       - a Suggested Update (the entry carries a `proposed_revision`): approve/edit promotes
         it to a new revision (history preserved), skip keeps it for later, dismiss/ignore
         discards the proposal and keeps the current revision.
       - a brand-new pending_approval decision: approve/edit trusts it, ignore/dismiss
         suppresses it, skip leaves it pending.
+      - an ACTIVE decision (already approved/suggested, no pending proposal): only
+        'ignore' is legal — deliberately retiring a trusted rule (e.g. consolidating an
+        overlap-report cluster) is a legitimate hygiene act. Full revision history is
+        kept; only status flips to 'ignored'. approve/edit/dismiss/skip are rejected —
+        an already-approved decision can't be re-approved through this path.
 
     content: the corrected decision text, required when action='edit'
     Returns (success, message).
@@ -1459,8 +1465,28 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         verb = "Updated and approved" if action == "edit" else "Approved"
         return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\"", True
 
-    # New-decision pending_approval flow. The decision already has revision 1; approval
-    # blesses it in place (no new revision - there is no prior version to preserve yet).
+    # No proposed_revision: a plain decision entry, gated on its own status.
+    status = _entry_status(entry)
+
+    # ACTIVE (already trusted) decision: 'ignore' is the one legal action — deliberately
+    # retiring a trusted rule (e.g. consolidating an overlap-report cluster) is a legitimate
+    # hygiene act, and it keeps full revision history, just flips status. Every other action
+    # (approve/edit/dismiss/skip) stays pending-only: no re-approving an already-approved
+    # decision, and no repurposing 'dismiss' (which means "discard a proposal") here.
+    if status in ("approved", "suggested"):
+        if action == "ignore":
+            entry["status"] = "ignored"
+            return True, "Ignored. This trusted decision is retired and will not surface again.", True
+        return False, (
+            f"Decision is already {status} — only 'ignore' acts on an active decision "
+            "(to retire it). 'approve', 'edit', 'dismiss', and 'skip' are pending-only."
+        ), False
+
+    if status == "ignored":
+        return False, "Decision is already ignored — nothing to do.", False
+
+    # pending_approval flow. The decision already has revision 1; approval blesses it in
+    # place (no new revision - there is no prior version to preserve yet).
     if action == "skip":
         return True, "Skipped.", False
     if action in ("ignore", "dismiss"):
@@ -1551,6 +1577,68 @@ def format_pending_review(repo_path: str) -> str:
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
                  "for the whole list.")
     return "\n".join(lines)
+
+
+# Overlap-report thresholds. Pairwise is deliberately looser than the 0.7 novelty
+# bar: the report surfaces rules the dedup filter let coexist. Containment catches a
+# short rule swallowed by a longer restatement (|∩|/min), which the max-based
+# pairwise ratio structurally under-scores.
+_REPORT_PAIRWISE = 0.35
+_REPORT_CONTAINMENT = 0.7
+
+
+def overlap_report(repo_path: str) -> list[list[dict]]:
+    """Clusters of active constraint/convention decisions whose contents overlap enough
+    to plausibly say the same thing — surfaced for MANUAL consolidation. Pure read:
+    never merges, never deletes, never writes. Fail-soft: returns [] on any error.
+
+    Two rules are linked when token overlap (_overlap_ratio) >= _REPORT_PAIRWISE or
+    containment |∩|/min >= _REPORT_CONTAINMENT; clusters are the transitive closure
+    (union-find), so A~C plus B~C groups all three even if A and B miss directly.
+    Only clusters of size >= 2 are returned."""
+    try:
+        entries = [
+            e for e in _load(repo_path).get("entries", [])
+            if e.get("type") == "decision"
+            and e.get("subtype") in ("constraint", "convention")
+            and _entry_status(e) in ("approved", "suggested", "pending_approval")
+        ]
+        toks = [_tokenize(_current_content(e)) for e in entries]
+        n = len(entries)
+
+        parent = list(range(n))
+
+        def _find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(n):
+            if not toks[i]:
+                continue
+            for j in range(i + 1, n):
+                if not toks[j]:
+                    continue
+                inter = len(toks[i] & toks[j])
+                lo = min(len(toks[i]), len(toks[j]))
+                if (_overlap_ratio(toks[i], toks[j]) >= _REPORT_PAIRWISE
+                        or inter / lo >= _REPORT_CONTAINMENT):
+                    parent[_find(i)] = _find(j)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(n):
+            groups.setdefault(_find(i), []).append(i)
+
+        return [
+            [{"id": (entries[i].get("id") or "")[:8],
+              "subtype": entries[i].get("subtype", ""),
+              "status": _entry_status(entries[i]),
+              "content": _current_content(entries[i])} for i in members]
+            for members in groups.values() if len(members) >= 2
+        ]
+    except Exception:
+        return []
 
 
 def _share_projection(entry: dict) -> dict:
