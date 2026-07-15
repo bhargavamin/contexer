@@ -83,6 +83,20 @@ class TestOverlapReport:
         store.overlap_report(tmp_repo)
         assert path.read_bytes() == before
 
+    def test_retiring_approved_duplicates_makes_cluster_disappear_on_rerun(self, tmp_repo):
+        # Finding 129: ignore now works on APPROVED entries too, so the executable
+        # workflow (keep the best, ignore the rest) actually clears the cluster.
+        ids = [_add(tmp_repo, rule) for rule in TRIO]
+        for eid in ids:
+            ok, _ = store.approve_decision(tmp_repo, eid, "approve")
+            assert ok
+        assert len(store.overlap_report(tmp_repo)) == 1
+
+        for eid in ids[1:]:  # keep the first, retire the other two
+            ok, msg = store.approve_decision(tmp_repo, eid, "ignore")
+            assert ok, msg
+        assert store.overlap_report(tmp_repo) == [], "cluster gone once duplicates are retired"
+
 
 class TestReviewOverlapSection:
     @pytest.fixture
@@ -105,7 +119,8 @@ class TestReviewOverlapSection:
         for rule in TRIO:
             assert rule in out
         assert "never merges or deletes" in out
-        assert "ignore the rest" in out
+        assert 'action="ignore"' in out
+        assert "ignore now works on approved rules too" in out
 
     def test_clusters_shown_immediately_when_nothing_pending(self, cli_repo, capsys):
         for eid in [_add(cli_repo, rule) for rule in TRIO]:

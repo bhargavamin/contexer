@@ -309,9 +309,10 @@ def _print_overlap_section(repo_path: str) -> None:
         for d in cluster:
             print(f'  {d["id"]}  [{d["subtype"]}, {d["status"]}]  "{d["content"]}"')
         print()
-    print("To consolidate: edit one entry into the single rule (via approve_decision "
-          "edit or your agent) and ignore the rest — Contexer never merges or deletes "
-          "automatically.")
+    print("To consolidate: keep the best rule (edit its wording via your agent or "
+          "update_context with replace_id if it needs cleanup) and retire the rest with "
+          "approve_decision(entry_id, action=\"ignore\") — ignore now works on approved "
+          "rules too, not just pending ones. Contexer never merges or deletes automatically.")
 
 
 def reinstall() -> None:

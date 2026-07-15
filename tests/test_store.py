@@ -2274,6 +2274,14 @@ class TestApproveDecision:
         )
         return entry["id"]
 
+    def _store_active(self, repo: str, content: str, subtype: str = "convention") -> str:
+        """Store a decision that lands ALREADY trusted (approved/suggested) and return its id."""
+        store.update_decision(repo, content, "s1", subtype=subtype, created_by="human")
+        data = store._load(repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        assert entry["status"] in ("approved", "suggested")
+        return entry["id"]
+
     def test_approve_action_sets_approved_status(self, tmp_repo):
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
@@ -2341,6 +2349,79 @@ class TestApproveDecision:
         store.approve_decision(tmp_repo, eid, "ignore")
         result = store.get_context(tmp_repo)
         assert "RabbitMQ" not in result
+
+    # ── ignore on an ALREADY-trusted (approved/suggested) decision — Finding 129 ──────
+
+    def test_ignore_action_retires_an_approved_decision(self, tmp_repo):
+        eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
+        ok, msg = store.approve_decision(tmp_repo, eid, "ignore")
+        assert ok is True
+        assert "retired" in msg.lower()
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "ignored"
+        assert entry["revisions"], "full revision history is kept, not wiped"
+
+    def test_ignore_action_retires_a_suggested_decision(self, tmp_repo):
+        # created_by="ai" + non-constraint, no L3 signal -> lands "suggested" (still active/
+        # injected), distinct from "approved" and from "pending_approval".
+        store.update_decision(tmp_repo, "Group route handlers under api/routes/", "s1",
+                              subtype="pattern", created_by="ai")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "suggested"
+        ok, _msg = store.approve_decision(tmp_repo, entry["id"], "ignore")
+        assert ok is True
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == entry["id"])
+        assert entry["status"] == "ignored"
+
+    def test_ignored_active_decision_excluded_from_session_start_injection(self, tmp_repo):
+        eid = self._store_active(tmp_repo, "Always use uv for dependency management")
+        before = store.get_session_start_context(tmp_repo)
+        assert "uv" in before["hookSpecificOutput"]["additionalContext"]
+        store.approve_decision(tmp_repo, eid, "ignore")
+        after = store.get_session_start_context(tmp_repo)
+        # The lone decision is now ignored -> nothing left to inject at all.
+        assert "hookSpecificOutput" not in after
+        assert "uv" not in json.dumps(after)
+
+    def test_approve_action_on_approved_decision_rejected(self, tmp_repo):
+        eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok is False
+        assert "already approved" in msg.lower()
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved", "no re-approval mutation"
+
+    def test_edit_action_on_approved_decision_rejected(self, tmp_repo):
+        eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
+        ok, msg = store.approve_decision(tmp_repo, eid, "edit", content="Use camelCase instead")
+        assert ok is False
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["content"] == "Use snake_case for Python module names", "untouched"
+
+    def test_dismiss_and_skip_on_approved_decision_rejected(self, tmp_repo):
+        eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
+        for action in ("dismiss", "skip"):
+            ok, _msg = store.approve_decision(tmp_repo, eid, action)
+            assert ok is False, f"{action} should stay pending-only"
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+
+    def test_ignore_on_already_ignored_decision_rejected(self, tmp_repo):
+        eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
+        ok1, _ = store.approve_decision(tmp_repo, eid, "ignore")
+        assert ok1 is True
+        ok2, msg2 = store.approve_decision(tmp_repo, eid, "ignore")
+        assert ok2 is False
+        assert "already ignored" in msg2.lower()
+
+    def test_pending_flow_unaffected_by_active_gating(self, tmp_repo):
+        # Regression: the new status gate must not touch the pending_approval branch.
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok is True
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
 
 
 # ── get_pending_decisions ──────────────────────────────────────────────────────
