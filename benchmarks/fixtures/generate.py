@@ -49,6 +49,11 @@ def build_webapi(dest: Path, seed: int = 0) -> Path:
         (tests / f"test_svc_{n}.py").write_text(body)
 
     _sh("git", "init", "-q", cwd=dest)
+    # No background maintenance in fixture repos: an auto-detached `git gc` after a
+    # commit races the runner's copytree of this repo (transient pack files vanish
+    # mid-copy -> shutil.Error).
+    _sh("git", "config", "gc.auto", "0", cwd=dest)
+    _sh("git", "config", "gc.autoDetach", "false", cwd=dest)
     for i in range(22):
         _commit(dest, f"feat: add capability {seed}-{i}", "--allow-empty")
     _sh("git", "add", "-A", cwd=dest)
