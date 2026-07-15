@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.20.0](https://github.com/bhargavamin/contexer/compare/v0.19.0...v0.20.0) (2026-07-15)
+
+
+### Features
+
+* **bench:** per-condition contexer source for version A/B campaigns ([d098db9](https://github.com/bhargavamin/contexer/commit/d098db95805ddef45e2336a886c334afc8b1ec4a))
+* **retrieval:** make injections observable — user-facing cost line, no-refetch cue ([a689a94](https://github.com/bhargavamin/contexer/commit/a689a94d01a2cd2e376540df2356aa011582e6a2))
+* **retrieval:** session integration — standing map, compact rehydration, working-set GC ([c50ce12](https://github.com/bhargavamin/contexer/commit/c50ce12bb0cd69a035a11a526605909ecb76a527))
+* **retrieval:** status line names what was recalled; token cost flagged on exception only ([29f1bda](https://github.com/bhargavamin/contexer/commit/29f1bdad67c14ea006368a6e3fc9c9207b31d628))
+* **retrieval:** topic router — BM25 index sidecar, injection ladder, working set ([879d66d](https://github.com/bhargavamin/contexer/commit/879d66db0e33101dcef1532f16ace95afaf6dddd))
+* **retrieval:** topic-aware retrieval V1 — BM25 router, injection ladder, session rehydration ([e2cb022](https://github.com/bhargavamin/contexer/commit/e2cb022a1786c0fe9a017571d9866eeaafc61389))
+
+
+### Bug Fixes
+
+* **retrieval:** adapter parity — Codex/Gemini rehydration, structured status line, docs ([3496483](https://github.com/bhargavamin/contexer/commit/34964832d1caee8c643539fcb5f68be6fda4c3b6))
+* **retrieval:** address Greptile [#117](https://github.com/bhargavamin/contexer/issues/117) — pending decisions indexed, ws ids hashed, CLI validation ([283483b](https://github.com/bhargavamin/contexer/commit/283483b281f73ef68c26fa546d9fb6e463295da3))
+* **retrieval:** review findings — index must never lose to its own fallback ([86e21ff](https://github.com/bhargavamin/contexer/commit/86e21ff61e7af85e37a8c094a75d5f1912acd48c))
+
+
+### Documentation
+
+* README as two-audience pitch; benchmark rewritten plain-language with version-tagged results ([bbb4c24](https://github.com/bhargavamin/contexer/commit/bbb4c2456378da94e2e3c4251c1bd7c4b2cc951d))
+
 ## [0.19.0](https://github.com/bhargavamin/contexer/compare/v0.18.0...v0.19.0) (2026-07-13)
 
 
