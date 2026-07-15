@@ -125,11 +125,9 @@ def before_agent(repo_path: str, raw: str) -> str:
                 marker.parent.mkdir(mode=0o700, exist_ok=True)
                 marker.touch()
 
-        entry_id, content = store.capture_user_constraint(repo, prompt, session_id)
+        entry_id, content, status = store.capture_user_constraint(repo, prompt, session_id)
         if entry_id is not None:
-            contexts.append(
-                f"Auto-stored as constraint: '{content}'. Acknowledge this briefly to the user."
-            )
+            contexts.append(store.constraint_ack(content, status))
 
         rationale = store.get_context_for_prompt(repo, prompt, session_id)
         if rationale:

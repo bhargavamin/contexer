@@ -140,17 +140,18 @@ def format_post_compact(payload: dict) -> dict:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """UserPromptSubmit (every prompt): auto-store 'always/never/from now on' directives."""
+    """UserPromptSubmit (every prompt): auto-store 'always/never/from now on' directives.
+    A deictic directive ('this feature', 'it could be') lands pending_approval, not trusted -
+    the ack tells the user to generalize/approve/discard it rather than treating it as stored."""
     try:
         repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
         if not repo:
             return "{}"
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw))
         if entry_id is None:
             return "{}"
-        msg = (f"Auto-stored as constraint: '{content}'. "
-               "Acknowledge this briefly to the user — e.g. 'Stored as a constraint in Contexer.'")
+        msg = store.constraint_ack(content, status)
         return json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": msg}})
     except Exception:

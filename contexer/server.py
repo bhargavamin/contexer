@@ -261,13 +261,10 @@ def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return ""
-    entry_id, content = store.capture_user_constraint(resolved, prompt, SESSION_ID)
+    entry_id, content, status = store.capture_user_constraint(resolved, prompt, SESSION_ID)
     if entry_id is None:
         return ""
-    return (
-        f"Auto-stored as constraint: '{content}'. "
-        f"Acknowledge this briefly to the user — e.g. 'Stored as a constraint in Contexer.'"
-    )
+    return store.constraint_ack(content, status)
 
 
 @mcp.tool()

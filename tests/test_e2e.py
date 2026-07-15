@@ -744,7 +744,7 @@ class TestConstraintCapture:
         ("going forward, prefer async functions", "convention"),
     ])
     def test_prescriptive_directive_captured_with_correct_subtype(self, tmp_repo, prompt, expected_subtype):
-        eid, content = store.capture_user_constraint(tmp_repo, prompt, SESSION)
+        eid, content, status = store.capture_user_constraint(tmp_repo, prompt, SESSION)
         assert eid is not None, f"Expected capture for: {prompt!r}"
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
@@ -758,16 +758,16 @@ class TestConstraintCapture:
         "fix the login bug",            # task, no trigger
     ])
     def test_non_directive_rejected(self, tmp_repo, prompt):
-        eid, content = store.capture_user_constraint(tmp_repo, prompt, SESSION)
+        eid, content, status = store.capture_user_constraint(tmp_repo, prompt, SESSION)
         assert eid is None, f"Expected rejection for: {prompt!r}"
 
     def test_duplicate_directive_silently_discarded(self, tmp_repo):
         store.capture_user_constraint(tmp_repo, "always use type hints in Python", SESSION)
-        eid2, content = store.capture_user_constraint(tmp_repo, "always use type hints in Python", SESSION)
+        eid2, content, status = store.capture_user_constraint(tmp_repo, "always use type hints in Python", SESSION)
         assert eid2 is None
 
     def test_stored_as_decision_type(self, tmp_repo):
-        eid, content = store.capture_user_constraint(tmp_repo, "never push to main directly", SESSION)
+        eid, content, status = store.capture_user_constraint(tmp_repo, "never push to main directly", SESSION)
         data = store._load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["type"] == "decision"
@@ -776,7 +776,7 @@ class TestConstraintCapture:
         # A long pasted blob containing a directive word is not a clean directive —
         # it must not be auto-stored as a constraint.
         long_prompt = "always " + "x" * 700
-        eid, content = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
+        eid, content, status = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
         assert eid is None
         assert store._load(tmp_repo)["entries"] == []
 
@@ -1048,7 +1048,7 @@ class TestPatternPromotion:
         and it must never promote an architecture entry from a constraint phrasing."""
         store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
         before = (store._store_path(tmp_repo)).stat().st_mtime_ns
-        eid, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
+        eid, _, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
         assert eid is None
         data = store._load(tmp_repo)
         arch = next(e for e in data["entries"] if "Pydantic" in e["content"])

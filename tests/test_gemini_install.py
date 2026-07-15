@@ -85,6 +85,19 @@ class TestGeminiRuntime:
         assert "Auto-stored as constraint" in context
         assert "always use conventional commits" in store.get_context(repo).lower()
 
+    def test_before_agent_deictic_directive_acks_pending(self, home, tmp_path):
+        # decision ceb955f5: deictic directives are stored pending_approval, not trusted.
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({
+            "session_id": "s1",
+            "prompt": "I'm not going to accept any performance degradation so ensure you "
+                      "clarify and ensure this feature is actual improvement",
+        })
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "pending" in context.lower()
+        assert "Auto-stored as constraint" not in context
+
     def test_write_flag_injects_reminder_when_no_compress(self, home, tmp_path):
         repo = str(tmp_path / "repo")
         raw = json.dumps({"session_id": "s1", "prompt": "continue"})

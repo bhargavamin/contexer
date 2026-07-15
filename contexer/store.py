@@ -687,6 +687,29 @@ _SYSTEM_TEXT_PREFIXES = (
     "[contexer", "contexer:",
 )
 
+# Deictic referents point at an object only this conversation can resolve — a strong
+# signal the directive is session-scoped intent, not a standing rule. Still stored
+# (never dropped), just not auto-trusted. Narrowly scoped to avoid v1's false positives:
+#  - this/these/those, UNLESS immediately scoping the rule to the store itself
+#    ("this repo/project/repository/codebase" is a legitimate standing rule).
+#  - "it" ONLY when directive-initial (^it) — real misfires ("It could be...") all lead
+#    with it; mid-sentence "it" ("make it a rule", "keep it consistent") is ordinary
+#    English, not deictic.
+#  - here.
+# Bare "that" is dropped entirely: relative/complementizer uses ("code that fails",
+# "ensure that X") dominate and are never deictic.
+_DEICTIC_THIS_THESE_THOSE = re.compile(
+    r"\b(?:this|these|those)\b(?!\s+(?:repo|repository|project|codebase)\b)", re.IGNORECASE)
+_DEICTIC_INITIAL_IT = re.compile(r"^\s*it\b", re.IGNORECASE)
+_DEICTIC_HERE = re.compile(r"\bhere\b", re.IGNORECASE)
+
+
+def _is_deictic(content: str) -> bool:
+    """True if `content` carries a conversation-local referent (see _DEICTIC_* above)."""
+    return bool(_DEICTIC_INITIAL_IT.search(content)
+                or _DEICTIC_HERE.search(content)
+                or _DEICTIC_THIS_THESE_THOSE.search(content))
+
 
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
@@ -723,27 +746,88 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     return True, subtype
 
 
-def capture_user_constraint(repo_path: str, prompt: str, session_id: str) -> tuple[str, str] | tuple[None, None]:
+def capture_user_constraint(
+    repo_path: str, prompt: str, session_id: str
+) -> tuple[str, str, str] | tuple[None, None, None]:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
-    and stores them as decisions. Returns (entry_id, sanitized_content) if stored, (None, None) otherwise."""
+    and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
+    stored but NOT auto-trusted — it lands pending_approval so the developer can generalize,
+    approve, or discard it via review_pending, since "this feature"/"It ..." only means
+    something to the conversation that typed it.
+
+    A clean (non-deictic) restatement that matches — via the standard >70% token-overlap
+    gate — a still-pending twin THIS path created earlier is treated as the developer's
+    generalization: it promotes the pending entry to approved in place (status "promoted"),
+    rather than being silently dropped as a duplicate. Any other match (an already-approved
+    entry, or a still-deictic restatement of the pending twin) stays today's silent no-op.
+    'ignored' entries are excluded from matching here ONLY — a user re-typing a rule after
+    discarding a false positive gets a fresh entry, not a permanently blocked match.
+
+    Returns (entry_id, sanitized_content, status) if stored, (None, None, None) otherwise.
+    `status` is one of "approved" | "pending_approval" | "promoted" — pass it to
+    constraint_ack() for the matching notice."""
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
-        return None, None
+        return None, None, None
     content = _sanitize_directive(prompt.strip())[:600]
     if not _is_storable(content):
-        return None, None
+        return None, None, None
+    deictic = _is_deictic(content)
+    status = "pending_approval" if deictic else "approved"
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
-        decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-        # This hook fires on every prompt; a near-duplicate is a silent no-op (no write).
-        if _find_match(content, decisions_only) is not None:
-            return None, None
+        # 'ignored' entries never block a re-typed rule from landing fresh (Fix 3).
+        decisions_only = [e for e in data["entries"]
+                          if e["type"] == "decision" and e.get("status") != "ignored"]
+        # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
+        # write) — EXCEPT a clean restatement of this path's own pending twin, which promotes.
+        match = _find_match(content, decisions_only)
+        if match is not None:
+            # A pending entry with created_by="human" can only have been born here: the normal
+            # update_decision path always classifies created_by="human" as auto-approved.
+            if (not deictic and match.get("status") == "pending_approval"
+                    and match.get("created_by") == "human"):
+                now = datetime.now(timezone.utc).isoformat()
+                _append_revision(match, content, source="human", approved_at=now)
+                match["status"] = "approved"
+                match["approved_at"] = now
+                match["approved_by"] = "human"
+                _record_recurrence(match, session_id)
+                _save(repo_path, data)
+                return match["id"], _current_content(match), "promoted"
+            return None, None, None
         entry = _new_decision_entry(content, session_id, subtype,
-                                    created_by="human", status="approved")
+                                    created_by="human", status=status)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
-        return entry["id"], content
+        # Deliberately does NOT arm the .pending_review flag: the in-band ack (constraint_ack)
+        # already notifies the developer, and the SessionStart pending-count pointer covers
+        # persistence — a second nudge from this path would double up.
+        return entry["id"], content, status
+
+
+def constraint_ack(content: str, status: str) -> str:
+    """Single-sourced ack text for capture_user_constraint, shared by every adapter (Claude,
+    Codex via claude.capture_constraint, Gemini, the MCP tool) so wording — and the
+    self-approval-proofing on the pending case — can never drift between hosts."""
+    if status == "pending_approval":
+        return (
+            f"Stored pending your review: '{content}' — it references something only this "
+            "conversation understands (this/it/here), so it is not yet trusted. Briefly tell "
+            "the developer it was stored pending review. Do NOT approve it yourself; only the "
+            "developer decides (they can run `contexer review`, or ask you to show it via "
+            "review_pending)."
+        )
+    if status == "promoted":
+        return (
+            f"Your restated rule replaced the pending one — '{content}' is now active. "
+            "Acknowledge this briefly to the user."
+        )
+    return (
+        f"Auto-stored as constraint: '{content}'. "
+        "Acknowledge this briefly to the user — e.g. 'Stored as a constraint in Contexer.'"
+    )
 
 
 def _normalize_content(content: str) -> str:

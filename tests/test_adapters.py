@@ -115,6 +115,22 @@ class TestClaudeCaptureEntrypoints:
         raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"
 
+    def test_capture_constraint_deictic_directive_acks_pending(self, tmp_repo):
+        # decision ceb955f5: a deictic directive is stored but the ack must say PENDING
+        # review, not "stored as a constraint" — it is not auto-trusted.
+        raw = _json.dumps({
+            "prompt": "I'm not going to accept any performance degradation so ensure you "
+                      "clarify and ensure this feature is actual improvement",
+            "session_id": "s1",
+        })
+        out = _json.loads(claude.capture_constraint(tmp_repo, raw))
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "pending" in ctx.lower()
+        assert "review_pending" in ctx or "contexer review" in ctx
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["status"] == "pending_approval"
+
     def test_rationale_injects_when_decisions_match(self, populated_repo):
         # Targets the fixture's retrievable (suggested) decision. The JWT entry classifies
         # as pending_approval and is deliberately not auto-injected (only approved/suggested
