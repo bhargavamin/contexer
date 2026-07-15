@@ -151,11 +151,6 @@ Capture beyond outright directives is best-effort (the *"store that decision"* e
 
 ---
 
-## Star history
-
-If Contexer saves you re-explanation time, a star helps others find it. It takes one second.
-
-[![GitHub stars](https://img.shields.io/github/stars/bhargavamin/contexer?style=flat&logo=github)](https://github.com/bhargavamin/contexer/stargazers) · [View the growth chart on star-history.com →](https://star-history.com/#bhargavamin/contexer&Date)
 
 ## Contributing
 
