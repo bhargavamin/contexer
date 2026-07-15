@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.20.1](https://github.com/bhargavamin/contexer/compare/v0.20.0...v0.20.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **bench:** golden-repo copy no longer races background git gc ([5b93235](https://github.com/bhargavamin/contexer/commit/5b9323518af4c53b23ac3e80d9b750d95f3614b9))
+* **bench:** golden-repo copy no longer races background git gc ([e104110](https://github.com/bhargavamin/contexer/commit/e1041106eadf55c2aa15fc663ba69607ef1586d9))
+* **retrieval:** compound auth-session phrases keep the auth topic ([e6ccea8](https://github.com/bhargavamin/contexer/commit/e6ccea86512718122deb9fa9e205651db139dacf))
+* **retrieval:** drop session/sessions from the auth topic aliases ([af50fbb](https://github.com/bhargavamin/contexer/commit/af50fbb982d8a4ec8799af524c77175840945d98))
+* **retrieval:** drop session/sessions from the auth topic aliases ([1b803a6](https://github.com/bhargavamin/contexer/commit/1b803a62578115764222a175559141e5153b80b0))
+
+
+### Documentation
+
+* add always-available GitHub stars badge ([be63335](https://github.com/bhargavamin/contexer/commit/be63335196213a356cd1eae087f12f39ba884e28))
+* add always-available GitHub stars badge ([eb36e92](https://github.com/bhargavamin/contexer/commit/eb36e92dbd8d96ed50ef7df538816358843a8ddf))
+* **bench:** address Greptile [#122](https://github.com/bhargavamin/contexer/issues/122) — reproducible session count, A/B attribution scope, source provenance ([d0c6c51](https://github.com/bhargavamin/contexer/commit/d0c6c515f66a00b1ac6becfbe1e1fe89c3038ea5))
+* **bench:** measured v0.20.0 overhead + paraphrase stability (campaigns 7-8) ([1c3de73](https://github.com/bhargavamin/contexer/commit/1c3de739e75f299d11fc222422784624d9f9b314))
+* **bench:** measured v0.20.0 overhead + paraphrase stability (campaigns 7-8) ([80b79e8](https://github.com/bhargavamin/contexer/commit/80b79e89672e7b6e21a877d14d2a80a236d53a56))
+* name every agent's rules-file equivalent, not just CLAUDE.md ([67695d8](https://github.com/bhargavamin/contexer/commit/67695d81a9ba58e588eb4362a7b5743970c0d2d4))
+* name every agent's rules-file equivalent, not just CLAUDE.md ([98fc1ee](https://github.com/bhargavamin/contexer/commit/98fc1ee409c5e239e7014f023ac386f6a99ededd))
+* remove Star history section ([aad5976](https://github.com/bhargavamin/contexer/commit/aad5976f70e03c1439e8ca87b709b104e4591de8))
+* remove the Star history section entirely ([249fe72](https://github.com/bhargavamin/contexer/commit/249fe724748879dcce21fcb3ce142df13d78d26e))
+* Star history section can no longer render a broken image ([16d6198](https://github.com/bhargavamin/contexer/commit/16d61988d604ef9212bd21b29a92ceb5f441a913))
+
 ## [0.20.0](https://github.com/bhargavamin/contexer/compare/v0.19.0...v0.20.0) (2026-07-15)
 
 
