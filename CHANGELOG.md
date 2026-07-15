@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/bhargavamin/contexer/compare/v0.20.1...v0.21.0) (2026-07-15)
+
+
+### Features
+
+* **capture:** deictic directives stored pending review, not trusted ([1281617](https://github.com/bhargavamin/contexer/commit/1281617cb519489dbcfaea754512e67d438dda1a))
+
 ## [0.20.1](https://github.com/bhargavamin/contexer/compare/v0.20.0...v0.20.1) (2026-07-15)
 
 
