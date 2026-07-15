@@ -3052,15 +3052,26 @@ def _ignore(repo, eid):
 # ── Retrieval V1 review findings: indexed path must dominate legacy ─────────────
 
 class TestIndexStatusFilter:
-    def test_ignored_and_pending_not_indexed(self, tmp_repo):
+    def test_ignored_not_indexed_pending_is(self, tmp_repo):
         _, ig = store.update_decision(tmp_repo, "Use postgres for the ledger storage layer",
                                       RV1_SESSION, "architecture")
         _ignore(tmp_repo, ig)
-        # a constraint is born pending_approval — also excluded from the index
+        # a constraint is born pending_approval — retrievable via get_context (tagged
+        # [pending]), so it MUST be indexed; only ignored is excluded (Greptile #117).
         store.update_decision(tmp_repo, "Never log postgres credentials in plaintext",
                               RV1_SESSION, "constraint")
         idx = store._read_retrieval_index(tmp_repo)
-        assert idx["n_docs"] == 0
+        assert idx["n_docs"] == 1
+        assert all(d["status"] == "pending_approval" for d in idx["docs"].values())
+
+    def test_pending_only_match_injects_tagged(self, tmp_repo):
+        # Dominance parity: legacy surfaces a pending-only rationale match via
+        # get_context, so the indexed path must inject it too (with the pending tag).
+        store.update_decision(tmp_repo, "Chose Kafka over RabbitMQ for the event backbone ordering",
+                              RV1_SESSION, "constraint")
+        result = store.get_context_for_prompt(tmp_repo, "why did we choose kafka for the event backbone?")
+        assert "Kafka over RabbitMQ" in result
+        assert "[pending]" in result
 
     def test_approved_wins_over_ignored(self, tmp_repo):
         _, ig = store.update_decision(tmp_repo, "JWT tokens are validated in middleware auth checks",
@@ -3163,6 +3174,17 @@ class TestWsPathSanitized:
         assert p.exists()                           # ws file created directly in STORE_DIR
         second = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
         assert "auto-fetched" not in second         # dedup works across calls with that id
+
+    def test_shared_32char_prefix_does_not_collide(self, tmp_repo):
+        # Greptile #117: ids sharing the first 32 chars must not share a working set.
+        base = "project-alpha-2026-07-15-morning-run"   # >32 chars
+        a, b = base + "-A", base + "-B"
+        assert store._ws_path(tmp_repo, a) != store._ws_path(tmp_repo, b)
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", a)
+        assert "auto-fetched" in first
+        other = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", b)
+        assert "auto-fetched" in other              # session B is not poisoned by A's working set
 
 
 # Two distinct docs (below the 70% novelty threshold) covering every hit class.

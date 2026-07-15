@@ -2230,11 +2230,13 @@ def _build_retrieval_index(data: dict) -> dict:
         did = e.get("id")
         if not did:
             continue
-        # Index only what get_context can hand back: ignored / pending_approval decisions
-        # would rank as top hits then render as nothing (and advertise unretrievable
-        # topics in weak pointers).
+        # Index only what get_context can hand back. Ignored decisions are permanently
+        # suppressed everywhere, so indexing them lets a top-ranked hit render as
+        # nothing and weak pointers advertise unretrievable topics. Pending ones ARE
+        # retrievable (get_context renders them with a [pending] tag), so they stay
+        # indexed — the legacy fallback surfaces them and the indexed path must too.
         status = _entry_status(e)
-        if status not in ("approved", "suggested"):
+        if status == "ignored":
             continue
         content = _current_content(e)
         toks = _index_tokens(content)
@@ -2348,9 +2350,10 @@ def _extract_artifacts(prompt: str) -> list[str]:
 
 
 def _ws_path(repo_path: str, session_id: str) -> Path:
-    # Sanitize before embedding: a session id like 'proj/abc' must not create a
-    # nested path or escape STORE_DIR.
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:32]
+    # Hash the session id before embedding: filename-safe for any host-supplied id
+    # (no path escape) and collision-free where truncation wasn't (two ids sharing
+    # a 32-char prefix must not share a working set).
+    safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
     return STORE_DIR / f".ws_{_slug(repo_path)}_{safe}.json"
 
 

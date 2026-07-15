@@ -349,7 +349,12 @@ if __name__ == "__main__":
     a = ap.parse_args()
     ids = [s for s in a.tasks.split(",") if s] or None
     conds = tuple(s for s in a.conditions.split(",") if s)
-    sources = dict(pair.split("=", 1) for pair in a.contexer_sources.split(",") if pair)
+    sources = {}
+    for pair in (s for s in a.contexer_sources.split(",") if s):
+        if "=" not in pair:
+            ap.error(f"--contexer-sources entry {pair!r} is not name=path")
+        name, path = pair.split("=", 1)
+        sources[name] = path
     if not a.model:
         print("WARNING: no --model pinned; the report will flag mixed models.", file=sys.stderr)
     print(run_campaign(Path(a.out), reps=a.reps, task_ids=ids,

@@ -275,3 +275,18 @@ class TestChainScoringIsolation:
         assert by_step[1]["violations"] >= 1   # the bad file is step 1's work
         assert by_step[2]["violations"] == 0   # not re-counted
         assert by_step[3]["violations"] == 0
+
+
+class TestContexerSourcesCLI:
+    def test_malformed_pair_rejected_before_any_run(self, tmp_path):
+        # Greptile #117: a pair without '=' must be an argparse error (exit 2 with a
+        # clear message), never a ValueError after the campaign machinery starts.
+        import subprocess, sys
+        proc = subprocess.run(
+            [sys.executable, "-m", "benchmarks.run",
+             "--tasks", "rat-storage", "--out", str(tmp_path / "out"),
+             "--contexer-sources", "contexer_pre_v1"],
+            capture_output=True, text=True)
+        assert proc.returncode == 2
+        assert "is not name=path" in proc.stderr
+        assert not (tmp_path / "out").exists()      # nothing was written
