@@ -158,9 +158,16 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         return "{}"
 
 
-# Injection cost is surfaced on exception, not routinely: below this estimate the
-# systemMessage names what was recalled but stays silent about tokens.
+# The token note is surfaced on exception, not routinely: below this injected-size
+# estimate the systemMessage names what was recalled but stays silent about tokens.
 _COST_NOTE_TOKENS = 150
+
+# Golden savings multiplier: median without/with session-token ratio over the 10
+# recall-event task-cells (rationale + continuity) in campaigns 3/4-sonnet/4-opus/5
+# runs.jsonl (median 4.13; developer-ratified 2026-07-16). The notice shows net
+# benefit — est × (multiplier − 1) — rounded to the nearest 10. Re-derive on
+# re-benchmark.
+_SAVED_MULTIPLIER = 4
 
 
 def rationale(repo_path: str, raw: str) -> str:
@@ -178,8 +185,9 @@ def rationale(repo_path: str, raw: str) -> str:
         if not ctx:
             return "{}"
         # systemMessage is user-facing only (the model never sees it): name WHAT was
-        # recalled so retrieval is observable, not spooky. Cost is flagged on exception —
-        # a token estimate appears only when the injection is big enough to care about.
+        # recalled so retrieval is observable, not spooky. Savings are flagged on
+        # exception — the benchmark-derived estimate appears only when the injection
+        # is big enough to care about.
         # Built from the router's structured meta, not scraped from the rendered text.
         est = max(1, len(ctx) // 4)
         topics = meta.get("topics") or []
@@ -194,7 +202,8 @@ def rationale(repo_path: str, raw: str) -> str:
             if n and topics:
                 msg += f" ({', '.join(topics[:3])})"
         if est > _COST_NOTE_TOKENS:
-            msg += f" · ~{est} tokens"
+            saved = int(round(est * (_SAVED_MULTIPLIER - 1), -1))
+            msg += f" · ~{saved} tokens saved"
         return json.dumps({
             "systemMessage": msg,
             "hookSpecificOutput": {
