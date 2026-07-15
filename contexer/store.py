@@ -355,16 +355,36 @@ def _containment_ratio(a: set[str], b: set[str]) -> float:
 
 
 def _find_containment(content: str, existing: list) -> dict | None:
-    """First entry (same iteration order as _find_match) whose containment with `content`
-    exceeds 0.7, or None. Multiple simultaneous hits: first only — no cluster logic."""
+    """Best-match entry whose containment with `content` exceeds 0.7, or None.
+
+    First-hit-wins was wrong here: a short generic rule ("Always commit") contained in
+    many longer directives scores 1.0 containment against ALL of them, so whichever one
+    happened to iterate first "won" regardless of which is actually closest. Instead,
+    every candidate above the threshold is scored and the best one picked: highest
+    containment ratio first, ties broken by highest _overlap_ratio (closest overall
+    content — the max-denominator metric penalizes a short match more than a near-equal-
+    length one), remaining ties keep earliest iteration order (strict '>' comparisons
+    never displace an earlier equally-good candidate)."""
     tokens = _tokenize(content)
     if not tokens:
         return None
+    best = None
+    best_containment = 0.0
+    best_overlap = 0.0
     for entry in existing:
         other = _tokenize(entry.get("content", ""))
-        if other and _containment_ratio(tokens, other) > 0.7:
-            return entry
-    return None
+        if not other:
+            continue
+        containment = _containment_ratio(tokens, other)
+        if containment <= 0.7:
+            continue
+        overlap = _overlap_ratio(tokens, other)
+        if best is None or containment > best_containment or (
+                containment == best_containment and overlap > best_overlap):
+            best = entry
+            best_containment = containment
+            best_overlap = overlap
+    return best
 
 
 _NEAR_MISS_FLOOR = 0.25
@@ -828,8 +848,8 @@ def capture_user_constraint(
     constraint_ack so the developer can confirm a consolidation.
 
     Returns (entry_id, sanitized_content, status) if stored, (None, None, None) otherwise.
-    `status` is one of "approved" | "pending_approval" | "promoted" | "revision_proposed"
-    — pass it to constraint_ack() for the matching notice."""
+    `status` is one of "approved" | "pending_approval" | "promoted" | "revision_proposed" |
+    "revision_already_pending" — pass it to constraint_ack() for the matching notice."""
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
         return None, None, None
@@ -890,8 +910,12 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
       - pending twin (born on this path) + clean  → promote with the fuller content
       - pending twin + deictic                    → amend v1 in place, stays pending
       - other pending (AI-captured)               → recurrence (base needs review first)
-      - approved/suggested                        → attach a proposed_revision (Suggested
+      - approved/suggested, no unresolved proposal → attach a proposed_revision (Suggested
                                                     Update — approval promotes it)
+      - approved/suggested, DIFFERENT proposal
+        already pending                            → leave the existing proposal untouched,
+                                                    return "revision_already_pending" (never
+                                                    clobber an unreviewed Suggested Update)
     New content SHORTER (user re-types the terse version):
       - pending twin + clean → promote keeping the fuller existing content
       - otherwise            → recurrence, silent no-op like an ordinary duplicate."""
@@ -928,7 +952,12 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             return _recur_silently()  # never propose on an unreviewed base
         norm = _normalize_content(content)
         prop = hit.get("proposed_revision")
-        if not (prop and prop.get("content") == norm):
+        if prop and prop.get("content") != norm:
+            # A DIFFERENT Suggested Update is already awaiting review on this entry —
+            # never clobber it (it would vanish unreviewed). Leave it untouched and
+            # surface the new phrasing to the developer instead of silently dropping it.
+            return hit["id"], norm, "revision_already_pending"
+        if not prop:
             hit["proposed_revision"] = _build_proposal(
                 hit, content, subtype, session_id, now, source="human")
             _save(repo_path, data)
@@ -992,6 +1021,13 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
             "a suggested update to that rule is pending their review. Do NOT approve it "
             "yourself; only the developer decides (they can run `contexer review`, or ask "
             "you to show it via review_pending)."
+        )
+    if status == "revision_already_pending":
+        return (
+            f"Rule {entry_id[:8]} already has a suggested update awaiting review; this new "
+            f"phrasing ('{content}') was NOT stored, to avoid clobbering it. Tell the developer "
+            "a suggested update is already pending for that rule — they can run `contexer "
+            "review` — and mention this new phrasing so they can fold it in if relevant."
         )
     return (
         f"Auto-stored as constraint: '{content}'. "

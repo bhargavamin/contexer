@@ -2776,6 +2776,56 @@ class TestContainmentCapture:
         assert "confirms" in ack.lower(), "consolidation gated on developer confirmation"
         assert "never merge on your own" in ack.lower()
 
+    def test_containment_picks_best_match_not_first_hit(self, tmp_repo):
+        # A short generic rule ("Always commit") is contained (ratio 1.0) in every longer
+        # directive that mentions committing. First-hit-wins would route to whichever
+        # happens to iterate first; the fix picks the closest overall match instead.
+        data = store._load(tmp_repo)
+        short = store._new_decision_entry("Always commit", "seed", "constraint",
+                                          created_by="human", status="approved")
+        longer = store._new_decision_entry("Always commit automatically", "seed", "constraint",
+                                           created_by="human", status="approved")
+        data["entries"].extend([short, longer])  # short iterates first
+        store._save(tmp_repo, data)
+
+        eid, _content, status = store.capture_user_constraint(
+            tmp_repo, "Always commit automatically after approvals", "s1")
+        assert status == "revision_proposed"
+        assert eid == longer["id"], "routes to the closer match (higher overlap ratio)"
+        assert eid != short["id"]
+
+    def test_different_superset_does_not_clobber_pending_proposal(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
+        original_prop = next(e for e in store._load(tmp_repo)["entries"]
+                             if e["id"] == eid2)["proposed_revision"]
+        assert original_prop is not None
+
+        different_superset = "Always commit automatically after every merge to keep history clean"
+        eid3, content3, status3 = store.capture_user_constraint(tmp_repo, different_superset, "s3")
+        assert eid3 == eid2, "still routes onto the same contained entry"
+        assert status3 == "revision_already_pending"
+
+        target = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid2)
+        assert target["proposed_revision"] == original_prop, "original proposal untouched"
+
+        ack = store.constraint_ack(content3, status3, eid3)
+        assert eid2[:8] in ack
+        assert "already has a suggested update" in ack.lower()
+        assert "not stored" in ack.lower()
+        assert "contexer review" in ack.lower()
+        assert content3.lower() in ack.lower(), "new phrasing surfaced so the developer can fold it in"
+
+    def test_identical_superset_recapture_stays_idempotent_with_pending_proposal(self, tmp_repo):
+        # Companion to test_superset_capture_is_idempotent: pins that a byte-identical
+        # re-capture of the SAME superset never triggers the new clobber-guard status.
+        store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
+        eid3, _content, status3 = store.capture_user_constraint(tmp_repo, self._SUPERSET, "s3")
+        assert (eid3, status3) == (eid2, "revision_proposed")
+
 
 class TestReviewPendingAndSharePreview:
     """Direct coverage for the on-demand review list and the cloud-push dry-run preview."""
