@@ -1,33 +1,52 @@
 # The Contexer Benchmark
 
-*540 live Claude Code sessions across two models (Sonnet 5, Opus 4.8) and six memory conditions, scored deterministically, recomputed by an independent validator, and challenged by an adversarial review before publication. Raw per-session data ships in `benchmarks/artifacts/`; every number below can be re-derived from it.*
+We ran 588 real AI coding sessions and measured what Contexer costs and what it returns, against every common alternative. Everything on this page was scored by code, re-checked by an independent validator, and challenged by an adversarial review before publication. The raw per-session data is in `benchmarks/artifacts/` — every number can be recomputed from it.
 
-## What we measured
+**Three words, defined once:**
 
-The same AI agent performs the same tasks on the same codebase under different memory conditions — no memory at all, a hand-written CLAUDE.md, an AGENTS.md, both files, contexer, and contexer on top of CLAUDE.md — and we measure accuracy, tokens, cost, turns, and rule compliance, with code doing all the scoring.
+- A **session** is one conversation with an AI coding assistant, start to finish.
+- **Tokens** are the units AI providers bill you for. Fewer tokens for the same result = less money and less waiting.
+- A **memory setup** is whatever you use to give the AI project knowledge: nothing, a hand-written instructions file (CLAUDE.md or AGENTS.md), or Contexer.
 
-## Findings
+## What it costs
 
-**1. Recorded decisions turn unanswerable questions into one-turn answers.** Asked "why did we choose Postgres over MySQL?" when the decision existed only in memory: with contexer the agent answered correctly in 1 turn at ~33k tokens (~$0.04); without memory it explored for 6 turns and ~165k tokens (~$0.11) and correctly concluded it couldn't know. Same pattern on both models, 16 runs per condition, stable under three rewordings of the question.
+Same repo, same model (Claude Sonnet 5), same questions about past project decisions. The only thing we changed is the memory setup. Each row is the median of the sessions measured for it:
 
-**2. Stored rules get followed.** A seeded compliance rule ("never log request data") was respected 8/8 runs on both models by every memory condition, while bare sessions violated it most of the time (Opus: 0/8 compliant). On Sonnet, contexer was also the cheapest way to comply (~68k tokens vs ~250k for the same rule in CLAUDE.md), because injected rules skip the exploration phase.
+| Memory setup | Sessions measured | Tokens per session | Cost per session | Right answer? |
+|---|---|---|---|---|
+| Nothing | 24 | 198,864 | $0.116 | **No** — guesses or gives up |
+| Hand-written, up-to-date AGENTS.md | 3 | 131,184 | $0.085 | Yes |
+| Hand-written, up-to-date CLAUDE.md | 24 | 32,430 | $0.042 | Yes |
+| Hand-written, up-to-date CLAUDE.md + AGENTS.md | 3 | 32,445 | $0.043 | Yes |
+| **Contexer** (v0.20.0) | 12 | 32,804 | $0.043 | Yes |
 
-**3. A complete, hand-maintained CLAUDE.md ties contexer on static recall.** Given the same knowledge, accuracy and compliance were identical (both models, 16 runs per cell). Contexer's value is therefore not out-recalling a perfect file — it's that the file never has to be written: bootstrap mines evidence-backed conventions from the repo automatically in seconds, and decisions made mid-session are captured without anyone editing docs. Layering contexer on an existing CLAUDE.md caused no harm and no single-shot gain.
+Read the last column first: **with no memory, you pay the most and get wrong answers.** The AI burns six times the tokens searching the code for a decision that was never written down, then guesses or admits it can't know.
 
-**4. AGENTS.md knowledge is honored, but at 2–4× the token cost of CLAUDE.md** (131k vs 33k on the same question) — consistent with the file being found and read rather than auto-loaded. Directional result: the campaign stopped early, one observation per cell.
+Then read the cost column: **Contexer costs the same as a perfect CLAUDE.md.** Not cheaper — the same. A complete, up-to-date instructions file is genuinely as token-efficient as Contexer. That is the honest headline, and it leads to the real question: who keeps that file perfect?
 
-**5. What we could not confirm — published because dropping failed claims is how benchmarks lie:** an early "cross-session compounding" effect (contexer getting cheaper across chained sessions) disappeared at higher sample size with proper interleaving; and contexer's median session costs **+12–17% more tokens** across all tasks — the injected context is overhead on tasks that never touch memory. The savings are task-shaped, not universal.
+*(Fewer sessions were measured for AGENTS.md — treat those two rows as indicative, not final.)*
 
-**6. Scope:** all numbers cover personal, single-developer sessions on synthetic repos with a pinned model. The team-mode benchmark (shared decisions across developers via the remote store) is designed but has not yet run — numbers on this page make no claims about team mode.
+The cost table compares Contexer to a CLAUDE.md that is **complete and current** — but files start incomplete and go stale, and that difference is what you're actually buying. See **[What Contexer gives you that a .md file can't](../README.md#what-contexer-gives-you-that-a-md-file-cant)** in the README.
 
-## The harness approach
+## The fine print
 
-- **Isolation:** every session runs in a throwaway `HOME` with a fresh copy of the fixture repo; sessions receive an environment allowlist, never the developer's real environment; contexer is installed via its real installer so real hooks are exercised.
-- **No training-data leakage:** the fixture codebase is synthetic and seeded — it cannot exist in any model's training data.
-- **No ordering confounds:** conditions alternate in time (never one block after another) and every row carries a timestamp; a validator warns if any condition ran as a contiguous block.
-- **Deterministic scoring:** answers must contain facts from the stored knowledge; written code is checked by AST inspection against measured conventions; tasks pass or fail by their own test commands. No LLM judge.
-- **Verification chain:** an independent validator recomputes every statistic from raw rows with separate code and hunts anomalies (zero-token "successes", error-rate asymmetries, non-interleaved runs); failed sessions are recorded as errored rows and excluded from aggregates, never silently zeroed. An adversarial review pass attempts to refute each claim before anything is published — its objections shaped the conditions above (the CLAUDE.md arm exists because the review demanded a fair competitor).
-- **Prompt-sensitivity probes:** key prompts run in reworded variants with identical stored knowledge and scoring, so conclusions can't hinge on one phrasing.
+For readers who work with tokens, turns, and medians. Numbers are Sonnet 5 unless stated; Opus 4.8 replicated the accuracy and compliance results.
+
+1. **Rationale recall:** with the decision stored, "why did we choose Postgres over MySQL?" is answered correctly in 1 turn / ~33k tokens; without memory: 6 turns / ~165k tokens and no answer. 16 runs per condition, stable under three question rewordings.
+2. **Rule compliance:** a seeded rule ("never log request data") was followed 8/8 by every memory condition; bare sessions violated it most of the time (Opus: 0/8 compliant). Contexer was the cheapest compliant setup (~68k tokens vs ~250k for the same rule via CLAUDE.md).
+3. **A complete CLAUDE.md ties Contexer on static recall** — identical accuracy and compliance at equal cost. Contexer's edge is that nobody has to write or maintain the file. Layering Contexer on an existing CLAUDE.md caused no harm and no single-shot gain.
+4. **AGENTS.md is honored but expensive** — the file is found and read rather than auto-loaded (131k vs 33k tokens on the same question). Small sample (n=3), directional.
+5. **Current numbers only — v0.20.0, published with the honest limits:** on a plain editing task with nothing to retrieve, v0.20.0 added **no measurable overhead** versus v0.19.0 (see the A/B below) — but savings are task-shaped, not universal, and an earlier "gets cheaper the more sessions you chain" effect did not hold up at a proper sample size. We publish what disappears under scrutiny, not just what survives it.
+6. **v0.20.0 vs v0.19.0 (retrieval engine A/B):** 48 interleaved sessions, identical everything except the installed Contexer release. Accuracy and compliance identical; v0.20.0 used **−11.7% median tokens (−8% cost)** overall, −12% to −14.5% on cross-session chain tasks (every v0.20.0 run cheaper than every v0.19.0 run in those cells), and added **no overhead** on the editing task with nothing to retrieve. Wrinkle: 2 of 4 v0.20.0 compliance runs spent extra tokens flagging a conflict with the stored rule before implementing — costlier, arguably better.
+7. **Scope:** personal, single-developer sessions on synthetic repos with a pinned model. Team mode has not been benchmarked; this page makes no claims about it.
+
+## How we measured
+
+- **Isolation:** every session runs in a throwaway `HOME` on a fresh copy of a synthetic fixture repo (which cannot exist in any model's training data), with an environment allowlist. Contexer is installed by its real installer, so real hooks are exercised.
+- **No ordering tricks:** conditions alternate in time and every row is timestamped; the validator flags any condition that ran as a contiguous block.
+- **Scored by code, not opinion:** answers must contain the stored facts; written code is AST-checked against measured conventions; tasks pass or fail by their own test commands. No LLM judge.
+- **Checked twice, then attacked:** an independent validator recomputes every statistic from raw rows and hunts anomalies (zero-token "successes", error asymmetries); failed sessions are recorded and excluded, never zeroed. An adversarial review tries to refute each claim before publication — it's why the CLAUDE.md comparison exists at all.
+- **Reworded prompts:** key questions run in paraphrased variants with identical stored knowledge, so no conclusion hinges on one phrasing.
 
 ## Reproduce it
 
@@ -40,6 +59,13 @@ uv run python -m benchmarks.run --reps 1 --tasks rat-storage,conv-endpoint \
   --model claude-sonnet-5 --out benchmarks/artifacts/mine
 uv run python -m benchmarks.report benchmarks/artifacts/mine/runs.jsonl
 uv run python -m benchmarks.validate benchmarks/artifacts/mine
+
+# A/B two Contexer versions (how fine-print item 6 was produced): each condition
+# installs Contexer from its own checkout into the session's isolated HOME
+uv run python -m benchmarks.run --reps 4 --tasks rat-storage,rat-errors,cont-logging,conv-endpoint,chain-1-cache,chain-2-list \
+  --model claude-sonnet-5 --conditions contexer_pre_v1,contexer_v1 \
+  --contexer-sources "contexer_pre_v1=/path/to/old-checkout,contexer_v1=." \
+  --out benchmarks/artifacts/my-ab
 ```
 
 The harness lives in `benchmarks/` (runner, scorers, validator, fixture generator, task definitions). Campaign artifacts — one JSONL row per session plus validator output — are in `benchmarks/artifacts/`.

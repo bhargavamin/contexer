@@ -20,15 +20,13 @@
 </p>
 
 <p align="center">
-  <a href="#the-problem">The problem</a> ·
-  <a href="#the-solution">The solution</a> ·
-  <a href="#how-is-contexer-different">How is Contexer different?</a> ·
-  <a href="#use-cases">Use cases</a> ·
+  <a href="#the-developer-problem-re-teaching-your-agent-every-session">For developers</a> ·
+  <a href="#the-leadership-problem-your-standards-never-reach-the-code">For engineering leaders</a> ·
+  <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not just CLAUDE.md?</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="#cost">Cost</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/install.md">Docs</a> ·
+  <a href="#documentation">Docs</a> ·
   <a href="https://discord.gg/Fk6JSaW4p">Discord</a>
 </p>
 
@@ -37,127 +35,69 @@
   <sub>Sync your engineering decisions across every machine, and share a team decision layer that every agent on your team reads from.</sub>
 </p>
 
-<p align="center">
-  <strong>📊 Measured, not claimed — <a href="docs/benchmark.md">read the benchmark</a></strong><br>
-  <sub>540 live Claude Code sessions, two models, six memory conditions: recorded decisions answer "why" questions in <strong>1 turn instead of 6 at ~5&times; fewer tokens</strong>, and stored rules are followed <strong>8/8 vs 0/8</strong> without memory. Deterministic scoring, independent validation, adversarial review — negative findings included, raw data in the repo.</sub>
-</p>
+---
+
+# Stop your AI agents from overthinking, repeating, and burning tokens on what you already decided.
+
+You explained it Monday. Again Wednesday. It's Friday, and your AI is asking again — or quietly re-deriving the answer from scratch, six turns at a time. **And if you're the diligent one who maintains a CLAUDE.md:** you updated it this morning; the afternoon session reworked an entire feature; the file is already out of date.
+
+Every AI coding session starts from zero, and the files you write to fix that go stale the moment an agent ships something new. Contexer is the fix: a **decision layer** that captures your engineering decisions as you work, keeps them current as they change, and hands them to **every agent** — Claude Code, Cursor, Codex, Gemini CLI — **before it starts reasoning**. The settled answer arrives first; the agent stops wondering, stops re-exploring — and just builds.
+
+**Session 1, Tuesday** — the agent proposes `LIMIT/OFFSET` pagination for a listing endpoint. You correct it:
+
+> **You:** No offset pagination — that collapsed for us at 10M rows. Cursor-based on `(created_at, id)`, always, and the composite index is mandatory.
+> _Contexer stores the convention — including the reason._
+
+**Session 3, three weeks later** — fresh context, different feature, maybe a different tool. You ask for a new listing endpoint, and before the agent writes a line:
+
+> _Contexer injects:_ `[convention] Pagination is cursor-based on (created_at, id) with the composite index — offset pagination collapsed at 10M rows.`
+> The agent ships cursor pagination on the first try. And when a teammate's session asks *"why don't we use OFFSET here?"* — it gets the real answer, with the incident behind it, not a guess from training data.
+
+Every claim about Contexer is **measured, not claimed** — hundreds of live agent sessions, deterministic scoring, independent validation, negative findings published. **[Read the benchmark →](docs/benchmark.md)**
 
 ---
 
-# Contexer
+## The developer problem: re-teaching your agent every session
 
-## The Engineering Decision Layer for AI Coding Agents
+You know these moments:
 
-Contexer captures architecture decisions, constraints, conventions, and engineering patterns while you work with AI coding assistants.
+- **"I've told it this three times."** You corrected the agent's mocking strategy Monday. It's Wednesday and the agent is mocking the DB layer again. → Contexer injects your conventions at session start, every session. Correct once, done forever.
+- **"Why did we pick this?"** You ask about a decision made three weeks ago and the agent confidently guesses wrong from training data. → Ask "why did we choose Postgres?" and Contexer hands the agent the *actual stored decision* — with the reasoning — before it answers.
+- **"Cursor doesn't know what Claude knows."** You switch tools and start re-teaching. → One decision layer, four agents. Capture in any of them; all of them know it.
+- **"I maintain four rule files now."** CLAUDE.md for Claude, AGENTS.md for Codex, `.cursor/rules` for Cursor, GEMINI.md for Gemini — times every repo. You wrote them in January; the codebase moved on in February; now they quietly teach every agent things that are no longer true. → Zero files to maintain. Decisions are captured when they're made and updated when they change, in one store every tool reads.
+- **"My context just got compacted."** Long session, context compression eats the decisions you fetched. → Contexer restores them automatically.
 
-**One decision layer, every agent.** The same engineering knowledge follows you across **Claude Code, Cursor, Codex, and Gemini CLI** — capture a decision in one, and every other agent already knows it. No single-vendor lock-in.
+No workflow change. No prompt discipline. You code; directives like *"always use uv, never pip"* are captured automatically, and *"store that decision"* catches anything else. Everything stays in plain JSON on your machine.
 
-<!-- TODO: add a 15s asciinema/GIF of the aha moment here (session 1 teaches → session 2 already knows). A demo at the very top converts better than any prose below. -->
+## The leadership problem: your standards never reach the code
 
-### See it in one exchange
+If you run an engineering team, your real problem isn't that AI writes bad code — it's that **AI writes code without knowing what your organization has decided**:
 
-**Session 1** — you correct the agent once:
+- **Standards that live in a wiki don't reach the code.** Your security rule — *"never log request data"*, *"no plaintext secrets"* — is documented, and violated, because no agent reads the wiki at the moment it writes the line. Contexer puts the rule in front of every agent, in every session, *before generation* — the leftmost shift there is.
+- **Every senior engineer is a walking decision archive** — and those decisions leave in AI chat scrollback, Slack threads, and resignations. Contexer turns them into a versioned, human-approved, auditable asset: who decided what, when, and why.
+- **Onboarding costs weeks of "ask the person who knows".** A new engineer's agent starts with the repo's full decision history from day one.
+- **Multi-agent sprawl is already here.** Your team runs Claude Code *and* Cursor *and* Codex. Contexer is the one layer that keeps them all consistent — no single-vendor lock-in on your engineering knowledge.
+- **Governance, not vibes.** Decisions are approved by humans, versioned with full history, and reviewable (`contexer review`). AI proposes; your engineers ratify. And Contexer steers rather than enforces — your CI and PR gates still verify; agents just stop violating the rules in the first place.
 
-> **You:** Mock at the service boundary, not the DB layer.
-> _Contexer stores it as a convention._
-
-**Session 2, next day, fresh context** — before you type a word:
-
-> _Contexer injects:_ `[convention] Mock at the service boundary, not the DB layer.`
-> The agent gets it right the first time. The re-explanation tax is gone.
-
----
-
-## The Problem
-
-AI coding assistants are excellent at writing code. They are not good at remembering **why** engineering decisions were made. Every new AI session starts from zero.
-
-You established "mock at the service boundary, not the DB layer" in session one. Session two, the agent is back to mocking the DB. You correct it. Session three, same thing. Every session pays the re-explanation tax.
-
-Engineering teams make decisions every day: database choices, deployment ownership, security constraints, observability standards, messaging tradeoffs. Most of these are discussed in AI conversations, pull requests, Slack, meetings, and code reviews. They rarely make it into documentation or survive into the next session.
+The open-source version is per-developer. **[Contexer Teams](https://contexer.ai)** (early access) makes it organizational: your platform or security team publishes a rule once, and every developer's agent starts with it — every repo, every tool, before the code is written.
 
 ---
 
-## The Solution
+## What Contexer gives you that a .md file can't
 
-Contexer captures important engineering decisions as they happen.
+A complete, up-to-date CLAUDE.md is genuinely as token-efficient as Contexer — [we measured it](docs/benchmark.md). But files start incomplete and go stale. This is what you're actually buying:
 
-Instead of storing conversations, it stores knowledge like:
-
-**Architecture Decisions**
-
-> "We use PostgreSQL for transactional workloads."
-
-**Constraints**
-
-> "Public S3 buckets are prohibited."
-
-**Conventions**
-
-> "Terraform modules live under `infrastructure/modules`."
-
-**Patterns**
-
-> "Every service must emit OpenTelemetry traces."
-
-Future AI sessions automatically receive the relevant engineering knowledge before generating code.
-
----
-
-## How is Contexer Different?
-
-Contexer is **not** a replacement for README.md, CLAUDE.md, AGENTS.md, Cursor Memories, or other AI memory systems. Each serves a different purpose.
-
-| Tool | Purpose | Best For |
+| | Hand-written file (CLAUDE.md / AGENTS.md) | Contexer |
 |---|---|---|
-| README.md | Human documentation | Project overview, setup instructions, architecture documentation |
-| CLAUDE.md / AGENTS.md | Static AI instructions | Coding guidelines, workflows, commands, project rules |
-| Contexer | Living engineering knowledge | Capturing, approving, versioning and replaying engineering decisions across AI coding sessions |
-
-### Engineering decisions, not conversations
-
-| | AI Memory | Contexer |
-|---|---|---|
-| **What it stores** | Conversations | Engineering decisions |
-| **Scope** | Personal | Project decisions (org-wide rules in Contexer Teams) |
-| **Persistence** | Session history | Cross-session |
-| **History** | n/a | Versioned - full history preserved, latest approved replayed |
-| **Focus** | Chat focused | Human approved |
-| **Awareness** | n/a | Architecture aware |
-| **Reach** | Single tool | Works across repositories |
-| **Agents** | One assistant | Shared across AI coding agents |
-| **Governance** | No governance | Human-approved decisions |
-
-> AI assistants remember conversations. Contexer remembers what your engineering organization decided.
-
-> [!NOTE]
-> **Contexer doesn't replace your documentation. It complements it.**
->
-> README.md, CLAUDE.md and AGENTS.md remain the canonical documentation and instruction files. Contexer continuously captures engineering knowledge that can later be promoted into permanent documentation, Architecture Decision Records (ADRs), README.md or CLAUDE.md after review.
-
----
-
-## Use Cases
-
-### Never Explain Your Architecture Twice
-
-Your AI already knows your architecture decisions.
-
-### Keep Every AI Coding Assistant Consistent
-
-Claude, Cursor, Codex and Gemini all start with the same engineering knowledge.
-
-### Build Shared Team Knowledge
-
-Capture engineering decisions once. Reuse them across the entire team.
-
-### Onboard Engineers Faster
-
-New developers instantly understand historical architecture decisions.
-
-### Preserve Tribal Knowledge
-
-Engineering decisions no longer disappear inside AI conversations.
+| Who writes it | You, by hand | Written for you: the repo is scanned and measured on first use; decisions are captured as you work |
+| How many to maintain | One per tool, per repo — CLAUDE.md, AGENTS.md, `.cursor/rules`, GEMINI.md — and the copies drift apart | Zero files. One store serves every tool and repo |
+| Who keeps it current | You. Nobody does — files decay | Every decision is stored the moment it's made, with the reasoning |
+| When it's wrong or outdated | Silently misleads every session | Changes need your approval; full version history of every decision is kept |
+| "Why did we build it this way?" | Answered only if someone wrote it down that day | The stored decision includes the reasoning, and the AI is handed it before answering |
+| Which tools benefit | Only the tool that reads that file | Claude Code, Cursor, Codex, and Gemini CLI — one store, captured once, known everywhere |
+| Long sessions | Knowledge the AI dug up is lost when the conversation is compressed | Restored automatically after compression |
+| What it costs when nothing is relevant | The whole file is loaded every session regardless | Nothing loads except your always-on rules (~26 tokens each); lookups add milliseconds |
+| Your team | Everyone maintains their own copy | One shared, approved source across the team (Teams, early access) |
 
 ---
 
@@ -166,300 +106,47 @@ Engineering decisions no longer disappear inside AI conversations.
 Requires **Python 3.12+** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**. Under two minutes.
 
 ```bash
-# Step 1: install
-uv tool install contexer
-
-# Step 2: wire into your AI assistant
-contexer install
+uv tool install contexer   # 1. install
+contexer install           # 2. wire into your AI assistants
 ```
 
-`contexer install` auto-detects which tools are present (`~/.claude` → Claude Code, `~/.cursor` → Cursor, `~/.codex` → Codex, `~/.gemini` → Gemini CLI) and wires all of them. Pass `--target claude`, `--target cursor`, `--target codex`, `--target gemini`, or `--target all` to override.
+`contexer install` auto-detects Claude Code, Cursor, Codex, and Gemini CLI, and wires everything it finds. Restart your assistant, open any git repo — on first use, Contexer analyzes the repo and proposes its starting knowledge. It runs silently from there.
 
-Restart your AI assistant and open any git repo. Contexer runs silently from here.
-
-See **[docs/install.md](docs/install.md)** for verification, update, and uninstall steps.
+Details: **[installation & verification](docs/install.md)** · **[per-tool integration notes](docs/integrations.md)**
 
 ---
 
 ## How it works
 
-```
-1. Developer works with AI
-        ↓
-2. Contexer detects engineering decisions
-        ↓
-3. Bootstrap asks authoritative questions when needed
-        ↓
-4. Approved decisions are stored locally
-        ↓
-5. Future AI sessions automatically replay relevant engineering knowledge
-```
+Contexer captures four kinds of engineering knowledge — **constraints** ("never merge untested code"), **conventions** ("uv, not pip"), **architecture decisions** ("REST over GraphQL, here's why"), and **patterns** — and replays them at the right moment: rules load at session start; architecture and rationale are fetched on demand the instant a question needs them.
 
-### What gets captured
-
-Contexer continuously captures engineering knowledge as you work:
-
-- **Architecture decisions**: structural choices that shape the system
-- **Constraints**: rules that must always apply
-- **Conventions**: team or project standards
-- **Patterns**: recurring implementation approaches
-
-| Type | What it captures | Loaded at session start |
-|---|---|---|
-| `constraint` | Rules that must always apply ("never merge untested code") | Yes, always |
-| `convention` | Team or project standards ("use uv not pip", "conventional commits") | Yes, always |
-| `architecture` | Structural decisions ("chose REST over GraphQL") | No, fetched on demand |
-| `pattern` | Recurring implementation approaches | No, fetched on demand |
-
-Constraints and conventions load every session because they apply to every task. Architecture and pattern decisions are fetched on demand when you ask about rationale, design, or past decisions.
-
-Capture is two-track, and you stay in control of both:
-
-- Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook — no model guesswork, no decision stored behind your back.
-- Everything else relies on the agent noticing a decision and calling the store tool. That is best-effort by design; when the agent misses one, say *"store that decision"* and it's captured immediately.
-
-### Bootstrap: establishing trusted knowledge
-
-When Contexer is used on a repository for the first time, it analyzes the project and proposes a small set of engineering questions.
-
-Examples:
-
-- Should infrastructure always be deployed with Terraform?
-- Is PostgreSQL the standard database?
-- Are deployments multi-cloud?
-
-Developers confirm or refine the answers. These approved decisions become the initial engineering knowledge for the repository.
-
-The offer adapts to how well you know the repo, judged from its git history:
-
-- The repo has commits from you → pick **quick** (one question) or **full** (guided setup).
-- No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs to propose decisions instead of asking questions you can't answer.
-- Can't tell → it simply asks how well you know the repo.
-
-**Resumed sessions** (Claude Code's `--resume` / `--continue`) don't repeat any of this. The context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes the agent mine that conversation for decisions already made and store them, no questions asked.
-
-### At session start
-
-At session start, a hook injects your stored constraints and conventions before you type anything. The injected block looks roughly like this:
+You drive it in plain English:
 
 ```
-## Project rules - apply to ALL tasks in this repo:
-- [convention] Use uv, not pip, for all dependency management
-- [constraint] Never commit untested code - CI blocks merges below coverage
-2 architecture decision(s) stored. Call get_context before reading files
-for questions about architecture, design, or rationale.
-```
-
-Ask about a past decision or rationale ("why did we pick REST?") and Contexer fetches the matching entries automatically, before the agent responds.
-
-### Under the hood
-
-Contexer is wired in through two mechanisms: **MCP tools** the agent can call (to store and fetch decisions) and **editor hooks** the host runs around your session (to inject context and capture directives). You work normally; most of it is invisible.
-
-**Deduplication is not an LLM call.** Before storing, Contexer checks token overlap against existing decisions. Over 70% overlap is treated as a duplicate and silently dropped. It's deterministic, costs no tokens, and is why you can "over-call" store without bloating anything.
-
-Everything lives as plain JSON in `~/.contexer/` on your own machine. Nothing about your code or decisions leaves your machine. The only network call Contexer makes is an optional version check against PyPI, which you can turn off.
-
----
-
-## Cost
-
-Contexer's cost is fixed and predictable: roughly **26 tokens per rule** at session start, paid only for constraints and conventions. Architecture and pattern decisions cost nothing until something actually needs them.
-
-| Pre-loaded rules | Approx. tokens at session start |
-|---|---|
-| 5 | ~125 |
-| 10 | ~250 |
-| 25 | ~625 |
-
-Paid once per session. Every later prompt adds nothing. On prompts unrelated to anything stored, Contexer skips entirely: no read, no tokens. Store lookups are sub-millisecond and run before the response is generated, so they add nothing to response time.
-
-The point isn't token compression. It's **eliminated rework across sessions**. The recurring, unpredictable cost of re-explaining rules and correcting re-introduced patterns is replaced by a small, flat, session-start cost.
-
-Shorter sessions. Lower cost. No lost engineering knowledge.
-
----
-
-## Managing decisions
-
-Everything uses natural language.
-
-### Store a decision
-
-```
-"store that as a constraint"
 "save this as a convention: always use uv not pip"
-"remember this architecture decision"
-```
-
-Global decisions apply across all repos. Use them for commit style, branch naming, or anything that travels with you:
-
-```
-"store that globally as a convention"
-"save this as a global constraint: always use conventional commits"
-```
-
-Only `constraint` and `convention` types can be stored globally. Architecture and pattern decisions are always repo-specific.
-
-### Query decisions
-
-```
-"show me all constraints"
 "what decisions did we make about postgres?"
-"show everything stored for this repo"
+"store that globally: conventional commits everywhere"
 ```
 
-### Review pending decisions
+Trust is explicit: AI-*proposed* decisions are held for your review (`contexer review`) and never reach a session until you approve them. Approved decisions are versioned — history preserved, latest approved revision replayed. Cost is flat and tiny (roughly 26 tokens per rule at session start, nothing on unrelated prompts).
 
-AI-proposed architecture and constraint decisions - and any change to a decision you have already approved - are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them. Review them whenever you like:
+Deep dive: **[how it works](docs/how-it-works.md)** · **[day-to-day usage & CLI](docs/usage.md)**
 
-```bash
-contexer review
-```
+### Honest limits
 
-For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
-
-Approved decisions are versioned: a change never overwrites the previous value - it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
-
-### Update or remove
-
-```
-"update the uv decision - we switched back to pip"
-"delete the postgres decision"
-"remove all outdated constraints"
-```
-
-The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
+Capture beyond outright directives is best-effort (the *"store that decision"* escape hatch exists for a reason); Cursor's hook model limits per-prompt injection there; the OSS store is per-developer, not shared. Full list, published on purpose: **[limitations](docs/usage.md#limitations-read-this--we-publish-them-on-purpose)**.
 
 ---
 
-## Use with Cursor (1.7+)
+## Documentation
 
-```bash
-contexer install --target cursor   # or: contexer install (auto-detects ~/.cursor)
-```
-
-This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor hook events in `~/.cursor/hooks.json`:
-
-- `sessionStart`: injects your stored project rules and a usage nudge, and drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
-- `beforeSubmitPrompt`: silently captures your task and any "always / never / don't / create a rule" directives.
-
-The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to call Contexer's `get_context` before reading files for architecture/"why" questions, and to save rules via `update_context` rather than writing native `.cursor/rules` files.
-
-The first time Cursor calls a Contexer tool it asks you to approve it. Contexer does not pre-approve its own MCP tools for you.
-
-**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The core value (automatic session-start injection of your stored rules) works identically to Claude Code.
-
----
-
-## Use with Codex
-
-```bash
-contexer install --target codex   # or: contexer install (auto-detects ~/.codex)
-```
-
-This registers Contexer's MCP server in `~/.codex/config.toml` (under `[mcp_servers.contexer]`) and wires hooks in `~/.codex/hooks.json`. The `config.toml` edit is surgical: only the contexer stanza is added or removed, so your existing servers, plugins, projects, and secrets are left untouched.
-
-Codex's hooks use the same events as Claude Code (`SessionStart`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`), so Contexer runs at **full Claude parity** there: automatic session-start injection, per-prompt rationale and constraint capture, post-edit reminders, and context reload after compaction all work.
-
-The first time Codex calls a Contexer tool it asks you to approve it. Contexer does not pre-approve its own MCP tools for you.
-
----
-
-## Use with Gemini CLI
-
-```bash
-contexer install --target gemini   # or: contexer install (auto-detects ~/.gemini)
-```
-
-This adds Contexer's MCP server and managed hooks to `~/.gemini/settings.json`, preserving all existing settings, MCP servers, and user hooks. Gemini CLI will ask you to trust the new hooks after installation.
-
-The adapter uses Gemini's native `SessionStart`, `BeforeAgent`, `AfterTool`, `PreCompress`, and `SessionEnd` events. Session rules, first-prompt task capture, deterministic constraint capture, rationale lookup, and post-edit reminders are supported. The `AfterTool` hook matches Gemini's `write_file` and `replace` tools.
-
-**Parity note:** Gemini's `PreCompress` hook is asynchronous and advisory, and Gemini has no `PostCompress` event. Contexer therefore flags the compression and re-injects full context at the next `BeforeAgent` event. This restores context on the next turn, but cannot force Gemini to save an unsaved decision immediately before compression.
-
----
-
-## Why it stays lightweight
-
-Contexer is a single Python MCP server with a plain JSON store. No background worker. No vector database. No port listening. No infrastructure to maintain.
-
-This is intentional. Every piece of complexity added to a decision store is a piece of complexity that can fail, drift, or accumulate noise. Contexer stores only what matters (engineering decisions) and keeps everything inspectable, auditable, and greppable.
-
----
-
-## Contexer Teams (early access)
-
-The open-source Contexer is per-developer. **Contexer Teams** makes your team's engineering and security standards **present in every AI agent** — the same engine, one shared, governed source of truth across the org.
-
-- **Publish once, present everywhere.** Your security or platform team sets a rule — *"no plaintext secrets in code"*, *"all PII encrypted at rest"* — and every developer's AI agent starts with it, in every repo and every tool, *before the code is written*.
-- **Standards travel to the point of work.** A team's conventions reach any developer the moment they open that repo in their agent — not buried in a wiki no one reads.
-- **Governed and auditable.** Rules are centrally owned, lead-approved, and versioned — who decided what, when, and why. The trail compliance needs and onboarding lives on.
-
-A few people publish the rules; everyone else's agent just consumes them — no team-wide capture discipline required.
-
-> [!NOTE]
-> **Contexer steers, it doesn't enforce — and that distinction matters.**
-> It reliably *tells* every agent your standards at the moment it writes code — the leftmost shift, fewer violations at the source. It does **not** scan code, block commits, or guarantee compliance; your CI, secret scanners, and PR gates still verify and enforce. Contexer makes agents *aware*; it complements your gates, it doesn't replace them.
-
-→ **[Request early access at contexer.ai](https://contexer.ai)** — design-partner teams.
-
-### Connecting to a team
-
-Once you have access, joining a team is two commands — nothing to hand-edit:
-
-```bash
-contexer install     # local setup (same as above)
-contexer login       # opens your browser to sign in; enables team sync
-```
-
-`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you. After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up (`contexer share --all` pushes every non-ignored decision, oldest first). `contexer logout` disconnects.
-
-Pointing at a self-hosted or local Teams server (for development): set `CONTEXER_ENV=local` before `contexer login`, or pass `contexer login --endpoint <url>`.
-
----
-
-## Limitations
-
-- **Personal, not team.** The open-source store is per-user, per-machine — shared rules don't propagate between developers. Team sync, org-wide rules, and governance live in **Contexer Teams** (early access — see above).
-- **Cursor parity is partial.** Cursor's `beforeSubmitPrompt` hook can't inject context (only allow/block) and it has no usable compaction hook, so per-prompt rationale injection and compaction save/restore are unavailable there. Cursor steering rides on the session-start nudge plus an always-apply rule file.
-- **Gemini compression is deferred.** Gemini CLI has `PreCompress` but no `PostCompress`; Contexer re-injects stored context at the next prompt rather than immediately after compression.
-- **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch.
-- **Soft storage cap.** Up to 500 entries per repo; beyond that, the least-reinforced decisions are evicted. There's no automatic staleness pruning. Outdated decisions stay until you remove them.
-- **One network call.** `contexer status` checks PyPI for a newer version. Disable with `CONTEXER_NO_UPDATE_CHECK=1`. Nothing else leaves your machine.
-
----
-
-## CLI reference
-
-| Command | Description |
+| | |
 |---|---|
-| `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, Codex, and/or Gemini CLI) |
-| `contexer install --target claude\|cursor\|codex\|gemini\|all` | Install for a specific tool only, or all |
-| `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each |
-| `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
-| `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
-| `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |
-| `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
-| `contexer reinstall` | Re-sync after an AI assistant update |
-| `contexer uninstall` | Disconnect; context store is kept |
-| `contexer uninstall --purge` | Remove everything including `~/.contexer/` |
-| `contexer version` | Print installed version |
-| `contexer help` | Show all commands and flags |
-
----
-
-## Troubleshooting
-
-**The agent isn't storing decisions automatically.** Say *"store that decision"* and it is captured immediately.
-
-**A decision was stored but isn't appearing.** Constraints and conventions load at session start. If added mid-session, they appear from the next session onward.
-
-**A decision is outdated or wrong.** Say *"delete the X decision"* or edit the store file directly at `~/.contexer/`.
-
-**A new decision wasn't saved. Looks like a duplicate.** Content too similar to an existing decision is silently skipped. Rephrase to include what specifically changed.
-
-**No context appeared at session start on a new repo.** The agent will offer bootstrap setup. Complete it once and all future sessions will have context.
+| **[Installation](docs/install.md)** | Install, verify, update, uninstall |
+| **[Integrations](docs/integrations.md)** | Claude Code, Cursor, Codex, Gemini CLI — wiring and parity notes |
+| **[How it works](docs/how-it-works.md)** | Capture, bootstrap, session injection, review/versioning, cost, privacy |
+| **[Usage & CLI](docs/usage.md)** | Natural-language commands, CLI reference, teams login, troubleshooting, limitations |
+| **[Benchmark](docs/benchmark.md)** | Live-session A/B methodology, findings (including negative ones), raw data |
 
 ---
 
@@ -469,15 +156,9 @@ If Contexer saves you re-explanation time, a star helps others find it. It takes
 
 [![Star History Chart](https://api.star-history.com/svg?repos=bhargavamin/contexer&type=Date)](https://star-history.com/#bhargavamin/contexer&Date)
 
----
-
 ## Contributing
 
-Bug reports, fixes, and documentation improvements are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, code style, and the PR process.
-
-Questions or ideas? Join the community on [Discord](https://discord.gg/Fk6JSaW4p).
-
----
+Bug reports, fixes, and documentation improvements are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, code style, and the PR process. Questions or ideas? Join the community on [Discord](https://discord.gg/Fk6JSaW4p).
 
 ## License
 
@@ -487,4 +168,4 @@ The Contexer name and logo are trademarks of Contexer.ai. The MIT license does n
 
 ---
 
-Contexer is **not a chat memory tool.** It is **the engineering decision layer for AI coding agents**, capturing architecture decisions, constraints, conventions, and patterns so engineering knowledge becomes a shared organizational asset instead of disappearing inside AI conversations.
+Contexer is **not a chat memory tool**. It is **the engineering decision layer for AI coding agents** — capturing architecture decisions, constraints, conventions, and patterns so engineering knowledge becomes a shared organizational asset instead of disappearing inside AI conversations.
