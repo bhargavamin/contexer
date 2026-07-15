@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-5",
+  "seed": 0,
+  "reps": 1,
+  "conditions": [
+    "without",
+    "with"
+  ],
+  "contexer_sources": {},
+  "managed_settings_present": false,
+  "started_at": "2026-07-15T17:52:07.116096+00:00"
+}
