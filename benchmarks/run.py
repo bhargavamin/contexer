@@ -233,7 +233,9 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
 
 def _fresh(td: Path, golden: Path, tag: str):
     work, home = td / f"w-{tag}", td / f"h-{tag}"
-    shutil.copytree(golden, work)
+    # ignore transient git-gc pack files: they can vanish between listing and copy
+    shutil.copytree(golden, work, ignore=shutil.ignore_patterns(
+        "tmp_pack_*", "tmp_idx_*", "tmp_rev_*", "tmp_mtimes_*"))
     home.mkdir()
     # resolve(): macOS TemporaryDirectory lives under /var/folders, a symlink to
     # /private/var. The SessionStart hook slugs the repo via `git rev-parse
