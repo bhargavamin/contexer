@@ -1364,20 +1364,21 @@ class TestSanitizeDirective:
 
 class TestCaptureUserConstraint:
     def test_stores_always_directive_as_constraint(self, tmp_repo):
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             tmp_repo,
             "ensure terraform always stores state on s3 with dynamodb locking",
             "sess-1",
         )
         assert entry_id is not None
         assert content
+        assert status == "approved"
         data = store._load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == 1
         assert decisions[0]["subtype"] == "constraint"
 
     def test_stores_never_directive_as_constraint(self, tmp_repo):
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             tmp_repo, "never push secrets or credentials to the repository", "sess-1"
         )
         assert entry_id is not None
@@ -1386,22 +1387,23 @@ class TestCaptureUserConstraint:
         assert decisions[0]["subtype"] == "constraint"
 
     def test_non_directive_prompt_returns_none(self, tmp_repo):
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             tmp_repo, "write tests for the authentication module", "sess-1"
         )
         assert entry_id is None
         assert content is None
+        assert status is None
         data = store._load(tmp_repo)
         assert data["entries"] == []
 
     def test_question_prompt_returns_none(self, tmp_repo):
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             tmp_repo, "should we always use s3 for terraform state?", "sess-1"
         )
         assert entry_id is None
 
     def test_personal_descriptive_returns_none(self, tmp_repo):
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             tmp_repo, "I always get a permission error when running this", "sess-1"
         )
         assert entry_id is None
@@ -1410,7 +1412,7 @@ class TestCaptureUserConstraint:
         store.capture_user_constraint(
             tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-1"
         )
-        entry_id, content = store.capture_user_constraint(
+        entry_id, content, status = store.capture_user_constraint(
             tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-2"
         )
         assert entry_id is None
@@ -1432,7 +1434,7 @@ class TestCaptureUserConstraint:
         # it must not be stored (previously it was truncated to 600c and kept, which
         # crowded the store with pasted prompts).
         long_prompt = "always " + "x" * 700
-        entry_id, content = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
+        entry_id, content, status = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
         assert entry_id is None
         assert store._load(tmp_repo)["entries"] == []
 
@@ -2495,6 +2497,151 @@ class TestCaptureUserConstraintFields:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "approved"
         assert entry["created_by"] == "human"
+
+
+# ── deictic constraint scope (decision ceb955f5) ───────────────────────────────
+# A prescriptive directive that leans on a conversation-local pronoun (this/that/these/
+# those/it/here) is a strong signal of session-scoped intent, not a standing rule.
+# It is still stored (never dropped) but as pending_approval, not auto-trusted.
+
+class TestDeicticConstraintScope:
+    @pytest.mark.parametrize("prompt", [
+        # Three live misfires from 2026-07-15.
+        "I'm not going to accept any performance degradation so ensure you clarify "
+        "and ensure this feature is actual improvement",
+        'It could be "Dogfood for you agents so that they stop overdoing, repeating '
+        'and waisting time and tokens."',
+        "It could be beautiful nudges for you ai agents to stop wondering and "
+        "overthinking same issue. something likethat",
+        # Greptile #125 P1: unresolved mid-directive pronoun must not be trusted.
+        "always apply it before deployment",
+        # Greptile #125 P2 counter-case: mid-directive here is conversation-local.
+        "the pattern used here must always be followed",
+    ])
+    def test_deictic_directive_stored_pending_not_trusted(self, tmp_repo, prompt):
+        entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert entry_id is not None, f"must still be stored: {prompt!r}"
+        assert status == "pending_approval"
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == entry_id)
+        assert entry["status"] == "pending_approval"
+        assert entry["created_by"] == "human"  # provenance unchanged by the deictic check
+
+    @pytest.mark.parametrize("prompt", [
+        "always use uv not pip",
+        "never log request data",
+        "from now on use conventional commits for every commit",
+        "never commit code that fails lint",
+        "make it a rule to run tests before pushing",
+        "always ensure that migrations are reversible",
+        "always use uv for this repo",
+        # Greptile #125 P2: trailing here scopes the rule to the repo — durable.
+        "always use uv here",
+        "never push directly to main here.",
+    ])
+    def test_clean_directive_remains_trusted(self, tmp_repo, prompt):
+        entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert entry_id is not None, f"must be stored trusted: {prompt!r}"
+        assert status == "approved"
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == entry_id)
+        assert entry["status"] == "approved"
+
+    def test_it_inside_word_does_not_trigger_pending(self, tmp_repo):
+        # "git" contains "it" as a substring but not as a standalone word.
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "always run git fetch before rebasing", "s1")
+        assert entry_id is not None
+        assert status == "approved"
+
+    def test_deictic_capture_does_not_arm_pending_review_flag(self, tmp_repo):
+        # Fix 5: the in-band ack already notifies; a second deferred nudge would double up.
+        store.capture_user_constraint(
+            tmp_repo,
+            "I'm not going to accept any performance degradation so ensure you clarify "
+            "and ensure this feature is actual improvement",
+            "s1",
+        )
+        assert not store._pending_review_flag(tmp_repo).exists()
+
+    def test_deictic_pending_surfaces_in_review_pending(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "I'm not going to accept any performance degradation so ensure you clarify "
+            "and ensure this feature is actual improvement",
+            "s1",
+        )
+        pending = store.get_pending_decisions(tmp_repo)
+        assert any(e["id"] == entry_id for e in pending)
+
+
+class TestDeicticCleanRestatementPromotion:
+    """Fix 2: a clean (non-deictic) restatement that overlaps its own pending twin promotes
+    it to approved in place, instead of being silently dropped as a duplicate."""
+
+    _DEICTIC = "always validate this feature before shipping"
+    _CLEAN = "always validate the feature before shipping"
+
+    def test_pending_then_clean_restatement_promotes_to_approved(self, tmp_repo):
+        eid, _, status = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
+        assert status == "pending_approval"
+
+        eid2, content2, status2 = store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")
+        assert eid2 == eid, "promotion amends the same decision, not a new one"
+        assert status2 == "promoted"
+        assert "the feature" in content2.lower()
+
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert "the feature" in entry["content"].lower()
+        assert entry["occurrence_count"] == 2
+
+    def test_promoted_entry_injected_at_session_start(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
+        store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")
+        payload = store.session_start_payload(tmp_repo)
+        assert "the feature" in payload["context"].lower()
+
+    def test_deictic_restatement_of_pending_twin_stays_silent_noop(self, tmp_repo):
+        eid, _, _ = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
+        eid2, content2, status2 = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s2")
+        assert (eid2, content2, status2) == (None, None, None)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "pending_approval"
+        assert entry["occurrence_count"] == 1
+
+    def test_clean_restatement_of_already_approved_entry_stays_silent_noop(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
+        store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")  # promotes -> approved
+        eid3, content3, status3 = store.capture_user_constraint(tmp_repo, self._CLEAN, "s3")
+        assert (eid3, content3, status3) == (None, None, None)
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["type"] == "decision")
+        assert entry["occurrence_count"] == 2, "no further bump on an ordinary duplicate"
+
+
+class TestDeicticIgnoredTombstoneDoesNotBlock:
+    """Fix 3: an entry the developer ignored via review must not block a re-typed rule."""
+
+    _DEICTIC = "always validate this feature before shipping"
+    _CLEAN = "always validate the feature before shipping"
+
+    def test_reretype_after_ignore_stores_fresh_as_approved(self, tmp_repo):
+        eid, _, status = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
+        assert status == "pending_approval"
+        store.approve_decision(tmp_repo, eid, "ignore")
+        data = store._load(tmp_repo)
+        assert next(e for e in data["entries"] if e["id"] == eid)["status"] == "ignored"
+
+        eid2, content2, status2 = store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")
+        assert eid2 is not None and eid2 != eid, "re-typed rule lands as a fresh entry"
+        assert status2 == "approved"
+        data = store._load(tmp_repo)
+        fresh = next(e for e in data["entries"] if e["id"] == eid2)
+        assert fresh["status"] == "approved"
+        ignored = next(e for e in data["entries"] if e["id"] == eid)
+        assert ignored["status"] == "ignored", "the tombstone itself is untouched"
 
 
 class TestReviewPendingAndSharePreview:
