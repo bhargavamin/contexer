@@ -2513,6 +2513,10 @@ class TestDeicticConstraintScope:
         'and waisting time and tokens."',
         "It could be beautiful nudges for you ai agents to stop wondering and "
         "overthinking same issue. something likethat",
+        # Greptile #125 P1: unresolved mid-directive pronoun must not be trusted.
+        "always apply it before deployment",
+        # Greptile #125 P2 counter-case: mid-directive here is conversation-local.
+        "the pattern used here must always be followed",
     ])
     def test_deictic_directive_stored_pending_not_trusted(self, tmp_repo, prompt):
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
@@ -2531,6 +2535,9 @@ class TestDeicticConstraintScope:
         "make it a rule to run tests before pushing",
         "always ensure that migrations are reversible",
         "always use uv for this repo",
+        # Greptile #125 P2: trailing here scopes the rule to the repo — durable.
+        "always use uv here",
+        "never push directly to main here.",
     ])
     def test_clean_directive_remains_trusted(self, tmp_repo, prompt):
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")

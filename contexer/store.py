@@ -692,21 +692,22 @@ _SYSTEM_TEXT_PREFIXES = (
 # (never dropped), just not auto-trusted. Narrowly scoped to avoid v1's false positives:
 #  - this/these/those, UNLESS immediately scoping the rule to the store itself
 #    ("this repo/project/repository/codebase" is a legitimate standing rule).
-#  - "it" ONLY when directive-initial (^it) — real misfires ("It could be...") all lead
-#    with it; mid-sentence "it" ("make it a rule", "keep it consistent") is ordinary
-#    English, not deictic.
-#  - here.
+#  - "it", UNLESS inside the self-resolving idiom "make it a <rule/convention/...>" —
+#    an unresolved pronoun ("always apply it before deployment") only this conversation
+#    can resolve must not become a trusted rule (fail toward review, not silent trust).
+#  - "here", UNLESS trailing — "always use uv here" means "in this repo" (durable,
+#    like the this-repo exemption); only a mid-directive here is conversation-local.
 # Bare "that" is dropped entirely: relative/complementizer uses ("code that fails",
 # "ensure that X") dominate and are never deictic.
 _DEICTIC_THIS_THESE_THOSE = re.compile(
     r"\b(?:this|these|those)\b(?!\s+(?:repo|repository|project|codebase)\b)", re.IGNORECASE)
-_DEICTIC_INITIAL_IT = re.compile(r"^\s*it\b", re.IGNORECASE)
-_DEICTIC_HERE = re.compile(r"\bhere\b", re.IGNORECASE)
+_DEICTIC_IT = re.compile(r"(?<!make\s)\bit\b(?!\s+a\s+\w)", re.IGNORECASE)
+_DEICTIC_HERE = re.compile(r"\bhere\b(?!\W*$)", re.IGNORECASE)
 
 
 def _is_deictic(content: str) -> bool:
     """True if `content` carries a conversation-local referent (see _DEICTIC_* above)."""
-    return bool(_DEICTIC_INITIAL_IT.search(content)
+    return bool(_DEICTIC_IT.search(content)
                 or _DEICTIC_HERE.search(content)
                 or _DEICTIC_THIS_THESE_THOSE.search(content))
 
