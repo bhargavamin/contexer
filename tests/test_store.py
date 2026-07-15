@@ -2644,6 +2644,139 @@ class TestDeicticIgnoredTombstoneDoesNotBlock:
         assert ignored["status"] == "ignored", "the tombstone itself is untouched"
 
 
+class TestContainmentCapture:
+    """Containment-aware routing in capture_user_constraint: a superset restatement of a
+    stored rule (high |∩|/min, low |∩|/max) consolidates onto the existing entry instead
+    of accumulating. _overlap_ratio/_find_match are untouched — bootstrap idempotence,
+    memory sync, and team dedup depend on the max-denominator metric as-is."""
+
+    # The real user-reported scenario, verbatim (typo kept on purpose).
+    _SEED_LONG = "Always ensure you commit changes on approval"
+    _SEED_SHORT = "Always commit automatically"
+    _SUPERSET = "Always commit automatically after approvals and ensure you double cfonirm"
+
+    def test_real_three_constraint_scenario_becomes_suggested_update(self, tmp_repo):
+        eid1, _, st1 = store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid2, _, st2 = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        assert st1 == st2 == "approved"
+
+        near: list = []
+        eid3, content3, status3 = store.capture_user_constraint(
+            tmp_repo, self._SUPERSET, "s2", near)
+        assert status3 == "revision_proposed"
+        assert eid3 == eid2, "routed onto the contained entry, not stored as a third"
+        assert near == [], "no near-miss note on a containment hit"
+
+        data = store._load(tmp_repo)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+        assert len(decisions) == 2, "NO new overlapping entry"
+        target = next(e for e in decisions if e["id"] == eid2)
+        prop = target.get("proposed_revision")
+        assert prop and "cfonirm" in prop["content"]
+        assert target["content"] == self._SEED_SHORT, "trusted revision never replaced silently"
+        assert target["status"] == "approved"
+
+        ack = store.constraint_ack(content3, status3, eid3, near)
+        assert "suggested update" in ack.lower()
+        assert eid2[:8] in ack
+        assert "do not approve it yourself" in ack.lower()
+
+    def test_approving_the_proposal_promotes_to_new_revision(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
+        ok, msg = store.approve_decision(tmp_repo, eid2, "approve")
+        assert ok
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid2)
+        assert entry["revision"] == 2
+        assert "cfonirm" in entry["content"]
+
+    def test_superset_capture_is_idempotent(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
+        eid3b, _, status3b = store.capture_user_constraint(tmp_repo, self._SUPERSET, "s3")
+        # Repeat lands on the same entry; the identical proposal is not re-attached.
+        assert (eid3b, status3b) == (eid2, "revision_proposed")
+        data = store._load(tmp_repo)
+        assert len([e for e in data["entries"] if e["type"] == "decision"]) == 2
+
+    def test_pending_twin_clean_superset_promotes_with_new_content(self, tmp_repo):
+        eid, _, st = store.capture_user_constraint(
+            tmp_repo, "always validate this feature before shipping", "s1")
+        assert st == "pending_approval"
+        eid2, content2, status2 = store.capture_user_constraint(
+            tmp_repo,
+            "always validate the feature before shipping and run the full smoke suite",
+            "s2")
+        assert eid2 == eid
+        assert status2 == "promoted"
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert "smoke suite" in entry["content"]
+        assert entry["revision"] == 2, "promotion appends a revision (history preserved)"
+
+    def test_pending_twin_deictic_superset_amends_in_place_stays_pending(self, tmp_repo):
+        eid, _, _ = store.capture_user_constraint(
+            tmp_repo, "always validate this feature before shipping", "s1")
+        eid2, content2, status2 = store.capture_user_constraint(
+            tmp_repo,
+            "always validate this feature before shipping and update it in the changelog",
+            "s2")
+        assert eid2 == eid
+        assert status2 == "pending_approval"
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "pending_approval"
+        assert "changelog" in entry["content"]
+        assert entry["revision"] == 1, "pre-approval amend rewrites v1, no new revision"
+
+    def test_pending_twin_shorter_clean_promotes_keeping_fuller_content(self, tmp_repo):
+        eid, _, st = store.capture_user_constraint(
+            tmp_repo,
+            "always validate this feature before shipping to production environments", "s1")
+        assert st == "pending_approval"
+        eid2, content2, status2 = store.capture_user_constraint(
+            tmp_repo, "always validate before shipping", "s2")
+        assert eid2 == eid
+        assert status2 == "promoted"
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert "production environments" in entry["content"], "fuller content kept"
+
+    def test_shorter_clean_restatement_of_approved_is_recurrence(self, tmp_repo):
+        eid, _, st = store.capture_user_constraint(
+            tmp_repo, "Always run the full integration suite before merging to main", "s1")
+        assert st == "approved"
+        result = store.capture_user_constraint(
+            tmp_repo, "Always run the full integration suite", "s2")
+        assert result == (None, None, None), "silent no-op like today's dup case"
+        data = store._load(tmp_repo)
+        decisions = [e for e in data["entries"] if e["type"] == "decision"]
+        assert len(decisions) == 1, "recurrence of the existing rule, not a new entry"
+        assert decisions[0]["occurrence_count"] == 2
+
+    def test_synonym_phrasings_remain_two_entries(self, tmp_repo):
+        # Pinned as the documented limitation: dedup is lexical, so the same rule in
+        # different words stays separate — surfaced via the near-miss ack, merged manually.
+        eid1, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        assert eid1 is not None and eid2 is not None and eid1 != eid2
+        data = store._load(tmp_repo)
+        assert len([e for e in data["entries"] if e["type"] == "decision"]) == 2
+
+    def test_near_miss_listed_in_ack_for_developer_confirmed_consolidation(self, tmp_repo):
+        eid1, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        near: list = []
+        eid2, content2, status2 = store.capture_user_constraint(
+            tmp_repo, self._SEED_SHORT, "s1", near)
+        assert status2 == "approved"
+        assert len(near) == 1 and eid1[:8] in near[0]
+        ack = store.constraint_ack(content2, status2, eid2, near)
+        assert eid1[:8] in ack
+        assert "confirms" in ack.lower(), "consolidation gated on developer confirmation"
+        assert "never merge on your own" in ack.lower()
+
+
 class TestReviewPendingAndSharePreview:
     """Direct coverage for the on-demand review list and the cloud-push dry-run preview."""
 
