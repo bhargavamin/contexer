@@ -1348,6 +1348,68 @@ def format_pending_review(repo_path: str) -> str:
     return "\n".join(lines)
 
 
+# Overlap-report thresholds. Pairwise is deliberately looser than the 0.7 novelty
+# bar: the report surfaces rules the dedup filter let coexist. Containment catches a
+# short rule swallowed by a longer restatement (|∩|/min), which the max-based
+# pairwise ratio structurally under-scores.
+_REPORT_PAIRWISE = 0.35
+_REPORT_CONTAINMENT = 0.7
+
+
+def overlap_report(repo_path: str) -> list[list[dict]]:
+    """Clusters of active constraint/convention decisions whose contents overlap enough
+    to plausibly say the same thing — surfaced for MANUAL consolidation. Pure read:
+    never merges, never deletes, never writes. Fail-soft: returns [] on any error.
+
+    Two rules are linked when token overlap (_overlap_ratio) >= _REPORT_PAIRWISE or
+    containment |∩|/min >= _REPORT_CONTAINMENT; clusters are the transitive closure
+    (union-find), so A~C plus B~C groups all three even if A and B miss directly.
+    Only clusters of size >= 2 are returned."""
+    try:
+        entries = [
+            e for e in _load(repo_path).get("entries", [])
+            if e.get("type") == "decision"
+            and e.get("subtype") in ("constraint", "convention")
+            and _entry_status(e) in ("approved", "suggested", "pending_approval")
+        ]
+        toks = [_tokenize(_current_content(e)) for e in entries]
+        n = len(entries)
+
+        parent = list(range(n))
+
+        def _find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(n):
+            if not toks[i]:
+                continue
+            for j in range(i + 1, n):
+                if not toks[j]:
+                    continue
+                inter = len(toks[i] & toks[j])
+                lo = min(len(toks[i]), len(toks[j]))
+                if (_overlap_ratio(toks[i], toks[j]) >= _REPORT_PAIRWISE
+                        or inter / lo >= _REPORT_CONTAINMENT):
+                    parent[_find(i)] = _find(j)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(n):
+            groups.setdefault(_find(i), []).append(i)
+
+        return [
+            [{"id": (entries[i].get("id") or "")[:8],
+              "subtype": entries[i].get("subtype", ""),
+              "status": _entry_status(entries[i]),
+              "content": _current_content(entries[i])} for i in members]
+            for members in groups.values() if len(members) >= 2
+        ]
+    except Exception:
+        return []
+
+
 def _share_projection(entry: dict) -> dict:
     """Project a decision entry onto the push wire shape {id, type, content, confidence,
     evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
