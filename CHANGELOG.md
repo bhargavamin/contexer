@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.22.0](https://github.com/bhargavamin/contexer/compare/v0.21.0...v0.22.0) (2026-07-15)
+
+
+### Features
+
+* **review:** surface possibly-overlapping rules for manual consolidation ([1648341](https://github.com/bhargavamin/contexer/commit/16483411c74533dbd713dc68288ba3c06745b73b))
+* **review:** surface possibly-overlapping rules for manual consolidation ([e339031](https://github.com/bhargavamin/contexer/commit/e33903132f23be0c864adb45ae5807ecbd86a30d))
+
+
+### Bug Fixes
+
+* **capture:** best-match containment routing; never clobber a pending proposal ([e193bbe](https://github.com/bhargavamin/contexer/commit/e193bbe2ca233cb97f24a31b3189c7d04bf3e412))
+* **capture:** containment-aware routing + near-miss consolidation nudge ([a6f6a9c](https://github.com/bhargavamin/contexer/commit/a6f6a9c23ddd5980d45bd6fe7f3499c81b915641))
+* **capture:** containment-aware routing + near-miss consolidation nudge ([6fbb211](https://github.com/bhargavamin/contexer/commit/6fbb21186661df392d24dc59678c92cbcf157938))
+* **review:** retiring approved rules is now a first-class act ([1a4ec76](https://github.com/bhargavamin/contexer/commit/1a4ec76e36e06311aeda32d80e30c103e7bb8f86))
+
 ## [0.21.0](https://github.com/bhargavamin/contexer/compare/v0.20.1...v0.21.0) (2026-07-15)
 
 
