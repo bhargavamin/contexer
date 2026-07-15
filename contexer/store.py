@@ -2172,7 +2172,10 @@ _TOPIC_ALIASES: dict[str, frozenset] = {
                      "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
     "api": frozenset({"endpoint", "endpoints", "rest", "route", "routes", "request",
                       "response", "http", "graphql"}),
-    "auth": frozenset({"jwt", "oauth", "login", "token", "tokens", "session", "sessions"}),
+    # "session"/"sessions" deliberately absent: in agent-tooling repos those words
+    # overwhelmingly mean agent sessions, not auth sessions — they mis-tagged
+    # documentation questions as auth (observed live 2026-07-15).
+    "auth": frozenset({"jwt", "oauth", "login", "token", "tokens"}),
     "frontend": frozenset({"react", "component", "components", "css", "ui", "dom"}),
     "deploy": frozenset({"docker", "kubernetes", "k8s", "ci", "terraform", "helm", "release"}),
     "testing": frozenset({"pytest", "test", "tests", "fixture", "fixtures", "mock", "coverage"}),

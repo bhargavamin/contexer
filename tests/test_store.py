@@ -2811,6 +2811,11 @@ class TestDeriveTopics:
     def test_case_insensitive(self):
         assert store._derive_topics("Using JWT for LOGIN flows") == ["auth"]
 
+    def test_session_words_do_not_mean_auth(self):
+        # "session" means agent sessions in this domain — it mis-tagged docs
+        # questions as auth when it lived in the auth alias set.
+        assert store._derive_topics("SessionStart hooks run each session") == []
+
 
 class TestRetrievalIndex:
     def test_written_by_save_on_update_decision(self, tmp_repo):
