@@ -2172,9 +2172,10 @@ _TOPIC_ALIASES: dict[str, frozenset] = {
                      "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
     "api": frozenset({"endpoint", "endpoints", "rest", "route", "routes", "request",
                       "response", "http", "graphql"}),
-    # "session"/"sessions" deliberately absent: in agent-tooling repos those words
-    # overwhelmingly mean agent sessions, not auth sessions — they mis-tagged
-    # documentation questions as auth (observed live 2026-07-15).
+    # Bare "session"/"sessions" deliberately absent: in agent-tooling repos those
+    # words overwhelmingly mean agent sessions, not auth sessions — they mis-tagged
+    # documentation questions as auth (observed live 2026-07-15). Genuine auth-session
+    # phrasing is caught by _AUTH_SESSION_RE below instead.
     "auth": frozenset({"jwt", "oauth", "login", "token", "tokens"}),
     "frontend": frozenset({"react", "component", "components", "css", "ui", "dom"}),
     "deploy": frozenset({"docker", "kubernetes", "k8s", "ci", "terraform", "helm", "release"}),
@@ -2211,10 +2212,20 @@ def _index_tokens(text: str) -> list[str]:
     return [t for t in toks if len(t) >= 3 and t not in _QUERY_STOP_WORDS]
 
 
+# Compound auth-session phrasing ("invalidate all user sessions") carries no
+# surviving auth alias token; this phrase check restores the tag without letting
+# bare agent-session vocabulary ("SessionStart runs each session") mean auth.
+_AUTH_SESSION_RE = re.compile(r"\b(?:user|login|auth|authenticated) sessions?\b")
+
+
 def _derive_topics(content: str) -> list[str]:
     """Sorted topics with >=1 alias hit in `content`. Derived, never persisted."""
-    toks = set(re.findall(r"[a-z0-9]+", (content or "").lower()))
-    return sorted(t for t, aliases in _TOPIC_ALIASES.items() if toks & aliases)
+    low = (content or "").lower()
+    toks = set(re.findall(r"[a-z0-9]+", low))
+    topics = {t for t, aliases in _TOPIC_ALIASES.items() if toks & aliases}
+    if "auth" not in topics and _AUTH_SESSION_RE.search(low):
+        topics.add("auth")
+    return sorted(topics)
 
 
 def _index_path(repo_path: str) -> Path:
