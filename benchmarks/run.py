@@ -57,18 +57,24 @@ def _load_tasks(task_ids):
     return sorted(picked, key=lambda t: (t["chain"], t["step"]))
 
 
-def _condition_b_setup(repo: str, home: Path, seed_decision: str) -> None:
+def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path = None) -> None:
     """contexer install + bootstrap + optional decision seed, in a child process
-    whose HOME is the isolated one (store paths must resolve inside it)."""
+    whose HOME is the isolated one (store paths must resolve inside it). `source`
+    is the contexer checkout `uv run` installs from (its cwd resolves the pyproject
+    / venv that provides the `contexer` console script and the `contexer` package
+    imported below) — this is what lets an A/B campaign compare two contexer
+    versions; it defaults to this harness's own repo root, so callers that don't
+    pass it see no behavior change."""
     env = _session_env(home, otel_port=0)
+    src = source or Path(__file__).resolve().parent.parent
     subprocess.run(["uv", "run", "contexer", "install"], env=env, check=True,
-                   capture_output=True, cwd=Path(__file__).resolve().parent.parent)
+                   capture_output=True, cwd=src)
     code = f"from contexer import store\nstore.bootstrap_apply({repo!r}, 'bench-seed')\n"
     if seed_decision:
         code += (f"store.update_decision({repo!r}, {seed_decision!r}, 'bench-seed', "
                  "'constraint', created_by='human')\n")
     subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
-                   capture_output=True, cwd=Path(__file__).resolve().parent.parent)
+                   capture_output=True, cwd=src)
 
 
 def _condition_c_setup(work: Path, seed_decision: str,
@@ -127,6 +133,9 @@ _FILE_CONDITIONS = {
     "claudemd_with": ("CLAUDE.md",),
 }
 
+# Conditions that always install contexer regardless of --contexer-sources.
+_CONTEXER_CONDITIONS = ("with", "claudemd_with")
+
 
 def _run_session(repo: str, prompt: str, claude_cmd: str, env: dict, model: str) -> dict:
     # Non-interactive sessions can't answer permission prompts; without this flag the
@@ -170,11 +179,18 @@ def _telemetry_check(row: dict, snap: dict):
 
 def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = "claude",
                  seed: int = 0, model: str = "",
-                 conditions: tuple = ("without", "claudemd", "with")) -> Path:
+                 conditions: tuple = ("without", "claudemd", "with"),
+                 contexer_sources: dict = None) -> Path:
+    """`contexer_sources` maps condition name -> contexer checkout path (see
+    `_condition_b_setup`), for A/B comparisons across contexer versions. A
+    condition present in the map installs contexer from that path even if it
+    isn't one of `_CONTEXER_CONDITIONS`. Omitted/empty: unchanged behavior."""
+    contexer_sources = contexer_sources or {}
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "runs.jsonl"
     (out_dir / "campaign.json").write_text(json.dumps({
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
+        "contexer_sources": contexer_sources,
         "managed_settings_present": _MANAGED_SETTINGS.exists(),
         "started_at": datetime.now(timezone.utc).isoformat()}, indent=2))
     tasks = _load_tasks(task_ids)
@@ -198,7 +214,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                     for condition in conditions:
                         work, home = _fresh(td, golden, f"{task['id']}-{condition}-{rep}")
                         row = _one_run(task, condition, rep, work, home, baseline,
-                                       claude_cmd, seed, model, rx)
+                                       claude_cmd, seed, model, rx, contexer_sources)
                         _append(out, row)
                 for chain_tasks in chains.values():
                     # A chain's steps must stay sequential within one condition
@@ -208,7 +224,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                         work, home = _fresh(td, golden, f"{chain_tasks[0]['chain']}-{condition}-{rep}")
                         for task in chain_tasks:  # steps share repo + HOME: accumulation
                             row = _one_run(task, condition, rep, work, home, baseline,
-                                           claude_cmd, seed, model, rx)
+                                           claude_cmd, seed, model, rx, contexer_sources)
                             _append(out, row)
     finally:
         rx.stop()
@@ -237,7 +253,7 @@ def _mine_baseline(repo: str) -> list[dict]:
 
 
 def _one_run(task, condition, rep, work: Path, home: Path, baseline,
-             claude_cmd, seed, model, rx: OtelReceiver) -> dict:
+             claude_cmd, seed, model, rx: OtelReceiver, contexer_sources: dict = None) -> dict:
     prompt = task["prompt"].replace("{seed}", str(seed))
     check_cmd = task["check_cmd"].replace("{seed}", str(seed))
     row = {"task_id": task["id"], "kind": task["kind"], "chain": task["chain"],
@@ -255,8 +271,10 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             files = _FILE_CONDITIONS.get(condition)
             if files:
                 _condition_c_setup(work, task["seed_decision"], files)
-            if condition in ("with", "claudemd_with"):
-                _condition_b_setup(str(work), home, task["seed_decision"])
+            src = (contexer_sources or {}).get(condition)
+            if condition in _CONTEXER_CONDITIONS or src:
+                _condition_b_setup(str(work), home, task["seed_decision"],
+                                   Path(src) if src else None)
         rx.reset()
         row["ts"] = time.time()  # stamped when the session starts (post-setup)
         # Pre-session HEAD: sessions may commit their edits, which would vanish
@@ -322,11 +340,23 @@ if __name__ == "__main__":
     ap.add_argument("--model", default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--conditions", default="without,claudemd,with")
+    ap.add_argument("--contexer-sources", default="",
+                    help="condition=path pairs, comma-separated (e.g. "
+                         "contexer_pre_v1=/path/a,contexer_v1=/path/b) — selects "
+                         "which contexer checkout `uv run contexer install` uses "
+                         "for that condition; a condition not listed here falls "
+                         "back to this harness's own repo root.")
     a = ap.parse_args()
     ids = [s for s in a.tasks.split(",") if s] or None
     conds = tuple(s for s in a.conditions.split(",") if s)
+    sources = {}
+    for pair in (s for s in a.contexer_sources.split(",") if s):
+        if "=" not in pair:
+            ap.error(f"--contexer-sources entry {pair!r} is not name=path")
+        name, path = pair.split("=", 1)
+        sources[name] = path
     if not a.model:
         print("WARNING: no --model pinned; the report will flag mixed models.", file=sys.stderr)
     print(run_campaign(Path(a.out), reps=a.reps, task_ids=ids,
                        claude_cmd=a.claude_cmd, seed=a.seed, model=a.model,
-                       conditions=conds))
+                       conditions=conds, contexer_sources=sources))

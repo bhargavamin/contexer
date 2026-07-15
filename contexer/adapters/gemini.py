@@ -99,7 +99,9 @@ def before_agent(repo_path: str, raw: str) -> str:
         if reload_flag.exists():
             reload_flag.unlink(missing_ok=True)
             pending.unlink(missing_ok=True)
-            payload = store.post_compact_payload(repo)
+            # session_id (Retrieval V1 compact-reload parity): rehydrates this session's
+            # pre-compaction working set, mirroring Claude's SessionStart(compact) path.
+            payload = store.post_compact_payload(repo, session_id)
             contexts.extend(part for part in (payload.get("status"), payload.get("context")) if part)
         elif pending.exists():
             pending.unlink(missing_ok=True)
@@ -129,7 +131,7 @@ def before_agent(repo_path: str, raw: str) -> str:
                 f"Auto-stored as constraint: '{content}'. Acknowledge this briefly to the user."
             )
 
-        rationale = store.get_context_for_prompt(repo, prompt)
+        rationale = store.get_context_for_prompt(repo, prompt, session_id)
         if rationale:
             contexts.append(rationale)
         return _output("BeforeAgent", contexts)

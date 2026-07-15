@@ -7,11 +7,12 @@ driven with asyncio.run(...), matching test_remote.py's convention.
 """
 import asyncio
 import inspect
+import json
 import threading
 import time
 
 import contexer.share as share_mod
-from contexer import server
+from contexer import server, store
 
 
 def test_share_decision_is_async_tool():
@@ -269,3 +270,34 @@ def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
     result = asyncio.run(server.share_decision(" ab12 , cd34 ,", "/repo", confirm=True))
     assert got["ids"] == ["ab12", "cd34"]  # parsed, trimmed, blanks dropped
     assert result == "done"
+
+
+def test_get_context_logs_followup_on_matching_pointer(tmp_repo):
+    # A prior pointer nudge ("db" topic) plus a matching get_context(query="db") call must
+    # log a follow-through event — proof the router's pointers actually get chased. The
+    # returned context itself is unaffected (log-only side effect).
+    store.update_decision(
+        tmp_repo, "Postgres migrations run through Alembic for the orders database",
+        "s1", "architecture",
+    )
+    store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-x")
+    path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+    assert json.loads(path.read_text().splitlines()[-1])["e"] == "pointer"
+
+    expected = store.get_context(tmp_repo, "db")
+    result = server.get_context(tmp_repo, "db")
+
+    assert result == expected  # log-only side effect — the returned context is unchanged
+    events = [json.loads(l) for l in path.read_text().splitlines() if l]
+    assert events[-1]["e"] == "followup"
+    assert events[-1]["query"] == "db"
+
+
+def test_get_context_no_followup_without_prior_pointer(tmp_repo):
+    store.update_decision(
+        tmp_repo, "Postgres migrations run through Alembic for the orders database",
+        "s1", "architecture",
+    )
+    server.get_context(tmp_repo, "db")  # no pointer was ever logged for this repo
+    path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+    assert not path.exists()

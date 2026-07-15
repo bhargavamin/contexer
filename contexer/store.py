@@ -165,6 +165,9 @@ def _atomic_write(path: Path, text: str) -> None:
 def _save(repo_path: str, data: dict) -> None:
     path = _store_path(repo_path)
     _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+    # The retrieval index is a disposable sidecar maintained ONLY here — every store
+    # writer already holds the store lock, so per-prompt readers never rebuild it.
+    _write_retrieval_index(repo_path, data)
 
 
 @contextlib.contextmanager
@@ -1794,7 +1797,7 @@ def _hook_cwd_repo(repo_path: str) -> str:
     return cwd if _is_sane_repo(cwd) else repo_path
 
 
-def session_start_payload(repo_path: str, source: str = "") -> dict:
+def session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
 
@@ -1816,7 +1819,10 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     unchanged beyond the existing team-section join. The suffix is cap-aware: `format_team_
     section` renders at most `_team_display_cap()` rows, so when the cache holds more than
     that the suffix adds `(cap shown)` rather than claiming a count the model never
-    actually received."""
+    actually received.
+
+    session_id (Retrieval V1 Part B): optional, "" preserves every existing caller. Threaded
+    through to `_local_session_start_payload` for compact-source working-set rehydration."""
     resolved = _hook_cwd_repo(repo_path)
     if resolved != repo_path and _is_sane_repo(resolved):
         # The cwd fallback engaged (non-git project dir): anchor the shared pointer
@@ -1828,7 +1834,7 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
         except OSError:
             pass
     repo_path = resolved
-    payload = _local_session_start_payload(repo_path, source)
+    payload = _local_session_start_payload(repo_path, source, session_id)
     team = _team_section(repo_path, "", "")
     if not team or (source == "resume" and not payload.get("context")):
         return payload
@@ -1845,11 +1851,17 @@ def session_start_payload(repo_path: str, source: str = "") -> dict:
     }
 
 
-def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
+def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
-    is unchanged from the original get_session_start_context."""
+    is unchanged from the original get_session_start_context.
+
+    session_id (Retrieval V1 Part B): "" preserves every existing caller. On a compact
+    source with a session id, the working set built up before compaction is rehydrated
+    (content of the most-recently-injected decisions) after the normal rules injection —
+    additionalContext re-injection doesn't otherwise know what the pre-compaction router
+    already surfaced this session."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
@@ -1875,6 +1887,7 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
         }
 
     resume_flag.unlink(missing_ok=True)
+    _gc_stale_session_files()
 
     if not decisions:
         lines = _build_bootstrap_context(repo_path)
@@ -1944,6 +1957,20 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
                        'action="approve") clears the lot.')
         sys_parts.append(notice)
 
+    # B1: size-gated standing topic map — a one-line overview once the store is big
+    # enough that "call get_context before reading files" alone stops being actionable.
+    standing_map = _standing_topic_map(repo_path, decisions)
+    if standing_map:
+        sys_parts.append(standing_map)
+
+    # B2: compact re-injects the normal rules above; also rehydrate the CONTENT of the
+    # working set the router built up pre-compaction, since additionalContext replay
+    # otherwise loses which decisions were already surfaced this session.
+    if source == "compact" and session_id:
+        rehydrated = _rehydrate_working_set(repo_path, session_id)
+        if rehydrated:
+            sys_parts.append(rehydrated)
+
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
     patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
@@ -1975,11 +2002,14 @@ def _local_session_start_payload(repo_path: str, source: str = "") -> dict:
     return {"status": status, "context": "\n".join(sys_parts)}
 
 
-def get_session_start_context(repo_path: str, source: str = "") -> dict:
+def get_session_start_context(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Claude Code SessionStart hook output. Thin envelope over session_start_payload —
-    kept for back-compat with installed hooks and the existing test suite."""
+    kept for back-compat with installed hooks and the existing test suite.
+
+    session_id (Retrieval V1 Part B): "" preserves every existing caller (Codex/Cursor
+    still call this without it)."""
     from contexer.adapters import claude
-    return claude.format_session_start(session_start_payload(repo_path, source))
+    return claude.format_session_start(session_start_payload(repo_path, source, session_id))
 
 
 # The article is OPTIONAL — "what is repo doing?" (no this/the) is just as much a newcomer
@@ -2072,19 +2102,30 @@ def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
     return claude.format_bootstrap_prompt(bootstrap_prompt_payload(repo_path, prompt))
 
 
-def post_compact_payload(repo_path: str) -> dict:
-    """Neutral PostCompact content. {"status": str, "context": str}."""
+def post_compact_payload(repo_path: str, session_id: str = "") -> dict:
+    """Neutral PostCompact content. {"status": str, "context": str}.
+
+    session_id (Retrieval V1 compact-reload parity): "" preserves every existing caller.
+    When set, appends the rehydrated content of this session's pre-compaction working set
+    (via _rehydrate_working_set — same helper Claude's SessionStart(compact) path uses) so
+    Gemini's before_agent reload and Codex's post-compact path get the same rehydration
+    Claude gets, instead of losing the router's pre-compaction state on replay."""
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if not decisions:
         return {"status": "", "context": "\n".join(_build_bootstrap_context(repo_path))}
-    return {"status": "Contexer: context reloaded after compaction", "context": get_context(repo_path)}
+    context = get_context(repo_path)
+    if session_id:
+        rehydrated = _rehydrate_working_set(repo_path, session_id)
+        if rehydrated:
+            context = f"{context}\n\n{rehydrated}" if context else rehydrated
+    return {"status": "Contexer: context reloaded after compaction", "context": context}
 
 
-def get_post_compact_context(repo_path: str) -> dict:
-    """Claude PostCompact output. Back-compat envelope."""
+def get_post_compact_context(repo_path: str, session_id: str = "") -> dict:
+    """Claude/Codex PostCompact output. Back-compat envelope."""
     from contexer.adapters import claude
-    return claude.format_post_compact(post_compact_payload(repo_path))
+    return claude.format_post_compact(post_compact_payload(repo_path, session_id))
 
 
 _RATIONALE_WORDS = frozenset({
@@ -2121,18 +2162,439 @@ _OVERVIEW_GENERIC_WORDS = frozenset({
 })
 
 
-def get_context_for_prompt(repo_path: str, prompt: str) -> str:
-    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
-    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
-    Searches repo decisions first; falls back to global decisions."""
+# ── Retrieval V1: topic router (lexical BM25 index + working set + injection ladder) ──
+#
+# Topic → alias words. A decision (or prompt) is tagged with a topic when its lowercase
+# tokens hit >=1 alias. Derived only — never stored on the entry (the index sidecar owns
+# topics). Aliases are the listed words only; the bare topic name is NOT auto-added.
+_TOPIC_ALIASES: dict[str, frozenset] = {
+    "db": frozenset({"postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
+                     "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
+    "api": frozenset({"endpoint", "endpoints", "rest", "route", "routes", "request",
+                      "response", "http", "graphql"}),
+    "auth": frozenset({"jwt", "oauth", "login", "token", "tokens", "session", "sessions"}),
+    "frontend": frozenset({"react", "component", "components", "css", "ui", "dom"}),
+    "deploy": frozenset({"docker", "kubernetes", "k8s", "ci", "terraform", "helm", "release"}),
+    "testing": frozenset({"pytest", "test", "tests", "fixture", "fixtures", "mock", "coverage"}),
+    "config": frozenset({"toml", "yaml", "env", "settings"}),
+    "perf": frozenset({"cache", "latency", "optimize"}),
+    "security": frozenset({"secret", "vulnerability", "sanitize", "injection"}),
+}
+
+# BM25 tuning (Robertson/Sparck-Jones defaults — corpus is <=500 short jargon sentences).
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+# Injection ladder — RELATIVE thresholds (never absolute cross-repo scores).
+_STRONG_CANDIDATES = 5      # top-k considered for a strong (content) injection
+_STRONG_SCORE_FRAC = 0.5    # a candidate is strong only within this fraction of the top score
+_STRONG_MIN_HITS = 2        # ...and with at least this many distinct query-term hits
+_STRONG_CAP = 3             # never inject more than this many decisions per prompt
+_RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
+
+# Artifact extraction: signal-rich tokens pulled from a paste even when the prose is empty.
+_ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|md|toml|yaml|json)\b")
+_ARTIFACT_DOTTED_RE = re.compile(r"\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+\b")
+_ARTIFACT_EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b")
+# Two+ path segments required: a lone slash in prose ("light/dark", "read/write",
+# "either/or") is not a route, but "/api/users/{id}" is.
+_ARTIFACT_ROUTE_RE = re.compile(r"/[a-z][\w{}-]*(?:/[\w{}-]+)+")
+
+
+def _index_tokens(text: str) -> list[str]:
+    """Lowercase, punctuation-stripped, alnum tokens of length >=3, minus stop words.
+    The single tokenization used by both the index and the BM25 query side (distinct from
+    the novelty filter's set-based `_tokenize`)."""
+    toks = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return [t for t in toks if len(t) >= 3 and t not in _QUERY_STOP_WORDS]
+
+
+def _derive_topics(content: str) -> list[str]:
+    """Sorted topics with >=1 alias hit in `content`. Derived, never persisted."""
+    toks = set(re.findall(r"[a-z0-9]+", (content or "").lower()))
+    return sorted(t for t, aliases in _TOPIC_ALIASES.items() if toks & aliases)
+
+
+def _index_path(repo_path: str) -> Path:
+    return STORE_DIR / f".retrieval_index_{_slug(repo_path)}.json"
+
+
+def _build_retrieval_index(data: dict) -> dict:
+    """Build the BM25 index payload from a loaded store. Indexes only `decision` entries,
+    over their CURRENT content."""
+    docs: dict[str, dict] = {}
+    df: dict[str, int] = {}
+    total_len = 0
+    for e in data.get("entries", []):
+        if e.get("type") != "decision":
+            continue
+        did = e.get("id")
+        if not did:
+            continue
+        # Index only what get_context can hand back. Ignored decisions are permanently
+        # suppressed everywhere, so indexing them lets a top-ranked hit render as
+        # nothing and weak pointers advertise unretrievable topics. Pending ones ARE
+        # retrievable (get_context renders them with a [pending] tag), so they stay
+        # indexed — the legacy fallback surfaces them and the indexed path must too.
+        status = _entry_status(e)
+        if status == "ignored":
+            continue
+        content = _current_content(e)
+        toks = _index_tokens(content)
+        tf: dict[str, int] = {}
+        for t in toks:
+            tf[t] = tf.get(t, 0) + 1
+        for t in tf:
+            df[t] = df.get(t, 0) + 1
+        total_len += len(toks)
+        docs[did] = {
+            "tf": tf, "len": len(toks), "topics": _derive_topics(content),
+            "subtype": e.get("subtype", ""), "status": status,
+        }
+    n_docs = len(docs)
+    avgdl = (total_len / n_docs) if n_docs else 0.0
+    return {"v": 1, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
+
+
+def _write_retrieval_index(repo_path: str, data: dict) -> None:
+    """Persist the index sidecar. Fail-soft — a missing index just triggers the legacy
+    per-prompt path, never a crash."""
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        _atomic_write(_index_path(repo_path), json.dumps(_build_retrieval_index(data)))
+    except OSError:
+        pass
+
+
+def _read_retrieval_index(repo_path: str) -> dict | None:
+    """Read the index sidecar. None on missing / corrupt / wrong-version. NEVER rebuilds
+    or creates the file (the reader is strictly read-only)."""
+    path = _index_path(repo_path)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("docs"), dict):
+        return None
+    return data
+
+
+def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]:
+    """BM25-score every indexed doc against `keywords` (which may repeat — repeats raise
+    that term's query weight). Returns (decision_id, score, distinct_term_hits) sorted by
+    score desc. Terms absent from the corpus contribute nothing."""
+    import math
+    docs = index.get("docs", {})
+    df = index.get("df", {})
+    n_docs = index.get("n_docs", 0) or 0
+    avgdl = index.get("avgdl", 0.0) or 0.0
+    if not docs or not keywords:
+        return []
+    # Query-term weights: a repeated keyword (e.g. a double-weighted artifact) counts twice.
+    qweight: dict[str, int] = {}
+    for kw in keywords:
+        qweight[kw] = qweight.get(kw, 0) + 1
+    # Resolve each query term to the corpus token(s) it scores against. An exact df hit maps
+    # to itself; a term absent from df expands to every indexed token having it as a prefix
+    # (restores legacy \b-prefix matching — 'postgres' must match a doc holding only
+    # 'postgresql'). Aggregated df is capped at n_docs so idf stays non-negative.
+    resolved: dict[str, tuple[list[str], int]] = {}
+    for term in qweight:
+        if term in df:
+            resolved[term] = ([term], df[term])
+            continue
+        pref = [t for t in df if t.startswith(term)]
+        if pref:
+            resolved[term] = (pref, min(sum(df[t] for t in pref), n_docs))
+    ranked: list[tuple[str, float, int]] = []
+    for did, doc in docs.items():
+        tf = doc.get("tf", {})
+        dl = doc.get("len", 0) or 0
+        score = 0.0
+        hits = 0
+        for term, w in qweight.items():
+            r = resolved.get(term)
+            if not r:
+                continue
+            toks_for, n_t = r
+            f = sum(tf.get(t, 0) for t in toks_for)
+            if not f:
+                continue
+            hits += 1
+            idf = math.log(1 + (n_docs - n_t + 0.5) / (n_t + 0.5))
+            denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * (dl / avgdl if avgdl else 1))
+            score += w * idf * (f * (_BM25_K1 + 1) / denom)
+        if hits:
+            ranked.append((did, score, hits))
+    ranked.sort(key=lambda r: r[1], reverse=True)
+    return ranked
+
+
+def _extract_artifacts(prompt: str) -> list[str]:
+    """Signal tokens pulled from a paste: file paths (segmented), dotted module paths,
+    CamelCase *Error/*Exception names, and route-shaped strings. Lowercased, len>=3."""
+    if not prompt:
+        return []
+    raw: list[str] = []
+    raw += _ARTIFACT_PATH_RE.findall(prompt)
+    raw += _ARTIFACT_DOTTED_RE.findall(prompt)
+    raw += _ARTIFACT_EXC_RE.findall(prompt)
+    raw += _ARTIFACT_ROUTE_RE.findall(prompt)
+    out: list[str] = []
+    for m in raw:
+        for seg in re.split(r"[^a-zA-Z0-9]+", m.lower()):
+            if len(seg) >= 3:
+                out.append(seg)
+    return out
+
+
+def _ws_path(repo_path: str, session_id: str) -> Path:
+    # Hash the session id before embedding: filename-safe for any host-supplied id
+    # (no path escape) and collision-free where truncation wasn't (two ids sharing
+    # a 32-char prefix must not share a working set).
+    safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
+    return STORE_DIR / f".ws_{_slug(repo_path)}_{safe}.json"
+
+
+def working_set_ids(repo_path: str, session_id: str) -> list[str]:
+    """Decision ids already injected this session (fail-soft; [] when no session id)."""
+    if not session_id:
+        return []
+    try:
+        data = json.loads(_ws_path(repo_path, session_id).read_text(encoding="utf-8"))
+        ids = data.get("injected") if isinstance(data, dict) else None
+        return ids if isinstance(ids, list) else []
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return []
+
+
+def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
+    """Record injected ids for this session so they are not re-injected. Skipped (and no
+    file created) when session_id is empty — dedup off, still correct."""
+    if not session_id or not ids:
+        return
+    existing = working_set_ids(repo_path, session_id)
+    merged = existing + [i for i in ids if i not in existing]
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        _atomic_write(_ws_path(repo_path, session_id),
+                      json.dumps({"injected": merged, "ts": time.time()}))
+    except OSError:
+        pass
+
+
+def _retrieval_log(repo_path: str, event: dict) -> None:
+    """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
+    path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        lines: list[str] = []
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()
+        lines.append(json.dumps(event))
+        if len(lines) > _RETRIEVAL_LOG_CAP:
+            lines = lines[-_RETRIEVAL_LOG_CAP:]
+        _atomic_write(path, "\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+# ── Retrieval V1 Part B: session-start integration (standing map, compact rehydration,
+# working-set GC, follow-through logging) ──────────────────────────────────────────────
+_STANDING_MAP_MIN_DECISIONS = 20   # below this, a topic map is more noise than signal
+_STANDING_MAP_TOP_N = 6            # top-N topics by count shown in the map line
+_REHYDRATE_CAP = 10                # most-recently-injected working-set decisions replayed
+_WS_GC_AGE_SECONDS = 7 * 24 * 3600  # working-set/log files older than this are stale sessions
+_FOLLOWUP_WINDOW_SECONDS = 30 * 60  # a pointer counts as "followed through" within this window
+
+
+def _standing_topic_map(repo_path: str, decisions: list) -> str:
+    """Size-gated one-liner: topic counts from the index sidecar, read-only (never
+    rebuilt here). '' below _STANDING_MAP_MIN_DECISIONS stored decisions, or when the
+    index isn't readable."""
+    if len(decisions) < _STANDING_MAP_MIN_DECISIONS:
+        return ""
+    index = _read_retrieval_index(repo_path)
+    if index is None:
+        return ""
+    counts: dict[str, int] = {}
+    for doc in index.get("docs", {}).values():
+        if doc.get("status") not in ("approved", "suggested"):
+            continue
+        for t in doc.get("topics", []):
+            counts[t] = counts.get(t, 0) + 1
+    if not counts:
+        return ""
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:_STANDING_MAP_TOP_N]
+    parts = ", ".join(f"{t}({n})" for t, n in top)
+    return f"Stored decisions by topic: {parts} — fetch with get_context(query=<topic>)."
+
+
+def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
+    """The content of at most the _REHYDRATE_CAP most-recently-injected working-set
+    decisions (current content, active statuses only), under a heading. '' when there is
+    no session id / working set / nothing still active to show."""
+    ids = working_set_ids(repo_path, session_id)
+    if not ids:
+        return ""
+    recent = ids[-_REHYDRATE_CAP:]
+    data = _load(repo_path)
+    by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    lines = []
+    for did in recent:
+        e = by_id.get(did)
+        if not e or _entry_status(e) not in ("approved", "suggested"):
+            continue
+        subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {_current_content(e)}")
+    if not lines:
+        return ""
+    return "## Rehydrated working context:\n" + "\n".join(lines)
+
+
+def _gc_stale_session_files() -> None:
+    """At non-resume session start: drop working-set dedup files and retrieval logs whose
+    session is well over — old enough that dedup/history no longer matters. Fail-soft,
+    a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2)."""
+    try:
+        cutoff = time.time() - _WS_GC_AGE_SECONDS
+        for pattern in (".ws_*.json", ".retrieval_*.jsonl"):
+            for p in STORE_DIR.glob(pattern):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+
+def _recent_pointer_event(repo_path: str) -> dict | None:
+    """Most recent 'pointer' log event for this repo within the follow-through window, or
+    None. Read-only — never touches the log. Fail-soft."""
+    path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    cutoff = time.time() - _FOLLOWUP_WINDOW_SECONDS
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("e") != "pointer":
+            continue
+        # Lines are appended in order — the first pointer found scanning backwards is the
+        # most recent; if it's already outside the window, nothing older qualifies either.
+        return event if event.get("ts", 0) >= cutoff else None
+    return None
+
+
+def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> None:
+    """Server-side hook for the get_context tool: log-only, never changes the returned
+    context. When a 'pointer' nudge was logged for this repo within the follow-through
+    window and `query` matches one of its topics, append a 'followup' event — a deterministic
+    usage signal for whether pointers actually get chased. Fail-soft.
+
+    `found`: whether the get_context call actually returned decisions. A no-result query is
+    not an honest follow-through, so it is never logged."""
+    if not query or not found:
+        return
+    try:
+        event = _recent_pointer_event(repo_path)
+        if not event:
+            return
+        topics = set(event.get("topics", []))
+        query_topics = set(_derive_topics(query)) | {query.strip().lower()}
+        if topics & query_topics:
+            _retrieval_log(repo_path, {"e": "followup", "query": query, "ts": time.time()})
+    except Exception:
+        pass
+
+
+def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
+    """Render the given decisions in the same line format `get_context` uses. Skips
+    ignored / missing entries; empty string when nothing renders."""
+    data = _load(repo_path)
+    by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    lines: list[str] = []
+    for did in ids:
+        e = by_id.get(did)
+        if not e or _entry_status(e) == "ignored":
+            continue
+        subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
+        st = _entry_status(e)
+        status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
+        entry_id = e.get("id", "")[:8]
+        id_tag = f" (id={entry_id})" if entry_id else ""
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {_current_content(e)}{id_tag}")
+    return "\n".join(lines)
+
+
+# Structured classification of an injection, replacing the old startswith/regex scrape of
+# the rendered text (claude.rationale used to reverse-engineer this from the string; now the
+# router hands it over directly). "" kind means no injection.
+_EMPTY_META = {"kind": "", "count": 0, "topics": []}
+
+
+def _rendered_meta(kind: str, text: str) -> dict:
+    """Count of rendered '- ' lines + derived topics, computed from the SAME text that gets
+    injected — matches what the old regex/line-count scrape produced, for kinds "strong"/
+    "overview"/"global" (they all rendered through the same get_context()-style line format)."""
+    count = sum(1 for line in text.splitlines() if line.startswith("- "))
+    return {"kind": kind, "count": count, "topics": _derive_topics(text)}
+
+
+def _global_prompt_lookup(ordered_kws: list[str]) -> tuple[str, dict]:
+    """The global-store fallback shared by the legacy and BM25 router paths."""
+    for kw in ordered_kws:
+        result = get_global_context(query=kw)
+        if "No matching" not in result and "No global context" not in result:
+            text = f"[Contexer: auto-fetched from global context]\n{result}"
+            return text, _rendered_meta("global", text)
+    return "", dict(_EMPTY_META)
+
+
+def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: bool) -> tuple[str, dict]:
+    """Today's exact per-prompt lookup, preserved verbatim for the index-absent path."""
+    data = _load(repo_path)
+    if data.get("entries"):
+        for kw in ordered_kws:
+            result = get_context(repo_path, query=kw)
+            if "No matching decisions" not in result and "No context stored" not in result:
+                text = f"[Contexer: auto-fetched for this question]\n{result}"
+                return text, _rendered_meta("strong", text)
+
+        # Overview fallback: only when the prompt has NO domain-specific keywords beyond
+        # the project-context trigger word itself. Generic referential words like "repo",
+        # "project", "app" don't count — they just mean "this thing we're discussing."
+        if is_project:
+            non_project_kws = [
+                k for k in ordered_kws
+                if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
+            ]
+            if not non_project_kws:
+                result = get_context(repo_path)
+                if "No context stored" not in result:
+                    text = f"[Contexer: project context]\n{result}"
+                    return text, _rendered_meta("overview", text)
+
+    return _global_prompt_lookup(ordered_kws)
+
+
+def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
+    """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
+    "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} — structured data for
+    a caller's status line (claude.rationale) instead of scraping the rendered text."""
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
 
     is_rationale = bool(word_set & _RATIONALE_WORDS)
     is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
-
-    if not is_rationale and not is_project:
-        return ""
 
     # Extract content keywords: alpha-only, length >= 3, not stop words.
     # >= 3 (not > 3) captures short tech terms: jwt, api, sdk, k8s, sql, gcp, aws.
@@ -2142,38 +2604,106 @@ def get_context_for_prompt(repo_path: str, prompt: str) -> str:
     ]
     ordered_kws = sorted(set(keywords), key=len, reverse=True)[:3]
 
-    # Search repo decisions first (longest keyword = most specific match).
-    # Rationale questions use the default (non-active-only) mode: the AI should see
-    # pending decisions too (with [pending] tag) so it can answer "why" questions even
-    # for decisions not yet approved. Only session-start injection restricts to active.
-    data = _load(repo_path)
-    if data.get("entries"):
-        for kw in ordered_kws:
-            result = get_context(repo_path, query=kw)
-            if "No matching decisions" not in result and "No context stored" not in result:
-                return f"[Contexer: auto-fetched for this question]\n{result}"
+    # No index (missing / corrupt / wrong version) → today's EXACT legacy behavior,
+    # including the rationale/project gate. The reader never rebuilds the index.
+    index = _read_retrieval_index(repo_path)
+    if index is None:
+        if not is_rationale and not is_project:
+            return "", dict(_EMPTY_META)
+        return _legacy_prompt_context(repo_path, ordered_kws, is_project)
 
-        # Overview fallback: only when the prompt has NO domain-specific keywords beyond
-        # the project-context trigger word itself. Generic referential words like "repo",
-        # "project", "app" don't count — they just mean "this thing we're discussing."
-        # Real domain keywords (e.g. "docker", "react", "postgres") block the overview.
+    # BM25 path. The router fires on rationale/project questions AND on artifact-bearing
+    # prompts (a stack-trace paste is signal-rich even when the prose names no topic);
+    # a prose-only, non-rationale prompt stays silent, exactly like today.
+    artifacts = _extract_artifacts(prompt)
+    if not is_rationale and not is_project and not artifacts:
+        return "", dict(_EMPTY_META)
+
+    # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
+    # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
+    # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
+    # overview/global fallbacks below — only this vector changes.
+    art_tokens = _index_tokens(" ".join(artifacts))
+    query_terms = _index_tokens(prompt) + art_tokens + art_tokens   # artifacts double-weighted
+    ranked = _bm25_rank(query_terms, index)
+    ws = set(working_set_ids(repo_path, session_id))
+    ranked = [r for r in ranked if r[0] not in ws]
+
+    if ranked:
+        top_score = ranked[0][1]
+        strong: list[str] = []
+        for did, score, hits in ranked[:_STRONG_CANDIDATES]:
+            if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
+                strong.append(did)
+        # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
+        # yields one doc with one hit — relax to hits>=1 on the top candidate so legacy's
+        # full-content recall for both prompt classes is preserved.
+        if not strong and (is_rationale or is_project) and ranked[0][2] >= 1:
+            strong = [ranked[0][0]]
+        strong = strong[:_STRONG_CAP]
+        if strong:
+            rendered = _render_prompt_decisions(repo_path, strong)
+            if rendered:
+                _ws_add(repo_path, session_id, strong)
+                # Suffix (not part of the pinned header prefix): without it the model
+                # narrates "I'll pull this from Contexer" and re-fetches what it already has.
+                text = ("[Contexer: auto-fetched for this question] "
+                        f"(already in context — no get_context call needed)\n{rendered}")
+                return text, _rendered_meta("strong", text)
+
+    # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
+    # a ~15-token pointer instead of full content.
+    prompt_topics = set(_derive_topics(prompt + " " + " ".join(artifacts)))
+    if prompt_topics:
+        counts: dict[str, int] = {}
+        for did, doc in index.get("docs", {}).items():
+            if did in ws:
+                continue
+            for t in set(doc.get("topics", [])) & prompt_topics:
+                counts[t] = counts.get(t, 0) + 1
+        if counts:
+            ordered_topics = sorted(counts, key=lambda t: (-counts[t], t))
+            parts = ", ".join(f"{t}({counts[t]})" for t in ordered_topics)
+            _retrieval_log(repo_path, {"e": "pointer", "topics": sorted(prompt_topics),
+                                       "sid": session_id, "ts": time.time()})
+            text = (f"[Contexer] Related stored decisions: {parts} — "
+                    f"call get_context(query='{ordered_topics[0]}') if relevant.")
+            meta = {"kind": "pointer", "count": sum(counts.values()), "topics": ordered_topics}
+            return text, meta
+
+    # Overview + global fallbacks run ONLY for rationale/project prompts — legacy was silent
+    # on an artifact-only prompt that produced no strong hit and no pointer, so we stay silent.
+    if is_rationale or is_project:
+        # Overview fallback stays exactly as today (project questions with no domain keyword).
         if is_project:
             non_project_kws = [
                 k for k in ordered_kws
                 if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
             ]
             if not non_project_kws:
-                result = get_context(repo_path)
-                if "No context stored" not in result:
-                    return f"[Contexer: project context]\n{result}"
+                data = _load(repo_path)
+                if data.get("entries"):
+                    result = get_context(repo_path)
+                    if "No context stored" not in result:
+                        text = f"[Contexer: project context]\n{result}"
+                        return text, _rendered_meta("overview", text)
+        # Global-store fallback, identical to the legacy tail.
+        return _global_prompt_lookup(ordered_kws)
+    return "", dict(_EMPTY_META)
 
-    # Fall back to global decisions when repo search yields nothing
-    for kw in ordered_kws:
-        result = get_global_context(query=kw)
-        if "No matching" not in result and "No global context" not in result:
-            return f"[Contexer: auto-fetched from global context]\n{result}"
 
-    return ""
+def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> str:
+    """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
+    the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
+    Searches repo decisions first; falls back to global decisions."""
+    return _get_context_for_prompt(repo_path, prompt, session_id)[0]
+
+
+def get_context_for_prompt_with_meta(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
+    """Same as get_context_for_prompt but also returns structured metadata about the
+    injection — {"kind": ..., "count": int, "topics": [...]} — so a caller (claude.rationale)
+    can build a status line without scraping the rendered text."""
+    return _get_context_for_prompt(repo_path, prompt, session_id)
 
 
 def _team_section(repo_path: str, query: str, entry_type: str) -> str:
@@ -2230,7 +2760,17 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
 
     if query:
         pat = _query_pattern(query)
-        decisions = [d for d in decisions if pat.search(d.get("content", ""))]
+        matched = [d for d in decisions if pat.search(d.get("content", ""))]
+        # Topic-alias retry: a literal miss on a bare topic name (the pointer nudge suggests
+        # get_context(query='db')) falls back to any of that topic's alias tokens, so the
+        # suggested call actually returns the postgres/alembic decisions instead of nothing.
+        if not matched and query.lower() in _TOPIC_ALIASES:
+            aliases = _TOPIC_ALIASES[query.lower()]
+            matched = [
+                d for d in decisions
+                if set(re.findall(r"[a-z0-9]+", d.get("content", "").lower())) & aliases
+            ]
+        decisions = matched
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
 

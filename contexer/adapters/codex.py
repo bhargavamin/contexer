@@ -134,12 +134,15 @@ def install(home: Path) -> list[str]:
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; store.STORE_DIR.mkdir(exist_ok=True); "
+        "repo=sys.argv[1]; raw=sys.stdin.read(); store.STORE_DIR.mkdir(exist_ok=True); "
         "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
         # Refresh team context (Path B seam) before building context — fail-soft, so a sync
         # hiccup never breaks session start. session_start_payload then renders it (T1).
         "_c.pull_team(repo); "
-        "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))"
+        # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
+        # rehydration, mirroring claude.py's ss_code.
+        "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
+        "store.session_from_hook_stdin(raw))))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
@@ -148,7 +151,8 @@ def install(home: Path) -> list[str]:
     )
     post_code = (
         "from contexer import store; import json,sys; "
-        "print(json.dumps(store.get_post_compact_context(sys.argv[1])))"
+        "raw=sys.stdin.read(); "
+        "print(json.dumps(store.get_post_compact_context(sys.argv[1], store.session_from_hook_stdin(raw))))"
     )
     anchor_cmd = (
         "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
@@ -209,9 +213,11 @@ def install(home: Path) -> list[str]:
     hooks = cfg.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: an older SessionStart group predates the team-context pull (T2). Replace it so
-    # team context refreshes at session start. Keyed on the pull_team marker.
-    if base._in_groups(ss, "get_session_start_context") and not base._in_groups(ss, "pull_team"):
+    # Migrate: an older SessionStart group predates the team-context pull (T2) or predates
+    # session-id threading (compact-source working-set rehydration) — replace it so the
+    # current ss_code is installed. Mirrors claude.py's SessionStart migration gate.
+    if base._in_groups(ss, "get_session_start_context") and not (
+            base._in_groups(ss, "pull_team") and base._in_groups(ss, "session_from_hook_stdin")):
         ss = base._filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not base._in_groups(ss, "get_session_start_context"):
@@ -243,6 +249,11 @@ def install(home: Path) -> list[str]:
             "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'"}]})
 
     poc = hooks.setdefault("PostCompact", [])
+    # Migrate: an older PostCompact group predates session-id threading (working-set
+    # rehydration) — replace it so the current post_code (reads session_id from stdin) runs.
+    if base._in_groups(poc, "get_post_compact_context") and not base._in_groups(poc, "session_from_hook_stdin"):
+        poc = base._filter_groups(poc, ["get_post_compact_context"])
+        hooks["PostCompact"] = poc
     if not base._in_groups(poc, "get_post_compact_context"):
         poc.append({"hooks": [{"type": "command",
             "statusMessage": "Reloading context after compact...", "command": _py(post_code)}]})

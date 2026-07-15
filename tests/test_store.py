@@ -1055,9 +1055,13 @@ class TestProjectContextOverviewFallback:
     def test_domain_keyword_in_purpose_question_uses_query_not_overview(self, tmp_repo):
         store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION_ID_SS, "architecture")
         result = store.get_context_for_prompt(tmp_repo, "what is the purpose of the postgres schema?")
-        # "postgres" is a domain keyword — should search, not dump full overview
+        # "postgres" is a domain keyword — should search, never dump the full overview.
+        # (Retrieval V1: BM25 tokenizes exactly, so "postgres" no longer substring-matches
+        # "PostgreSQL"; it routes via the shared `db` topic — a decision hit or a topic
+        # pointer, but never the "[Contexer: project context]" overview.)
         if result:
-            assert "PostgreSQL" in result or "postgres" in result.lower()
+            assert "project context" not in result.lower()
+            assert "postgres" in result.lower() or "db" in result.lower()
 
     def test_scope_without_domain_keywords_triggers_overview(self, tmp_repo):
         store.update_decision(tmp_repo, "Handles payment processing for e-commerce", SESSION_ID_SS, "architecture")
@@ -1574,6 +1578,34 @@ class TestPostCompactPayload:
         p = store.post_compact_payload(populated_repo)
         assert "reloaded after compaction" in p["status"].lower()
         assert p["context"] != ""
+
+    def test_session_id_rehydrates_working_set(self, tmp_repo):
+        # Codex/Gemini compact-reload parity: session_id threads through to
+        # _rehydrate_working_set so this session's pre-compaction router state survives
+        # replay, same as Claude's SessionStart(compact) path.
+        from contexer import store
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "postcompact-sess"
+        store.get_context_for_prompt(
+            tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        p = store.post_compact_payload(tmp_repo, sid)
+        assert "Rehydrated working context" in p["context"]
+
+    def test_no_session_id_omits_rehydration(self, populated_repo):
+        from contexer import store
+        p = store.post_compact_payload(populated_repo)
+        assert "Rehydrated working context" not in p["context"]
+
+    def test_get_post_compact_context_threads_session_id(self, tmp_repo):
+        # Codex's entrypoint (claude.format_post_compact envelope) must pass session_id
+        # through to post_compact_payload, not silently drop it.
+        from contexer import store
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "codex-postcompact-sess"
+        store.get_context_for_prompt(
+            tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        out = store.get_post_compact_context(tmp_repo, sid)
+        assert "Rehydrated working context" in out["systemMessage"]
 
 
 # ── review regression: corruption recovery, slug injectivity, query matching ──
@@ -2734,3 +2766,671 @@ class TestInsightCache:
         assert result["insight"] == "high"
         assert result["insight_source"] == "auto"
         assert result["decisive"] is True
+
+
+# ── Retrieval V1 (Part A): topic router — index, BM25, working set, log ────────
+
+RV1_SESSION = "rv1-session"
+
+
+def _seed_rv1(repo, items):
+    """items: list of (content, subtype). Returns {content: decision_id}."""
+    ids = {}
+    for content, subtype in items:
+        _, eid = store.update_decision(repo, content, RV1_SESSION, subtype)
+        ids[content] = eid
+    return ids
+
+
+# A store spanning the topic facets, used by the BM25 router tests.
+RV1_CORPUS = [
+    ("Postgres migrations run through Alembic; the session layer catches OperationalError and retries on the pool", "architecture"),
+    ("REST endpoints under the orders route return a JSON response envelope", "pattern"),
+    ("JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies", "architecture"),
+    ("React components use CSS modules for styling across the dashboard", "pattern"),
+    ("Docker images are built in CI and released through Helm charts", "convention"),
+    ("Pytest fixtures live in conftest and mocks use the responses library", "convention"),
+    ("Settings load from a TOML file validated at startup", "convention"),
+    ("An in-process cache trims latency on the hot product listing path", "architecture"),
+    ("Secrets are injected from the vault and inputs sanitized against injection", "constraint"),
+    ("The service is organized as thin controllers delegating to a domain layer", "architecture"),
+]
+
+
+class TestDeriveTopics:
+    def test_single_alias_hit(self):
+        assert store._derive_topics("we migrated the postgres schema for orders") == ["db"]
+
+    def test_multi_topic_sorted(self):
+        topics = store._derive_topics("the react component calls a rest endpoint")
+        assert topics == ["api", "frontend"]  # sorted, both facets present
+
+    def test_no_alias_returns_empty(self):
+        assert store._derive_topics("a plain sentence about widgets and gadgets") == []
+
+    def test_case_insensitive(self):
+        assert store._derive_topics("Using JWT for LOGIN flows") == ["auth"]
+
+
+class TestRetrievalIndex:
+    def test_written_by_save_on_update_decision(self, tmp_repo):
+        store.update_decision(tmp_repo, "We chose postgres for the orders schema", RV1_SESSION, "architecture")
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx is not None
+        assert idx["v"] == 1 and idx["n_docs"] == 1
+        (doc,) = idx["docs"].values()
+        assert "db" in doc["topics"]
+        assert "postgres" in doc["tf"]
+
+    def test_reflects_current_content_after_revision(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use redis for caching the product feed", RV1_SESSION, "architecture")
+        data = store._load(tmp_repo)
+        entry = data["entries"][0]
+        store._append_revision(entry, "Use memcached for caching the product feed now", source="human")
+        store._save(tmp_repo, data)
+        (doc,) = store._read_retrieval_index(tmp_repo)["docs"].values()
+        assert "memcached" in doc["tf"]      # current content indexed
+        assert "redis" not in doc["tf"]      # superseded content dropped
+
+    def test_missing_returns_none_and_creates_no_file(self, tmp_repo):
+        assert store._read_retrieval_index(tmp_repo) is None
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_corrupt_returns_none(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        store._index_path(tmp_repo).write_text("{ not json")
+        assert store._read_retrieval_index(tmp_repo) is None
+
+    def test_wrong_version_returns_none(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        p = store._index_path(tmp_repo)
+        payload = json.loads(p.read_text())
+        payload["v"] = 2
+        p.write_text(json.dumps(payload))
+        assert store._read_retrieval_index(tmp_repo) is None
+
+    def test_indexes_only_decisions(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        data = store._load(tmp_repo)
+        data["entries"].append({"type": "task", "id": "task-1", "content": "a task not a decision"})
+        store._save(tmp_repo, data)
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx["n_docs"] == 1
+        assert "task-1" not in idx["docs"]
+
+
+class TestBM25Router:
+    def _id_by(self, ids, needle):
+        return next(v for k, v in ids.items() if needle in k)
+
+    def test_strong_match_injects_content_with_header(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        result = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens live in cookies?")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "JWT" in result and "cookies" in result
+
+    def test_bm25_two_term_beats_one_term_noise(self, tmp_repo):
+        ids = _seed_rv1(tmp_repo, RV1_CORPUS + [
+            ("orders are archived nightly to cold storage", "convention"),
+            ("orders list uses cursor pagination with opaque cursors", "pattern"),
+        ])
+        idx = store._read_retrieval_index(tmp_repo)
+        ranked = store._bm25_rank(["orders", "pagination"], idx)
+        top_id = ranked[0][0]
+        assert top_id == self._id_by(ids, "cursor pagination")   # 2 term hits wins
+        assert ranked[0][2] == 2
+
+    def test_relative_threshold_weak_second_not_injected(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # "docker helm ci" hits the deploy doc on 3 terms; "layer" is a lone weak term
+        # shared by other docs — it must not be injected as content alongside the strong hit.
+        result = store.get_context_for_prompt(tmp_repo, "why did we choose docker helm ci for the layer?")
+        assert "Docker images" in result
+        assert "domain layer" not in result          # weak single-term doc excluded
+        assert result.count("\n- ") + result.count("]\n- ") >= 0  # structural sanity
+
+    def test_strong_cap_is_three(self, tmp_repo):
+        _seed_rv1(tmp_repo, [
+            ("caching alpha reduces the checkout latency budget", "architecture"),
+            ("caching beta improves the profile latency budget", "architecture"),
+            ("caching gamma speeds the search latency budget", "architecture"),
+            ("caching delta trims the report latency budget", "architecture"),
+        ])
+        result = store.get_context_for_prompt(tmp_repo, "why does caching latency budget matter?")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert result.count("\n- [") == 3           # capped at 3 rendered decisions
+
+    def test_artifact_extraction_routes_paste_to_db(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        prompt = "fix this bug\n\nTraceback: app/db/session.py raised OperationalError in the pool"
+        result = store.get_context_for_prompt(tmp_repo, prompt)
+        assert "OperationalError" in result          # routed via artifacts, prose named no topic
+        assert "Alembic" in result
+
+    def test_rationale_boost_preserves_single_keyword_hit(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # "alembic" hits exactly one doc with a single term — the rationale boost keeps it.
+        result = store.get_context_for_prompt(tmp_repo, "why alembic?")
+        assert result != ""
+        assert "Alembic" in result
+
+    def test_weak_topic_overlap_returns_pointer(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # "why the schema design?" — "schema" is a db alias but matches no doc token exactly,
+        # so no strong content; the db topic still overlaps stored docs → a pointer.
+        result = store.get_context_for_prompt(tmp_repo, "why the schema design here?")
+        assert result.startswith("[Contexer] Related stored decisions:")
+        assert "db(" in result
+
+    def test_miss_returns_empty(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        assert store.get_context_for_prompt(tmp_repo, "refactor the helper function") == ""
+        assert store.get_context_for_prompt(tmp_repo, "why do birds fly south?") == ""
+
+
+class TestContextForPromptMeta:
+    """get_context_for_prompt_with_meta hands back structured data instead of a caller
+    (claude.rationale) having to scrape the rendered text."""
+
+    def test_strong_hit_kind_and_count(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "why do jwt refresh tokens live in cookies?")
+        assert meta["kind"] == "strong"
+        assert meta["count"] == 1
+        assert "auth" in meta["topics"]
+
+    def test_pointer_kind_and_topics(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "why the schema design here?")
+        assert meta["kind"] == "pointer"
+        assert "db" in meta["topics"]
+        assert meta["count"] >= 1
+
+    def test_miss_kind_empty(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        text, meta = store.get_context_for_prompt_with_meta(tmp_repo, "refactor the helper function")
+        assert text == ""
+        assert meta == {"kind": "", "count": 0, "topics": []}
+
+    @pytest.mark.parametrize("prompt", [
+        "why do jwt refresh tokens live in cookies?",
+        "why the schema design here?",
+        "refactor the helper function",
+        "why did we choose docker helm ci for the layer?",
+    ])
+    def test_drift_pin_matches_public_api(self, tmp_repo, prompt):
+        # get_context_for_prompt and get_context_for_prompt_with_meta must never diverge —
+        # both are thin wrappers over the same private implementation.
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        assert store.get_context_for_prompt(tmp_repo, prompt) == \
+            store.get_context_for_prompt_with_meta(tmp_repo, prompt)[0]
+
+
+class TestWorkingSet:
+    def test_second_identical_prompt_not_reinjected(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "sess-ws"
+        first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert first.startswith("[Contexer: auto-fetched for this question]")
+        second = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert "auto-fetched" not in second          # already in the working set → not re-injected
+
+    def test_different_session_reinjects(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", "sess-a")
+        other = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", "sess-b")
+        assert other.startswith("[Contexer: auto-fetched for this question]")
+
+    def test_empty_session_no_dedup_no_file(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        a = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?")
+        b = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?")
+        assert a == b and a.startswith("[Contexer: auto-fetched for this question]")
+        assert store._ws_path(tmp_repo, "").exists() is False
+
+    def test_working_set_ids_public_helper(self, tmp_repo):
+        ids = _seed_rv1(tmp_repo, RV1_CORPUS)
+        sid = "sess-helper"
+        store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        jwt_id = next(v for k, v in ids.items() if "JWT" in k)
+        assert jwt_id in store.working_set_ids(tmp_repo, sid)
+        assert store.working_set_ids(tmp_repo, "") == []
+
+
+class TestLegacyFallback:
+    def test_rationale_hit_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "We chose postgres over mongo for ACID transactions", RV1_SESSION, "architecture")
+        monkeypatch.setattr(store, "_read_retrieval_index", lambda repo: None)
+        result = store.get_context_for_prompt(tmp_repo, "why did we choose postgres?")
+        expected = "[Contexer: auto-fetched for this question]\n" + store.get_context(tmp_repo, query="postgres")
+        assert result == expected
+
+    def test_miss_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "We chose postgres over mongo", RV1_SESSION, "architecture")
+        monkeypatch.setattr(store, "_read_retrieval_index", lambda repo: None)
+        assert store.get_context_for_prompt(tmp_repo, "add a new endpoint here") == ""
+
+
+class TestRetrievalLog:
+    def test_pointer_event_appended(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-log")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        assert path.exists()
+        events = [json.loads(l) for l in path.read_text().splitlines() if l]
+        assert events[-1]["e"] == "pointer"
+        assert "db" in events[-1]["topics"]
+        assert events[-1]["sid"] == "sess-log"
+
+    def test_log_cap_enforced(self, tmp_repo):
+        for i in range(store._RETRIEVAL_LOG_CAP + 25):
+            store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["db"], "sid": "s", "ts": i})
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        lines = [l for l in path.read_text().splitlines() if l]
+        assert len(lines) == store._RETRIEVAL_LOG_CAP
+        assert json.loads(lines[-1])["ts"] == store._RETRIEVAL_LOG_CAP + 24  # tail kept
+
+    def test_corrupt_log_ignored(self, tmp_repo):
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        path.write_text("not\x00valid json line\n")
+        # append still succeeds (fail-soft rewrite), never raises
+        store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["api"], "sid": "s", "ts": 1})
+        assert path.exists()
+
+
+def _ignore(repo, eid):
+    data = store._load(repo)
+    for e in data["entries"]:
+        if e["id"] == eid:
+            e["status"] = "ignored"
+    store._save(repo, data)
+
+
+# ── Retrieval V1 review findings: indexed path must dominate legacy ─────────────
+
+class TestIndexStatusFilter:
+    def test_ignored_not_indexed_pending_is(self, tmp_repo):
+        _, ig = store.update_decision(tmp_repo, "Use postgres for the ledger storage layer",
+                                      RV1_SESSION, "architecture")
+        _ignore(tmp_repo, ig)
+        # a constraint is born pending_approval — retrievable via get_context (tagged
+        # [pending]), so it MUST be indexed; only ignored is excluded (Greptile #117).
+        store.update_decision(tmp_repo, "Never log postgres credentials in plaintext",
+                              RV1_SESSION, "constraint")
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx["n_docs"] == 1
+        assert all(d["status"] == "pending_approval" for d in idx["docs"].values())
+
+    def test_pending_only_match_injects_tagged(self, tmp_repo):
+        # Dominance parity: legacy surfaces a pending-only rationale match via
+        # get_context, so the indexed path must inject it too (with the pending tag).
+        store.update_decision(tmp_repo, "Chose Kafka over RabbitMQ for the event backbone ordering",
+                              RV1_SESSION, "constraint")
+        result = store.get_context_for_prompt(tmp_repo, "why did we choose kafka for the event backbone?")
+        assert "Kafka over RabbitMQ" in result
+        assert "[pending]" in result
+
+    def test_approved_wins_over_ignored(self, tmp_repo):
+        _, ig = store.update_decision(tmp_repo, "JWT tokens are validated in middleware auth checks",
+                                      RV1_SESSION, "architecture")
+        _ignore(tmp_repo, ig)
+        store.update_decision(tmp_repo,
+                              "We rejected long-lived jwt refresh cookies for middleware security reasons",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "why do we use jwt tokens in middleware?")
+        assert "rejected long-lived" in result                 # approved content injected
+        assert "validated in middleware auth checks" not in result   # ignored never surfaces
+
+
+class TestBM25PrefixAndDigits:
+    def test_prefix_query_matches_indexed_token(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL as the primary database with SQLAlchemy",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "why did we pick postgres for storage?")
+        assert "PostgreSQL" in result       # 'postgres' prefix-expanded to 'postgresql'
+
+    def test_digit_bearing_term_reaches_ranker(self, tmp_repo):
+        store.update_decision(tmp_repo, "We deploy the service on k8s clusters through helm charts",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "why did we pick k8s for this?")
+        assert "k8s" in result              # digit-bearing term survives tokenization
+
+    def test_bm25_prefix_expansion_aggregates_df(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        idx = store._read_retrieval_index(tmp_repo)
+        # 'postgres' is absent as an exact token but 'postgres'-prefixed tokens exist
+        ranked = store._bm25_rank(["postgres"], idx)
+        assert ranked and ranked[0][2] == 1
+
+
+class TestProjectRelaxation:
+    def test_project_single_keyword_injects_content(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use PostgreSQL as the primary database with SQLAlchemy",
+                              RV1_SESSION, "architecture", created_by="human")
+        result = store.get_context_for_prompt(tmp_repo, "what is the goal for the database layer?")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "PostgreSQL" in result
+
+
+class TestArtifactRouteGate:
+    def test_prose_slashes_are_not_routes(self):
+        for prose in ("light/dark mode", "read/write splitting", "either/or choice"):
+            assert store._ARTIFACT_ROUTE_RE.findall(prose) == [], prose
+            assert store._extract_artifacts(prose) == [], prose
+
+    def test_real_route_matches(self):
+        assert store._ARTIFACT_ROUTE_RE.findall("GET /api/users/{id} returns json") == ["/api/users/{id}"]
+        arts = store._extract_artifacts("GET /api/users/{id} returns json")
+        assert "users" in arts and "api" in arts
+
+    def test_artifact_only_prompt_no_global_leak(self, tmp_repo):
+        # An index must exist (a repo decision) so the BM25 path — not legacy — runs.
+        store.update_decision(tmp_repo, "The cart service owns checkout totals",
+                              RV1_SESSION, "architecture", created_by="human")
+        store.update_global_decision("Always rename modules using git mv to preserve history",
+                                     RV1_SESSION, "convention")
+        # not rationale, not project — only an artifact (utils.py). Legacy was silent here.
+        assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
+
+
+class TestTopicAliasRetry:
+    def test_bare_topic_query_falls_back_to_aliases(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # No decision literally contains 'db', but the pointer nudge suggests query='db'.
+        result = store.get_context(tmp_repo, query="db")
+        assert "Alembic" in result                      # postgres/migration alias hit
+        assert "No matching decisions" not in result
+
+    def test_literal_match_unchanged_when_present(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        result = store.get_context(tmp_repo, query="jwt")
+        assert "JWT refresh tokens" in result
+
+    def test_no_result_query_logs_no_followup(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # Arm a fresh pointer for the db topic.
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-fu")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        before = path.read_text().count('"followup"')
+        # A get_context that found nothing must not log a follow-through, even in-window.
+        store.log_followup_if_matching(tmp_repo, "db", found=False)
+        assert path.read_text().count('"followup"') == before
+        # A genuine hit does log one.
+        store.log_followup_if_matching(tmp_repo, "db", found=True)
+        assert path.read_text().count('"followup"') == before + 1
+
+
+class TestWsPathSanitized:
+    def test_slashed_session_id_stays_in_store_dir(self, tmp_repo):
+        sid = "proj/abc123"
+        p = store._ws_path(tmp_repo, sid)
+        assert p.parent == store.STORE_DIR          # no nested path escape
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert first.startswith("[Contexer: auto-fetched for this question]")
+        assert p.exists()                           # ws file created directly in STORE_DIR
+        second = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
+        assert "auto-fetched" not in second         # dedup works across calls with that id
+
+    def test_shared_32char_prefix_does_not_collide(self, tmp_repo):
+        # Greptile #117: ids sharing the first 32 chars must not share a working set.
+        base = "project-alpha-2026-07-15-morning-run"   # >32 chars
+        a, b = base + "-A", base + "-B"
+        assert store._ws_path(tmp_repo, a) != store._ws_path(tmp_repo, b)
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", a)
+        assert "auto-fetched" in first
+        other = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", b)
+        assert "auto-fetched" in other              # session B is not poisoned by A's working set
+
+
+# Two distinct docs (below the 70% novelty threshold) covering every hit class.
+DOMINANCE_CORPUS = [
+    ("We chose PostgreSQL as the primary database for ACID order processing across the data layer", "architecture"),
+    ("The session catches OperationalError from app/db/session.py and retries on the pool", "architecture"),
+]
+
+
+class TestIndexDominatesLegacy:
+    """Pins the primary (indexed) path to never inject less than its legacy fallback."""
+
+    @pytest.mark.parametrize("prompt,needle,is_miss", [
+        ("why did we choose postgresql for storage?", "PostgreSQL", False),   # rationale exact-token
+        ("why did we pick postgres here?", "PostgreSQL", False),              # rationale prefix-form
+        ("what is the goal for the database layer?", "PostgreSQL", False),    # project single keyword
+        ("Traceback:\napp/db/session.py raised OperationalError", "OperationalError", False),  # artifact paste
+        ("refactor the helper function", "", True),                          # task/miss
+        ("why do birds fly south?", "", True),                               # rationale word, no domain match
+    ])
+    def test_indexed_at_least_as_good_as_legacy(self, tmp_repo, prompt, needle, is_miss):
+        for content, subtype in DOMINANCE_CORPUS:
+            store.update_decision(tmp_repo, content, RV1_SESSION, subtype, created_by="human")
+        indexed = store.get_context_for_prompt(tmp_repo, prompt)
+        store._index_path(tmp_repo).unlink(missing_ok=True)   # force the legacy path
+        legacy = store.get_context_for_prompt(tmp_repo, prompt)
+        if is_miss:
+            assert indexed == "" and legacy == ""
+        else:
+            if needle in legacy:                              # never worse than fallback
+                assert needle in indexed
+            assert needle in indexed                          # and the indexed path actually recalls it
+
+
+# ── Retrieval V1 (Part B): session-start integration ────────────────────────────────
+
+# Distinct-enough-to-avoid-novelty-dedup filler so a store can clear the 20-decision gate
+# for the standing-map tests without colliding with RV1_CORPUS content.
+RV1_EXTRA = [
+    ("The billing service uses stripe webhooks for payment reconciliation", "architecture"),
+    ("Search indexing runs nightly through a cron job in the etl pipeline", "convention"),
+    ("Feature flags are managed through launchdarkly for gradual rollout", "pattern"),
+    ("Error monitoring reports crash telemetry to sentry", "convention"),
+    ("The notification worker retries failed emails three times", "pattern"),
+    ("User uploads are stored in an s3 bucket with versioning enabled", "architecture"),
+    ("Rate limiting caps external calls at 100 requests per minute", "constraint"),
+    ("The admin dashboard uses server side rendering for faster loads", "pattern"),
+    ("Background jobs run through a sidekiq style queue worker", "architecture"),
+    ("Analytics events are batched before being sent to the warehouse", "convention"),
+    ("The mobile app syncs offline changes using a conflict free merge", "pattern"),
+    ("Internationalization strings are loaded from json locale files", "convention"),
+]
+
+
+class TestStandingTopicMap:
+    def test_map_appears_at_20_plus_decisions(self, tmp_repo):
+        assert len(RV1_CORPUS) + len(RV1_EXTRA) >= 20
+        _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" in ctx
+        assert "get_context(query=" in ctx
+
+    def test_map_absent_below_20(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)  # 10 decisions — below the gate
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" not in ctx
+
+    def test_map_absent_when_index_missing(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
+        store._index_path(tmp_repo).unlink()  # simulate a missing index sidecar
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" not in ctx
+
+
+class TestCompactRehydration:
+    def test_rehydrates_capped_and_active_only(self, tmp_repo):
+        items = RV1_CORPUS + RV1_EXTRA  # 22 mutually-distinct decisions, nothing deduped
+        ids_by_content = _seed_rv1(tmp_repo, items)
+        ids = [ids_by_content[c] for c, _ in items]
+        assert all(ids)  # sanity: no novelty-filter dedup collapsed any of these
+        sid = "sess-compact"
+        # Ignore one of the 10 most-recently-injected ids — it must never be rehydrated
+        # even though it's in the working set.
+        ignored_id = ids[13]  # RV1_EXTRA[3] — "...crash telemetry to sentry", within the last 10
+        store.approve_decision(tmp_repo, ignored_id, "ignore")
+        store._ws_add(tmp_repo, sid, ids)  # simulate all 22 injected earlier this session
+
+        result = store.get_session_start_context(tmp_repo, "compact", sid)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "## Rehydrated working context" in ctx
+        section = ctx.split("## Rehydrated working context:")[1]
+        assert section.count("\n- [") <= 10
+        assert "sentry" not in section  # ids[13]'s content — excluded (ignored, not active)
+
+    def test_no_session_id_no_rehydration(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
+        result = store.get_session_start_context(tmp_repo, "compact")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Rehydrated working context" not in ctx
+
+    def test_no_working_set_no_rehydration(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
+        result = store.get_session_start_context(tmp_repo, "compact", "sess-empty-ws")
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Rehydrated working context" not in ctx
+
+
+class TestWorkingSetGC:
+    def test_gc_removes_stale_and_keeps_fresh(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        slug = store._slug(tmp_repo)
+        stale_ws = store.STORE_DIR / f".ws_{slug}_stale.json"
+        fresh_ws = store.STORE_DIR / f".ws_{slug}_fresh.json"
+        stale_log = store.STORE_DIR / f".retrieval_{slug}.jsonl"
+        stale_ws.write_text('{"injected": [], "ts": 0}')
+        fresh_ws.write_text('{"injected": [], "ts": 0}')
+        stale_log.write_text('{"e": "pointer"}\n')
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_ws, (old, old))
+        os.utime(stale_log, (old, old))
+        # fresh_ws keeps the mtime from the write above (just now)
+
+        store._gc_stale_session_files()
+
+        assert not stale_ws.exists()
+        assert not stale_log.exists()
+        assert fresh_ws.exists()
+
+    def test_gc_runs_at_non_resume_session_start(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        stale_ws = store.STORE_DIR / f".ws_{store._slug(tmp_repo)}_old.json"
+        stale_ws.write_text('{"injected": [], "ts": 0}')
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_ws, (old, old))
+        store.get_session_start_context(tmp_repo)  # non-resume start
+        assert not stale_ws.exists()
+
+    def test_gc_skipped_on_resume(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        stale_ws = store.STORE_DIR / f".ws_{store._slug(tmp_repo)}_old.json"
+        stale_ws.write_text('{"injected": [], "ts": 0}')
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_ws, (old, old))
+        store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
+        store.get_session_start_context(tmp_repo, "resume")
+        assert stale_ws.exists()  # resume takes the early-return path — GC never runs
+
+
+class TestRationaleSessionIdPlumbing:
+    def test_rationale_passes_session_id_dedups_second_prompt(self, tmp_repo):
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-1",
+        })
+        first = json.loads(claude.rationale(tmp_repo, raw))
+        assert "additionalContext" in first["hookSpecificOutput"]
+        assert "auto-fetched" in first["hookSpecificOutput"]["additionalContext"]
+        second = json.loads(claude.rationale(tmp_repo, raw))  # same prompt, same session
+        second_ctx = second.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "auto-fetched" not in second_ctx  # already in the working set -> not re-injected
+
+    def test_injection_is_observable(self, tmp_repo):
+        # The developer sees WHAT was recalled (systemMessage, user-facing); a routine
+        # small injection stays silent about cost. The model is told the fetch already
+        # happened so it doesn't re-call get_context.
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-obs",
+        })
+        out = json.loads(claude.rationale(tmp_repo, raw))
+        msg = out["systemMessage"]
+        assert msg.startswith("Contexer: recalled 1 decision")
+        assert "tokens" not in msg  # small injection -> cost note suppressed
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("[Contexer: auto-fetched for this question]")
+        assert "no get_context call needed" in ctx
+
+    def test_large_injection_flags_cost(self, tmp_repo):
+        # Cost-on-exception: only an injection above _COST_NOTE_TOKENS carries the estimate.
+        from contexer.adapters import claude
+        long_tail = " because " + " ".join(f"reason{i} pooling latency" for i in range(80))
+        store.update_decision(
+            tmp_repo, "Chose postgres for the orders database" + long_tail,
+            RV1_SESSION, "architecture", created_by="scan")
+        raw = json.dumps({
+            "prompt": "why did we choose postgres for the orders database?",
+            "session_id": "claude-sess-big",
+        })
+        out = json.loads(claude.rationale(tmp_repo, raw))
+        msg = out["systemMessage"]
+        assert msg.startswith("Contexer: recalled 1 decision")
+        assert "· ~" in msg and "tokens" in msg
+
+    def test_no_injection_no_system_message(self, tmp_repo):
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw = json.dumps({"prompt": "hello there", "session_id": "claude-sess-quiet"})
+        assert claude.rationale(tmp_repo, raw) == "{}"
+
+    def test_different_session_id_reinjects(self, tmp_repo):
+        from contexer.adapters import claude
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        raw_a = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-a",
+        })
+        raw_b = json.dumps({
+            "prompt": "why do jwt refresh tokens expire in httpOnly cookies?",
+            "session_id": "claude-sess-b",
+        })
+        claude.rationale(tmp_repo, raw_a)
+        second = json.loads(claude.rationale(tmp_repo, raw_b))
+        assert "additionalContext" in second["hookSpecificOutput"]
+
+
+class TestFollowThroughLog:
+    def test_followup_logged_on_matching_query(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-follow")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        assert json.loads(path.read_text().splitlines()[-1])["e"] == "pointer"
+
+        store.log_followup_if_matching(tmp_repo, "db")
+
+        events = [json.loads(l) for l in path.read_text().splitlines() if l]
+        assert events[-1]["e"] == "followup"
+        assert events[-1]["query"] == "db"
+
+    def test_no_followup_when_topic_does_not_match(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-follow2")
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        before = path.read_text()
+
+        store.log_followup_if_matching(tmp_repo, "frontend")
+
+        assert path.read_text() == before  # no matching topic -> nothing appended
+
+    def test_no_pointer_no_followup_no_crash(self, tmp_repo):
+        store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
+        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        assert not path.exists()

@@ -109,6 +109,23 @@ class TestGeminiRuntime:
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
         assert not (store.STORE_DIR / ".gemini_pending_reload").exists()
 
+    def test_compress_flag_rehydrates_working_set(self, home, tmp_path):
+        # session_id threading (Retrieval V1 compact-reload parity): a reload after
+        # compression rehydrates the CONTENT of decisions the router already surfaced this
+        # session, not just the general rules — mirroring Claude's SessionStart(compact).
+        repo = str(tmp_path / "repo")
+        store.update_decision(
+            repo, "JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies",
+            "s1", "architecture")
+        prompt = "why do jwt refresh tokens expire in httpOnly cookies?"
+        store.get_context_for_prompt(repo, prompt, "s1")  # populates the working set
+        raw = json.dumps({"session_id": "s1", "prompt": prompt})
+        gemini.after_write(repo, raw)
+        gemini.pre_compress(repo, raw)
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "Rehydrated working context" in context
+
     def test_pending_review_flag_injects_nudge(self, home, tmp_path):
         repo = str(tmp_path / "repo")
         raw = json.dumps({"session_id": "s1", "prompt": "continue"})

@@ -38,6 +38,50 @@ class TestCodexInstall:
         cmds = [g["hooks"][0]["command"] for g in _hooks(home)["hooks"]["SessionStart"]]
         assert any("get_session_start_context" in c for c in cmds)
 
+    def test_session_start_hook_threads_session_id(self, home):
+        # Mirrors claude.py's ss_code: reads stdin once, passes both source and session id
+        # so compact-source working-set rehydration works for Codex too.
+        codex.install(home)
+        cmds = [g["hooks"][0]["command"] for g in _hooks(home)["hooks"]["SessionStart"]]
+        assert any("session_from_hook_stdin" in c for c in cmds)
+
+    def test_migrates_stale_session_start_to_thread_session_id(self, home):
+        # An older install has pull_team but predates session-id threading — must still be
+        # replaced on reinstall so the current ss_code (session-id-aware) is installed.
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = (
+            'py -c "from contexer import store; from contexer.adapters import claude as _c; '
+            'import json,sys; repo=sys.argv[1]; _c.pull_team(repo); '
+            'print(json.dumps(store.get_session_start_context(repo, '
+            'store.source_from_hook_stdin(sys.stdin.read()))))" "$REPO"'
+        )
+        hooks_path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        ss = _hooks(home)["hooks"]["SessionStart"]
+        cmds = [g["hooks"][0]["command"] for g in ss]
+        assert len(ss) == 1  # replaced in place, not duplicated
+        assert any("session_from_hook_stdin" in c for c in cmds)
+        assert any("pull_team" in c for c in cmds)
+
+    def test_post_compact_hook_threads_session_id(self, home):
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["PostCompact"] for h in g["hooks"]]
+        assert any("session_from_hook_stdin" in c for c in cmds)
+
+    def test_migrates_stale_post_compact_to_thread_session_id(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = 'py -c "print(store.get_post_compact_context(sys.argv[1]))" "$REPO"'
+        hooks_path.write_text(json.dumps({"hooks": {"PostCompact": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        poc = _hooks(home)["hooks"]["PostCompact"]
+        cmds = [h["command"] for g in poc for h in g["hooks"]]
+        assert len(poc) == 1  # replaced in place, not duplicated
+        assert any("session_from_hook_stdin" in c for c in cmds)
+
     def test_full_hook_event_set_wired(self, home):
         codex.install(home)
         hooks = _hooks(home)["hooks"]

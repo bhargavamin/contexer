@@ -259,6 +259,22 @@ class TestMemorySyncMigration:
         assert any("sync_memory" in c for c in cmds)
         assert len(json.loads(path.read_text())["hooks"]["PreCompact"]) == 1
 
+    def test_session_start_upgraded_to_thread_session_id(self, clean_home):
+        # Pre-retrieval-V1 hook: has source_from_hook_stdin AND sync_memory but no
+        # session-id threading — must still be replaced on reinstall.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command",
+                "command": "py -c '_c.sync_memory(repo); store.get_session_start_context("
+                           "repo, store.source_from_hook_stdin(x))'"}]}],
+        }}))
+        install()
+        groups = json.loads(settings_path.read_text())["hooks"]["SessionStart"]
+        cmds = [h["command"] for grp in groups for h in grp["hooks"]]
+        assert any("session_from_hook_stdin" in c for c in cmds)
+        assert len(groups) == 1
+
 
 class TestTargetSelection:
     def test_install_target_cursor_only(self, clean_home, monkeypatch):
