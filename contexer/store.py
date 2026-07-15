@@ -341,6 +341,78 @@ def _find_match(content: str, existing: list) -> dict | None:
     return None
 
 
+def _containment_ratio(a: set[str], b: set[str]) -> float:
+    """|a∩b| / min(|a|,|b|) — 1.0 when the smaller token set is fully inside the larger.
+    Complements _overlap_ratio (max-denominator), which a superset restatement evades:
+    "Always commit automatically" inside "Always commit automatically after approvals …"
+    scores 0.30 on max but 1.0 on min. Used ONLY for capture_user_constraint routing —
+    bootstrap idempotence, memory sync, and team dedup depend on the max-denominator
+    metric exactly as-is, so _overlap_ratio/_find_match stay untouched."""
+    if not a or not b:
+        return 0.0
+    lo = len(a) if len(a) < len(b) else len(b)
+    return len(a & b) / lo
+
+
+def _find_containment(content: str, existing: list) -> dict | None:
+    """Best-match entry whose containment with `content` exceeds 0.7, or None.
+
+    First-hit-wins was wrong here: a short generic rule ("Always commit") contained in
+    many longer directives scores 1.0 containment against ALL of them, so whichever one
+    happened to iterate first "won" regardless of which is actually closest. Instead,
+    every candidate above the threshold is scored and the best one picked: highest
+    containment ratio first, ties broken by highest _overlap_ratio (closest overall
+    content — the max-denominator metric penalizes a short match more than a near-equal-
+    length one), remaining ties keep earliest iteration order (strict '>' comparisons
+    never displace an earlier equally-good candidate)."""
+    tokens = _tokenize(content)
+    if not tokens:
+        return None
+    best = None
+    best_containment = 0.0
+    best_overlap = 0.0
+    for entry in existing:
+        other = _tokenize(entry.get("content", ""))
+        if not other:
+            continue
+        containment = _containment_ratio(tokens, other)
+        if containment <= 0.7:
+            continue
+        overlap = _overlap_ratio(tokens, other)
+        if best is None or containment > best_containment or (
+                containment == best_containment and overlap > best_overlap):
+            best = entry
+            best_containment = containment
+            best_overlap = overlap
+    return best
+
+
+_NEAR_MISS_FLOOR = 0.25
+_NEAR_MISS_CAP = 3
+
+
+def _near_misses(content: str, existing: list) -> list[str]:
+    """Stored rules in the lexical grey zone (0.25 ≤ _overlap_ratio < 0.7) — the synonym-
+    phrasing band token dedup cannot resolve ("commit on approval" vs "commit
+    automatically"). Rendered as `short-id "preview"` items for the capture ack, top
+    _NEAR_MISS_CAP by overlap; consolidation is the developer's call, never automatic."""
+    tokens = _tokenize(content)
+    if not tokens:
+        return []
+    scored = []
+    for entry in existing:
+        ratio = _overlap_ratio(tokens, _tokenize(entry.get("content", "")))
+        if _NEAR_MISS_FLOOR <= ratio < 0.7:
+            scored.append((ratio, entry))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    out = []
+    for _ratio, e in scored[:_NEAR_MISS_CAP]:
+        text = _current_content(e)
+        preview = text[:80] + ("..." if len(text) > 80 else "")
+        out.append(f'{(e.get("id") or "")[:8]} "{preview}"')
+    return out
+
+
 def _is_storable(content: str) -> bool:
     """Content needs at least one real token to be a storable decision. Punctuation-
     or whitespace-only content is rejected — this preserves the pre-refactor behavior
@@ -748,7 +820,8 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
 
 
 def capture_user_constraint(
-    repo_path: str, prompt: str, session_id: str
+    repo_path: str, prompt: str, session_id: str,
+    near_misses: list | None = None,
 ) -> tuple[str, str, str] | tuple[None, None, None]:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
@@ -764,9 +837,19 @@ def capture_user_constraint(
     'ignored' entries are excluded from matching here ONLY — a user re-typing a rule after
     discarding a false positive gets a fresh entry, not a permanently blocked match.
 
+    When _find_match misses, a containment check (|∩|/min > 0.7, see _containment_ratio)
+    against the same candidates catches superset/subset restatements the max-denominator
+    metric is blind to, and routes them onto the matched entry (Suggested Update,
+    promotion, in-place amend, or recurrence — see _route_containment) instead of
+    accumulating a new overlapping entry.
+
+    `near_misses`, when a list is passed, is extended in place with grey-zone lexical
+    matches (see _near_misses) for a brand-new entry — the caller forwards it to
+    constraint_ack so the developer can confirm a consolidation.
+
     Returns (entry_id, sanitized_content, status) if stored, (None, None, None) otherwise.
-    `status` is one of "approved" | "pending_approval" | "promoted" — pass it to
-    constraint_ack() for the matching notice."""
+    `status` is one of "approved" | "pending_approval" | "promoted" | "revision_proposed" |
+    "revision_already_pending" — pass it to constraint_ack() for the matching notice."""
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
         return None, None, None
@@ -797,6 +880,15 @@ def capture_user_constraint(
                 _save(repo_path, data)
                 return match["id"], _current_content(match), "promoted"
             return None, None, None
+        # Containment routing: a superset/subset restatement of a stored rule evades the
+        # max-denominator metric above — consolidate onto the first contained entry
+        # instead of accumulating a new overlapping one.
+        hit = _find_containment(content, decisions_only)
+        if hit is not None:
+            return _route_containment(repo_path, data, hit, content, subtype,
+                                      deictic, session_id)
+        if near_misses is not None:
+            near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
                                     created_by="human", status=status)
         data["entries"].append(entry)
@@ -808,26 +900,139 @@ def capture_user_constraint(
         return entry["id"], content, status
 
 
-def constraint_ack(content: str, status: str) -> str:
+def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
+                       deictic: bool, session_id: str) -> tuple:
+    """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
+    Called under the store lock; saves and returns the capture 3-tuple. Never creates a
+    new entry, and never silently replaces a trusted rule's current revision.
+
+    New content LONGER (the observed bug — superset restatement):
+      - pending twin (born on this path) + clean  → promote with the fuller content
+      - pending twin + deictic                    → amend v1 in place, stays pending
+      - other pending (AI-captured)               → recurrence (base needs review first)
+      - approved/suggested, no unresolved proposal → attach a proposed_revision (Suggested
+                                                    Update — approval promotes it)
+      - approved/suggested, DIFFERENT proposal
+        already pending                            → leave the existing proposal untouched,
+                                                    return "revision_already_pending" (never
+                                                    clobber an unreviewed Suggested Update)
+    New content SHORTER (user re-types the terse version):
+      - pending twin + clean → promote keeping the fuller existing content
+      - otherwise            → recurrence, silent no-op like an ordinary duplicate."""
+    now = datetime.now(timezone.utc).isoformat()
+    longer = len(_tokenize(content)) > len(_tokenize(hit.get("content", "")))
+    pending = _entry_status(hit) == "pending_approval"
+    pending_twin = pending and hit.get("created_by") == "human"
+
+    def _recur_silently():
+        _record_recurrence(hit, session_id)
+        _save(repo_path, data)
+        return None, None, None
+
+    if longer:
+        if pending_twin:
+            if deictic:
+                # Pre-approval amend precedent: rewrite v1 in place, stays pending.
+                rev = _current_revision(hit)
+                if rev is not None:
+                    rev["content"] = _normalize_content(content)
+                _sync_decision_cache(hit)
+                hit["updated_at"] = now
+                _record_recurrence(hit, session_id)
+                _save(repo_path, data)
+                return hit["id"], _current_content(hit), "pending_approval"
+            _append_revision(hit, content, source="human", approved_at=now)
+            hit["status"] = "approved"
+            hit["approved_at"] = now
+            hit["approved_by"] = "human"
+            _record_recurrence(hit, session_id)
+            _save(repo_path, data)
+            return hit["id"], _current_content(hit), "promoted"
+        if pending:
+            return _recur_silently()  # never propose on an unreviewed base
+        norm = _normalize_content(content)
+        prop = hit.get("proposed_revision")
+        if prop and prop.get("content") != norm:
+            # A DIFFERENT Suggested Update is already awaiting review on this entry —
+            # never clobber it (it would vanish unreviewed). Leave it untouched and
+            # surface the new phrasing to the developer instead of silently dropping it.
+            return hit["id"], norm, "revision_already_pending"
+        if not prop:
+            hit["proposed_revision"] = _build_proposal(
+                hit, content, subtype, session_id, now, source="human")
+            _save(repo_path, data)
+        # No .pending_review flag here for the same reason as new captures: the
+        # in-band revision_proposed ack already notifies the developer.
+        return hit["id"], norm, "revision_proposed"
+
+    if pending_twin and not deictic:
+        # Terse clean restatement is the activation gesture: bless revision 1 in place,
+        # keeping the fuller stored content (approve_decision precedent).
+        cur = _current_revision(hit)
+        hit["status"] = "approved"
+        hit["approved_at"] = now
+        hit["approved_by"] = "human"
+        _record_recurrence(hit, session_id)
+        if cur is not None:
+            cur["approved_at"] = now
+            score, factors = _compute_confidence(hit)
+            cur["confidence_score"] = score
+            cur["evidence"] = factors
+        _sync_decision_cache(hit)
+        _save(repo_path, data)
+        return hit["id"], _current_content(hit), "promoted"
+    return _recur_silently()
+
+
+def constraint_ack(content: str, status: str, entry_id: str = "",
+                   near_misses: list | tuple = ()) -> str:
     """Single-sourced ack text for capture_user_constraint, shared by every adapter (Claude,
     Codex via claude.capture_constraint, Gemini, the MCP tool) so wording — and the
-    self-approval-proofing on the pending case — can never drift between hosts."""
+    self-approval-proofing on the pending and revision_proposed cases — can never drift
+    between hosts. `entry_id` names the touched entry (used by revision_proposed);
+    `near_misses` (from capture_user_constraint's out-list) appends a consolidation hint
+    for grey-zone lexical matches on a brand-new entry."""
+    near_note = ""
+    if near_misses:
+        near_note = (
+            " Possibly related stored rules (lexical near-matches, NOT merged): "
+            + "; ".join(near_misses)
+            + ". If any of these states the same rule, point it out and offer to "
+            "consolidate — only proceed after the developer explicitly confirms; never "
+            "merge on your own."
+        )
     if status == "pending_approval":
         return (
             f"Stored pending your review: '{content}' — it references something only this "
             "conversation understands (this/it/here), so it is not yet trusted. Briefly tell "
             "the developer it was stored pending review. Do NOT approve it yourself; only the "
             "developer decides (they can run `contexer review`, or ask you to show it via "
-            "review_pending)."
+            "review_pending)." + near_note
         )
     if status == "promoted":
         return (
             f"Your restated rule replaced the pending one — '{content}' is now active. "
             "Acknowledge this briefly to the user."
         )
+    if status == "revision_proposed":
+        return (
+            f"Recorded a suggested update to existing rule {entry_id[:8]}: '{content}'. "
+            "The current rule stays active until it is reviewed. Briefly tell the developer "
+            "a suggested update to that rule is pending their review. Do NOT approve it "
+            "yourself; only the developer decides (they can run `contexer review`, or ask "
+            "you to show it via review_pending)."
+        )
+    if status == "revision_already_pending":
+        return (
+            f"Rule {entry_id[:8]} already has a suggested update awaiting review; this new "
+            f"phrasing ('{content}') was NOT stored, to avoid clobbering it. Tell the developer "
+            "a suggested update is already pending for that rule — they can run `contexer "
+            "review` — and mention this new phrasing so they can fold it in if relevant."
+        )
     return (
         f"Auto-stored as constraint: '{content}'. "
         "Acknowledge this briefly to the user — e.g. 'Stored as a constraint in Contexer.'"
+        + near_note
     )
 
 

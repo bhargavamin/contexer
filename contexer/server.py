@@ -261,10 +261,11 @@ def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return ""
-    entry_id, content, status = store.capture_user_constraint(resolved, prompt, SESSION_ID)
+    near: list = []
+    entry_id, content, status = store.capture_user_constraint(resolved, prompt, SESSION_ID, near)
     if entry_id is None:
         return ""
-    return store.constraint_ack(content, status)
+    return store.constraint_ack(content, status, entry_id, near)
 
 
 @mcp.tool()
