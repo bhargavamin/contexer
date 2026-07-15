@@ -23,7 +23,7 @@
 <p align="center">
   <a href="#the-developer-problem-re-teaching-your-agent-every-session">For developers</a> ·
   <a href="#the-leadership-problem-your-standards-never-reach-the-code">For engineering leaders</a> ·
-  <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not just CLAUDE.md?</a> ·
+  <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not rule files?</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
@@ -40,7 +40,7 @@
 
 # Stop your AI agents from overthinking, repeating, and burning tokens on what you already decided.
 
-You explained it Monday. Again Wednesday. It's Friday, and your AI is asking again — or quietly re-deriving the answer from scratch, six turns at a time. **And if you're the diligent one who maintains a CLAUDE.md:** you updated it this morning; the afternoon session reworked an entire feature; the file is already out of date.
+You explained it Monday. Again Wednesday. It's Friday, and your AI is asking again — or quietly re-deriving the answer from scratch, six turns at a time. **And if you're the diligent one who maintains a rules file — CLAUDE.md, AGENTS.md, GEMINI.md, `.cursor/rules`:** you updated it this morning; the afternoon session reworked an entire feature; the file is already out of date.
 
 Every AI coding session starts from zero, and the files you write to fix that go stale the moment an agent ships something new. Contexer is the fix: a **decision layer** that captures your engineering decisions as you work, keeps them current as they change, and hands them to **every agent** — Claude Code, Cursor, Codex, Gemini CLI — **before it starts reasoning**. The settled answer arrives first; the agent stops wondering, stops re-exploring — and just builds.
 
@@ -86,9 +86,9 @@ The open-source version is per-developer. **[Contexer Teams](https://contexer.ai
 
 ## What Contexer gives you that a .md file can't
 
-A complete, up-to-date CLAUDE.md is genuinely as token-efficient as Contexer — [we measured it](docs/benchmark.md). But files start incomplete and go stale. This is what you're actually buying:
+Every agent has its own rules file: CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI), `.cursor/rules` (Cursor). A complete, up-to-date one is genuinely as token-efficient as Contexer — [we measured it](docs/benchmark.md). But each file serves only the tool that reads it, and all of them start incomplete and go stale. This is what you're actually buying:
 
-| | Hand-written file (CLAUDE.md / AGENTS.md) | Contexer |
+| | Hand-written rules file (CLAUDE.md, AGENTS.md, GEMINI.md, `.cursor/rules`) | Contexer |
 |---|---|---|
 | Who writes it | You, by hand | Written for you: the repo is scanned and measured on first use; decisions are captured as you work |
 | How many to maintain | One per tool, per repo — CLAUDE.md, AGENTS.md, `.cursor/rules`, GEMINI.md — and the copies drift apart | Zero files. One store serves every tool and repo |
