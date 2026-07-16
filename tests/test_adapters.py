@@ -143,6 +143,35 @@ class TestClaudeCaptureEntrypoints:
         raw = _json.dumps({"prompt": "add a test"})
         assert claude.rationale(populated_repo, raw) == "{}"
 
+    def test_rationale_note_shows_tokens_saved(self, tmp_repo):
+        # Above the _COST_NOTE_TOKENS gate the notice reports estimated SAVINGS
+        # (est × (_SAVED_MULTIPLIER − 1), nearest 10) — never the injected count.
+        # Same "constraint:" wording as the populated_repo fixture's retrievable
+        # entry, padded long enough that the injected ctx exceeds the gate.
+        content = (
+            "constraint: never store plaintext passwords, always use bcrypt for "
+            "password hashing. Rationale: "
+            + "bcrypt has adaptive cost tuning and a battle-tested history. " * 15
+        )
+        store.update_decision(tmp_repo, content, "sess-1")
+        raw = _json.dumps({"prompt": "why did we choose bcrypt for password hashing?"})
+        out = _json.loads(claude.rationale(tmp_repo, raw))
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        est = max(1, len(ctx) // 4)
+        assert est > claude._COST_NOTE_TOKENS  # guard: test data must clear the gate
+        saved = int(round(est * (claude._SAVED_MULTIPLIER - 1), -1))
+        msg = out["systemMessage"]
+        assert msg.endswith(f"· ~{saved} tokens saved"), msg
+        assert f"~{est} tokens" not in msg  # injected count no longer shown
+
+    def test_rationale_note_silent_below_gate(self, populated_repo):
+        # Short injection (fixture's two one-line decisions) stays under the gate:
+        # notice names what was recalled but claims no savings number.
+        raw = _json.dumps({"prompt": "why did we choose bcrypt for password hashing?"})
+        out = _json.loads(claude.rationale(populated_repo, raw))
+        assert "additionalContext" in out["hookSpecificOutput"]
+        assert "tokens saved" not in out["systemMessage"]
+
     def test_entrypoints_never_raise_on_bad_stdin(self, tmp_repo):
         assert claude.capture_constraint(tmp_repo, "garbage") == "{}"
         assert claude.rationale(tmp_repo, "garbage") == "{}"
