@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import json
 import secrets
 import socket
@@ -206,6 +207,82 @@ def refresh_now(profile: Profile) -> str | None:
     return _locked_refresh(profile)
 
 
+# Static CSS for the loopback result tab (kept out of the f-string so `{}` stays literal).
+_PAGE_CSS = """
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+       background: #f8fafc; color: #0f172a; }
+.card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 48px 56px;
+        text-align: center; box-shadow: 0 10px 30px rgba(2, 6, 23, .08); max-width: 26rem; margin: 16px; }
+.brand { letter-spacing: .08em; text-transform: uppercase; font-size: 12px; color: #64748b;
+         margin: 0 0 20px; }
+.badge { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center;
+         justify-content: center; margin: 0 auto 20px; font-size: 30px; color: #fff; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+.detail { color: #475569; font-size: 15px; line-height: 1.5; margin: 0; }
+.hint { margin: 24px 0 0; font-size: 13px; color: #64748b; }
+code { background: #f1f5f9; padding: 2px 6px; border-radius: 6px; font-size: 12.5px; }
+@media (prefers-color-scheme: dark) {
+  body { background: #0b1220; color: #e2e8f0; }
+  .card { background: #111a2e; border-color: #1e293b; box-shadow: none; }
+  .detail { color: #94a3b8; }
+  code { background: #1e293b; }
+}
+"""
+
+
+def _result_page(ok: bool, title: str, detail: str) -> bytes:
+    """Self-contained HTML for the loopback result tab (inline CSS, no external assets).
+
+    `title` and `detail` are HTML-escaped here — `detail` can carry text reflected from the
+    callback query string (`error_description`), so escaping is a security requirement, not
+    cosmetics. The data-URI favicon suppresses the browser's follow-up /favicon.ico request,
+    which would otherwise hit a already-closed (or still-listening) loopback server."""
+    icon, color = ("&#10003;", "#16a34a") if ok else ("&#10007;", "#dc2626")
+    hint = ("Next: <code>contexer pull</code> &middot; <code>contexer share</code>" if ok
+            else "Return to your terminal and run <code>contexer login</code> to try again.")
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<link rel="icon" href="data:,"><title>Contexer</title>'
+        f"<style>{_PAGE_CSS}</style></head><body>"
+        '<div class="card"><p class="brand">Contexer Teams</p>'
+        f'<div class="badge" style="background:{color}">{icon}</div>'
+        f"<h1>{html.escape(title)}</h1>"
+        f'<p class="detail">{html.escape(detail)}</p>'
+        f'<p class="hint">{hint}</p>'
+        "</div></body></html>"
+    ).encode()
+
+
+def _callback_outcome(qs: dict, expected_state: str) -> tuple[str | None, str | None, bytes]:
+    """Decide the loopback callback result: (code, error, page).
+
+    Pure (unit-testable): `qs` is the parse_qs dict of the /callback query. Exactly one of
+    `code`/`error` is set; `page` is what the browser tab shows and always matches the
+    terminal outcome. An OAuth `error` param (e.g. the user denied consent) is checked first
+    so a denial never renders as success; the state check runs before trusting the code."""
+    error = (qs.get("error") or [None])[0]
+    if error:
+        desc = (qs.get("error_description") or [None])[0]
+        reason = f"{error}: {desc}" if desc else error
+        return None, f"authorization failed — {reason}", _result_page(
+            False, "Login failed", f"The authorization server reported: {reason}.")
+    if (qs.get("state") or [None])[0] != expected_state:
+        return None, "OAuth state mismatch — login aborted.", _result_page(
+            False, "Login failed",
+            "Security check failed (state mismatch). Close this tab and try again.")
+    code = (qs.get("code") or [None])[0]
+    if not code:
+        return None, "No authorization code received.", _result_page(
+            False, "Login failed", "No authorization code was received from the server.")
+    return code, None, _result_page(
+        True, "Login complete",
+        "You're signed in to Contexer Teams. Close this tab and return to your terminal.")
+
+
 def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma: no cover - interactive (browser + blocking loopback server)
     """Open the browser to the authorize URL and block until the loopback receives the code."""
     import http.server
@@ -215,13 +292,22 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            result["code"] = (qs.get("code") or [None])[0]
-            result["state"] = (qs.get("state") or [None])[0]
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != "/callback":
+                # Stray request (favicon, prefetch, port scan) — don't let it consume the
+                # one meaningful request; the outer loop keeps serving until /callback.
+                self.send_response(404)
+                self.end_headers()
+                return
+            qs = urllib.parse.parse_qs(parsed.query)
+            code, error, page = _callback_outcome(qs, expected_state)
+            # Record the outcome before writing the body: a browser that disconnects
+            # mid-write must not leave the loop below serving forever.
+            result["code"], result["error"] = code, error
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"<h1>Contexer: login complete. You can close this tab.</h1>")
+            self.wfile.write(page)
 
         def log_message(self, *a):
             pass
@@ -229,12 +315,13 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
     server = http.server.HTTPServer(("127.0.0.1", port), Handler)
     print(f"Opening your browser to sign in. If it doesn't open, visit:\n  {auth_url}")
     webbrowser.open(auth_url)
-    server.handle_request()  # serve exactly one request (the OAuth redirect)
-    server.server_close()
-    if result.get("state") != expected_state:
-        raise RuntimeError("OAuth state mismatch — login aborted.")
-    if not result.get("code"):
-        raise RuntimeError("No authorization code received.")
+    try:
+        while not result:
+            server.handle_request()  # serve until the OAuth redirect hits /callback
+    finally:
+        server.server_close()
+    if result.get("error"):
+        raise RuntimeError(result["error"])
     return result["code"]
 
 

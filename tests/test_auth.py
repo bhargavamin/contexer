@@ -42,6 +42,61 @@ def test_free_port_returns_bindable_int():
     assert isinstance(port, int) and 1024 <= port <= 65535
 
 
+# ── loopback result page ─────────────────────────────────────────────────────────
+
+def test_result_page_success_has_next_steps():
+    page = auth._result_page(True, "Login complete", "You're signed in.").decode()
+    assert "Login complete" in page
+    assert "contexer pull" in page and "contexer share" in page
+
+
+def test_result_page_error_suggests_retry():
+    page = auth._result_page(False, "Login failed", "nope").decode()
+    assert "contexer login" in page
+    assert "contexer pull" not in page
+
+
+def test_result_page_escapes_html():
+    page = auth._result_page(False, "Login failed", "<script>alert(1)</script>").decode()
+    assert "<script>" not in page
+    assert "&lt;script&gt;" in page
+
+
+def test_callback_outcome_success():
+    code, err, page = auth._callback_outcome({"code": ["abc"], "state": ["s1"]}, "s1")
+    assert code == "abc" and err is None
+    assert b"Login complete" in page
+
+
+def test_callback_outcome_oauth_error():
+    code, err, page = auth._callback_outcome(
+        {"error": ["access_denied"], "error_description": ["user declined"], "state": ["s1"]}, "s1")
+    assert code is None
+    assert "access_denied" in err and "user declined" in err
+    assert b"Login failed" in page and b"user declined" in page
+
+
+def test_callback_outcome_error_description_escaped():
+    _, _, page = auth._callback_outcome(
+        {"error": ["access_denied"], "error_description": ["<img onerror=x>"]}, "s1")
+    assert b"<img" not in page
+    assert b"&lt;img" in page
+
+
+def test_callback_outcome_state_mismatch():
+    code, err, page = auth._callback_outcome({"code": ["abc"], "state": ["evil"]}, "s1")
+    assert code is None
+    assert "state mismatch" in err
+    assert b"Login failed" in page
+
+
+def test_callback_outcome_missing_code():
+    code, err, page = auth._callback_outcome({"state": ["s1"]}, "s1")
+    assert code is None
+    assert "No authorization code" in err
+    assert b"Login failed" in page
+
+
 # ── creds storage ────────────────────────────────────────────────────────────────
 
 def test_creds_roundtrip_and_0600(creds_env):
