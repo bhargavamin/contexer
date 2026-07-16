@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.23.0](https://github.com/bhargavamin/contexer/compare/v0.22.0...v0.23.0) (2026-07-16)
+
+
+### Features
+
+* **claude:** recall notice shows benchmark-derived tokens saved ([6f663a2](https://github.com/bhargavamin/contexer/commit/6f663a2665c8e6af6a836386fc5cab7c6615957e))
+
+
+### Bug Fixes
+
+* **share:** normalize decision source onto the cloud's accepted taxonomy ([d949687](https://github.com/bhargavamin/contexer/commit/d94968729741f83450b80d21c123ca462131673d))
+* **share:** preserve plan provenance on the cloud sync wire ([bc867e9](https://github.com/bhargavamin/contexer/commit/bc867e9518df68a2698547468be80f8d592d8692))
+
+
+### Documentation
+
+* record tokens-saved recall notice and golden multiplier derivation ([00e514c](https://github.com/bhargavamin/contexer/commit/00e514cce30860557c35cf51168d21aab4b09292))
+
 ## [0.22.0](https://github.com/bhargavamin/contexer/compare/v0.21.0...v0.22.0) (2026-07-15)
 
 
