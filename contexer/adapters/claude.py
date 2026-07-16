@@ -147,11 +147,12 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
         if not repo:
             return "{}"
+        near: list = []
         entry_id, content, status = store.capture_user_constraint(
-            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw))
+            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw), near)
         if entry_id is None:
             return "{}"
-        msg = store.constraint_ack(content, status)
+        msg = store.constraint_ack(content, status, entry_id, near)
         return json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": msg}})
     except Exception:

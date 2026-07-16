@@ -53,7 +53,7 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 |---|---|
 | `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, Codex, and/or Gemini CLI) |
 | `contexer install --target claude\|cursor\|codex\|gemini\|all` | Install for a specific tool only, or all |
-| `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each |
+| `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each. Also surfaces possibly-overlapping constraint/convention rules — keep the best one and retire the rest with `approve_decision(id, action="ignore")`, which works on already-approved rules too (Contexer itself never merges or deletes) |
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |
@@ -110,6 +110,7 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 **Every tier:**
 
 - **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch.
+- **Deduplication is lexical, not semantic.** Duplicates are detected by token overlap, with no understanding of meaning — the same rule phrased with different words ("commit on approval" vs "commit automatically") can accumulate as separate entries. Containment restatements (re-typing a rule with extra words, or a terse version of it) are consolidated automatically; synonym phrasings are only flagged in the capture ack and surface in review for you to merge manually.
 - **Cursor parity is partial.** Cursor's hooks can't inject per-prompt context or restore after compaction; Cursor steering rides on the session-start nudge plus an always-apply rule file. See [integrations](integrations.md).
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.
 - **Contexer steers, it doesn't enforce.** Agents are told your rules before writing code; your CI and PR gates still verify.
