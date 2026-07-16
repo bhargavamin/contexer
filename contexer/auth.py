@@ -216,8 +216,10 @@ body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify
        background: #f8fafc; color: #0f172a; }
 .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 48px 56px;
         text-align: center; box-shadow: 0 10px 30px rgba(2, 6, 23, .08); max-width: 26rem; margin: 16px; }
-.brand { letter-spacing: .08em; text-transform: uppercase; font-size: 12px; color: #64748b;
+.brand { display: flex; align-items: center; justify-content: center; gap: 7px;
+         letter-spacing: .08em; text-transform: uppercase; font-size: 12px; color: #64748b;
          margin: 0 0 20px; }
+.brand svg { width: 20px; height: 20px; color: #15170d; }
 .badge { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center;
          justify-content: center; margin: 0 auto 20px; font-size: 30px; color: #fff; }
 h1 { font-size: 22px; margin: 0 0 8px; }
@@ -229,8 +231,20 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 6px; font-size: 12.
   .card { background: #111a2e; border-color: #1e293b; box-shadow: none; }
   .detail { color: #94a3b8; }
   code { background: #1e293b; }
+  .brand svg { color: #f2f1e6; }
 }
 """
+
+# The Contexer mark (apps/web/public/brand/contexer-mark.svg in contexer-teams), inlined so the
+# page stays self-contained. stroke=currentColor: .brand css picks the ink/light variant per
+# color scheme; the lime accent (#CDEB36) is shared by both brand variants.
+_BRAND_MARK = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" aria-hidden="true">'
+    '<path d="M23 8 H13 A6 6 0 0 0 7 14 V18 A6 6 0 0 0 13 24 H23" fill="none"'
+    ' stroke="currentColor" stroke-width="3.2" stroke-linecap="round"'
+    ' stroke-linejoin="round"/>'
+    '<rect x="20.5" y="13.7" width="4.6" height="4.6" rx="1" fill="#CDEB36"/></svg>'
+)
 
 
 def _result_page(ok: bool, title: str, detail: str) -> bytes:
@@ -248,7 +262,7 @@ def _result_page(ok: bool, title: str, detail: str) -> bytes:
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<link rel="icon" href="data:,"><title>Contexer</title>'
         f"<style>{_PAGE_CSS}</style></head><body>"
-        '<div class="card"><p class="brand">Contexer Teams</p>'
+        f'<div class="card"><p class="brand">{_BRAND_MARK}<span>Contexer Teams</span></p>'
         f'<div class="badge" style="background:{color}">{icon}</div>'
         f"<h1>{html.escape(title)}</h1>"
         f'<p class="detail">{html.escape(detail)}</p>'

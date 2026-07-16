@@ -56,6 +56,11 @@ def test_result_page_error_suggests_retry():
     assert "contexer pull" not in page
 
 
+def test_result_page_has_brand_mark():
+    page = auth._result_page(True, "Login complete", "ok").decode()
+    assert "<svg" in page and "Contexer Teams" in page
+
+
 def test_result_page_escapes_html():
     page = auth._result_page(False, "Login failed", "<script>alert(1)</script>").decode()
     assert "<script>" not in page
