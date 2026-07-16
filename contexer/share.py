@@ -30,6 +30,27 @@ from contexer.repo_key import canonical_repo_key
 # only bound, so a long-offline stretch can't grow ~/.contexer/.outbox.json without limit.
 _OUTBOX_CAP = 50
 
+# The cloud's push_decision validates `source` against this exact CLOSED allowlist (a z.enum)
+# and rejects anything else with a hard -32602 that silently poisons the outbox forever. Kept
+# in sync with contexer-teams' PUSH_DECISION_SOURCES: the five canonical sources plus `plan`
+# (OSS provisional provenance), which the cloud accepts and stores as-is since contexer-teams#91.
+_WIRE_SOURCES = frozenset({"ai", "human", "scan", "bootstrap", "memory", "plan"})
+
+
+def _wire_source(source: str | None) -> str | None:
+    """Coerce a local decision's `source` onto the cloud's accepted taxonomy.
+
+    The cloud's push_decision accepts only _WIRE_SOURCES and rejects anything else with a hard
+    -32602 that silently poisons the outbox forever. `plan` (a provisional maturity marker that
+    leaks from `created_by` into a revision's `source`) is accepted and PRESERVED end-to-end, so
+    the provisional signal reaches the cloud intact. Any *other* off-taxonomy *string* degrades
+    to "ai" — a safe accepted value — so an unknown source can never brick the outbox. `None`
+    passes through unchanged: push_decision OMITS source when it is None (the cloud stores NULL =
+    unknown provenance), so None must not be fabricated into a false "ai" provenance."""
+    if source is None or source in _WIRE_SOURCES:
+        return source
+    return "ai"
+
 
 def _outbox_path():
     # Computed at call time (not module import time) so tests that monkeypatch
@@ -107,7 +128,7 @@ def drain_outbox(profile: Profile | None = None) -> int:
             lambda entry=entry: remote.push_decision(
                 type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
                 rationale=entry.get("rationale"), confidence=entry.get("confidence"),
-                evidence=entry.get("evidence"), source=entry.get("source"),
+                evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
                 decision_id=entry.get("decision_id")),
             default=None, action="drain queued share")
         if server_id is None:
@@ -125,7 +146,7 @@ def _payload(dec: dict, key) -> dict:
     return {
         "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
         "repo": key, "rationale": None, "confidence": dec["confidence"],
-        "evidence": dec["evidence"], "source": dec["source"],
+        "evidence": dec["evidence"], "source": _wire_source(dec["source"]),
         "queued_at": time.time(), "attempts": 0,
     }
 
@@ -155,7 +176,7 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
             lambda dec=dec: remote.push_decision(
                 type=dec["type"], content=dec["content"], repo=key,
                 confidence=dec["confidence"], evidence=dec["evidence"],
-                source=dec["source"], decision_id=dec["id"]),
+                source=_wire_source(dec["source"]), decision_id=dec["id"]),
             default=None, action="share decision")
         if server_id is None:
             queued = 0
@@ -203,7 +224,7 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
         lambda: remote.push_decision(
             type=dec["type"], content=dec["content"], repo=key,
             confidence=dec["confidence"], evidence=dec["evidence"],
-            source=dec["source"], decision_id=dec["id"]),
+            source=_wire_source(dec["source"]), decision_id=dec["id"]),
         default=None, action="share decision")
     if server_id is None:
         # Cloud unreachable OR auth rejected - either way a queued retry can succeed
