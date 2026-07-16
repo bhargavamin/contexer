@@ -594,3 +594,93 @@ def test_cli_share_no_repo_exits(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
     with pytest.raises(SystemExit):
         cli.share_cmd([])
+
+
+# ── wire-source normalization ──────────────────────────────────────────────────────
+# The cloud's push_decision accepts a CLOSED source allowlist (ai|human|scan|bootstrap|
+# memory|plan) and rejects anything else with a hard -32602 that silently poisons the
+# outbox. `plan` (OSS provisional provenance — created_by leaks into revision.source) is
+# accepted and PRESERVED end-to-end since contexer-teams#91; only a genuinely-unknown
+# source degrades to "ai" so it can never brick the outbox.
+
+def test_wire_source_preserves_plan():
+    # The cloud accepts source="plan" (contexer-teams PUSH_DECISION_SOURCES), so the
+    # provisional signal is preserved on the wire, not coerced to "ai".
+    assert share._wire_source("plan") == "plan"
+
+
+def test_wire_source_passes_canonical_sources_through():
+    for s in ("ai", "human", "scan", "bootstrap", "memory"):
+        assert share._wire_source(s) == s
+
+
+def test_wire_source_coerces_unknown_string_to_ai():
+    # Defense against future taxonomy drift: an unknown *non-null* source must never reach
+    # the cloud verbatim (that is what bricks the outbox); it degrades to the safe "ai".
+    assert share._wire_source("something-new") == "ai"
+
+
+def test_wire_source_passes_none_through():
+    # None = genuinely-unknown provenance. push_decision OMITS source when it is None (the
+    # cloud stores NULL), so None must NOT be fabricated into "ai" — that mislabels a
+    # decision of unknown origin as AI-authored.
+    assert share._wire_source(None) is None
+
+
+def test_share_plan_sourced_decision_preserves_plan_on_wire(tmp_repo, monkeypatch):
+    _, did = store.update_decision(
+        tmp_repo, "provisional plan decision to sync", "s1",
+        subtype="architecture", created_by="plan")
+    assert store.get_shareable(tmp_repo, did)["source"] == "plan"  # local value is plan
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _fake(monkeypatch, ret="srv-9")
+    share.share(tmp_repo, did, profile=TEAM)
+    assert fake.calls[0]["source"] == "plan"  # ... and the cloud now accepts it, unchanged
+
+
+def test_share_all_plan_sourced_preserves_plan_on_wire(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "provisional plan decision one", "s1",
+                          subtype="architecture", created_by="plan")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    fake = _fake(monkeypatch, ret="srv-1")
+    share.share_all(tmp_repo, profile=TEAM)
+    assert all(kw["source"] == "plan" for kw in fake.calls)
+
+
+def test_payload_preserves_plan_source(tmp_repo, monkeypatch):
+    _, did = store.update_decision(
+        tmp_repo, "plan decision that fails to sync", "s1",
+        subtype="architecture", created_by="plan")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    share.share(tmp_repo, did, profile=TEAM)
+    # The queued outbox entry preserves "plan" (the cloud accepts it), so a later drain
+    # re-sends it faithfully.
+    assert share._load_outbox()[0]["source"] == "plan"
+
+
+def test_drain_outbox_preserves_plan_source(tmp_repo, monkeypatch):
+    # An outbox entry with source="plan" drains faithfully now that the cloud accepts it.
+    share._enqueue({
+        "decision_id": "plan-1", "type": "architecture", "content": "queued plan entry",
+        "repo": "github.com/a/b", "rationale": None, "confidence": 30, "evidence": None,
+        "source": "plan", "queued_at": 0.0, "attempts": 3,
+    })
+    fake = _fake(monkeypatch, ret="srv-plan")
+    sent = share.drain_outbox(profile=TEAM)
+    assert sent == 1
+    assert fake.calls[0]["source"] == "plan"
+
+
+def test_drain_outbox_coerces_unknown_source(tmp_repo, monkeypatch):
+    # A queued entry with a genuinely off-taxonomy source still degrades to "ai" on drain,
+    # so an unknown value can never brick the outbox.
+    share._enqueue({
+        "decision_id": "weird-1", "type": "architecture", "content": "legacy weird entry",
+        "repo": "github.com/a/b", "rationale": None, "confidence": 30, "evidence": None,
+        "source": "totally-bogus", "queued_at": 0.0, "attempts": 26,
+    })
+    fake = _fake(monkeypatch, ret="srv-weird")
+    sent = share.drain_outbox(profile=TEAM)
+    assert sent == 1
+    assert fake.calls[0]["source"] == "ai"
