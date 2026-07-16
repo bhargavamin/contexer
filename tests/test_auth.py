@@ -78,16 +78,27 @@ def test_callback_outcome_oauth_error():
 
 def test_callback_outcome_error_description_escaped():
     _, _, page = auth._callback_outcome(
-        {"error": ["access_denied"], "error_description": ["<img onerror=x>"]}, "s1")
+        {"error": ["access_denied"], "error_description": ["<img onerror=x>"],
+         "state": ["s1"]}, "s1")
     assert b"<img" not in page
     assert b"&lt;img" in page
 
 
-def test_callback_outcome_state_mismatch():
+def test_callback_outcome_state_mismatch_keeps_listening():
+    # Wrong state = not our redirect (stray, stale, or malicious). Neither code nor error:
+    # the caller must keep waiting instead of letting the request abort the login.
     code, err, page = auth._callback_outcome({"code": ["abc"], "state": ["evil"]}, "s1")
-    assert code is None
-    assert "state mismatch" in err
-    assert b"Login failed" in page
+    assert code is None and err is None
+    assert b"state mismatch" in page
+
+
+def test_callback_outcome_error_without_state_is_ignored():
+    # An OAuth error redirect echoes our state (RFC 6749); one without it could come from
+    # any local process poking the loopback port — it must not terminate the flow.
+    code, err, page = auth._callback_outcome(
+        {"error": ["access_denied"], "error_description": ["spoofed"]}, "s1")
+    assert code is None and err is None
+    assert b"state mismatch" in page
 
 
 def test_callback_outcome_missing_code():

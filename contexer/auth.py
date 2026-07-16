@@ -260,20 +260,25 @@ def _result_page(ok: bool, title: str, detail: str) -> bytes:
 def _callback_outcome(qs: dict, expected_state: str) -> tuple[str | None, str | None, bytes]:
     """Decide the loopback callback result: (code, error, page).
 
-    Pure (unit-testable): `qs` is the parse_qs dict of the /callback query. Exactly one of
-    `code`/`error` is set; `page` is what the browser tab shows and always matches the
-    terminal outcome. An OAuth `error` param (e.g. the user denied consent) is checked first
-    so a denial never renders as success; the state check runs before trusting the code."""
+    Pure (unit-testable): `qs` is the parse_qs dict of the /callback query; `page` is what
+    the browser tab shows and always matches the terminal outcome. Three shapes:
+    - (code, None, page) — success;
+    - (None, error, page) — legitimate flow-terminating failure (denial, missing code);
+    - (None, None, page) — state mismatch: NOT our redirect. The AS echoes our `state` on
+      both success and error redirects (RFC 6749), so a request without it could come from
+      any local process poking the loopback port — the caller must keep listening rather
+      than let a stray or malicious request abort (or spoof the reason for) the login."""
+    if (qs.get("state") or [None])[0] != expected_state:
+        return None, None, _result_page(
+            False, "Login failed",
+            "Security check failed (state mismatch). This tab is not from the current "
+            "login attempt — your terminal is still waiting; use the newest login link.")
     error = (qs.get("error") or [None])[0]
     if error:
         desc = (qs.get("error_description") or [None])[0]
         reason = f"{error}: {desc}" if desc else error
         return None, f"authorization failed — {reason}", _result_page(
             False, "Login failed", f"The authorization server reported: {reason}.")
-    if (qs.get("state") or [None])[0] != expected_state:
-        return None, "OAuth state mismatch — login aborted.", _result_page(
-            False, "Login failed",
-            "Security check failed (state mismatch). Close this tab and try again.")
     code = (qs.get("code") or [None])[0]
     if not code:
         return None, "No authorization code received.", _result_page(
@@ -301,9 +306,14 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
                 return
             qs = urllib.parse.parse_qs(parsed.query)
             code, error, page = _callback_outcome(qs, expected_state)
-            # Record the outcome before writing the body: a browser that disconnects
-            # mid-write must not leave the loop below serving forever.
-            result["code"], result["error"] = code, error
+            if code or error:
+                # Record the outcome before writing the body: a browser that disconnects
+                # mid-write must not leave the loop below serving forever.
+                result["code"], result["error"] = code, error
+            else:
+                # State mismatch: not our redirect — answer it but keep listening.
+                print("contexer: ignoring loopback callback with unexpected state",
+                      file=sys.stderr)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
