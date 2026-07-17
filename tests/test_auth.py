@@ -449,6 +449,7 @@ def test_cli_login_dispatches(monkeypatch):
     from contexer import cli
     captured = {}
     monkeypatch.setattr(auth, "login", lambda endpoint=None: captured.update(endpoint=endpoint))
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: None)  # isolate: no network
     cli.login_cmd([])
     assert "endpoint" in captured and captured["endpoint"] is None
 
@@ -457,8 +458,47 @@ def test_cli_login_endpoint_flag(monkeypatch):
     from contexer import cli
     captured = {}
     monkeypatch.setattr(auth, "login", lambda endpoint=None: captured.update(endpoint=endpoint))
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: None)  # isolate: no network
     cli.login_cmd(["--endpoint", "http://x/mcp"])
     assert captured["endpoint"] == "http://x/mcp"
+
+
+def test_cli_login_triggers_post_login_sync(monkeypatch):
+    # After a successful login, status must not be stale — login kicks a team pull.
+    from contexer import cli
+    called = {}
+    monkeypatch.setattr(auth, "login", lambda endpoint=None: None)
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: called.setdefault("ran", True))
+    cli.login_cmd([])
+    assert called.get("ran") is True
+
+
+def test_post_login_sync_noop_outside_git_repo(monkeypatch):
+    from contexer import cli, store, team_context
+    monkeypatch.setattr(store, "_git_root", lambda cwd: None)
+    monkeypatch.setattr(team_context, "pull",
+                        lambda *a, **k: pytest.fail("pull must not run outside a repo"))
+    cli._post_login_sync()  # returns cleanly, no pull
+
+
+def test_post_login_sync_pulls_and_reports(monkeypatch, capsys):
+    from contexer import cli, store, team_context
+    monkeypatch.setattr(store, "_git_root", lambda cwd: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo: (2, 1))
+    cli._post_login_sync()
+    out = capsys.readouterr().out
+    assert "Synced 2 team decision(s)" in out and "removed 1" in out
+
+
+def test_post_login_sync_swallows_errors(monkeypatch):
+    from contexer import cli, store, team_context
+    monkeypatch.setattr(store, "_git_root", lambda cwd: "/repo")
+
+    def boom(repo):
+        raise RuntimeError("network exploded")
+
+    monkeypatch.setattr(team_context, "pull", boom)
+    cli._post_login_sync()  # must not raise — login already succeeded
 
 
 def test_cli_login_endpoint_flag_missing_url(monkeypatch, capsys):

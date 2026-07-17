@@ -620,6 +620,33 @@ def login_cmd(rest: list | None = None) -> None:
         # no code, no token). Both are user-actionable — print cleanly, no traceback.
         print(f"contexer login: {e}", file=sys.stderr)
         sys.exit(1)
+    _post_login_sync()  # refresh team sync so `contexer status` isn't stale after login
+
+
+def _post_login_sync() -> None:
+    """Best-effort team pull for the current repo right after a successful login.
+
+    `contexer status` reads the last cached sync result off disk (no network), and login
+    itself does no sync — so without this a freshly authenticated user still sees the stale
+    pre-auth `last sync: failed`. Pulling here refreshes that cache entry. Fail-soft: login
+    has already succeeded, so a no-op (not in a repo / local mode) or any error must never
+    fail the command or print a traceback."""
+    import os
+
+    from contexer import store, team_context
+
+    repo = store._git_root(os.getcwd())
+    if not repo:
+        return  # login can be run anywhere; only a git repo has team context to sync
+    try:
+        upserted, removed = team_context.pull(repo)
+    except Exception:
+        return  # login is done — never let a post-login sync problem surface as a failure
+    if upserted or removed:
+        msg = f"Synced {upserted} team decision(s) for this repo"
+        if removed:
+            msg += f", removed {removed}"
+        print(msg + ".")
 
 
 def logout_cmd(rest: list | None = None) -> None:
