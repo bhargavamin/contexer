@@ -401,66 +401,34 @@ class TestRepoPointerNotPoisoned:
 
 
 class TestTeamsRegistration:
-    def test_not_registered_by_default(self, clean_home, monkeypatch):
-        # Path B: the native contexer-teams MCP entry is opt-in only (CONTEXER_TEAMS_MCP).
-        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
+    # The native contexer-teams remote-MCP entry is retired: team sync is the Python client
+    # path (`contexer login` + pull/share/poll). Install never writes the entry and strips
+    # any legacy leftover from an older build.
+    def test_never_registers(self, clean_home):
         install()
         servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
         assert "contexer-teams" not in servers
 
-    def test_opt_in_registers_prod(self, clean_home, monkeypatch):
-        monkeypatch.delenv("CONTEXER_ENV", raising=False)
+    def test_retired_env_var_never_registers(self, clean_home, monkeypatch):
+        # CONTEXER_TEAMS_MCP is dead — setting it must NOT resurrect the native entry.
         monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
         install()
         servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"] == {"type": "http", "url": "https://mcp.contexer.ai/mcp"}
+        assert "contexer-teams" not in servers
 
-    def test_opt_in_local_env_registers_localhost(self, clean_home, monkeypatch):
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        monkeypatch.setenv("CONTEXER_ENV", "local")
+    def test_install_strips_legacy_entry(self, clean_home):
+        # A leftover entry from an older default-on build is removed on the next install;
+        # the local stdio entry and unrelated servers survive.
+        cfg = clean_home / ".claude.json"
+        cfg.write_text(json.dumps({"mcpServers": {
+            "contexer-teams": {"type": "http", "url": "https://mcp.contexer.ai/mcp"},
+            "other": {"type": "stdio", "command": "x"},
+        }}))
         install()
-        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"]["url"] == "http://localhost:8080/mcp"
-
-    def test_opt_in_respects_configured_endpoint(self, clean_home, monkeypatch, tmp_path):
-        # A dev override in config.toml (e.g. from `contexer login --endpoint`) governs
-        # the native entry too — the built-in default is only the unconfigured fallback.
-        cfg = tmp_path / "isolated-config.toml"
-        cfg.write_text('mode = "team"\nendpoint = "https://mcp.dev.contexer.ai/mcp"\n')
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        install()
-        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"]["url"] == "https://mcp.dev.contexer.ai/mcp"
-
-    def test_opt_in_malformed_config_falls_back_to_default(self, clean_home, monkeypatch, tmp_path):
-        # A corrupt config.toml must never break install — fall back to the default.
-        cfg = tmp_path / "isolated-config.toml"
-        cfg.write_text("mode = = broken")
-        monkeypatch.delenv("CONTEXER_ENV", raising=False)
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        install()
-        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert servers["contexer-teams"]["url"] == "https://mcp.contexer.ai/mcp"
-
-    def test_local_only_install_never_reads_config(self, clean_home, monkeypatch, tmp_path):
-        # OSS/local-only path: flag unset — even a corrupt config.toml is irrelevant,
-        # no teams entry is written, install succeeds untouched.
-        cfg = tmp_path / "isolated-config.toml"
-        cfg.write_text("mode = = broken")
-        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
-        install()
-        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
+        servers = json.loads(cfg.read_text())["mcpServers"]
         assert "contexer-teams" not in servers
         assert servers["contexer"]["type"] == "stdio"
-
-    def test_default_install_strips_stale_entry(self, clean_home, monkeypatch):
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        install()  # opt-in: entry present
-        assert "contexer-teams" in json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        monkeypatch.delenv("CONTEXER_TEAMS_MCP", raising=False)
-        install()  # plain (default) reinstall drops it
-        servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
-        assert "contexer-teams" not in servers
+        assert servers["other"] == {"type": "stdio", "command": "x"}
 
     def test_local_stdio_entry_untouched(self, clean_home):
         install()
@@ -475,19 +443,16 @@ class TestTeamsRegistration:
         servers = json.loads(cfg.read_text())["mcpServers"]
         assert servers["other"] == {"type": "stdio", "command": "x"}
 
-    def test_no_token_or_secret_in_entry(self, clean_home, monkeypatch):
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        install()
-        entry = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]["contexer-teams"]
-        assert set(entry.keys()) == {"type", "url"}
-
 
 class TestTeamsUninstall:
-    def test_uninstall_removes_contexer_teams(self, clean_home, monkeypatch):
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        install()  # register the opt-in entry
+    def test_uninstall_removes_legacy_contexer_teams(self, clean_home):
+        install()
+        cfg = clean_home / ".claude.json"
+        data = json.loads(cfg.read_text())
+        data["mcpServers"]["contexer-teams"] = {"type": "http", "url": "https://mcp.contexer.ai/mcp"}
+        cfg.write_text(json.dumps(data))
         uninstall()
-        servers = json.loads((clean_home / ".claude.json").read_text()).get("mcpServers", {})
+        servers = json.loads(cfg.read_text()).get("mcpServers", {})
         assert "contexer-teams" not in servers
 
     def test_uninstall_preserves_unrelated_servers(self, clean_home):
@@ -504,17 +469,11 @@ class TestTeamsUninstall:
 
 
 class TestTeamsStatus:
-    def test_status_shows_teams_registered(self, clean_home, monkeypatch):
-        monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
-        install()
+    def test_status_has_no_teams_line(self, clean_home):
+        # The native teams entry is retired — status no longer reports it at all.
         joined = "\n".join(claude.status_lines(clean_home))
-        assert "teams (remote)" in joined
-        assert "mcp.contexer.ai" in joined
-
-    def test_status_shows_teams_not_registered_on_clean(self, clean_home):
-        joined = "\n".join(claude.status_lines(clean_home))
-        assert "teams (remote)" in joined
-        assert "NOT registered" in joined
+        assert "teams (remote)" not in joined
+        assert "[claude]" in joined
 
 
 class TestLegacyRepoSettingsCleanup:
