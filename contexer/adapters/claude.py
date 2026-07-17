@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import config, memory_sync, store
+from contexer import memory_sync, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -19,20 +19,6 @@ from contexer.adapters.base import (
 )
 
 NAME = "claude"
-
-
-def _teams_url() -> str:
-    """Endpoint for the opt-in native contexer-teams MCP entry (CONTEXER_TEAMS_MCP).
-
-    Prefers the user's configured team endpoint (config.toml) so a dev override like
-    `contexer login --endpoint <dev-url>` governs this entry too; falls back to the
-    built-in default. Fail-soft: a malformed config.toml must never break install —
-    and local-only users (no config, flag unset) never reach this path at all."""
-    try:
-        configured = config.load_profile().endpoint
-    except config.ConfigError:
-        configured = None
-    return configured or config.default_endpoint()
 
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
@@ -481,20 +467,13 @@ def install(home: Path) -> list[str]:
         "type": "stdio",
         "command": contexer_bin,
     }
-    # Team sync is the Python client path (`contexer login` + pull/share/poll). The native
-    # remote-MCP entry (Claude Code's OWN OAuth client) is redundant under that design and
-    # would show a failed/unauthenticated server for every user (incl. local-only), so it is
-    # registered ONLY when explicitly opted in via CONTEXER_TEAMS_MCP. `uninstall` strips any
-    # existing entry, so a plain `contexer reinstall` removes a stale one.
-    register_teams = bool(os.environ.get("CONTEXER_TEAMS_MCP"))
-    if register_teams:
-        claude["mcpServers"]["contexer-teams"] = {"type": "http", "url": _teams_url()}
-    else:
-        claude["mcpServers"].pop("contexer-teams", None)  # drop a stale opt-in entry on plain install
+    # Legacy cleanup: older builds registered a native `contexer-teams` remote-MCP entry
+    # (it authenticated Claude Code's OWN MCP client, had no push/pull, and showed a failed
+    # server for every user). Team sync is the Python client path now (`contexer login` +
+    # pull/share/poll), so any leftover entry is stripped on every install. Idempotent.
+    claude["mcpServers"].pop("contexer-teams", None)
     _save(claude_json, claude)
     log.append("  ✓ MCP server registered in ~/.claude.json")
-    if register_teams:
-        log.append(f"  ✓ contexer-teams (remote MCP) registered → {_teams_url()}")
 
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"
@@ -815,12 +794,9 @@ def status_lines(home: Path) -> list[str]:
     """Diagnostic lines for `contexer status`: MCP/hooks state for the Claude target."""
     mcp, hooks_ok = _mcp_and_hooks_ok(home)
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
-    teams = _load_safe(home / ".claude.json").get("mcpServers", {}).get("contexer-teams")
-    teams_url = teams.get("url") if isinstance(teams, dict) else None
     return [
         "  [claude]",
         f"    MCP server: {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
-        f"    teams (remote): {'registered → ' + teams_url if teams_url else 'NOT registered'}",
         f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
     ]
 
