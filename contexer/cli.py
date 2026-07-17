@@ -624,26 +624,34 @@ def login_cmd(rest: list | None = None) -> None:
 
 
 def _post_login_sync() -> None:
-    """Best-effort team pull for the current repo right after a successful login.
+    """Best-effort team refresh right after a successful login, so `contexer status` doesn't
+    keep showing the stale pre-auth `last sync: failed`.
 
-    `contexer status` reads the last cached sync result off disk (no network), and login
-    itself does no sync — so without this a freshly authenticated user still sees the stale
-    pre-auth `last sync: failed`. Pulling here refreshes that cache entry. Fail-soft: login
-    has already succeeded, so a no-op (not in a repo / local mode) or any error must never
-    fail the command or print a traceback."""
-    import os
-
-    from contexer import store, team_context
-
-    repo = store._git_root(os.getcwd())
-    if not repo:
-        return  # login can be run anywhere; only a git repo has team context to sync
+    Refreshes BOTH the current working repo and the repo `contexer status` actually displays
+    (the `.current_repo` pointer) — these differ when login is run outside the project you
+    last worked in (e.g. logging in from the CLI repo while status still points at your app),
+    which is exactly when the stale line is most visible. Uses `team_context.refresh()`: it
+    bounds each pull to a short transport timeout (never stalls login on a slow cloud), never
+    raises, and drains any queued offline shares. Login has already succeeded and printed, so
+    nothing here may fail the command or emit a traceback."""
     try:
-        upserted, removed = team_context.pull(repo)
+        import os
+
+        from contexer import store, team_context
+
+        repos: list[str] = []
+        for candidate in (store._git_root(os.getcwd()), store._current_repo_path()):
+            if candidate and candidate not in repos:
+                repos.append(candidate)
+        upserted = removed = 0
+        for repo in repos:
+            up, rm = team_context.refresh(repo)  # bounded timeout, never raises
+            upserted += up
+            removed += rm
     except Exception:
         return  # login is done — never let a post-login sync problem surface as a failure
     if upserted or removed:
-        msg = f"Synced {upserted} team decision(s) for this repo"
+        msg = f"Synced {upserted} team decision(s)"
         if removed:
             msg += f", removed {removed}"
         print(msg + ".")
