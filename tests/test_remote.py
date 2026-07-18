@@ -593,17 +593,27 @@ def test_async_connection_error_maps_to_unavailable(monkeypatch):
         asyncio.run(RemoteStore("https://t/mcp", "tok").aget_context())
 
 
-def test_async_401_triggers_one_refresh_and_retry(monkeypatch):
-    """The reactive-refresh path works through the async core too: one refresh + one retry,
-    the refresh runs off the loop (to_thread) so it never blocks the event loop."""
+def test_async_core_surfaces_401_without_refreshing(monkeypatch):
+    """#108: the async core does NO reactive refresh — it surfaces the transport 401 as a
+    RemoteAuthError so it stays fully cancellable (no uncancellable refresh thread). Reactive
+    refresh is the sync shim's job. So `contexer.auth.refresh_now` must never be called here."""
     fake = _seq_call(_http_error(401), _result(structured={"result": []}))
     monkeypatch.setattr(remote, "_acall_tool", fake)
-    calls = []
-    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: calls.append(p) or "new-tok")
+    monkeypatch.setattr("contexer.auth.refresh_now",
+                        lambda p: pytest.fail("async core must not refresh — that spawns a thread"))
     store = _team_store()
-    ctx = asyncio.run(store.aget_context())
-    assert isinstance(ctx, RemoteContext)
-    assert store._token == "new-tok"
-    assert len(calls) == 1
-    assert len(fake.calls) == 2
-    assert fake.calls[1][1] == "new-tok"
+    with pytest.raises(RemoteAuthError):
+        asyncio.run(store.aget_context())
+    assert len(fake.calls) == 1  # surfaced immediately, no retry
+
+
+def test_sync_shim_reactive_refresh_only_for_transport_auth(monkeypatch):
+    """The sync shim refreshes on a transport 401 (tagged) but NOT on a server-side authz
+    denial (untagged RemoteAuthError from _classify_tool_error) — a refresh can't fix scope."""
+    # authz denial: isError result -> RemoteAuthError WITHOUT _transport_auth -> no refresh
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(
+        content=[_text("This token lacks the 'write' scope required.")], is_error=True))
+    monkeypatch.setattr("contexer.auth.refresh_now",
+                        lambda p: pytest.fail("authz denial must not refresh"))
+    with pytest.raises(RemoteAuthError):
+        _team_store().push_decision(type="constraint", content="c", repo=None)

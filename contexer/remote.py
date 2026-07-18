@@ -33,7 +33,13 @@ class RemoteStoreError(Exception):
 
 
 class RemoteAuthError(RemoteStoreError):
-    """The Teams endpoint rejected the token (HTTP 401/403)."""
+    """The Teams endpoint rejected the token (HTTP 401/403).
+
+    ``_transport_auth`` is set True only for a genuine transport 401/403 (by ``_classify``);
+    it stays False for a server-side authz/scope denial (``_classify_tool_error``). The sync
+    reactive-refresh path refreshes only when it is True — a scope denial a refresh can't fix."""
+
+    _transport_auth = False
 
 
 class RemoteUnavailableError(RemoteStoreError):
@@ -95,7 +101,9 @@ class RemoteStore:
     # cancellation propagates into httpx's async context managers, closing the socket. The
     # sync push_decision/get_context below are thin asyncio.run(...) shims over this same
     # core for off-loop callers (CLI, hooks — separate processes, no running loop), so there
-    # is exactly ONE copy of the wire-serialization + error-mapping + refresh logic.
+    # is exactly ONE copy of the wire-serialization + error-mapping logic. The one thing the
+    # shims add is reactive token refresh — kept OFF the async core on purpose so the awaited
+    # push never spawns an uncancellable refresh thread (see _run_with_reactive_refresh).
 
     async def apush_decision(self, *, type: str, content: str, repo: str | None,
                              rationale: str | None = None, agent: str | None = None,
@@ -161,9 +169,9 @@ class RemoteStore:
         Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure. For
         off-loop callers only — an in-loop caller must await :meth:`apush_decision` instead
         (asyncio.run cannot run inside a running event loop)."""
-        return asyncio.run(self.apush_decision(
+        return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
-            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id))
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id)))
 
     def get_context(self, repo: str | None = None,
                     updated_since: str | None = None) -> RemoteContext:
@@ -172,22 +180,38 @@ class RemoteStore:
         ``updated_since`` (an ISO cursor, typically a prior ``RemoteContext.cursor``) fetches
         only changes after it and populates ``deleted`` (tombstoned ids to remove locally).
         Raises RemoteStoreError on failure. Off-loop callers only."""
-        return asyncio.run(self.aget_context(repo=repo, updated_since=updated_since))
+        return self._run_with_reactive_refresh(
+            lambda: asyncio.run(self.aget_context(repo=repo, updated_since=updated_since)))
 
-    async def _ainvoke(self, name: str, arguments: dict, *, _refreshed: bool = False):
+    def _run_with_reactive_refresh(self, run: "Callable[[], T]") -> T:
+        """Run an off-loop op, and on a transport 401/403 do exactly ONE token refresh + retry.
+
+        The bearer can expire mid-session (it is frozen at construction), so a transport-auth
+        failure gets one bounded refresh-and-retry. This lives in the SYNC shim layer — NOT in
+        the async core — deliberately (#108): the refresh is a blocking, cross-process-locked
+        network call (`auth._locked_refresh`), and doing it here (off the event loop, no running
+        loop) means the awaited async push path never spawns an uncancellable worker thread. Only
+        a genuine *transport* 401/403 (tagged `_transport_auth`) refreshes — a server-side
+        authz/scope denial (which a refresh can't fix) surfaces unchanged."""
+        try:
+            return run()
+        except RemoteAuthError as exc:
+            if not getattr(exc, "_transport_auth", False) or not self._refresh_token():
+                raise
+        return run()  # one retry with the refreshed token; a second 401 here propagates
+
+    async def _ainvoke(self, name: str, arguments: dict):
         """Call one Teams tool, mapping any transport failure to a typed RemoteStoreError.
 
-        On a transport 401/403 (an expired/rejected bearer), attempt exactly ONE token
-        refresh + retry: the access token may have expired mid-session (the token is frozen
-        at construction). This is bounded — `_refreshed` gates it so we never loop, and it
-        only fires for the transport-auth path, not for a server-side authz/scope denial
-        (which a refresh can't fix). If refresh yields no *new* token, the original auth
-        error surfaces (→ with_local_fallback's "run contexer login").
+        Async core — pure and cancellable: it does NO blocking token refresh (that lives in
+        the sync shim's :meth:`_run_with_reactive_refresh`), so a cancelled push tears the
+        transport down with nothing lingering (#108). A transport 401/403 surfaces as a
+        ``RemoteAuthError`` tagged ``_transport_auth`` so the sync shim knows it is
+        refresh-eligible; the in-loop async caller instead degrades (→ outbox retry).
 
         ``except Exception`` deliberately does NOT catch ``asyncio.CancelledError`` (a
         BaseException): a cancelled push must propagate and tear the transport down, not be
-        reclassified as an unreachable endpoint. The refresh is a rare, blocking network call
-        (auth), so it runs off the loop via ``to_thread`` to keep the loop responsive."""
+        reclassified as an unreachable endpoint."""
         try:
             # In production `_acall_tool` is a coroutine → this awaits the real async transport
             # (cancellable). Unit tests patch this seam with a plain sync fake returning a
@@ -199,11 +223,7 @@ class RemoteStore:
         except RemoteStoreError:
             raise
         except Exception as exc:  # network / transport / anyio group -> typed, catchable
-            err = _classify(exc)
-            if (isinstance(err, RemoteAuthError) and not _refreshed
-                    and await asyncio.to_thread(self._refresh_token)):
-                return await self._ainvoke(name, arguments, _refreshed=True)
-            raise err from exc
+            raise _classify(exc) from exc
         if getattr(result, "isError", False):
             message = _first_text(getattr(result, "content", None)) or f"{name} failed"
             raise _classify_tool_error(message)
@@ -327,10 +347,16 @@ def _extract_status(exc: BaseException) -> int | None:
 
 
 def _classify(exc: BaseException) -> RemoteStoreError:
-    """Map a raw transport exception to a typed RemoteStoreError."""
+    """Map a raw transport exception to a typed RemoteStoreError.
+
+    A transport 401/403 is tagged ``_transport_auth`` so the sync shim's reactive-refresh
+    path can distinguish it from a server-side authz/scope denial (which arrives via
+    ``_classify_tool_error`` untagged and must never trigger a token refresh)."""
     status = _extract_status(exc)
     if status in (401, 403):
-        return RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
+        err = RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
+        err._transport_auth = True
+        return err
     return RemoteUnavailableError(f"Teams endpoint unreachable: {exc}")
 
 

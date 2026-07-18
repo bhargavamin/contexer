@@ -96,10 +96,35 @@ def test_share_decision_cancels_wedged_push_on_timeout(monkeypatch):
         return "late"
 
     monkeypatch.setattr(share_mod, "share_ids_async", wedged_share_ids)
+    monkeypatch.setattr(share_mod, "enqueue_ids_for_retry", lambda repo, ids, **k: len(ids))
     result = asyncio.run(server.share_decision("d", "/repo", confirm=True))
     assert state["started"] is True
     assert state["cancelled"] is True   # THE fix: cancelled, not left running in the background
     assert "Saved locally" in result and "did not respond" in result
+
+
+def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
+    # Greptile #1: cancellation bypasses share_async's own enqueue, so the timeout handler
+    # must queue the selection itself — otherwise "the outbox retries it" is a false promise.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
+
+    async def wedged(repo, ids, **kw):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(share_mod, "share_ids_async", wedged)
+    enqueued = {}
+
+    def fake_enqueue(repo, ids, **k):
+        enqueued["repo"] = repo
+        enqueued["ids"] = ids
+        return len(ids)
+
+    monkeypatch.setattr(share_mod, "enqueue_ids_for_retry", fake_enqueue)
+    result = asyncio.run(server.share_decision("ab12,cd34", "/repo", confirm=True))
+    assert enqueued["ids"] == ["ab12", "cd34"]  # the parsed selection was queued for retry
+    assert enqueued["repo"] == "/repo"
+    assert "outbox retries it" in result
 
 
 # ── cloud-push preview gate + review_pending ─────────────────────────────────────

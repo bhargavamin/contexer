@@ -796,6 +796,38 @@ def test_share_async_drains_queued_before_new_push(tmp_repo, monkeypatch):
     assert share._load_outbox() == []
 
 
+def test_enqueue_ids_for_retry_queues_each(tmp_repo, monkeypatch):
+    _, id1 = store.update_decision(tmp_repo, "use postgres for the database", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "never hardcode secret api keys", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    n = share.enqueue_ids_for_retry(tmp_repo, [id1, id2])
+    assert n == 2
+    assert [e["decision_id"] for e in share._load_outbox()] == [id1, id2]
+
+
+def test_enqueue_ids_for_retry_empty_queues_most_recent(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "the newest decision here now", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    n = share.enqueue_ids_for_retry(tmp_repo, [])
+    assert n == 1
+    assert share._load_outbox()[0]["decision_id"] == did
+
+
+def test_enqueue_ids_for_retry_is_idempotent(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "a decision to queue twice", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    share.enqueue_ids_for_retry(tmp_repo, [did])
+    share.enqueue_ids_for_retry(tmp_repo, [did])  # dedup by decision_id
+    assert len([e for e in share._load_outbox() if e["decision_id"] == did]) == 1
+
+
+def test_enqueue_ids_for_retry_skips_missing(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    n = share.enqueue_ids_for_retry(tmp_repo, ["no-such-id"])
+    assert n == 0
+    assert share._load_outbox() == []
+
+
 def test_share_async_preserves_plan_source_on_wire(tmp_repo, monkeypatch):
     _, did = store.update_decision(
         tmp_repo, "provisional plan decision to sync", "s1",

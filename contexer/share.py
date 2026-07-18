@@ -336,3 +336,24 @@ async def share_ids_async(repo_path: str, decision_ids: list, *,
         return await share_async(repo_path, "", profile=profile)
     results = [await share_async(repo_path, did, profile=profile) for did in decision_ids]
     return "\n".join(results)
+
+
+def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
+    """Queue the given decisions (by id) into the outbox so a later drain retries them.
+
+    Called when an in-loop share is CANCELLED by its deadline (server.share_decision timeout)
+    before it could push or queue them itself: cancellation bypasses share_async's own
+    enqueue-on-failure, so without this the tool's "the outbox retries it" message would be an
+    empty promise. Idempotent — `_enqueue` dedups by decision_id and a re-push is idempotent
+    server-side, so queuing a decision that may already have been sent is safe. An empty list
+    queues the most recent shareable (matching `share_async('')`). Missing ids are skipped.
+    Returns the count queued."""
+    ids = decision_ids or [""]  # "" -> most recent, matching share_async("")
+    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    queued = 0
+    for did in ids:
+        dec = store.get_shareable(repo_path, did)
+        if dec is not None:
+            _enqueue(_payload(dec, key))
+            queued += 1
+    return queued
