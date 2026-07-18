@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.23.1](https://github.com/bhargavamin/contexer/compare/v0.23.0...v0.23.1) (2026-07-18)
+
+
+### Bug Fixes
+
+* **#108:** address Greptile P1s — enqueue on cancel; refresh off the loop ([27c0dab](https://github.com/bhargavamin/contexer/commit/27c0dab6b33f18a2dca876da8fc151a4341546ce))
+* **#108:** async-native RemoteStore push path so a wedged share is cancellable ([e2fe0f6](https://github.com/bhargavamin/contexer/commit/e2fe0f6f354aade028b2dcb6f159963e66c68d6c))
+* **#108:** async-native RemoteStore push path so a wedged share is cancellable ([a15d76e](https://github.com/bhargavamin/contexer/commit/a15d76ed33f02fdda38a3d73ce21bf2c70169e1e))
+* **login:** bound post-login sync + refresh the repo status shows ([5df4fcd](https://github.com/bhargavamin/contexer/commit/5df4fcd57e239400e53f8abbeb79cc9505eafe11))
+* **login:** pull team context after login so status isn't stale ([3311db6](https://github.com/bhargavamin/contexer/commit/3311db6936ead547991ddc79803310317456b8d0))
+
 ## [0.23.0](https://github.com/bhargavamin/contexer/compare/v0.22.0...v0.23.0) (2026-07-16)
 
 
