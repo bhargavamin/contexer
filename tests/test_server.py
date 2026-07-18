@@ -1,15 +1,14 @@
 """Tests for MCP tool entry points in contexer/server.py.
 
 share_decision is the one MCP tool that reaches the network from inside FastMCP's event
-loop. It is async and offloads its blocking (sync) body to a worker thread the loop AWAITS,
-so a slow/hung cloud never freezes the whole server. No pytest-asyncio: the async tool is
-driven with asyncio.run(...), matching test_remote.py's convention.
+loop. It AWAITS the async-native share path (share_ids_async), so a slow/hung cloud never
+freezes the loop AND a wedged push is cancelled at the deadline (nothing lingers). No
+pytest-asyncio: the async tool is driven with asyncio.run(...), matching test_remote.py.
 """
 import asyncio
 import inspect
 import json
 import threading
-import time
 
 import contexer.share as share_mod
 from contexer import server, store
@@ -30,18 +29,18 @@ def test_share_decision_short_circuits_without_repo(monkeypatch):
     assert called["share"] is False  # never reaches the network layer
 
 
-def test_share_decision_offloads_blocking_body_off_the_loop(monkeypatch):
-    # The sync share() body must run on a DIFFERENT thread than the event loop, and its
-    # return value + args must pass through unchanged.
+def test_share_decision_awaits_async_share_path_on_the_loop(monkeypatch):
+    # The async share path is AWAITED on the event loop (no thread offload), and its args +
+    # return value pass through unchanged — a single id becomes a one-element selection.
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo/x")
     seen = {}
 
-    def fake_share(repo, decision_id, **kw):
+    async def fake_share_ids(repo, ids, **kw):
         seen["thread"] = threading.current_thread()
-        seen["args"] = (repo, decision_id)
+        seen["args"] = (repo, ids)
         return "shared srv-1"
 
-    monkeypatch.setattr(share_mod, "share", fake_share)
+    monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     async def driver():
         seen["loop_thread"] = threading.current_thread()
@@ -49,22 +48,22 @@ def test_share_decision_offloads_blocking_body_off_the_loop(monkeypatch):
 
     result = asyncio.run(driver())
     assert result == "shared srv-1"
-    assert seen["args"] == ("/repo/x", "dec-42")
-    assert seen["thread"] is not seen["loop_thread"]
+    assert seen["args"] == ("/repo/x", ["dec-42"])
+    assert seen["thread"] is seen["loop_thread"]  # awaited on the loop, not offloaded to a thread
 
 
 def test_share_decision_does_not_block_the_event_loop(monkeypatch):
-    # While the blocking share() runs, the loop must stay free to make progress on other
-    # coroutines. If share_decision froze the loop, no tick could land before share finished.
+    # While the awaited share path is in-flight, the loop must stay free to make progress on
+    # other coroutines. If share_decision froze the loop, no tick could land before it finished.
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     order = []
 
-    def slow_share(repo, decision_id, **kw):
-        time.sleep(0.2)  # stands in for a slow network round-trip
+    async def slow_share_ids(repo, ids, **kw):
+        await asyncio.sleep(0.2)  # stands in for a slow network round-trip
         order.append("share_done")
         return "ok"
 
-    monkeypatch.setattr(share_mod, "share", slow_share)
+    monkeypatch.setattr(share_mod, "share_ids_async", slow_share_ids)
 
     async def ticker():
         for _ in range(5):
@@ -79,26 +78,53 @@ def test_share_decision_does_not_block_the_event_loop(monkeypatch):
     assert order.index("tick") < order.index("share_done")
 
 
-def test_share_decision_times_out_without_hanging(monkeypatch):
-    # A wedged share() (transport never returns) must not hang the tool: within the bounded
-    # wait it returns a local-first degradation message instead of blocking forever. The
-    # worker keeps running in the background (Python can't cancel a blocking thread), which
-    # is why the fake sleeps a bounded 0.3s so the test process doesn't hang on exit.
+def test_share_decision_cancels_wedged_push_on_timeout(monkeypatch):
+    # #108: the push is AWAITED, so the deadline CANCELS it. The cancellation reaches the
+    # push coroutine (no leaked worker/socket, unlike the old thread offload), and the tool
+    # returns the local-first degradation message.
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
-    started = threading.Event()
+    state = {"started": False, "cancelled": False}
 
-    def wedged_share(repo, decision_id, **kw):
-        started.set()
-        time.sleep(0.3)  # outlives the 0.03s backstop
+    async def wedged_share_ids(repo, ids, **kw):
+        state["started"] = True
+        try:
+            await asyncio.sleep(3600)  # a cloud that never answers
+        except asyncio.CancelledError:
+            state["cancelled"] = True  # the awaited push is torn down at the deadline
+            raise
         return "late"
 
-    monkeypatch.setattr(share_mod, "share", wedged_share)
-
+    monkeypatch.setattr(share_mod, "share_ids_async", wedged_share_ids)
+    monkeypatch.setattr(share_mod, "enqueue_ids_for_retry", lambda repo, ids, **k: len(ids))
     result = asyncio.run(server.share_decision("d", "/repo", confirm=True))
-    assert started.is_set()          # the offload did start
-    assert result != "late"          # but the tool did NOT wait for it
+    assert state["started"] is True
+    assert state["cancelled"] is True   # THE fix: cancelled, not left running in the background
     assert "Saved locally" in result and "did not respond" in result
+
+
+def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
+    # Greptile #1: cancellation bypasses share_async's own enqueue, so the timeout handler
+    # must queue the selection itself — otherwise "the outbox retries it" is a false promise.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
+
+    async def wedged(repo, ids, **kw):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(share_mod, "share_ids_async", wedged)
+    enqueued = {}
+
+    def fake_enqueue(repo, ids, **k):
+        enqueued["repo"] = repo
+        enqueued["ids"] = ids
+        return len(ids)
+
+    monkeypatch.setattr(share_mod, "enqueue_ids_for_retry", fake_enqueue)
+    result = asyncio.run(server.share_decision("ab12,cd34", "/repo", confirm=True))
+    assert enqueued["ids"] == ["ab12", "cd34"]  # the parsed selection was queued for retry
+    assert enqueued["repo"] == "/repo"
+    assert "outbox retries it" in result
 
 
 # ── cloud-push preview gate + review_pending ─────────────────────────────────────
@@ -114,7 +140,12 @@ def test_share_decision_previews_by_default_without_pushing(monkeypatch):
     monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
     monkeypatch.setattr(server.store, "format_share_preview", lambda r, d, profile=None: "PREVIEW-TEXT")
     pushed = {"n": 0}
-    monkeypatch.setattr(share_mod, "share", lambda *a, **k: pushed.__setitem__("n", pushed["n"] + 1))
+
+    async def counting_share_ids(*a, **k):
+        pushed["n"] += 1
+        return "pushed"
+
+    monkeypatch.setattr(share_mod, "share_ids_async", counting_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
     assert result == "PREVIEW-TEXT"
@@ -126,7 +157,11 @@ def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(skip_confirm=True))
-    monkeypatch.setattr(share_mod, "share", lambda repo, dec, **k: "pushed")
+
+    async def fake_share_ids(repo, ids, **k):
+        return "pushed"
+
+    monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
     assert result == "pushed"
@@ -139,7 +174,11 @@ def test_share_decision_local_mode_skips_preview(monkeypatch):
     previewed = {"n": 0}
     monkeypatch.setattr(server.store, "format_share_preview",
                         lambda *a, **k: previewed.__setitem__("n", previewed["n"] + 1) or "PREVIEW")
-    monkeypatch.setattr(share_mod, "share", lambda repo, dec, **k: "not configured")
+
+    async def fake_share_ids(repo, ids, **k):
+        return "not configured"
+
+    monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
     assert result == "not configured"
@@ -155,7 +194,11 @@ def test_share_decision_team_no_token_skips_preview(monkeypatch):
     previewed = {"n": 0}
     monkeypatch.setattr(server.store, "format_share_preview",
                         lambda *a, **k: previewed.__setitem__("n", 1) or "PREVIEW")
-    monkeypatch.setattr(share_mod, "share_ids", lambda repo, ids, **k: "not configured")
+
+    async def fake_share_ids(repo, ids, **k):
+        return "not configured"
+
+    monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
     assert result == "not configured"
@@ -262,11 +305,11 @@ def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     got = {}
 
-    def fake_share_ids(repo, ids, **k):
+    async def fake_share_ids(repo, ids, **k):
         got["ids"] = ids
         return "done"
 
-    monkeypatch.setattr(share_mod, "share_ids", fake_share_ids)
+    monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
     result = asyncio.run(server.share_decision(" ab12 , cd34 ,", "/repo", confirm=True))
     assert got["ids"] == ["ab12", "cd34"]  # parsed, trimmed, blanks dropped
     assert result == "done"
