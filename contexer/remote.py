@@ -12,9 +12,10 @@ ever reaching the agent.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
@@ -88,15 +89,19 @@ class RemoteStore:
             return None
         return cls(profile.endpoint, token, timeout=timeout, profile=profile)
 
-    def push_decision(self, *, type: str, content: str, repo: str | None,
-                      rationale: str | None = None, agent: str | None = None,
-                      confidence: int | None = None, evidence: list[str] | None = None,
-                      source: str | None = None, decision_id: str | None = None) -> str:
-        """Push one local decision to the caller's personal Teams context.
+    # ── async-native core (#108) ─────────────────────────────────────────────────
+    # The network path is async at its heart so an in-loop caller (server.share_decision)
+    # can AWAIT it and therefore CANCEL it: on a deadline the awaitable is cancelled and the
+    # cancellation propagates into httpx's async context managers, closing the socket. The
+    # sync push_decision/get_context below are thin asyncio.run(...) shims over this same
+    # core for off-loop callers (CLI, hooks — separate processes, no running loop), so there
+    # is exactly ONE copy of the wire-serialization + error-mapping + refresh logic.
 
-        Returns the server decision id (best-effort; ``""`` if the response carries none).
-        Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure.
-        """
+    async def apush_decision(self, *, type: str, content: str, repo: str | None,
+                             rationale: str | None = None, agent: str | None = None,
+                             confidence: int | None = None, evidence: list[str] | None = None,
+                             source: str | None = None, decision_id: str | None = None) -> str:
+        """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
         args: dict = {"type": type, "content": content}
         if repo is not None:
             args["repo"] = repo
@@ -112,25 +117,20 @@ class RemoteStore:
             args["source"] = source
         if decision_id is not None:
             args["decisionId"] = decision_id
-        result = self._invoke("push_decision", args)
+        result = await self._ainvoke("push_decision", args)
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
 
-    def get_context(self, repo: str | None = None,
-                    updated_since: str | None = None) -> RemoteContext:
-        """Pull merged team context.
-
-        ``updated_since`` (an ISO cursor, typically a prior ``RemoteContext.cursor``) fetches
-        only changes after it and populates ``deleted`` (tombstoned ids to remove locally).
-        Raises RemoteStoreError on failure.
-        """
+    async def aget_context(self, repo: str | None = None,
+                           updated_since: str | None = None) -> RemoteContext:
+        """Async core of :meth:`get_context`. Awaits the transport (cancellable)."""
         args: dict = {}
         if repo is not None:
             args["repo"] = repo
         if updated_since is not None:
             args["updatedSince"] = updated_since
-        result = self._invoke("get_context", args)
+        result = await self._ainvoke("get_context", args)
         structured = getattr(result, "structuredContent", None) or {}
         rows = structured.get("result") or []
         decisions = [
@@ -151,7 +151,30 @@ class RemoteStore:
             cursor=structured.get("cursor"),
         )
 
-    def _invoke(self, name: str, arguments: dict, *, _refreshed: bool = False):
+    def push_decision(self, *, type: str, content: str, repo: str | None,
+                      rationale: str | None = None, agent: str | None = None,
+                      confidence: int | None = None, evidence: list[str] | None = None,
+                      source: str | None = None, decision_id: str | None = None) -> str:
+        """Push one local decision to the caller's personal Teams context (sync shim).
+
+        Returns the server decision id (best-effort; ``""`` if the response carries none).
+        Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure. For
+        off-loop callers only — an in-loop caller must await :meth:`apush_decision` instead
+        (asyncio.run cannot run inside a running event loop)."""
+        return asyncio.run(self.apush_decision(
+            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id))
+
+    def get_context(self, repo: str | None = None,
+                    updated_since: str | None = None) -> RemoteContext:
+        """Pull merged team context (sync shim over :meth:`aget_context`).
+
+        ``updated_since`` (an ISO cursor, typically a prior ``RemoteContext.cursor``) fetches
+        only changes after it and populates ``deleted`` (tombstoned ids to remove locally).
+        Raises RemoteStoreError on failure. Off-loop callers only."""
+        return asyncio.run(self.aget_context(repo=repo, updated_since=updated_since))
+
+    async def _ainvoke(self, name: str, arguments: dict, *, _refreshed: bool = False):
         """Call one Teams tool, mapping any transport failure to a typed RemoteStoreError.
 
         On a transport 401/403 (an expired/rejected bearer), attempt exactly ONE token
@@ -159,15 +182,27 @@ class RemoteStore:
         at construction). This is bounded — `_refreshed` gates it so we never loop, and it
         only fires for the transport-auth path, not for a server-side authz/scope denial
         (which a refresh can't fix). If refresh yields no *new* token, the original auth
-        error surfaces (→ with_local_fallback's "run contexer login")."""
+        error surfaces (→ with_local_fallback's "run contexer login").
+
+        ``except Exception`` deliberately does NOT catch ``asyncio.CancelledError`` (a
+        BaseException): a cancelled push must propagate and tear the transport down, not be
+        reclassified as an unreachable endpoint. The refresh is a rare, blocking network call
+        (auth), so it runs off the loop via ``to_thread`` to keep the loop responsive."""
         try:
-            result = _call_tool(self._endpoint, self._token, name, arguments, self._timeout)
+            # In production `_acall_tool` is a coroutine → this awaits the real async transport
+            # (cancellable). Unit tests patch this seam with a plain sync fake returning a
+            # CallToolResult; tolerate that by only awaiting an actual awaitable, so tests need
+            # no coroutine wrapper while prod keeps its cancellable await.
+            result = _acall_tool(self._endpoint, self._token, name, arguments, self._timeout)
+            if inspect.isawaitable(result):
+                result = await result
         except RemoteStoreError:
             raise
         except Exception as exc:  # network / transport / anyio group -> typed, catchable
             err = _classify(exc)
-            if isinstance(err, RemoteAuthError) and not _refreshed and self._refresh_token():
-                return self._invoke(name, arguments, _refreshed=True)
+            if (isinstance(err, RemoteAuthError) and not _refreshed
+                    and await asyncio.to_thread(self._refresh_token)):
+                return await self._ainvoke(name, arguments, _refreshed=True)
             raise err from exc
         if getattr(result, "isError", False):
             message = _first_text(getattr(result, "content", None)) or f"{name} failed"
@@ -213,6 +248,32 @@ def warn_once(message: str, *, key: str) -> None:
     print(message, file=sys.stderr)
 
 
+def _warn_degrade(exc: RemoteStoreError, action: str) -> None:
+    """Emit the warn-once line matching a RemoteStoreError's category. Shared by the sync and
+    async fallback wrappers so their degradation messages can never drift apart."""
+    if isinstance(exc, RemoteAuthError):
+        warn_once(
+            f"Contexer: Teams authentication failed while trying to {action} - "
+            "continuing local-only (run 'contexer login --team' or check your token).",
+            key="degrade:auth",
+        )
+    elif isinstance(exc, RemoteUnavailableError):
+        warn_once(
+            f"Contexer: Teams endpoint unreachable while trying to {action} - "
+            "continuing local-only.",
+            key="degrade:unreachable",
+        )
+    else:
+        # The cloud was reached and answered, it just refused or failed the request (e.g. a
+        # validation error) - distinct from the transport-level "unreachable" case above, so the
+        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
+        warn_once(
+            f"Contexer: Teams request failed while trying to {action} - "
+            "continuing local-only.",
+            key="degrade:request",
+        )
+
+
 def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
     """Run a RemoteStore operation, degrading to local-only on any RemoteStoreError.
 
@@ -223,29 +284,22 @@ def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
     warning so the developer knows what degraded."""
     try:
         return op()
-    except RemoteAuthError:
-        warn_once(
-            f"Contexer: Teams authentication failed while trying to {action} - "
-            "continuing local-only (run 'contexer login --team' or check your token).",
-            key="degrade:auth",
-        )
+    except RemoteStoreError as exc:
+        _warn_degrade(exc, action)
         return default
-    except RemoteUnavailableError:
-        warn_once(
-            f"Contexer: Teams endpoint unreachable while trying to {action} - "
-            "continuing local-only.",
-            key="degrade:unreachable",
-        )
-        return default
-    except RemoteStoreError:
-        # The cloud was reached and answered, it just refused or failed the request (e.g. a
-        # validation error) - distinct from the transport-level "unreachable" case above, so the
-        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
-        warn_once(
-            f"Contexer: Teams request failed while trying to {action} - "
-            "continuing local-only.",
-            key="degrade:request",
-        )
+
+
+async def awith_local_fallback(op: Callable[[], Awaitable[T]], *, default: T, action: str) -> T:
+    """Async twin of :func:`with_local_fallback` for in-loop callers (server.share_decision).
+
+    ``op`` is a zero-arg callable returning an awaitable; it is ``await``-ed so a wedged push
+    stays cancellable. Same local-first contract and identical warn-once messages (via the
+    shared ``_warn_degrade``). A CancelledError is a BaseException, so an outer deadline
+    cancels straight through this wrapper — it is not swallowed as a degradation."""
+    try:
+        return await op()
+    except RemoteStoreError as exc:
+        _warn_degrade(exc, action)
         return default
 
 
@@ -305,12 +359,12 @@ def _classify_tool_error(message: str) -> RemoteStoreError:
     return RemoteStoreError(message)
 
 
-def _call_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O, exercised by the opt-in integration test
-    """Network seam: open a Streamable-HTTP MCP session, call one tool, return the result."""
-    return asyncio.run(_acall_tool(endpoint, token, name, arguments, timeout))
+async def _acall_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O, exercised by the opt-in integration test
+    """Network seam: open a Streamable-HTTP MCP session, call one tool, return the result.
 
-
-async def _acall_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O
+    The single async boundary the whole client funnels through (both the async core and the
+    sync asyncio.run shims). Awaiting it is what makes a wedged call cancellable — cancellation
+    unwinds these ``async with`` blocks, closing the transport."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 

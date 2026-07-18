@@ -164,12 +164,12 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
     return result
 
 
-# Coarse upper bound for the whole share() round-trip (drain outbox + push the new decision,
+# Coarse upper bound for the whole share round-trip (drain outbox + push the new decision,
 # each at RemoteStore's ~10s transport timeout). It only exists as a backstop: a pathological
-# remote that holds the connection open past its own timeout must not hang the tool call or
-# occupy an executor worker unboundedly. Set well above the healthy worst case so a legitimately
-# slow (but working) push never false-trips; a false trip is harmless anyway — share() is
-# local-first and idempotent, so the background push still lands or the outbox retries it.
+# remote that holds the connection open past its own timeout must not hang the tool call. On
+# timeout the awaited push is CANCELLED (the socket closes), so nothing lingers. Set well above
+# the healthy worst case so a legitimately slow (but working) push never false-trips; a false
+# trip is harmless anyway — share is local-first and idempotent, so the outbox retries it.
 _SHARE_TIMEOUT = 30.0
 
 
@@ -206,28 +206,26 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
 
     ids = [i.strip() for i in decision_id.split(",") if i.strip()]  # multi-select support
 
-    # share() is synchronous and does blocking network I/O (RemoteStore -> asyncio.run).
     # This is the ONE MCP tool that reaches the network from inside FastMCP's event loop, so
-    # run its blocking body on a worker thread the loop AWAITS rather than calling it inline
-    # (which would freeze the whole server for the round-trip and, since asyncio.run can't run
-    # inside a running loop, previously failed outright and misreported "endpoint unreachable").
-    # Off the loop there is no running loop, so share()'s own asyncio.run works unchanged.
+    # it AWAITS the async-native share path (share_ids_async -> RemoteStore.apush_decision ->
+    # awaited httpx transport) rather than calling the blocking sync share() inline (which,
+    # since asyncio.run can't run inside a running loop, previously failed outright and
+    # misreported "endpoint unreachable"). The loop stays free for every other tool.
     #
-    # Bounded so a wedged transport can't hang the tool call. NOTE a Python thread doing
-    # blocking I/O can't be cancelled, so on timeout the worker keeps running in the
-    # background until its transport gives up — but on the SHARED default executor that
-    # occupancy is bounded (unlike a per-call executor), only sharing degrades (the loop
-    # stays free for every other tool), and share() is local-first + outbox-backed so nothing
-    # is lost. Fully reclaiming a wedged connection needs async-native transport (follow-up).
+    # Bounded by _SHARE_TIMEOUT so a wedged transport can't hang the tool call. Because the
+    # push is AWAITED (not offloaded to an un-cancellable worker thread), wait_for CANCELS it
+    # on timeout: the cancellation propagates into the async transport and closes the socket,
+    # so nothing lingers in the background (#108). share_ids_async is local-first + outbox-
+    # backed, so a false trip is harmless — the decision is saved and the outbox retries it.
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_share.share_ids, resolved, ids, profile=profile),
+            _share.share_ids_async(resolved, ids, profile=profile),
             timeout=_SHARE_TIMEOUT,
         )
     except TimeoutError:
         return (
             f"Saved locally — the team cloud did not respond within {int(_SHARE_TIMEOUT)}s. "
-            "The push continues in the background and the outbox retries it automatically; "
+            "The push was cancelled and the outbox retries it automatically; "
             "your local decision is unchanged."
         )
 

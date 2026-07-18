@@ -1,10 +1,12 @@
 """Tests for the RemoteStore sync client (contexer/remote.py).
 
-Unit-level: the network seam `remote._call_tool` is monkeypatched so these tests assert
+Unit-level: the network seam `remote._acall_tool` is monkeypatched so these tests assert
 the wire serialization (snake->camel, None-omitted), result parsing, and error mapping
 without touching a real Teams server. The real transport is covered by the opt-in
 integration test documented in the manual steps.
 """
+import asyncio
+import inspect
 import types
 
 import pytest
@@ -35,6 +37,15 @@ def _http_error(status):
     exc = Exception(f"HTTP {status}")
     exc.response = types.SimpleNamespace(status_code=status)
     return exc
+
+
+def _aseam(body):
+    """Wrap a sync body as the async `_acall_tool` seam (the network boundary the sync
+    shims and the async core both funnel through). Calling `body` raises → the coroutine
+    raises on await, exactly like the real transport."""
+    async def _acall(endpoint, token, name, arguments, timeout):
+        return body(endpoint, token, name, arguments, timeout)
+    return _acall
 
 
 # ── from_profile ────────────────────────────────────────────────────────────────
@@ -72,11 +83,11 @@ def test_from_profile_accepts_timeout_override():
 def test_push_decision_serializes_full_wire_shape(monkeypatch):
     captured = {}
 
-    def fake_call(endpoint, token, name, arguments, timeout):
+    async def fake_call(endpoint, token, name, arguments, timeout):
         captured.update(endpoint=endpoint, token=token, name=name, args=arguments, timeout=timeout)
         return _result(content=[_text("Saved decision dec-42 to your personal context.")])
 
-    monkeypatch.setattr(remote, "_call_tool", fake_call)
+    monkeypatch.setattr(remote, "_acall_tool", fake_call)
     rs = RemoteStore("https://t/mcp", "tok", timeout=7.0)
     did = rs.push_decision(
         type="architecture", content="use X", repo="github.com/a/b",
@@ -98,7 +109,7 @@ def test_push_decision_serializes_full_wire_shape(monkeypatch):
 def test_push_decision_omits_none_optionals(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda e, t, n, args, to: captured.update(args=args)
         or _result(content=[_text("Saved decision x to your personal context.")]),
     )
@@ -107,7 +118,7 @@ def test_push_decision_omits_none_optionals(monkeypatch):
 
 
 def test_push_decision_returns_empty_when_no_id_in_message(monkeypatch):
-    monkeypatch.setattr(remote, "_call_tool", lambda *a, **k: _result(content=[_text("ok")]))
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(content=[_text("ok")]))
     did = RemoteStore("https://t/mcp", "tok").push_decision(type="convention", content="c", repo=None)
     assert did == ""
 
@@ -125,11 +136,11 @@ def test_get_context_parses_structured_content(monkeypatch):
         "cursor": "2026-01-01T00:00:00Z",
     }
 
-    def fake_call(endpoint, token, name, arguments, timeout):
+    async def fake_call(endpoint, token, name, arguments, timeout):
         captured.update(name=name, args=arguments)
         return _result(structured=structured)
 
-    monkeypatch.setattr(remote, "_call_tool", fake_call)
+    monkeypatch.setattr(remote, "_acall_tool", fake_call)
     ctx = RemoteStore("https://t/mcp", "tok").get_context(
         repo="r", updated_since="2025-12-31T00:00:00Z",
     )
@@ -147,7 +158,7 @@ def test_get_context_parses_structured_content(monkeypatch):
 def test_get_context_omits_none_args(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda e, t, n, args, to: captured.update(args=args)
         or _result(structured={"result": [], "deleted": [], "cursor": None}),
     )
@@ -159,7 +170,7 @@ def test_get_context_omits_none_args(monkeypatch):
 
 
 def test_get_context_missing_structured_yields_empty(monkeypatch):
-    monkeypatch.setattr(remote, "_call_tool", lambda *a, **k: _result(structured=None))
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(structured=None))
     ctx = RemoteStore("https://t/mcp", "tok").get_context()
     assert ctx.decisions == []
     assert ctx.deleted == []
@@ -169,39 +180,39 @@ def test_get_context_missing_structured_yields_empty(monkeypatch):
 # ── error mapping (feeds C8 degradation) ─────────────────────────────────────────
 
 def test_connection_error_maps_to_unavailable(monkeypatch):
-    def boom(*a, **k):
+    async def boom(*a, **k):
         raise ConnectionError("connection refused")
 
-    monkeypatch.setattr(remote, "_call_tool", boom)
+    monkeypatch.setattr(remote, "_acall_tool", boom)
     with pytest.raises(RemoteUnavailableError):
         RemoteStore("https://t/mcp", "tok").get_context()
 
 
 @pytest.mark.parametrize("status", [401, 403])
 def test_http_auth_status_maps_to_auth_error(monkeypatch, status):
-    monkeypatch.setattr(remote, "_call_tool", lambda *a, **k: (_ for _ in ()).throw(_http_error(status)))
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: (_ for _ in ()).throw(_http_error(status)))
     with pytest.raises(RemoteAuthError):
         RemoteStore("https://t/mcp", "tok").get_context()
 
 
 def test_http_500_maps_to_unavailable(monkeypatch):
-    monkeypatch.setattr(remote, "_call_tool", lambda *a, **k: (_ for _ in ()).throw(_http_error(500)))
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: (_ for _ in ()).throw(_http_error(500)))
     with pytest.raises(RemoteUnavailableError):
         RemoteStore("https://t/mcp", "tok").get_context()
 
 
 def test_exception_group_401_maps_to_auth_error(monkeypatch):
-    def boom(*a, **k):
+    async def boom(*a, **k):
         raise ExceptionGroup("transport", [_http_error(401)])
 
-    monkeypatch.setattr(remote, "_call_tool", boom)
+    monkeypatch.setattr(remote, "_acall_tool", boom)
     with pytest.raises(RemoteAuthError):
         RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
 
 
 def test_tool_error_result_raises(monkeypatch):
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text("invalid input")], is_error=True),
     )
     with pytest.raises(RemoteStoreError):
@@ -209,16 +220,16 @@ def test_tool_error_result_raises(monkeypatch):
 
 
 def test_tool_error_with_empty_content_uses_fallback_message(monkeypatch):
-    monkeypatch.setattr(remote, "_call_tool", lambda *a, **k: _result(content=[], is_error=True))
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(content=[], is_error=True))
     with pytest.raises(RemoteStoreError, match="get_context failed"):
         RemoteStore("https://t/mcp", "tok").get_context()
 
 
 def test_invoke_reraises_typed_error_unwrapped(monkeypatch):
-    def boom(*a, **k):
+    async def boom(*a, **k):
         raise RemoteAuthError("already typed")
 
-    monkeypatch.setattr(remote, "_call_tool", boom)
+    monkeypatch.setattr(remote, "_acall_tool", boom)
     with pytest.raises(RemoteAuthError, match="already typed"):
         RemoteStore("https://t/mcp", "tok").get_context()
 
@@ -233,7 +244,7 @@ def test_authz_tool_error_maps_to_auth_error(monkeypatch, message):
     """A reachable-but-refusing cloud (insufficient scope / permission) is an auth failure,
     NOT a transport outage — so it must raise RemoteAuthError, never a bare RemoteStoreError."""
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text(message)], is_error=True),
     )
     with pytest.raises(RemoteAuthError):
@@ -244,7 +255,7 @@ def test_generic_tool_error_is_not_auth_error(monkeypatch):
     """A non-authorization tool error (e.g. bad input) stays a plain RemoteStoreError so the
     scope-error classifier doesn't over-broaden into every failure."""
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
     )
     with pytest.raises(RemoteStoreError) as exc:
@@ -256,7 +267,7 @@ def test_scope_mentioning_validation_error_is_not_auth_error(monkeypatch):
     """A validation error that merely mentions a 'scope' parameter must NOT be misclassified as
     an authorization failure - the phrase-level regex only matches genuine auth denials."""
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(
             content=[_text("Value for 'scope' parameter must be a string")], is_error=True),
     )
@@ -269,7 +280,7 @@ def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
     """End-to-end for Bug 2: a missing-write-scope push, run through with_local_fallback, warns
     the user to re-authenticate — instead of the misleading 'endpoint unreachable' message."""
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(
             content=[_text("This token lacks the 'write' scope required for this action.")],
             is_error=True),
@@ -288,13 +299,13 @@ def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
 # ── reactive 401 refresh + bounded one-retry ─────────────────────────────────────
 
 def _seq_call(*outcomes):
-    """A fake _call_tool that yields `outcomes` in order (raise if an Exception).
+    """A fake async `_acall_tool` that yields `outcomes` in order (raise if an Exception).
 
     Records the (endpoint, token, ...) args of each call on `.calls` so tests can assert
     the retry used the refreshed token and how many times the transport was hit."""
     it = iter(outcomes)
 
-    def fake(*args, **kwargs):
+    async def fake(*args, **kwargs):
         fake.calls.append(args)
         out = next(it)
         if isinstance(out, Exception):
@@ -314,7 +325,7 @@ def _team_store():
 def test_401_triggers_one_refresh_and_retry(monkeypatch):
     """An expired bearer mid-session: one refresh + one retry, transparently succeeding."""
     fake = _seq_call(_http_error(401), _result(structured={"result": []}))
-    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr(remote, "_acall_tool", fake)
     calls = []
     monkeypatch.setattr("contexer.auth.refresh_now", lambda p: calls.append(p) or "new-tok")
 
@@ -331,7 +342,7 @@ def test_401_triggers_one_refresh_and_retry(monkeypatch):
 def test_401_without_profile_does_not_retry(monkeypatch):
     """Direct construction (no Profile) keeps the old behavior: 401 → RemoteAuthError, no refresh."""
     fake = _seq_call(_http_error(401))
-    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr(remote, "_acall_tool", fake)
     monkeypatch.setattr("contexer.auth.refresh_now", lambda p: pytest.fail("must not refresh without a profile"))
     with pytest.raises(RemoteAuthError):
         RemoteStore("https://t/mcp", "tok").get_context()
@@ -341,7 +352,7 @@ def test_401_without_profile_does_not_retry(monkeypatch):
 def test_401_refresh_yields_no_new_token_surfaces(monkeypatch):
     """If refresh can't produce a *new* token (same/None), surface the auth error — no retry."""
     fake = _seq_call(_http_error(401))
-    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr(remote, "_acall_tool", fake)
     monkeypatch.setattr("contexer.auth.refresh_now", lambda p: None)
     with pytest.raises(RemoteAuthError):
         _team_store().get_context()
@@ -351,7 +362,7 @@ def test_401_refresh_yields_no_new_token_surfaces(monkeypatch):
 def test_401_retry_still_401_surfaces(monkeypatch):
     """A genuinely dead token: refresh returns something new, retry still 401 → surface, no loop."""
     fake = _seq_call(_http_error(401), _http_error(401))
-    monkeypatch.setattr(remote, "_call_tool", fake)
+    monkeypatch.setattr(remote, "_acall_tool", fake)
     monkeypatch.setattr("contexer.auth.refresh_now", lambda p: "new-tok")
     with pytest.raises(RemoteAuthError):
         _team_store().get_context()
@@ -362,7 +373,7 @@ def test_authz_tool_error_is_not_reactively_refreshed(monkeypatch):
     """A server-side authz/scope denial (isError result) is NOT a transport 401 — a refresh can't
     fix it, so refresh_now must never be called for it."""
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text("This token lacks the 'write' scope required.")], is_error=True),
     )
     monkeypatch.setattr("contexer.auth.refresh_now", lambda p: pytest.fail("authz denial must not refresh"))
@@ -374,7 +385,7 @@ def test_authz_tool_error_is_not_reactively_refreshed(monkeypatch):
 
 def test_push_decision_reads_dict_content_item(monkeypatch):
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(content=[{"type": "text", "text": "Saved decision dd-7 to your personal context."}]),
     )
     did = RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
@@ -428,7 +439,7 @@ def test_with_local_fallback_generic_tool_error_warns_request_failed_not_unreach
     'request failed' message, not the misleading 'endpoint unreachable' wording - the cloud
     answered, it just couldn't complete the request."""
     monkeypatch.setattr(
-        remote, "_call_tool",
+        remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
     )
     store = RemoteStore("https://t/mcp", "tok")
@@ -470,3 +481,129 @@ def test_warn_once_dedups_by_key(capsys):
     assert "first" in err
     assert "second" not in err
     assert "third" in err
+
+
+# ── #108: async-native core (cancellable push path) ──────────────────────────────
+# The network path is async at its core: `_ainvoke` awaits `_acall_tool` directly, and
+# `apush_decision`/`aget_context` are its async front doors. The sync `push_decision`/
+# `get_context` are thin `asyncio.run(...)` shims over that ONE core (off-loop callers:
+# CLI, hooks). The payoff over the old thread-offload: an awaited call is CANCELLABLE, so a
+# wedged transport is torn down at the deadline instead of leaking a worker + open socket.
+
+def test_async_core_methods_are_coroutines():
+    assert inspect.iscoroutinefunction(RemoteStore.apush_decision)
+    assert inspect.iscoroutinefunction(RemoteStore.aget_context)
+    assert inspect.iscoroutinefunction(RemoteStore._ainvoke)
+
+
+def test_apush_decision_awaits_acall_tool_and_parses(monkeypatch):
+    captured = {}
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        captured.update(name=name, args=arguments, timeout=timeout, token=token)
+        return _result(content=[_text("Saved decision dec-99 to your personal context.")])
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    rs = RemoteStore("https://t/mcp", "tok", timeout=5.0)
+    did = asyncio.run(rs.apush_decision(type="architecture", content="use X", repo="r"))
+    assert did == "dec-99"
+    assert captured["name"] == "push_decision"
+    assert captured["args"] == {"type": "architecture", "content": "use X", "repo": "r"}
+    assert captured["timeout"] == 5.0
+    assert captured["token"] == "tok"
+
+
+def test_aget_context_awaits_acall_tool_and_parses(monkeypatch):
+    structured = {"result": [{"id": "1", "type": "constraint", "content": "c", "rationale": None,
+                              "repo": "r", "agent": "a", "scope": "team"}],
+                  "deleted": ["9"], "cursor": "2026-01-01T00:00:00Z"}
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured=structured)))
+    ctx = asyncio.run(RemoteStore("https://t/mcp", "tok").aget_context(repo="r"))
+    assert isinstance(ctx, RemoteContext)
+    assert ctx.deleted == ["9"]
+    assert ctx.decisions[0].content == "c"
+
+
+def test_sync_push_decision_is_thin_shim_over_async_core(monkeypatch):
+    """The sync shim drives the SAME async seam via asyncio.run — one network core, no
+    duplicated logic. Off-loop callers (CLI, hooks) keep working unchanged."""
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(
+        lambda *a: _result(content=[_text("Saved decision d-1 to your personal context.")])))
+    did = RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+    assert did == "d-1"
+
+
+def test_sync_get_context_is_thin_shim_over_async_core(monkeypatch):
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(
+        lambda *a: _result(structured={"result": [], "deleted": [], "cursor": None})))
+    ctx = RemoteStore("https://t/mcp", "tok").get_context()
+    assert ctx.decisions == [] and ctx.cursor is None
+
+
+def test_async_push_cancellation_tears_down_transport(monkeypatch):
+    """THE #108 fix. A wedged push, once its deadline fires, is CANCELLED — and the
+    cancellation reaches INTO the transport so its async context managers close the
+    connection. Asserts the transport's teardown actually ran (socket reclaimed), not
+    merely that the caller returned while a thread ran on."""
+    torn_down = {"v": False}
+
+    async def wedged(endpoint, token, name, arguments, timeout):
+        try:
+            await asyncio.sleep(3600)  # a remote that holds the connection open forever
+        except asyncio.CancelledError:
+            torn_down["v"] = True      # real httpx would close read/write + session here
+            raise
+
+    monkeypatch.setattr(remote, "_acall_tool", wedged)
+    rs = RemoteStore("https://t/mcp", "tok")
+
+    async def driver():
+        async with asyncio.timeout(0.05):
+            await rs.apush_decision(type="constraint", content="c", repo=None)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(driver())
+    assert torn_down["v"] is True  # cancellation propagated to the transport — reclaimed, not leaked
+
+
+def test_ainvoke_does_not_swallow_cancellation(monkeypatch):
+    """`_ainvoke`'s broad `except Exception` must NEVER catch a CancelledError (it is a
+    BaseException) and misclassify it as an unreachable-endpoint error — that would defeat
+    the whole cancellable-transport fix."""
+    async def wedged(*a, **k):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(remote, "_acall_tool", wedged)
+    rs = RemoteStore("https://t/mcp", "tok")
+
+    async def driver():
+        task = asyncio.ensure_future(rs._ainvoke("push_decision", {"type": "c", "content": "x"}))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await task
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(driver())
+
+
+def test_async_connection_error_maps_to_unavailable(monkeypatch):
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(
+        lambda *a: (_ for _ in ()).throw(ConnectionError("refused"))))
+    with pytest.raises(RemoteUnavailableError):
+        asyncio.run(RemoteStore("https://t/mcp", "tok").aget_context())
+
+
+def test_async_401_triggers_one_refresh_and_retry(monkeypatch):
+    """The reactive-refresh path works through the async core too: one refresh + one retry,
+    the refresh runs off the loop (to_thread) so it never blocks the event loop."""
+    fake = _seq_call(_http_error(401), _result(structured={"result": []}))
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    calls = []
+    monkeypatch.setattr("contexer.auth.refresh_now", lambda p: calls.append(p) or "new-tok")
+    store = _team_store()
+    ctx = asyncio.run(store.aget_context())
+    assert isinstance(ctx, RemoteContext)
+    assert store._token == "new-tok"
+    assert len(calls) == 1
+    assert len(fake.calls) == 2
+    assert fake.calls[1][1] == "new-tok"

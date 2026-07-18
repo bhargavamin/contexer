@@ -80,14 +80,14 @@ def test_share_all_outage_then_recovery_drains_outbox(team_stack, monkeypatch):
     _, id1 = store.update_decision(CLONE_A, "use postgres for the primary datastore", "sA", subtype="architecture")
     _, id2 = store.update_decision(CLONE_A, "always run migrations before deploy", "sA", subtype="constraint")
 
-    real_transport = remote._call_tool
-    monkeypatch.setattr(remote, "_call_tool",
+    real_transport = remote._acall_tool
+    monkeypatch.setattr(remote, "_acall_tool",
                         lambda *a, **k: (_ for _ in ()).throw(RemoteUnavailableError("down")))
     assert "queued" in share.share_all(CLONE_A, profile=TEAM).lower()
     assert server.rows == {}
     assert [e["decision_id"] for e in share._load_outbox()] == [id1, id2]
 
-    monkeypatch.setattr(remote, "_call_tool", real_transport)  # cloud comes back
+    monkeypatch.setattr(remote, "_acall_tool", real_transport)  # cloud comes back
     remote.reset_degradation_warnings()
     share.share_all(CLONE_A, profile=TEAM)  # drains the outbox first, then re-pushes
     assert set(server.rows) == {id1, id2}
@@ -98,7 +98,7 @@ def test_local_capture_survives_cloud_outage(team_stack, monkeypatch):
     # Local-first contract: the cloud being down must never block local capture or reads.
     import contexer.remote as remote
     from contexer.remote import RemoteUnavailableError
-    monkeypatch.setattr(remote, "_call_tool",
+    monkeypatch.setattr(remote, "_acall_tool",
                         lambda *a, **k: (_ for _ in ()).throw(RemoteUnavailableError("down")))
     ok, _ = store.update_decision(CLONE_A, "local decision while cloud is down", "sA", subtype="architecture")
     assert ok

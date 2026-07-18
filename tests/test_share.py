@@ -3,6 +3,8 @@
 RemoteStore is faked (monkeypatched from_profile) so no network is touched. The team
 profile is passed explicitly to share() to avoid reading a real config.toml.
 """
+import asyncio
+
 import pytest
 
 import contexer.remote as remote
@@ -25,6 +27,26 @@ class _FakeRS:
 
 def _fake(monkeypatch, **kw):
     fake = _FakeRS(**kw)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    remote.reset_degradation_warnings()
+    return fake
+
+
+class _AsyncFakeRS:
+    """The async twin of _FakeRS: the in-loop share path awaits ``apush_decision``."""
+
+    def __init__(self, ret="srv-1", exc=None):
+        self.ret, self.exc, self.calls = ret, exc, []
+
+    async def apush_decision(self, **kw):
+        self.calls.append(kw)
+        if self.exc is not None:
+            raise self.exc
+        return self.ret
+
+
+def _afake(monkeypatch, **kw):
+    fake = _AsyncFakeRS(**kw)
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     remote.reset_degradation_warnings()
     return fake
@@ -669,6 +691,118 @@ def test_drain_outbox_preserves_plan_source(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-plan")
     sent = share.drain_outbox(profile=TEAM)
     assert sent == 1
+    assert fake.calls[0]["source"] == "plan"
+
+
+# ── #108: async share path (awaited by the in-loop server.share_decision tool) ─────
+# share_async / share_ids_async / adrain_outbox are the async twins of share / share_ids /
+# drain_outbox. They await RemoteStore.apush_decision so a wedged push is CANCELLABLE, and
+# reuse every local helper (_finish_share, _entry_push_kwargs, _payload, _enqueue) so the
+# sync and async paths can't drift.
+
+def test_share_async_is_coroutine():
+    assert asyncio.iscoroutinefunction(share.share_async)
+    assert asyncio.iscoroutinefunction(share.share_ids_async)
+    assert asyncio.iscoroutinefunction(share.adrain_outbox)
+
+
+def test_share_async_happy_path_awaits_apush(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _afake(monkeypatch, ret="srv-9")
+    msg = asyncio.run(share.share_async(tmp_repo, profile=TEAM))
+    assert "srv-9" in msg
+    assert "won't see" in msg.lower()  # same honest-visibility message as sync share()
+    assert len(fake.calls) == 1
+    kw = fake.calls[0]
+    assert kw["decision_id"] == did
+    assert kw["repo"] == "github.com/a/b"
+    assert kw["source"] == "ai"
+
+
+def test_share_async_nothing_to_share(tmp_repo):
+    assert "nothing to share" in asyncio.run(share.share_async(tmp_repo, profile=TEAM)).lower()
+
+
+def test_share_async_local_mode_message(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "a decision to maybe share", "s1", subtype="architecture")
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
+    assert "team mode" in asyncio.run(share.share_async(tmp_repo, profile=config.Profile())).lower()
+
+
+def test_share_ids_async_shares_each_selected(tmp_repo, monkeypatch):
+    _, id1 = store.update_decision(tmp_repo, "use postgres for the database", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "never hardcode secret api keys", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    fake = _afake(monkeypatch, ret="srv-ok")
+    msg = asyncio.run(share.share_ids_async(tmp_repo, [id1[:8], id2[:8]], profile=TEAM))
+    assert [c["decision_id"] for c in fake.calls] == [id1, id2]
+    assert msg.count("srv-ok") == 2
+
+
+def test_share_ids_async_empty_shares_most_recent(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "the newest decision to share", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    fake = _afake(monkeypatch, ret="srv-1")
+    asyncio.run(share.share_ids_async(tmp_repo, [], profile=TEAM))
+    assert fake.calls[0]["decision_id"] == did
+
+
+def test_share_async_degraded_enqueues(tmp_repo, monkeypatch, capsys):
+    _, did = store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _afake(monkeypatch, exc=RemoteUnavailableError("down"))
+    msg = asyncio.run(share.share_async(tmp_repo, profile=TEAM))
+    assert "queued" in msg.lower()
+    assert [e["decision_id"] for e in share._load_outbox()] == [did]
+    assert "unreachable" in capsys.readouterr().err.lower()
+
+
+def test_adrain_outbox_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    share._enqueue({"decision_id": "d2", "type": "constraint", "content": "second",
+                    "repo": "r", "rationale": None, "confidence": 90,
+                    "evidence": None, "source": "ai", "queued_at": 2.0, "attempts": 0})
+    fake = _afake(monkeypatch, ret="srv-ok")
+    sent = asyncio.run(share.adrain_outbox(TEAM))
+    assert sent == 2
+    assert [c["decision_id"] for c in fake.calls] == ["d1", "d2"]
+    assert share._load_outbox() == []
+
+
+def test_adrain_outbox_stops_at_first_failure_keeps_tail(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    _afake(monkeypatch, exc=RemoteUnavailableError("down"))
+    sent = asyncio.run(share.adrain_outbox(TEAM))
+    assert sent == 0
+    remaining = share._load_outbox()
+    assert [e["decision_id"] for e in remaining] == ["d1"]
+    assert remaining[0]["attempts"] == 1
+
+
+def test_share_async_drains_queued_before_new_push(tmp_repo, monkeypatch):
+    share._enqueue({"decision_id": "queued-1", "type": "architecture", "content": "old queued item",
+                    "repo": "r", "rationale": None, "confidence": 80,
+                    "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
+    _, did = store.update_decision(tmp_repo, "brand new decision to share", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _afake(monkeypatch, ret="srv-ok")
+    asyncio.run(share.share_async(tmp_repo, profile=TEAM))
+    assert [c["decision_id"] for c in fake.calls] == ["queued-1", did]
+    assert share._load_outbox() == []
+
+
+def test_share_async_preserves_plan_source_on_wire(tmp_repo, monkeypatch):
+    _, did = store.update_decision(
+        tmp_repo, "provisional plan decision to sync", "s1",
+        subtype="architecture", created_by="plan")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    fake = _afake(monkeypatch, ret="srv-9")
+    asyncio.run(share.share_async(tmp_repo, did, profile=TEAM))
     assert fake.calls[0]["source"] == "plan"
 
 

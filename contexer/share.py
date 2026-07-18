@@ -22,7 +22,7 @@ import time
 
 from contexer import store
 from contexer.config import Profile, load_profile
-from contexer.remote import RemoteStore, with_local_fallback
+from contexer.remote import RemoteStore, awith_local_fallback, with_local_fallback
 from contexer.repo_key import canonical_repo_key
 
 # Outbox cap: push_decision is idempotent on decision_id server-side, so a queued entry is
@@ -106,6 +106,46 @@ def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
     return tail + extra
 
 
+def _entry_push_kwargs(entry: dict) -> dict:
+    """push_decision kwargs for one outbox entry. Shared by drain_outbox + adrain_outbox so
+    the two drains serialize an entry identically (source coerced through _wire_source)."""
+    return dict(
+        type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
+        rationale=entry.get("rationale"), confidence=entry.get("confidence"),
+        evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
+        decision_id=entry.get("decision_id"))
+
+
+def _dec_push_kwargs(dec: dict, key) -> dict:
+    """push_decision kwargs for one shareable decision. Shared by share / share_all /
+    share_async so every share path puts the same decision on the wire identically."""
+    return dict(
+        type=dec["type"], content=dec["content"], repo=key,
+        confidence=dec["confidence"], evidence=dec["evidence"],
+        source=_wire_source(dec["source"]), decision_id=dec["id"])
+
+
+def _finish_share(dec: dict, key, server_id) -> str:
+    """Turn one push outcome into the user-facing status (shared by share + share_async).
+
+    On failure (server_id is None: cloud unreachable OR auth rejected) enqueue the decision
+    so a later drain retries it - either way a queued retry can succeed later, so both
+    degradations queue rather than losing the share. On success, return the honest
+    personal-scope message (teammates don't see it until team promotion ships)."""
+    if server_id is None:
+        try:
+            _enqueue(_payload(dec, key))
+        except Exception:
+            # Even queueing can fail (disk full, temp-dir perms). Never raise - and the
+            # message must not promise a retry that was never recorded.
+            return ("Share failed: cloud unreachable or auth rejected (see the warning "
+                    "above). Your local decision is unchanged.")
+        return ("Share failed: cloud unreachable or auth rejected (see the warning above). "
+                "Queued - it will retry automatically at the next session start.")
+    return (f"Synced decision to your personal cloud context (server id={server_id}) - "
+            "teammates won't see this until team promotion ships.")
+
+
 def drain_outbox(profile: Profile | None = None) -> int:
     """Retry every queued push, FIFO, and return how many succeeded.
 
@@ -125,11 +165,34 @@ def drain_outbox(profile: Profile | None = None) -> int:
     sent_ids: set = set()
     for idx, entry in enumerate(entries):
         server_id = with_local_fallback(
-            lambda entry=entry: remote.push_decision(
-                type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
-                rationale=entry.get("rationale"), confidence=entry.get("confidence"),
-                evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
-                decision_id=entry.get("decision_id")),
+            lambda entry=entry: remote.push_decision(**_entry_push_kwargs(entry)),
+            default=None, action="drain queued share")
+        if server_id is None:
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            _save_outbox(_reconcile_with_disk(entries[idx:], sent_ids))
+            return sent
+        sent_ids.add(entry.get("decision_id"))
+        sent += 1
+    _save_outbox(_reconcile_with_disk([], sent_ids))
+    return sent
+
+
+async def adrain_outbox(profile: Profile | None = None) -> int:
+    """Async twin of :func:`drain_outbox` (awaits apush_decision so a wedged retry is
+    cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics — the only
+    difference is the awaited push; every other line is the shared local outbox logic."""
+    entries = _load_outbox()
+    if not entries:
+        return 0
+    profile = profile or load_profile()
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return 0
+    sent = 0
+    sent_ids: set = set()
+    for idx, entry in enumerate(entries):
+        server_id = await awith_local_fallback(
+            lambda entry=entry: remote.apush_decision(**_entry_push_kwargs(entry)),
             default=None, action="drain queued share")
         if server_id is None:
             entry["attempts"] = entry.get("attempts", 0) + 1
@@ -173,10 +236,7 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
     sent = 0
     for idx, dec in enumerate(decs):
         server_id = with_local_fallback(
-            lambda dec=dec: remote.push_decision(
-                type=dec["type"], content=dec["content"], repo=key,
-                confidence=dec["confidence"], evidence=dec["evidence"],
-                source=_wire_source(dec["source"]), decision_id=dec["id"]),
+            lambda dec=dec: remote.push_decision(**_dec_push_kwargs(dec, key)),
             default=None, action="share decision")
         if server_id is None:
             queued = 0
@@ -221,29 +281,9 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
     server_id = with_local_fallback(
-        lambda: remote.push_decision(
-            type=dec["type"], content=dec["content"], repo=key,
-            confidence=dec["confidence"], evidence=dec["evidence"],
-            source=_wire_source(dec["source"]), decision_id=dec["id"]),
+        lambda: remote.push_decision(**_dec_push_kwargs(dec, key)),
         default=None, action="share decision")
-    if server_id is None:
-        # Cloud unreachable OR auth rejected - either way a queued retry can succeed
-        # later (auth: after the user re-logs-in; unreachable: once the cloud is back),
-        # so both degradations enqueue rather than losing the share.
-        try:
-            _enqueue(_payload(dec, key))
-        except Exception:
-            # Even queueing can fail (disk full, temp-dir perms). share() never raises -
-            # and the message must not promise a retry that was never recorded.
-            return ("Share failed: cloud unreachable or auth rejected (see the warning "
-                    "above). Your local decision is unchanged.")
-        return ("Share failed: cloud unreachable or auth rejected (see the warning above). "
-                "Queued - it will retry automatically at the next session start.")
-    # Honest about scope: v1 push_decision writes to the CALLER's personal cloud context
-    # only (see module docstring) - teammates get nothing until team promotion (Track A)
-    # ships, so the success message must not imply the decision is visible to the team yet.
-    return (f"Synced decision to your personal cloud context (server id={server_id}) - "
-            "teammates won't see this until team promotion ships.")
+    return _finish_share(dec, key, server_id)
 
 
 def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
@@ -255,3 +295,44 @@ def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = N
     if not decision_ids:
         return share(repo_path, "", profile=profile)
     return "\n".join(share(repo_path, did, profile=profile) for did in decision_ids)
+
+
+# ── async share path (#108) ────────────────────────────────────────────────────────
+# The in-loop server.share_decision tool awaits these so a wedged push is CANCELLABLE at
+# the tool's deadline (no leaked worker thread / open socket). They mirror share / share_ids
+# above line-for-line except the push is awaited, and reuse the same local helpers
+# (_finish_share, _dec_push_kwargs, _payload, _enqueue) so no logic drifts between the paths.
+
+async def share_async(repo_path: str, decision_id: str = "", *,
+                      profile: Profile | None = None) -> str:
+    """Async twin of :func:`share`. Same local-first contract: never raises for cloud
+    problems, leaves the local decision untouched, queues on failure."""
+    profile = profile or load_profile()
+    try:
+        await adrain_outbox(profile)  # queued shares go out first, so ordering is preserved
+    except Exception:
+        pass  # a broken drain (e.g. disk error) must not block this share
+    dec = store.get_shareable(repo_path, decision_id)
+    if dec is None:
+        return "Nothing to share: no matching local decision."
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return ("Not in team mode. Set mode='team' + endpoint + token in "
+                "~/.contexer/config.toml to share.")
+    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    server_id = await awith_local_fallback(
+        lambda: remote.apush_decision(**_dec_push_kwargs(dec, key)),
+        default=None, action="share decision")
+    return _finish_share(dec, key, server_id)
+
+
+async def share_ids_async(repo_path: str, decision_ids: list, *,
+                          profile: Profile | None = None) -> str:
+    """Async twin of :func:`share_ids`. An empty list shares the most recent. Shares are
+    awaited sequentially (matching the sync order); each carries the outbox + local-first
+    guarantees per decision."""
+    profile = profile or load_profile()
+    if not decision_ids:
+        return await share_async(repo_path, "", profile=profile)
+    results = [await share_async(repo_path, did, profile=profile) for did in decision_ids]
+    return "\n".join(results)
