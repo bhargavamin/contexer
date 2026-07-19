@@ -27,6 +27,31 @@ _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
 _DEFAULT_TIMEOUT = 10.0
 
 
+def _push_arg(*, type: str, content: str, repo: str | None = None,
+              rationale: str | None = None, agent: str | None = None,
+              confidence: int | None = None, evidence: list[str] | None = None,
+              source: str | None = None, decision_id: str | None = None) -> dict:
+    """Build one push wire-arg dict, OMITTING every unset optional (the server reads an absent key
+    as NULL/unset — so None must not be sent as a literal). Shared by push_decision and the
+    push_decisions batch so the singular and bulk wire shapes can never drift."""
+    args: dict = {"type": type, "content": content}
+    if repo is not None:
+        args["repo"] = repo
+    if rationale is not None:
+        args["rationale"] = rationale
+    if agent is not None:
+        args["agent"] = agent
+    if confidence is not None:
+        args["confidence"] = confidence
+    if evidence is not None:
+        args["evidence"] = evidence
+    if source is not None:
+        args["source"] = source
+    if decision_id is not None:
+        args["decisionId"] = decision_id
+    return args
+
+
 class RemoteStoreError(Exception):
     """Base for any RemoteStore failure. Callers catch this to degrade to local-only."""
 
@@ -97,25 +122,31 @@ class RemoteStore:
         Returns the server decision id (best-effort; ``""`` if the response carries none).
         Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure.
         """
-        args: dict = {"type": type, "content": content}
-        if repo is not None:
-            args["repo"] = repo
-        if rationale is not None:
-            args["rationale"] = rationale
-        if agent is not None:
-            args["agent"] = agent
-        if confidence is not None:
-            args["confidence"] = confidence
-        if evidence is not None:
-            args["evidence"] = evidence
-        if source is not None:
-            args["source"] = source
-        if decision_id is not None:
-            args["decisionId"] = decision_id
+        args = _push_arg(type=type, content=content, repo=repo, rationale=rationale,
+                         agent=agent, confidence=confidence, evidence=evidence,
+                         source=source, decision_id=decision_id)
         result = self._invoke("push_decision", args)
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
+
+    def push_decisions(self, args_list: list[dict]) -> tuple[list[str], list[str]]:
+        """Batch-push decisions to the caller's personal Teams context in ONE call (one network
+        round-trip, one server transaction) — the bulk counterpart to push_decision.
+
+        ``args_list`` items are push wire-arg dicts (built via ``_push_arg``): the same shape
+        push_decision sends, one per decision. Idempotent per ``decisionId``.
+
+        Returns ``(saved_ids, skipped_decision_ids)``. The write is PER-ROW best-effort server-side:
+        ``saved_ids`` are the server ids that committed; ``skipped_decision_ids`` are decisionIds the
+        server accepted but could NOT store because the personal context is at its row cap — the
+        caller keeps those queued so they drain once space frees, rather than losing them. Raises
+        RemoteStoreError on a transport/auth failure (the caller then re-queues the whole chunk)."""
+        result = self._invoke("push_decisions", {"decisions": args_list})
+        structured = getattr(result, "structuredContent", None) or {}
+        saved = [str(r.get("id", "")) for r in (structured.get("results") or [])]
+        skipped = [str(r.get("decisionId")) for r in (structured.get("skipped") or []) if r.get("decisionId")]
+        return saved, skipped
 
     def get_context(self, repo: str | None = None,
                     updated_since: str | None = None) -> RemoteContext:

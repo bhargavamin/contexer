@@ -112,6 +112,64 @@ def test_push_decision_returns_empty_when_no_id_in_message(monkeypatch):
     assert did == ""
 
 
+# ── push_decisions (batch) serialization + id parsing ────────────────────────────
+
+def test_push_decisions_batches_args_and_parses_ids(monkeypatch):
+    captured = {}
+
+    def fake_call(endpoint, token, name, arguments, timeout):
+        captured.update(name=name, args=arguments)
+        return _result(structured={"results": [
+            {"decisionId": "local-1", "id": "srv-a"},
+            {"decisionId": "local-2", "id": "srv-b"},
+        ]})
+
+    monkeypatch.setattr(remote, "_call_tool", fake_call)
+    args_list = [
+        {"type": "architecture", "content": "a", "decisionId": "local-1"},
+        {"type": "constraint", "content": "b", "repo": "r", "decisionId": "local-2"},
+    ]
+    saved, skipped = RemoteStore("https://t/mcp", "tok").push_decisions(args_list)
+    assert captured["name"] == "push_decisions"
+    assert captured["args"] == {"decisions": args_list}  # wrapped, sent verbatim in one call
+    assert saved == ["srv-a", "srv-b"]
+    assert skipped == []
+
+
+def test_push_decisions_parses_skipped_capacity_rows(monkeypatch):
+    # The server stores what fits and reports the overflow under `skipped` (context at capacity);
+    # push_decisions surfaces those decisionIds so the caller can keep them queued.
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(structured={
+            "results": [{"decisionId": "local-1", "id": "srv-a"}],
+            "skipped": [{"decisionId": "local-2", "reason": "quota_exceeded"}],
+        }),
+    )
+    saved, skipped = RemoteStore("https://t/mcp", "tok").push_decisions([
+        {"type": "architecture", "content": "a", "decisionId": "local-1"},
+        {"type": "constraint", "content": "b", "decisionId": "local-2"},
+    ])
+    assert saved == ["srv-a"]
+    assert skipped == ["local-2"]
+
+
+def test_push_decisions_missing_results_yields_empty(monkeypatch):
+    monkeypatch.setattr(remote, "_call_tool", lambda *a, **k: _result(structured=None))
+    saved, skipped = RemoteStore("https://t/mcp", "tok").push_decisions([{"type": "constraint", "content": "c"}])
+    assert saved == []
+    assert skipped == []
+
+
+def test_push_decisions_tool_error_raises(monkeypatch):
+    monkeypatch.setattr(
+        remote, "_call_tool",
+        lambda *a, **k: _result(content=[_text("Rate limit exceeded")], is_error=True),
+    )
+    with pytest.raises(RemoteStoreError):
+        RemoteStore("https://t/mcp", "tok").push_decisions([{"type": "constraint", "content": "c"}])
+
+
 # ── get_context serialization + parsing ──────────────────────────────────────────
 
 def test_get_context_parses_structured_content(monkeypatch):
