@@ -28,6 +28,31 @@ _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
 _DEFAULT_TIMEOUT = 10.0
 
 
+def _wire_args(*, type: str, content: str, repo: str | None = None,
+               rationale: str | None = None, agent: str | None = None,
+               confidence: int | None = None, evidence: list[str] | None = None,
+               source: str | None = None, decision_id: str | None = None) -> dict:
+    """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
+    reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
+    wire-serialization, shared by apush_decision (one) and apush_decisions (batch)."""
+    args: dict = {"type": type, "content": content}
+    if repo is not None:
+        args["repo"] = repo
+    if rationale is not None:
+        args["rationale"] = rationale
+    if agent is not None:
+        args["agent"] = agent
+    if confidence is not None:
+        args["confidence"] = confidence
+    if evidence is not None:
+        args["evidence"] = evidence
+    if source is not None:
+        args["source"] = source
+    if decision_id is not None:
+        args["decisionId"] = decision_id
+    return args
+
+
 class RemoteStoreError(Exception):
     """Base for any RemoteStore failure. Callers catch this to degrade to local-only."""
 
@@ -110,25 +135,43 @@ class RemoteStore:
                              confidence: int | None = None, evidence: list[str] | None = None,
                              source: str | None = None, decision_id: str | None = None) -> str:
         """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
-        args: dict = {"type": type, "content": content}
-        if repo is not None:
-            args["repo"] = repo
-        if rationale is not None:
-            args["rationale"] = rationale
-        if agent is not None:
-            args["agent"] = agent
-        if confidence is not None:
-            args["confidence"] = confidence
-        if evidence is not None:
-            args["evidence"] = evidence
-        if source is not None:
-            args["source"] = source
-        if decision_id is not None:
-            args["decisionId"] = decision_id
-        result = await self._ainvoke("push_decision", args)
+        result = await self._ainvoke("push_decision", _wire_args(
+            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id))
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
+
+    async def apush_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
+        """Async core of :meth:`push_decisions`: batch-push many decisions in ONE call, awaiting
+        the transport (cancellable). Each item is push_decision KWARGS (built by
+        _dec_push_kwargs / _entry_push_kwargs), serialized through the same _wire_args as the
+        singular path.
+
+        Returns ``(saved_ids, skipped)``: server ids that committed, and a list of
+        ``{"decision_id", "reason"}`` for rows the server did NOT store. Reasons are either
+        TRANSIENT (``quota_exceeded`` - at capacity, retry later) or PERMANENT (``invalid_type`` /
+        ``invalid_content`` - the decision can't be stored as-is); the caller keeps transient rows
+        queued and drops permanent ones. Per-row validation on the server means one bad row is
+        skipped, never sinking the batch. Raises RemoteStoreError if the response omits a submitted
+        decisionId - an unconfirmed row must not be treated as done, so it stays queued."""
+        result = await self._ainvoke(
+            "push_decisions", {"decisions": [_wire_args(**kw) for kw in kwargs_list]})
+        structured = getattr(result, "structuredContent", None) or {}
+        results = structured.get("results") or []
+        skipped_rows = structured.get("skipped") or []
+        saved = [str(r.get("id", "")) for r in results]
+        skipped = [{"decision_id": str(r.get("decisionId")), "reason": r.get("reason", "invalid")}
+                   for r in skipped_rows if r.get("decisionId")]
+        # Every submitted decisionId must be accounted for (saved OR skipped); otherwise the
+        # server didn't confirm it and we must NOT drop it - fail so the caller keeps it queued.
+        submitted = {kw.get("decision_id") for kw in kwargs_list if kw.get("decision_id")}
+        accounted = {r.get("decisionId") for r in results} | {r.get("decisionId") for r in skipped_rows}
+        missing = submitted - accounted
+        if missing:
+            raise RemoteStoreError(
+                f"push_decisions response did not account for {len(missing)} submitted decision(s)")
+        return saved, skipped
 
     async def aget_context(self, repo: str | None = None,
                            updated_since: str | None = None) -> RemoteContext:
@@ -172,6 +215,13 @@ class RemoteStore:
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id)))
+
+    def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
+        """Batch-push decisions in ONE call (sync shim over :meth:`apush_decisions`). Off-loop
+        callers only. Returns ``(saved_ids, skipped)`` where skipped items are
+        ``{"decision_id", "reason"}``; raises RemoteStoreError on a transport/auth failure (the
+        caller then re-queues the whole chunk)."""
+        return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decisions(kwargs_list)))
 
     def get_context(self, repo: str | None = None,
                     updated_since: str | None = None) -> RemoteContext:
@@ -284,11 +334,12 @@ def _warn_degrade(exc: RemoteStoreError, action: str) -> None:
             key="degrade:unreachable",
         )
     else:
-        # The cloud was reached and answered, it just refused or failed the request (e.g. a
-        # validation error) - distinct from the transport-level "unreachable" case above, so the
-        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
+        # The cloud was reached and answered, it just REFUSED the request (e.g. rate limit or a
+        # validation error) - distinct from the transport-level "unreachable" case above. Surface
+        # the server's own reason (`exc`) so the developer sees WHY (e.g. "Rate limit exceeded -
+        # retry in 12s") instead of a generic failure that reads like a network outage.
         warn_once(
-            f"Contexer: Teams request failed while trying to {action} - "
+            f"Contexer: Teams refused the request while trying to {action}: {exc} - "
             "continuing local-only.",
             key="degrade:request",
         )

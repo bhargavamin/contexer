@@ -123,6 +123,63 @@ def test_push_decision_returns_empty_when_no_id_in_message(monkeypatch):
     assert did == ""
 
 
+# ── push_decisions (batch) serialization + parsing ───────────────────────────────
+
+def test_push_decisions_serializes_batch_and_parses_ids(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(
+        lambda e, t, n, args, to: captured.update(name=n, args=args) or _result(structured={
+            "results": [{"decisionId": "local-1", "id": "srv-a"},
+                        {"decisionId": "local-2", "id": "srv-b"}],
+            "skipped": [],
+        })))
+    saved, skipped = RemoteStore("https://t/mcp", "tok").push_decisions([
+        {"type": "architecture", "content": "a", "decision_id": "local-1"},
+        {"type": "constraint", "content": "b", "repo": "r", "decision_id": "local-2"},
+    ])
+    assert captured["name"] == "push_decisions"
+    # kwargs are serialized to the wire shape (decision_id -> decisionId, None omitted) inside one call.
+    assert captured["args"] == {"decisions": [
+        {"type": "architecture", "content": "a", "decisionId": "local-1"},
+        {"type": "constraint", "content": "b", "repo": "r", "decisionId": "local-2"},
+    ]}
+    assert saved == ["srv-a", "srv-b"]
+    assert skipped == []
+
+
+def test_push_decisions_parses_skipped_capacity_rows(monkeypatch):
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured={
+        "results": [{"decisionId": "local-1", "id": "srv-a"}],
+        "skipped": [{"decisionId": "local-2", "reason": "quota_exceeded"}],
+    })))
+    saved, skipped = RemoteStore("https://t/mcp", "tok").push_decisions([
+        {"type": "architecture", "content": "a", "decision_id": "local-1"},
+        {"type": "constraint", "content": "b", "decision_id": "local-2"},
+    ])
+    assert saved == ["srv-a"]
+    assert skipped == [{"decision_id": "local-2", "reason": "quota_exceeded"}]
+
+
+def test_push_decisions_raises_when_submitted_id_unaccounted(monkeypatch):
+    # A successful response that omits a submitted decisionId (neither saved nor skipped) must
+    # NOT be treated as done - raise so the caller keeps it queued (Greptile remote.py#149).
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured={
+        "results": [{"decisionId": "local-1", "id": "srv-a"}], "skipped": [],
+    })))
+    with pytest.raises(RemoteStoreError):
+        RemoteStore("https://t/mcp", "tok").push_decisions([
+            {"type": "architecture", "content": "a", "decision_id": "local-1"},
+            {"type": "constraint", "content": "b", "decision_id": "local-2"},  # dropped by server
+        ])
+
+
+def test_push_decisions_missing_structured_raises_when_ids_submitted(monkeypatch):
+    # Empty/missing structured content with submitted ids -> nothing accounted -> raise (queued).
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured=None)))
+    with pytest.raises(RemoteStoreError):
+        RemoteStore("https://t/mcp", "tok").push_decisions([{"type": "constraint", "content": "c", "decision_id": "d1"}])
+
+
 # ── get_context serialization + parsing ──────────────────────────────────────────
 
 def test_get_context_parses_structured_content(monkeypatch):
@@ -434,10 +491,10 @@ def test_with_local_fallback_auth_returns_default_and_hints_login(capsys):
     assert "contexer login --team" in err
 
 
-def test_with_local_fallback_generic_tool_error_warns_request_failed_not_unreachable(monkeypatch, capsys):
-    """A reachable-but-refusing/failing tool call (e.g. bad input) must warn with an honest
-    'request failed' message, not the misleading 'endpoint unreachable' wording - the cloud
-    answered, it just couldn't complete the request."""
+def test_with_local_fallback_refusal_warns_with_reason_not_unreachable(monkeypatch, capsys):
+    """A reachable-but-refusing tool call (bad input, rate limit, ...) must warn with the SERVER's
+    actual reason - not the misleading 'endpoint unreachable' wording - the cloud answered, it just
+    refused the request."""
     monkeypatch.setattr(
         remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
@@ -448,7 +505,8 @@ def test_with_local_fallback_generic_tool_error_warns_request_failed_not_unreach
         default=None, action="share decision")
     assert result is None
     err = capsys.readouterr().err
-    assert "request failed" in err
+    assert "refused the request" in err
+    assert "invalid input: content too long" in err  # the server's actual reason is surfaced
     assert "unreachable" not in err
 
 
