@@ -908,7 +908,8 @@ class _CapacityRS:
     def _split(self, kwargs_list):
         self.batches.append(kwargs_list)
         saved = [f"srv-{kwargs_list[0]['decision_id']}"] if kwargs_list else []
-        skipped = [kw["decision_id"] for kw in kwargs_list[1:]]
+        skipped = [{"decision_id": kw["decision_id"], "reason": "quota_exceeded"}
+                   for kw in kwargs_list[1:]]
         return saved, skipped
 
     def push_decisions(self, kwargs_list):
@@ -986,3 +987,49 @@ def test_share_all_chunks_large_selection(tmp_repo, monkeypatch):
     assert [len(b) for b in fake.batches] == [2, 2, 1]  # 5 -> chunks of 2,2,1
     assert [a["decision_id"] for b in fake.batches for a in b] == [f"id{i}" for i in range(5)]
     assert share._load_outbox() == []
+
+
+class _RejectRS:
+    """Stores the FIRST row, PERMANENTLY rejects the rest (invalid type/content). Sync + async."""
+
+    def __init__(self):
+        self.batches = []
+
+    def _split(self, kwargs_list):
+        self.batches.append(kwargs_list)
+        saved = [f"srv-{kwargs_list[0]['decision_id']}"] if kwargs_list else []
+        skipped = [{"decision_id": kw["decision_id"], "reason": "invalid_type"}
+                   for kw in kwargs_list[1:]]
+        return saved, skipped
+
+    def push_decisions(self, kwargs_list):
+        return self._split(kwargs_list)
+
+    async def apush_decisions(self, kwargs_list):
+        return self._split(kwargs_list)
+
+
+def test_share_all_invalid_skip_reported_and_dropped(tmp_repo, monkeypatch):
+    # Server per-row-rejects invalid rows (unsupported type/content): REPORTED and DROPPED, not
+    # re-queued (retrying is futile) - unlike capacity skips, which stay queued.
+    projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
+              "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
+    remote.reset_degradation_warnings()
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "1" in msg and "rejected" in msg.lower()
+    assert share._load_outbox() == []  # id0 saved; id1/id2 invalid -> dropped, NOT queued
+
+
+def test_drain_outbox_invalid_skip_dropped_not_retried(tmp_repo, monkeypatch):
+    for did in ("d1", "d2"):
+        share._enqueue({"decision_id": did, "type": "architecture", "content": did,
+                        "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                        "source": "ai", "queued_at": 1.0, "attempts": 0})
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
+    remote.reset_degradation_warnings()
+    sent = share.drain_outbox(TEAM)
+    assert sent == 1  # d1 saved
+    assert share._load_outbox() == []  # d2 invalid -> dropped from outbox (can never sync)

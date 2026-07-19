@@ -219,36 +219,46 @@ def _queue_rest_status(decs: list[dict], start: int, key, sent: int, total: int)
             "the warning above).")
 
 
-def _batch_success_status(sent: int, at_capacity: int, lost: int) -> str:
-    """Status when no chunk hit a transport failure: what synced, what was queued at capacity, and
-    what was genuinely lost (skipped AND un-queueable)."""
+def _split_skips(skipped: list) -> tuple[set, int]:
+    """Partition server skips into (retryable_decision_ids, permanent_invalid_count). TRANSIENT
+    'quota_exceeded' rows are kept queued to drain once space frees; PERMANENT ones (invalid type /
+    content - the server per-row-rejected them) can never sync, so they are dropped, not retried."""
+    retry = {s["decision_id"] for s in skipped if s.get("reason") == "quota_exceeded"}
+    invalid = len(skipped) - len(retry)
+    return retry, invalid
+
+
+def _batch_success_status(sent: int, at_capacity: int, invalid: int, lost: int) -> str:
+    """Status when no chunk hit a transport failure: what synced, what was queued at capacity, what
+    the server rejected as invalid (dropped), and what was genuinely lost (queued but un-writeable)."""
     msg = f"Synced {sent} decision(s) to your personal cloud context"
     if at_capacity:
         msg += (f"; {at_capacity} could not be stored (context at capacity) and were queued - "
                 "delete some decisions to sync them")
+    if invalid:
+        msg += f"; {invalid} were rejected by the server (unsupported type or content) and skipped"
     if lost:
         msg += f"; {lost} at capacity could NOT be queued (outbox write failed) and are unsaved"
     return msg + " - teammates won't see these until team promotion ships."
 
 
-def _drain_mark(chunk: list[dict], res: tuple[list[str], list[str]], sent_ids: set) -> int:
-    """Mark a successfully-drained chunk: saved entries -> sent_ids (dropped on the final
-    reconcile); capacity-skipped entries stay OUT of sent_ids so they remain queued. Returns saved."""
+def _drain_mark(chunk: list[dict], res: tuple[list[str], list[dict]], sent_ids: set) -> int:
+    """Mark a successfully-drained chunk: saved AND permanently-invalid entries -> sent_ids (dropped
+    from the outbox on the final reconcile - invalid ones can never sync, so stop retrying them);
+    only TRANSIENT capacity skips stay queued. Returns the count genuinely saved."""
     _saved, skipped = res
-    skipped_set = set(skipped)
-    saved = 0
+    retry, _invalid = _split_skips(skipped)
     for e in chunk:
-        if e.get("decision_id") not in skipped_set:
+        if e.get("decision_id") not in retry:
             sent_ids.add(e.get("decision_id"))
-            saved += 1
-    return saved
+    return len(chunk) - len(skipped)
 
 
 def _push_batch(remote: RemoteStore, decs: list[dict], key) -> str:
     """Sync batch push of shareable projections (share_all / share_ids). Stops at the first failed
-    chunk (queues it + the rest); re-queues capacity-skipped rows."""
+    chunk (queues it + the rest); re-queues TRANSIENT capacity skips; drops PERMANENT invalid ones."""
     total = len(decs)
-    sent = at_capacity = lost = 0
+    sent = at_capacity = invalid = lost = 0
     for start in range(0, total, _BATCH_SIZE):
         chunk = decs[start:start + _BATCH_SIZE]
         res = with_local_fallback(
@@ -258,18 +268,20 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key) -> str:
             return _queue_rest_status(decs, start, key, sent, total)
         _saved, skipped = res
         sent += len(chunk) - len(skipped)
-        if skipped:
-            requeued, dropped = _requeue_skipped(chunk, key, skipped)
+        retry, inv = _split_skips(skipped)
+        invalid += inv
+        if retry:
+            requeued, dropped = _requeue_skipped(chunk, key, retry)
             at_capacity += requeued
             lost += dropped
-    return _batch_success_status(sent, at_capacity, lost)
+    return _batch_success_status(sent, at_capacity, invalid, lost)
 
 
 async def _apush_batch(remote: RemoteStore, decs: list[dict], key) -> str:
     """Async twin of :func:`_push_batch` (awaits apush_decisions so a wedged chunk is cancellable).
     Mirrors it line-for-line except the awaited push; shares every outbox/status helper."""
     total = len(decs)
-    sent = at_capacity = lost = 0
+    sent = at_capacity = invalid = lost = 0
     for start in range(0, total, _BATCH_SIZE):
         chunk = decs[start:start + _BATCH_SIZE]
         res = await awith_local_fallback(
@@ -279,11 +291,13 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key) -> str:
             return _queue_rest_status(decs, start, key, sent, total)
         _saved, skipped = res
         sent += len(chunk) - len(skipped)
-        if skipped:
-            requeued, dropped = _requeue_skipped(chunk, key, skipped)
+        retry, inv = _split_skips(skipped)
+        invalid += inv
+        if retry:
+            requeued, dropped = _requeue_skipped(chunk, key, retry)
             at_capacity += requeued
             lost += dropped
-    return _batch_success_status(sent, at_capacity, lost)
+    return _batch_success_status(sent, at_capacity, invalid, lost)
 
 
 def drain_outbox(profile: Profile | None = None) -> int:

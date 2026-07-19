@@ -157,7 +157,7 @@ def test_push_decisions_parses_skipped_capacity_rows(monkeypatch):
         {"type": "constraint", "content": "b", "decision_id": "local-2"},
     ])
     assert saved == ["srv-a"]
-    assert skipped == ["local-2"]
+    assert skipped == [{"decision_id": "local-2", "reason": "quota_exceeded"}]
 
 
 def test_push_decisions_raises_when_submitted_id_unaccounted(monkeypatch):
