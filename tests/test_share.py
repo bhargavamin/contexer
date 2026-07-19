@@ -14,13 +14,21 @@ TEAM = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
 
 class _FakeRS:
     def __init__(self, ret="srv-1", exc=None):
-        self.ret, self.exc, self.calls = ret, exc, []
+        self.ret, self.exc = ret, exc
+        self.calls = []    # push_decision kwargs (single-share path)
+        self.batches = []  # push_decisions arg-lists (bulk path: share_all / share_ids / drain)
 
     def push_decision(self, **kw):
         self.calls.append(kw)
         if self.exc is not None:
             raise self.exc
         return self.ret
+
+    def push_decisions(self, args_list):
+        self.batches.append(args_list)
+        if self.exc is not None:
+            raise self.exc
+        return [f"srv-{i}" for i in range(len(args_list))], []  # (saved_ids, skipped_ids)
 
 
 def _fake(monkeypatch, **kw):
@@ -173,8 +181,26 @@ def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
     msg = share.share_all(tmp_repo, profile=TEAM)
     assert "3" in msg
     assert "won't see" in msg.lower()  # honest about visibility, like single share
-    assert [c["decision_id"] for c in fake.calls] == [id1, id2, id3]  # oldest first
-    assert all(c["repo"] == "github.com/a/b" for c in fake.calls)
+    assert len(fake.batches) == 1  # ONE network call for all three, not one per decision
+    assert [a["decisionId"] for a in fake.batches[0]] == [id1, id2, id3]  # oldest first
+    assert all(a["repo"] == "github.com/a/b" for a in fake.batches[0])
+    assert share._load_outbox() == []
+
+
+def test_share_all_chunks_large_selection(tmp_repo, monkeypatch):
+    # More decisions than one batch allows -> chunked into ceil(N / _BATCH_SIZE) calls, each
+    # <= _BATCH_SIZE, one round-trip per chunk (not one per decision). _BATCH_SIZE pinned to 2.
+    projs = [{"id": f"id{i}", "type": "architecture", "content": f"decision {i}",
+              "confidence": None, "evidence": None, "source": "ai"} for i in range(5)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(share, "_BATCH_SIZE", 2)
+    fake = _fake(monkeypatch, ret="srv-1")
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "5" in msg
+    assert [len(b) for b in fake.batches] == [2, 2, 1]  # 5 decisions -> chunks of 2,2,1
+    flat = [a["decisionId"] for b in fake.batches for a in b]
+    assert flat == [f"id{i}" for i in range(5)]  # every id sent once, oldest first, across chunks
     assert share._load_outbox() == []
 
 
@@ -185,34 +211,36 @@ def test_share_all_excludes_ignored(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-1")
     share.share_all(tmp_repo, profile=TEAM)
-    assert [c["decision_id"] for c in fake.calls] == [id1]
+    assert [a["decisionId"] for a in fake.batches[0]] == [id1]
 
 
 def test_share_all_failure_enqueues_failed_and_remaining(tmp_repo, monkeypatch):
-    """First push succeeds, second fails: the failed decision AND everything after it
-    are queued for retry - stop pushing, the cloud is likely down (drain semantics)."""
+    """First chunk succeeds, second fails: the failed chunk AND everything after it are queued
+    for retry - stop pushing, the cloud is likely down (drain semantics). _BATCH_SIZE is pinned
+    to 1 here so each decision is its own chunk, exercising the partial-progress path."""
     _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
     _, id3 = store.update_decision(tmp_repo, "snake case file naming", "s1", subtype="convention")
 
     class _FlakyRS:
         def __init__(self):
-            self.calls = []
+            self.batches = []
 
-        def push_decision(self, **kw):
-            self.calls.append(kw)
-            if kw["decision_id"] == id2:
+        def push_decisions(self, args_list):
+            self.batches.append(args_list)
+            if any(a.get("decisionId") == id2 for a in args_list):
                 raise RemoteUnavailableError("down")
-            return "srv-1"
+            return [f"srv-{i}" for i in range(len(args_list))], []
 
     fake = _FlakyRS()
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     remote.reset_degradation_warnings()
     monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(share, "_BATCH_SIZE", 1)  # one decision per chunk
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "1" in msg  # one synced
+    assert "1" in msg  # one synced (the first chunk)
     assert "queued" in msg.lower()
-    assert [c["decision_id"] for c in fake.calls] == [id1, id2]  # stopped after the failure
+    assert [b[0]["decisionId"] for b in fake.batches] == [id1, id2]  # stopped after the failing chunk
     assert [e["decision_id"] for e in share._load_outbox()] == [id2, id3]
 
 
@@ -347,7 +375,7 @@ def test_drain_outbox_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-ok")
     sent = share.drain_outbox(TEAM)
     assert sent == 2
-    assert [c["decision_id"] for c in fake.calls] == ["d1", "d2"]  # FIFO order
+    assert [a["decisionId"] for a in fake.batches[0]] == ["d1", "d2"]  # FIFO order, one batch
     assert share._load_outbox() == []
 
 
@@ -376,17 +404,18 @@ def test_drain_outbox_partial_success_then_failure(tmp_repo, monkeypatch):
 
     class _FlakyRS:
         def __init__(self):
-            self.calls = []
+            self.batches = []
 
-        def push_decision(self, **kw):
-            self.calls.append(kw)
-            if kw["decision_id"] == "d2":
+        def push_decisions(self, args_list):
+            self.batches.append(args_list)
+            if any(a.get("decisionId") == "d2" for a in args_list):
                 raise RemoteUnavailableError("down")
-            return "srv-1"
+            return [f"srv-{i}" for i in range(len(args_list))], []
 
     fake = _FlakyRS()
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     remote.reset_degradation_warnings()
+    monkeypatch.setattr(share, "_BATCH_SIZE", 1)  # one entry per chunk -> partial progress
     sent = share.drain_outbox(TEAM)
     assert sent == 1  # d1 sent, d2 kept
     remaining = share._load_outbox()
@@ -402,17 +431,17 @@ def test_drain_outbox_concurrent_enqueue_survives_final_save(tmp_repo, monkeypat
 
     class _ConcurrentEnqueueRS:
         def __init__(self):
-            self.calls = []
+            self.batches = []
 
-        def push_decision(self, **kw):
-            self.calls.append(kw)
+        def push_decisions(self, args_list):
+            self.batches.append(args_list)
             # Simulate a second process enqueueing a brand-new item while we're mid-drain --
             # it writes straight to the on-disk outbox, bypassing our in-memory `entries`.
             share._enqueue({"decision_id": "concurrent-1", "type": "constraint",
                             "content": "concurrently enqueued", "repo": "r",
                             "rationale": None, "confidence": 70, "evidence": None,
                             "source": "ai", "queued_at": 2.0, "attempts": 0})
-            return "srv-1"
+            return [f"srv-{i}" for i in range(len(args_list))], []  # (saved_ids, skipped_ids)
 
     fake = _ConcurrentEnqueueRS()
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
@@ -445,7 +474,10 @@ def test_share_drains_queued_items_before_new_push(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-ok")
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-ok" in msg
-    assert [c["decision_id"] for c in fake.calls] == ["queued-1", did]
+    # The queued item drains via the batch path (push_decisions); the new decision goes through
+    # the single push (push_decision) - drain runs first, so ordering is preserved.
+    assert [a["decisionId"] for a in fake.batches[0]] == ["queued-1"]
+    assert [c["decision_id"] for c in fake.calls] == [did]
     assert share._load_outbox() == []  # the queued item drained, only the new push happened
 
 
@@ -515,17 +547,89 @@ def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
     assert pushed["n"] == 0
 
 
-def test_share_ids_shares_each_selected(monkeypatch):
-    calls = []
-    monkeypatch.setattr(share, "share", lambda repo, did="", **k: calls.append(did) or f"ok:{did}")
-    out = share.share_ids("/repo", ["a", "b"], profile=TEAM)
-    assert calls == ["a", "b"]
-    assert "ok:a" in out and "ok:b" in out
+def test_share_ids_shares_selected_in_one_batch(tmp_repo, monkeypatch):
+    # A multi-pick resolves each id then pushes them all in ONE batched call, not one push per id.
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "get_shareable", lambda repo, did="": {
+        "id": did, "type": "constraint", "content": f"c-{did}",
+        "confidence": None, "evidence": None, "source": "ai"})
+    fake = _fake(monkeypatch, ret="srv-1")
+    out = share.share_ids(tmp_repo, ["a", "b"], profile=TEAM)
+    assert len(fake.batches) == 1  # one call for both, not one per id
+    assert [x["decisionId"] for x in fake.batches[0]] == ["a", "b"]
+    assert "2" in out  # "Synced 2 decision(s)..."
 
 
 def test_share_ids_empty_shares_most_recent(monkeypatch):
     monkeypatch.setattr(share, "share", lambda repo, did="", **k: f"recent:{did}")
     assert share.share_ids("/repo", [], profile=TEAM) == "recent:"
+
+
+def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
+    # A typo'd id in a multi-pick is REPORTED, not silently dropped (review finding #1). The valid
+    # id still shares.
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+
+    def _get(repo, did=""):
+        return ({"id": did, "type": "constraint", "content": f"c-{did}",
+                 "confidence": None, "evidence": None, "source": "ai"}
+                if did == "good1234" else None)
+
+    monkeypatch.setattr(store, "get_shareable", _get)
+    fake = _fake(monkeypatch, ret="srv-1")
+    out = share.share_ids(tmp_repo, ["good1234", "bad99999"], profile=TEAM)
+    assert "Skipped 1 unknown id" in out
+    assert "bad99999" in out
+    assert [x["decisionId"] for x in fake.batches[0]] == ["good1234"]  # only the valid one shared
+
+
+def test_share_ids_all_unknown_reports_and_pushes_nothing(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "get_shareable", lambda repo, did="": None)
+    fake = _fake(monkeypatch, ret="srv-1")
+    out = share.share_ids(tmp_repo, ["zzz11111"], profile=TEAM)
+    assert "unknown id" in out.lower()
+    assert fake.batches == []  # nothing left the machine
+
+
+class _CapacityRS:
+    """A fake that stores the FIRST row of each batch and reports the rest as at-capacity skips."""
+
+    def __init__(self):
+        self.batches = []
+
+    def push_decisions(self, args_list):
+        self.batches.append(args_list)
+        saved = [f"srv-{args_list[0]['decisionId']}"] if args_list else []
+        skipped = [a["decisionId"] for a in args_list[1:]]
+        return saved, skipped
+
+
+def test_share_all_capacity_skip_requeues_only_skipped(tmp_repo, monkeypatch):
+    # Server stores what fits and reports the overflow as skipped: the skipped rows are re-queued
+    # (not lost, not blocking the saved one) and the message says "at capacity" (review finding #3).
+    projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
+              "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
+    remote.reset_degradation_warnings()
+
+    msg = share.share_all(tmp_repo, profile=TEAM)
+    assert "1" in msg and "capacity" in msg.lower()
+    assert {e["decision_id"] for e in share._load_outbox()} == {"id1", "id2"}  # id0 saved, not queued
+
+
+def test_drain_outbox_capacity_skip_keeps_skipped_queued(tmp_repo, monkeypatch):
+    for did, content in (("d1", "first"), ("d2", "second")):
+        share._enqueue({"decision_id": did, "type": "architecture", "content": content,
+                        "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                        "source": "ai", "queued_at": 1.0, "attempts": 0})
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
+    remote.reset_degradation_warnings()
+
+    sent = share.drain_outbox(TEAM)
+    assert sent == 1  # d1 saved
+    assert [e["decision_id"] for e in share._load_outbox()] == ["d2"]  # d2 at capacity -> kept
 
 
 def _three_shareable(monkeypatch):
@@ -644,7 +748,7 @@ def test_share_all_plan_sourced_preserves_plan_on_wire(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-1")
     share.share_all(tmp_repo, profile=TEAM)
-    assert all(kw["source"] == "plan" for kw in fake.calls)
+    assert all(a["source"] == "plan" for a in fake.batches[0])
 
 
 def test_payload_preserves_plan_source(tmp_repo, monkeypatch):
@@ -669,7 +773,7 @@ def test_drain_outbox_preserves_plan_source(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-plan")
     sent = share.drain_outbox(profile=TEAM)
     assert sent == 1
-    assert fake.calls[0]["source"] == "plan"
+    assert fake.batches[0][0]["source"] == "plan"
 
 
 def test_drain_outbox_coerces_unknown_source(tmp_repo, monkeypatch):
@@ -683,4 +787,4 @@ def test_drain_outbox_coerces_unknown_source(tmp_repo, monkeypatch):
     fake = _fake(monkeypatch, ret="srv-weird")
     sent = share.drain_outbox(profile=TEAM)
     assert sent == 1
-    assert fake.calls[0]["source"] == "ai"
+    assert fake.batches[0][0]["source"] == "ai"

@@ -31,7 +31,8 @@ class FakeTeamsServer:
         self._seq += 1
         return f"{self._seq:06d}"  # zero-padded so string compare orders correctly
 
-    def push_decision(self, args: dict) -> str:
+    def _store(self, args: dict) -> str:
+        """Idempotent upsert of one decision; returns the server id."""
         did = args.get("decisionId") or f"srv-{self._tick()}"
         prev = self.rows.get(did, {})
         self.rows[did] = {
@@ -41,7 +42,17 @@ class FakeTeamsServer:
             "scope": prev.get("scope", "personal"),  # push lands in personal; approval promotes
             "updated_at": self._tick(),
         }
-        return f"Saved decision {did} to your personal context."
+        return did
+
+    def push_decision(self, args: dict) -> str:
+        return f"Saved decision {self._store(args)} to your personal context."
+
+    def push_decisions(self, args: dict) -> dict:
+        """Batch push: one server transaction, structuredContent {results:[...], skipped:[]}.
+        The fake has no quota, so nothing is ever skipped."""
+        return {"results": [{"decisionId": item.get("decisionId"), "id": self._store(item)}
+                            for item in args.get("decisions", [])],
+                "skipped": []}
 
     def approve_as_team(self, decision_id: str) -> None:
         """Simulate a lead approving a shared decision (personal -> team-approved)."""
@@ -72,6 +83,8 @@ def _fake_transport(server: FakeTeamsServer):
             return types.SimpleNamespace(
                 content=[types.SimpleNamespace(type="text", text=text)],
                 structuredContent=None, isError=False)
+        if name == "push_decisions":
+            return types.SimpleNamespace(content=[], structuredContent=server.push_decisions(args), isError=False)
         if name == "get_context":
             return types.SimpleNamespace(content=[], structuredContent=server.get_context(args), isError=False)
         raise AssertionError(f"unexpected tool {name}")

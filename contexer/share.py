@@ -22,13 +22,19 @@ import time
 
 from contexer import store
 from contexer.config import Profile, load_profile
-from contexer.remote import RemoteStore, with_local_fallback
+from contexer.remote import RemoteStore, _push_arg, with_local_fallback
 from contexer.repo_key import canonical_repo_key
 
 # Outbox cap: push_decision is idempotent on decision_id server-side, so a queued entry is
 # never dropped for age or attempt count in v1 - retrying is always safe. This count is the
 # only bound, so a long-offline stretch can't grow ~/.contexer/.outbox.json without limit.
 _OUTBOX_CAP = 50
+
+# Max decisions per push_decisions batch. MUST stay <= contexer-teams' PUSH_DECISIONS_MAX (50):
+# the server rejects a larger array, so `share --all` / drain chunk into calls of this size. One
+# call per chunk (not per decision) is what stops a bulk share from trickling into the web UI one
+# row at a time. Kept in sync with the cloud like _WIRE_SOURCES above.
+_BATCH_SIZE = 50
 
 # The cloud's push_decision validates `source` against this exact CLOSED allowlist (a z.enum)
 # and rejects anything else with a hard -32602 that silently poisons the outbox forever. Kept
@@ -106,13 +112,24 @@ def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
     return tail + extra
 
 
-def drain_outbox(profile: Profile | None = None) -> int:
-    """Retry every queued push, FIFO, and return how many succeeded.
+def _outbox_arg(entry: dict) -> dict:
+    """Build a push wire-arg from a queued outbox entry (the shape _payload / share() enqueue)."""
+    return _push_arg(
+        type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
+        rationale=entry.get("rationale"), confidence=entry.get("confidence"),
+        evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
+        decision_id=entry.get("decision_id"))
 
-    No-op (0) when the outbox is empty or team sync isn't configured. Stops at the FIRST
-    failure and leaves that entry plus everything after it queued: the cloud is likely
-    still down, so hammering the rest would be pointless (with_local_fallback's warn-once
-    already keeps stderr quiet). Entries are never dropped for age/attempts here - see
+
+def drain_outbox(profile: Profile | None = None) -> int:
+    """Retry queued pushes in chunks of _BATCH_SIZE (one network call per chunk), FIFO, and return
+    how many succeeded.
+
+    No-op (0) when the outbox is empty or team sync isn't configured. Stops at the FIRST failed
+    chunk and leaves that chunk plus everything after it queued: the cloud is likely still down, so
+    hammering the rest would be pointless (with_local_fallback's warn-once already keeps stderr
+    quiet). A chunk is all-or-nothing (one server transaction), so on failure every entry in it is
+    kept and its attempt count bumped. Entries are never dropped for age/attempts here - see
     _OUTBOX_CAP."""
     entries = _load_outbox()
     if not entries:
@@ -123,20 +140,25 @@ def drain_outbox(profile: Profile | None = None) -> int:
         return 0
     sent = 0
     sent_ids: set = set()
-    for idx, entry in enumerate(entries):
-        server_id = with_local_fallback(
-            lambda entry=entry: remote.push_decision(
-                type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
-                rationale=entry.get("rationale"), confidence=entry.get("confidence"),
-                evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
-                decision_id=entry.get("decision_id")),
+    for start in range(0, len(entries), _BATCH_SIZE):
+        chunk = entries[start:start + _BATCH_SIZE]
+        res = with_local_fallback(
+            lambda chunk=chunk: remote.push_decisions([_outbox_arg(e) for e in chunk]),
             default=None, action="drain queued share")
-        if server_id is None:
-            entry["attempts"] = entry.get("attempts", 0) + 1
-            _save_outbox(_reconcile_with_disk(entries[idx:], sent_ids))
+        if res is None:
+            for e in chunk:
+                e["attempts"] = e.get("attempts", 0) + 1
+            _save_outbox(_reconcile_with_disk(entries[start:], sent_ids))
             return sent
-        sent_ids.add(entry.get("decision_id"))
-        sent += 1
+        _saved_ids, skipped_ids = res
+        skipped = set(skipped_ids)
+        # Saved entries drop out of the outbox (added to sent_ids); entries the server skipped
+        # (personal context at capacity) are NOT marked sent, so _reconcile_with_disk keeps them
+        # queued to retry once space frees.
+        for e in chunk:
+            if e.get("decision_id") not in skipped:
+                sent_ids.add(e.get("decision_id"))
+        sent += len(chunk) - len(skipped_ids)
     _save_outbox(_reconcile_with_disk([], sent_ids))
     return sent
 
@@ -151,12 +173,75 @@ def _payload(dec: dict, key) -> dict:
     }
 
 
-def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
-    """Push every non-ignored local decision to your team cloud context, oldest first.
+def _proj_arg(dec: dict, key) -> dict:
+    """Build a push wire-arg from a share projection (store._share_projection shape)."""
+    return _push_arg(
+        type=dec["type"], content=dec["content"], repo=key,
+        confidence=dec["confidence"], evidence=dec["evidence"],
+        source=_wire_source(dec["source"]), decision_id=dec["id"])
 
-    Same local-first contract as share(): never raises for cloud problems. Stops at the
-    FIRST failed push (the cloud is likely down - drain_outbox semantics) and queues the
-    failed decision plus everything after it in the outbox, so no share intent is lost."""
+
+def _push_projections(remote: RemoteStore, projs: list[dict], key) -> str:
+    """Push share projections to your PERSONAL cloud in chunks of _BATCH_SIZE - one network call
+    per chunk, not per decision - so a bulk share lands as a batch instead of trickling in.
+
+    Local-first: stops at the FIRST failed chunk (cloud likely down) and queues that chunk plus
+    everything after it in the outbox, so no share intent is lost. A chunk the server accepts but
+    can only partially store (personal context at capacity) has its skipped rows re-queued to drain
+    later. Returns a human-readable status. Shared by share_all and share_ids."""
+    total = len(projs)
+    sent = 0
+    at_capacity = 0
+    for start in range(0, total, _BATCH_SIZE):
+        chunk = projs[start:start + _BATCH_SIZE]
+        res = with_local_fallback(
+            lambda chunk=chunk: remote.push_decisions([_proj_arg(p, key) for p in chunk]),
+            default=None, action="share decisions")
+        if res is None:
+            queued = 0
+            try:
+                for rest in projs[start:]:
+                    _enqueue(_payload(rest, key))
+                    queued += 1
+            except Exception:
+                # The outbox write itself died mid-queue (e.g. disk error). Report the exact split
+                # - some decisions may already be in the outbox - and how to retry the rest.
+                return (f"Shared {sent} of {total} decision(s), then the cloud became "
+                        f"unreachable or auth was rejected (see the warning above). Queued "
+                        f"{queued} of the remaining {total - sent} for retry before the "
+                        "outbox write failed - run `contexer share --all` again to queue "
+                        "the rest; your local decisions are unchanged.")
+            return (f"Shared {sent} of {total} decision(s). The rest are queued and "
+                    "will retry automatically at the next session start (cloud "
+                    "unreachable or auth rejected - see the warning above).")
+        _saved_ids, skipped_ids = res
+        sent += len(chunk) - len(skipped_ids)
+        if skipped_ids:
+            # Server stored what fit; the rest are at capacity. Re-queue only those (best-effort)
+            # so valid siblings aren't blocked and the intent isn't lost.
+            skipped = set(skipped_ids)
+            for p in chunk:
+                if p["id"] in skipped:
+                    try:
+                        _enqueue(_payload(p, key))
+                    except Exception:
+                        pass
+            at_capacity += len(skipped_ids)
+    if at_capacity:
+        return (f"Synced {sent} decision(s) to your personal cloud context; {at_capacity} could "
+                "not be stored (context at capacity) and were queued - delete some decisions to "
+                "sync them. Teammates won't see these until team promotion ships.")
+    return (f"Synced {sent} decision(s) to your personal cloud context - "
+            "teammates won't see these until team promotion ships.")
+
+
+def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
+    """Push every non-ignored local decision to your team cloud context, oldest first, in one
+    batched call per _BATCH_SIZE decisions.
+
+    Same local-first contract as share(): never raises for cloud problems. Stops at the FIRST
+    failed chunk (the cloud is likely down - drain_outbox semantics) and queues the failed chunk
+    plus everything after it in the outbox, so no share intent is lost."""
     profile = profile or load_profile()
     try:
         drain_outbox(profile)  # queued shares go out first, so ordering is preserved
@@ -170,35 +255,7 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    sent = 0
-    for idx, dec in enumerate(decs):
-        server_id = with_local_fallback(
-            lambda dec=dec: remote.push_decision(
-                type=dec["type"], content=dec["content"], repo=key,
-                confidence=dec["confidence"], evidence=dec["evidence"],
-                source=_wire_source(dec["source"]), decision_id=dec["id"]),
-            default=None, action="share decision")
-        if server_id is None:
-            queued = 0
-            try:
-                for rest in decs[idx:]:
-                    _enqueue(_payload(rest, key))
-                    queued += 1
-            except Exception:
-                # The outbox write itself died mid-queue (e.g. disk error). Report the
-                # exact split - some decisions may already be in the outbox - and how
-                # to retry the ones that are not.
-                return (f"Shared {sent} of {len(decs)} decision(s), then the cloud became "
-                        f"unreachable or auth was rejected (see the warning above). Queued "
-                        f"{queued} of the remaining {len(decs) - sent} for retry before the "
-                        "outbox write failed - run `contexer share --all` again to queue "
-                        "the rest; your local decisions are unchanged.")
-            return (f"Shared {sent} of {len(decs)} decision(s). The rest are queued and "
-                    "will retry automatically at the next session start (cloud "
-                    "unreachable or auth rejected - see the warning above).")
-        sent += 1
-    return (f"Synced {sent} decision(s) to your personal cloud context - "
-            "teammates won't see these until team promotion ships.")
+    return _push_projections(remote, decs, key)
 
 
 def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:
@@ -247,11 +304,33 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
 
 
 def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
-    """Share a selection of decisions (a multi-pick), returning a combined status. An empty list
-    shares the most recent (delegates to share('')). Each id goes through share() so the outbox +
-    local-first guarantees apply per decision; the loaded profile is threaded through to avoid
-    re-reading config.toml per id."""
+    """Share a selection of decisions (a multi-pick) in ONE batched call, returning a combined
+    status. An empty list shares the most recent (delegates to share('')). Outbox + local-first
+    guarantees are preserved (a failed chunk is queued for retry); the loaded profile is threaded
+    through to avoid re-reading config.toml per id."""
     profile = profile or load_profile()
     if not decision_ids:
         return share(repo_path, "", profile=profile)
-    return "\n".join(share(repo_path, did, profile=profile) for did in decision_ids)
+    try:
+        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+    except Exception:
+        pass
+    # Resolve each id, tracking any that don't match a local decision so an unknown id (e.g. a typo
+    # in a multi-pick) is REPORTED rather than silently dropped.
+    projs, missing = [], []
+    for did in decision_ids:
+        proj = store.get_shareable(repo_path, str(did))
+        (missing if proj is None else projs).append(did if proj is None else proj)
+    if not projs:
+        unknown = ", ".join(str(m)[:8] for m in missing)
+        return f"Nothing to share: no matching local decision (unknown id(s): {unknown})."
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return ("Not in team mode. Set mode='team' + endpoint + token in "
+                "~/.contexer/config.toml to share.")
+    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    status = _push_projections(remote, projs, key)
+    if missing:
+        unknown = ", ".join(str(m)[:8] for m in missing)
+        status = f"Skipped {len(missing)} unknown id(s): {unknown}.\n{status}"
+    return status
