@@ -144,10 +144,9 @@ def _finish_share(dec: dict, key, server_id) -> str:
         except Exception:
             # Even queueing can fail (disk full, temp-dir perms). Never raise - and the
             # message must not promise a retry that was never recorded.
-            return ("Share failed: cloud unreachable or auth rejected (see the warning "
-                    "above). Your local decision is unchanged.")
-        return ("Share failed: cloud unreachable or auth rejected (see the warning above). "
-                "Queued - it will retry automatically at the next session start.")
+            return ("Share failed (see the warning above for why). Your local decision is unchanged.")
+        return ("Share failed (see the warning above for why). Queued - it will retry "
+                "automatically at the next session start.")
     return (f"Synced decision to your personal cloud context (server id={server_id}) - "
             "teammates won't see this until team promotion ships.")
 
@@ -202,21 +201,22 @@ def _requeue_skipped(chunk: list[dict], key, skipped_ids: list) -> tuple[int, in
 
 
 def _queue_rest_status(decs: list[dict], start: int, key, sent: int, total: int) -> str:
-    """Transport-failed chunk: queue decs[start:] (this chunk + everything after) and return the
-    status. Mirrors share_all's original disk-error handling."""
+    """A chunk the cloud stopped accepting (unreachable, auth, OR a refusal like a rate limit - the
+    stderr warning above names which): queue decs[start:] (this chunk + everything after) and
+    return the status. Mirrors share_all's original disk-error handling."""
     queued = 0
     try:
         for rest in decs[start:]:
             _enqueue(_payload(rest, key))
             queued += 1
     except Exception:
-        return (f"Shared {sent} of {total} decision(s), then the cloud became unreachable or auth "
-                f"was rejected (see the warning above). Queued {queued} of the remaining "
-                f"{total - sent} for retry before the outbox write failed - run "
-                "`contexer share --all` again to queue the rest; your local decisions are unchanged.")
+        return (f"Shared {sent} of {total} decision(s), then the cloud stopped accepting them "
+                f"(see the warning above for why). Queued {queued} of the remaining {total - sent} "
+                "for retry before the outbox write failed - run `contexer share --all` again to "
+                "queue the rest; your local decisions are unchanged.")
     return (f"Shared {sent} of {total} decision(s). The rest are queued and will retry "
-            "automatically at the next session start (cloud unreachable or auth rejected - see "
-            "the warning above).")
+            "automatically at the next session start (see the warning above for why the cloud "
+            "stopped accepting them).")
 
 
 def _split_skips(skipped: list) -> tuple[set, int]:

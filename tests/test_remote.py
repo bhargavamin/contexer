@@ -491,10 +491,10 @@ def test_with_local_fallback_auth_returns_default_and_hints_login(capsys):
     assert "contexer login --team" in err
 
 
-def test_with_local_fallback_generic_tool_error_warns_request_failed_not_unreachable(monkeypatch, capsys):
-    """A reachable-but-refusing/failing tool call (e.g. bad input) must warn with an honest
-    'request failed' message, not the misleading 'endpoint unreachable' wording - the cloud
-    answered, it just couldn't complete the request."""
+def test_with_local_fallback_refusal_warns_with_reason_not_unreachable(monkeypatch, capsys):
+    """A reachable-but-refusing tool call (bad input, rate limit, ...) must warn with the SERVER's
+    actual reason - not the misleading 'endpoint unreachable' wording - the cloud answered, it just
+    refused the request."""
     monkeypatch.setattr(
         remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
@@ -505,7 +505,8 @@ def test_with_local_fallback_generic_tool_error_warns_request_failed_not_unreach
         default=None, action="share decision")
     assert result is None
     err = capsys.readouterr().err
-    assert "request failed" in err
+    assert "refused the request" in err
+    assert "invalid input: content too long" in err  # the server's actual reason is surfaced
     assert "unreachable" not in err
 
 

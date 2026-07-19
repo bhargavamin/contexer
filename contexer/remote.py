@@ -334,11 +334,12 @@ def _warn_degrade(exc: RemoteStoreError, action: str) -> None:
             key="degrade:unreachable",
         )
     else:
-        # The cloud was reached and answered, it just refused or failed the request (e.g. a
-        # validation error) - distinct from the transport-level "unreachable" case above, so the
-        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
+        # The cloud was reached and answered, it just REFUSED the request (e.g. rate limit or a
+        # validation error) - distinct from the transport-level "unreachable" case above. Surface
+        # the server's own reason (`exc`) so the developer sees WHY (e.g. "Rate limit exceeded -
+        # retry in 12s") instead of a generic failure that reads like a network outage.
         warn_once(
-            f"Contexer: Teams request failed while trying to {action} - "
+            f"Contexer: Teams refused the request while trying to {action}: {exc} - "
             "continuing local-only.",
             key="degrade:request",
         )
