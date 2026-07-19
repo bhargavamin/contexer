@@ -62,7 +62,7 @@ class TestStatus:
         status()
         out = capsys.readouterr().out
         assert "MCP server: registered" in out
-        assert "teams (remote): NOT registered" in out  # native teams MCP is opt-in (CONTEXER_TEAMS_MCP)
+        assert "teams (remote)" not in out  # native teams MCP entry retired (Python sync only)
         assert "hooks:      installed" in out
         assert "Not fully installed" not in out
 

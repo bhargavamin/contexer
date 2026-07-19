@@ -74,6 +74,6 @@ def test_delta_poll_is_throttled(team_stack):
 def test_poll_degrades_when_cloud_unreachable(team_stack, monkeypatch):
     import contexer.remote as remote
     from contexer.remote import RemoteUnavailableError
-    monkeypatch.setattr(remote, "_call_tool",
+    monkeypatch.setattr(remote, "_acall_tool",
                         lambda *a, **k: (_ for _ in ()).throw(RemoteUnavailableError("down")))
     assert team_context.poll(REPO, profile=TEAM) == []  # no injection, no crash

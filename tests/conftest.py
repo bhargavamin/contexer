@@ -77,6 +77,9 @@ class FakeTeamsServer:
 
 
 def _fake_transport(server: FakeTeamsServer):
+    # Patched over the async `_acall_tool` seam. A sync return is fine: `_ainvoke` only awaits
+    # an actual awaitable, so this in-memory fake needs no coroutine wrapper (both the sync
+    # asyncio.run shims and the awaited async share path funnel through here).
     def _call(endpoint, token, name, args, timeout):
         if name == "push_decision":
             text = server.push_decision(args)
@@ -98,7 +101,7 @@ def team_stack(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
     monkeypatch.setattr(store, "_git", lambda repo, *a: FakeTeamsServer.ORIGIN)
     server = FakeTeamsServer()
-    monkeypatch.setattr(remote, "_call_tool", _fake_transport(server))
+    monkeypatch.setattr(remote, "_acall_tool", _fake_transport(server))
     remote.reset_degradation_warnings()
     return server
 

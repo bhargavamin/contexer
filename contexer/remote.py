@@ -12,9 +12,10 @@ ever reaching the agent.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
@@ -27,13 +28,13 @@ _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
 _DEFAULT_TIMEOUT = 10.0
 
 
-def _push_arg(*, type: str, content: str, repo: str | None = None,
-              rationale: str | None = None, agent: str | None = None,
-              confidence: int | None = None, evidence: list[str] | None = None,
-              source: str | None = None, decision_id: str | None = None) -> dict:
-    """Build one push wire-arg dict, OMITTING every unset optional (the server reads an absent key
-    as NULL/unset — so None must not be sent as a literal). Shared by push_decision and the
-    push_decisions batch so the singular and bulk wire shapes can never drift."""
+def _wire_args(*, type: str, content: str, repo: str | None = None,
+               rationale: str | None = None, agent: str | None = None,
+               confidence: int | None = None, evidence: list[str] | None = None,
+               source: str | None = None, decision_id: str | None = None) -> dict:
+    """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
+    reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
+    wire-serialization, shared by apush_decision (one) and apush_decisions (batch)."""
     args: dict = {"type": type, "content": content}
     if repo is not None:
         args["repo"] = repo
@@ -57,7 +58,13 @@ class RemoteStoreError(Exception):
 
 
 class RemoteAuthError(RemoteStoreError):
-    """The Teams endpoint rejected the token (HTTP 401/403)."""
+    """The Teams endpoint rejected the token (HTTP 401/403).
+
+    ``_transport_auth`` is set True only for a genuine transport 401/403 (by ``_classify``);
+    it stays False for a server-side authz/scope denial (``_classify_tool_error``). The sync
+    reactive-refresh path refreshes only when it is True — a scope denial a refresh can't fix."""
+
+    _transport_auth = False
 
 
 class RemoteUnavailableError(RemoteStoreError):
@@ -113,55 +120,64 @@ class RemoteStore:
             return None
         return cls(profile.endpoint, token, timeout=timeout, profile=profile)
 
-    def push_decision(self, *, type: str, content: str, repo: str | None,
-                      rationale: str | None = None, agent: str | None = None,
-                      confidence: int | None = None, evidence: list[str] | None = None,
-                      source: str | None = None, decision_id: str | None = None) -> str:
-        """Push one local decision to the caller's personal Teams context.
+    # ── async-native core (#108) ─────────────────────────────────────────────────
+    # The network path is async at its heart so an in-loop caller (server.share_decision)
+    # can AWAIT it and therefore CANCEL it: on a deadline the awaitable is cancelled and the
+    # cancellation propagates into httpx's async context managers, closing the socket. The
+    # sync push_decision/get_context below are thin asyncio.run(...) shims over this same
+    # core for off-loop callers (CLI, hooks — separate processes, no running loop), so there
+    # is exactly ONE copy of the wire-serialization + error-mapping logic. The one thing the
+    # shims add is reactive token refresh — kept OFF the async core on purpose so the awaited
+    # push never spawns an uncancellable refresh thread (see _run_with_reactive_refresh).
 
-        Returns the server decision id (best-effort; ``""`` if the response carries none).
-        Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure.
-        """
-        args = _push_arg(type=type, content=content, repo=repo, rationale=rationale,
-                         agent=agent, confidence=confidence, evidence=evidence,
-                         source=source, decision_id=decision_id)
-        result = self._invoke("push_decision", args)
+    async def apush_decision(self, *, type: str, content: str, repo: str | None,
+                             rationale: str | None = None, agent: str | None = None,
+                             confidence: int | None = None, evidence: list[str] | None = None,
+                             source: str | None = None, decision_id: str | None = None) -> str:
+        """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
+        result = await self._ainvoke("push_decision", _wire_args(
+            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id))
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
 
-    def push_decisions(self, args_list: list[dict]) -> tuple[list[str], list[str]]:
-        """Batch-push decisions to the caller's personal Teams context in ONE call (one network
-        round-trip, one server transaction) — the bulk counterpart to push_decision.
+    async def apush_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[str]]:
+        """Async core of :meth:`push_decisions`: batch-push many decisions in ONE call, awaiting
+        the transport (cancellable). Each item is push_decision KWARGS (built by
+        _dec_push_kwargs / _entry_push_kwargs), serialized through the same _wire_args as the
+        singular path.
 
-        ``args_list`` items are push wire-arg dicts (built via ``_push_arg``): the same shape
-        push_decision sends, one per decision. Idempotent per ``decisionId``.
-
-        Returns ``(saved_ids, skipped_decision_ids)``. The write is PER-ROW best-effort server-side:
-        ``saved_ids`` are the server ids that committed; ``skipped_decision_ids`` are decisionIds the
-        server accepted but could NOT store because the personal context is at its row cap — the
-        caller keeps those queued so they drain once space frees, rather than losing them. Raises
-        RemoteStoreError on a transport/auth failure (the caller then re-queues the whole chunk)."""
-        result = self._invoke("push_decisions", {"decisions": args_list})
+        Returns ``(saved_ids, skipped_decision_ids)``: server ids that committed, and decisionIds
+        the server accepted but could NOT store (context at capacity) so the caller keeps them
+        queued. Raises RemoteStoreError if the response omits a submitted decisionId - an
+        unconfirmed row must not be treated as done, so it stays queued."""
+        result = await self._ainvoke(
+            "push_decisions", {"decisions": [_wire_args(**kw) for kw in kwargs_list]})
         structured = getattr(result, "structuredContent", None) or {}
-        saved = [str(r.get("id", "")) for r in (structured.get("results") or [])]
-        skipped = [str(r.get("decisionId")) for r in (structured.get("skipped") or []) if r.get("decisionId")]
+        results = structured.get("results") or []
+        skipped_rows = structured.get("skipped") or []
+        saved = [str(r.get("id", "")) for r in results]
+        skipped = [str(r.get("decisionId")) for r in skipped_rows if r.get("decisionId")]
+        # Every submitted decisionId must be accounted for (saved OR skipped); otherwise the
+        # server didn't confirm it and we must NOT drop it - fail so the caller keeps it queued.
+        submitted = {kw.get("decision_id") for kw in kwargs_list if kw.get("decision_id")}
+        accounted = {r.get("decisionId") for r in results} | {r.get("decisionId") for r in skipped_rows}
+        missing = submitted - accounted
+        if missing:
+            raise RemoteStoreError(
+                f"push_decisions response did not account for {len(missing)} submitted decision(s)")
         return saved, skipped
 
-    def get_context(self, repo: str | None = None,
-                    updated_since: str | None = None) -> RemoteContext:
-        """Pull merged team context.
-
-        ``updated_since`` (an ISO cursor, typically a prior ``RemoteContext.cursor``) fetches
-        only changes after it and populates ``deleted`` (tombstoned ids to remove locally).
-        Raises RemoteStoreError on failure.
-        """
+    async def aget_context(self, repo: str | None = None,
+                           updated_since: str | None = None) -> RemoteContext:
+        """Async core of :meth:`get_context`. Awaits the transport (cancellable)."""
         args: dict = {}
         if repo is not None:
             args["repo"] = repo
         if updated_since is not None:
             args["updatedSince"] = updated_since
-        result = self._invoke("get_context", args)
+        result = await self._ainvoke("get_context", args)
         structured = getattr(result, "structuredContent", None) or {}
         rows = structured.get("result") or []
         decisions = [
@@ -182,24 +198,77 @@ class RemoteStore:
             cursor=structured.get("cursor"),
         )
 
-    def _invoke(self, name: str, arguments: dict, *, _refreshed: bool = False):
+    def push_decision(self, *, type: str, content: str, repo: str | None,
+                      rationale: str | None = None, agent: str | None = None,
+                      confidence: int | None = None, evidence: list[str] | None = None,
+                      source: str | None = None, decision_id: str | None = None) -> str:
+        """Push one local decision to the caller's personal Teams context (sync shim).
+
+        Returns the server decision id (best-effort; ``""`` if the response carries none).
+        Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure. For
+        off-loop callers only — an in-loop caller must await :meth:`apush_decision` instead
+        (asyncio.run cannot run inside a running event loop)."""
+        return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
+            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id)))
+
+    def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[str]]:
+        """Batch-push decisions in ONE call (sync shim over :meth:`apush_decisions`). Off-loop
+        callers only. Returns ``(saved_ids, skipped_decision_ids)``; raises RemoteStoreError on a
+        transport/auth failure (the caller then re-queues the whole chunk)."""
+        return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decisions(kwargs_list)))
+
+    def get_context(self, repo: str | None = None,
+                    updated_since: str | None = None) -> RemoteContext:
+        """Pull merged team context (sync shim over :meth:`aget_context`).
+
+        ``updated_since`` (an ISO cursor, typically a prior ``RemoteContext.cursor``) fetches
+        only changes after it and populates ``deleted`` (tombstoned ids to remove locally).
+        Raises RemoteStoreError on failure. Off-loop callers only."""
+        return self._run_with_reactive_refresh(
+            lambda: asyncio.run(self.aget_context(repo=repo, updated_since=updated_since)))
+
+    def _run_with_reactive_refresh(self, run: "Callable[[], T]") -> T:
+        """Run an off-loop op, and on a transport 401/403 do exactly ONE token refresh + retry.
+
+        The bearer can expire mid-session (it is frozen at construction), so a transport-auth
+        failure gets one bounded refresh-and-retry. This lives in the SYNC shim layer — NOT in
+        the async core — deliberately (#108): the refresh is a blocking, cross-process-locked
+        network call (`auth._locked_refresh`), and doing it here (off the event loop, no running
+        loop) means the awaited async push path never spawns an uncancellable worker thread. Only
+        a genuine *transport* 401/403 (tagged `_transport_auth`) refreshes — a server-side
+        authz/scope denial (which a refresh can't fix) surfaces unchanged."""
+        try:
+            return run()
+        except RemoteAuthError as exc:
+            if not getattr(exc, "_transport_auth", False) or not self._refresh_token():
+                raise
+        return run()  # one retry with the refreshed token; a second 401 here propagates
+
+    async def _ainvoke(self, name: str, arguments: dict):
         """Call one Teams tool, mapping any transport failure to a typed RemoteStoreError.
 
-        On a transport 401/403 (an expired/rejected bearer), attempt exactly ONE token
-        refresh + retry: the access token may have expired mid-session (the token is frozen
-        at construction). This is bounded — `_refreshed` gates it so we never loop, and it
-        only fires for the transport-auth path, not for a server-side authz/scope denial
-        (which a refresh can't fix). If refresh yields no *new* token, the original auth
-        error surfaces (→ with_local_fallback's "run contexer login")."""
+        Async core — pure and cancellable: it does NO blocking token refresh (that lives in
+        the sync shim's :meth:`_run_with_reactive_refresh`), so a cancelled push tears the
+        transport down with nothing lingering (#108). A transport 401/403 surfaces as a
+        ``RemoteAuthError`` tagged ``_transport_auth`` so the sync shim knows it is
+        refresh-eligible; the in-loop async caller instead degrades (→ outbox retry).
+
+        ``except Exception`` deliberately does NOT catch ``asyncio.CancelledError`` (a
+        BaseException): a cancelled push must propagate and tear the transport down, not be
+        reclassified as an unreachable endpoint."""
         try:
-            result = _call_tool(self._endpoint, self._token, name, arguments, self._timeout)
+            # In production `_acall_tool` is a coroutine → this awaits the real async transport
+            # (cancellable). Unit tests patch this seam with a plain sync fake returning a
+            # CallToolResult; tolerate that by only awaiting an actual awaitable, so tests need
+            # no coroutine wrapper while prod keeps its cancellable await.
+            result = _acall_tool(self._endpoint, self._token, name, arguments, self._timeout)
+            if inspect.isawaitable(result):
+                result = await result
         except RemoteStoreError:
             raise
         except Exception as exc:  # network / transport / anyio group -> typed, catchable
-            err = _classify(exc)
-            if isinstance(err, RemoteAuthError) and not _refreshed and self._refresh_token():
-                return self._invoke(name, arguments, _refreshed=True)
-            raise err from exc
+            raise _classify(exc) from exc
         if getattr(result, "isError", False):
             message = _first_text(getattr(result, "content", None)) or f"{name} failed"
             raise _classify_tool_error(message)
@@ -244,6 +313,32 @@ def warn_once(message: str, *, key: str) -> None:
     print(message, file=sys.stderr)
 
 
+def _warn_degrade(exc: RemoteStoreError, action: str) -> None:
+    """Emit the warn-once line matching a RemoteStoreError's category. Shared by the sync and
+    async fallback wrappers so their degradation messages can never drift apart."""
+    if isinstance(exc, RemoteAuthError):
+        warn_once(
+            f"Contexer: Teams authentication failed while trying to {action} - "
+            "continuing local-only (run 'contexer login --team' or check your token).",
+            key="degrade:auth",
+        )
+    elif isinstance(exc, RemoteUnavailableError):
+        warn_once(
+            f"Contexer: Teams endpoint unreachable while trying to {action} - "
+            "continuing local-only.",
+            key="degrade:unreachable",
+        )
+    else:
+        # The cloud was reached and answered, it just refused or failed the request (e.g. a
+        # validation error) - distinct from the transport-level "unreachable" case above, so the
+        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
+        warn_once(
+            f"Contexer: Teams request failed while trying to {action} - "
+            "continuing local-only.",
+            key="degrade:request",
+        )
+
+
 def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
     """Run a RemoteStore operation, degrading to local-only on any RemoteStoreError.
 
@@ -254,29 +349,22 @@ def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
     warning so the developer knows what degraded."""
     try:
         return op()
-    except RemoteAuthError:
-        warn_once(
-            f"Contexer: Teams authentication failed while trying to {action} - "
-            "continuing local-only (run 'contexer login --team' or check your token).",
-            key="degrade:auth",
-        )
+    except RemoteStoreError as exc:
+        _warn_degrade(exc, action)
         return default
-    except RemoteUnavailableError:
-        warn_once(
-            f"Contexer: Teams endpoint unreachable while trying to {action} - "
-            "continuing local-only.",
-            key="degrade:unreachable",
-        )
-        return default
-    except RemoteStoreError:
-        # The cloud was reached and answered, it just refused or failed the request (e.g. a
-        # validation error) - distinct from the transport-level "unreachable" case above, so the
-        # warning doesn't misreport a reachable-but-failing cloud as a network outage.
-        warn_once(
-            f"Contexer: Teams request failed while trying to {action} - "
-            "continuing local-only.",
-            key="degrade:request",
-        )
+
+
+async def awith_local_fallback(op: Callable[[], Awaitable[T]], *, default: T, action: str) -> T:
+    """Async twin of :func:`with_local_fallback` for in-loop callers (server.share_decision).
+
+    ``op`` is a zero-arg callable returning an awaitable; it is ``await``-ed so a wedged push
+    stays cancellable. Same local-first contract and identical warn-once messages (via the
+    shared ``_warn_degrade``). A CancelledError is a BaseException, so an outer deadline
+    cancels straight through this wrapper — it is not swallowed as a degradation."""
+    try:
+        return await op()
+    except RemoteStoreError as exc:
+        _warn_degrade(exc, action)
         return default
 
 
@@ -304,10 +392,16 @@ def _extract_status(exc: BaseException) -> int | None:
 
 
 def _classify(exc: BaseException) -> RemoteStoreError:
-    """Map a raw transport exception to a typed RemoteStoreError."""
+    """Map a raw transport exception to a typed RemoteStoreError.
+
+    A transport 401/403 is tagged ``_transport_auth`` so the sync shim's reactive-refresh
+    path can distinguish it from a server-side authz/scope denial (which arrives via
+    ``_classify_tool_error`` untagged and must never trigger a token refresh)."""
     status = _extract_status(exc)
     if status in (401, 403):
-        return RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
+        err = RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
+        err._transport_auth = True
+        return err
     return RemoteUnavailableError(f"Teams endpoint unreachable: {exc}")
 
 
@@ -336,12 +430,12 @@ def _classify_tool_error(message: str) -> RemoteStoreError:
     return RemoteStoreError(message)
 
 
-def _call_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O, exercised by the opt-in integration test
-    """Network seam: open a Streamable-HTTP MCP session, call one tool, return the result."""
-    return asyncio.run(_acall_tool(endpoint, token, name, arguments, timeout))
+async def _acall_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O, exercised by the opt-in integration test
+    """Network seam: open a Streamable-HTTP MCP session, call one tool, return the result.
 
-
-async def _acall_tool(endpoint: str, token: str, name: str, arguments: dict, timeout: float):  # pragma: no cover - real network I/O
+    The single async boundary the whole client funnels through (both the async core and the
+    sync asyncio.run shims). Awaiting it is what makes a wedged call cancellable — cancellation
+    unwinds these ``async with`` blocks, closing the transport."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
