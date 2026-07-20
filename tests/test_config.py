@@ -124,3 +124,36 @@ def test_write_team_profile_preserves_skip_confirm(config_path):
     config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\nskip_confirm = true\n')
     config.write_team_profile("http://new/mcp")  # e.g. `contexer login` re-writes config
     assert load_profile().skip_confirm is True
+
+
+# ── redact_secrets (secret redaction, ON by default) ─────────────────────────
+
+def test_redact_secrets_defaults_true(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\n')
+    assert load_profile().redact_secrets is True  # safety property holds with zero config
+
+
+def test_redact_secrets_absent_file_defaults_true(config_path):
+    assert not config_path.exists()
+    assert load_profile().redact_secrets is True
+
+
+def test_redact_secrets_false_parsed(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\nredact_secrets = false\n')
+    assert load_profile().redact_secrets is False
+
+
+def test_redact_secrets_invalid_type_raises(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('redact_secrets = "no"\n')
+    with pytest.raises(ConfigError):
+        load_profile()
+
+
+def test_write_team_profile_preserves_redact_secrets_optout(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\nredact_secrets = false\n')
+    config.write_team_profile("http://new/mcp")
+    assert load_profile().redact_secrets is False  # opt-out survives `contexer login`

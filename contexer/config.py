@@ -40,6 +40,11 @@ class Profile:
     # ON (share_decision previews first). Set `skip_confirm = true` in config.toml to always
     # push without the preview.
     skip_confirm: bool = False
+    # Secret redaction on EGRESS. Default True = secrets are scrubbed before any push leaves the
+    # machine (share projection/preview + wire); capture is NOT redacted, so the local store stays
+    # a faithful record. Set `redact_secrets = false` in config.toml to opt out (power users who
+    # accept the risk); default-on so the safety property holds unconfigured.
+    redact_secrets: bool = True
 
 
 def load_profile(path: Path | None = None) -> Profile:
@@ -71,7 +76,14 @@ def load_profile(path: Path | None = None) -> Profile:
             f"invalid skip_confirm in {config_path}: expected true/false, "
             f"got {type(skip_confirm).__name__}")
 
-    return Profile(mode=mode, endpoint=endpoint, token=token, skip_confirm=skip_confirm)
+    redact_secrets = data.get("redact_secrets", True)
+    if not isinstance(redact_secrets, bool):
+        raise ConfigError(
+            f"invalid redact_secrets in {config_path}: expected true/false, "
+            f"got {type(redact_secrets).__name__}")
+
+    return Profile(mode=mode, endpoint=endpoint, token=token,
+                   skip_confirm=skip_confirm, redact_secrets=redact_secrets)
 
 
 def write_team_profile(endpoint: str, path: Path | None = None) -> None:
@@ -85,6 +97,8 @@ def write_team_profile(endpoint: str, path: Path | None = None) -> None:
         lines.append(f"token = {_toml_str(existing.token)}")
     if existing.skip_confirm:  # preserve the push-confirm opt-out across `contexer login`
         lines.append("skip_confirm = true")
+    if not existing.redact_secrets:  # preserve the redaction opt-out across `contexer login`
+        lines.append("redact_secrets = false")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n")
     config_path.chmod(0o600)  # may hold a bearer token — owner-only, like .team_auth.json

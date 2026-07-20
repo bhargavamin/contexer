@@ -3856,3 +3856,87 @@ class TestFollowThroughLog:
         store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
         path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
         assert not path.exists()
+
+
+# ── secret redaction on the EGRESS path only (share projection + preview) ─────
+# Capture is deliberately NOT redacted — the local store stays a faithful record; redaction
+# happens only when a decision LEAVES the machine (projection/preview here, wire in remote.py).
+
+_AWS = "AKIAIOSFODNN7EXAMPLE"
+_GH = "ghp_" + "a" * 36
+
+
+def _all_store_text(store_dir) -> str:
+    """Every byte persisted under STORE_DIR."""
+    return "\n".join(p.read_text() for p in Path(store_dir).glob("*.json"))
+
+
+class TestSecretRedactionOutbound:
+    def _store_raw_secret(self, tmp_repo, monkeypatch, content):
+        """Capture is egress-only (not redacted), so the raw secret lands on disk as-is. Pin the
+        redaction flag ON so the outbound projection under test is deterministic (not config-read)."""
+        monkeypatch.setattr(store, "_redaction_enabled", lambda: True)
+        store.update_decision(tmp_repo, content, "s1")
+
+    def test_capture_is_not_redacted(self, tmp_repo, monkeypatch):
+        # The store stays a faithful record: a secret in a decision is kept locally verbatim.
+        monkeypatch.setattr(store, "_redaction_enabled", lambda: True)
+        store.update_decision(tmp_repo, f"deploy uses key {_AWS} for prod", "s1")
+        assert _AWS in _all_store_text(store.STORE_DIR)
+
+    def test_share_projection_redacts_content(self, tmp_repo, monkeypatch):
+        self._store_raw_secret(tmp_repo, monkeypatch, f"legacy key {_AWS}")
+        proj = store.get_shareable(tmp_repo, "")
+        assert _AWS not in proj["content"]
+        assert proj["redacted"] >= 1
+
+    def test_share_projection_redacts_evidence(self, tmp_repo, monkeypatch):
+        self._store_raw_secret(tmp_repo, monkeypatch, "a plain decision")
+        data = store._load(tmp_repo)
+        entry = next(x for x in data["entries"] if x["type"] == "decision")
+        store._current_revision(entry)["evidence"] = [f"observed {_GH}", "plain"]
+        store._save(tmp_repo, data)
+        proj = store.get_shareable(tmp_repo, "")
+        assert all(_GH not in ev for ev in (proj["evidence"] or []))
+        assert "plain" in (proj["evidence"] or [])
+
+    def test_preview_reports_redaction_count(self, tmp_repo, monkeypatch):
+        from contexer import config
+        self._store_raw_secret(tmp_repo, monkeypatch, f"deploy with {_AWS}")
+        prof = config.Profile(mode="team", endpoint="http://x/mcp", token="t")
+        out = store.format_share_preview(tmp_repo, "", profile=prof)
+        assert _AWS not in out
+        assert "redacted" in out.lower()
+
+    def test_preview_no_redaction_line_when_clean(self, tmp_repo):
+        from contexer import config
+        store.update_decision(tmp_repo, "chose LRU caching for the hot path", "s1")
+        prof = config.Profile(mode="team", endpoint="http://x/mcp", token="t")
+        out = store.format_share_preview(tmp_repo, "", profile=prof)
+        assert "redacted" not in out.lower()
+
+    def test_preview_redaction_follows_passed_profile(self, tmp_repo, monkeypatch):
+        from contexer import config
+        # a raw secret on disk; global _redaction_enabled() would say OFF
+        monkeypatch.setattr(store, "_redaction_enabled", lambda: False)
+        store.update_decision(tmp_repo, f"deploy with {_AWS}", "s1")
+        # the profile passed to the preview governs redaction, NOT the global config read
+        prof_on = config.Profile(mode="team", endpoint="http://x/mcp", token="t",
+                                 redact_secrets=True)
+        out = store.format_share_preview(tmp_repo, "", profile=prof_on)
+        assert _AWS not in out
+        assert "redacted" in out.lower()
+        prof_off = config.Profile(mode="team", endpoint="http://x/mcp", token="t",
+                                  redact_secrets=False)
+        out2 = store.format_share_preview(tmp_repo, "", profile=prof_off)
+        assert _AWS in out2  # profile opt-out honored
+
+    def test_get_shareable_all_reads_config_once(self, tmp_repo, monkeypatch):
+        for i in range(3):
+            store.update_decision(tmp_repo, f"decision {i} about the caching layer design", f"s{i}")
+        calls = {"n": 0}
+        real = store._redaction_enabled
+        monkeypatch.setattr(store, "_redaction_enabled",
+                            lambda: (calls.__setitem__("n", calls["n"] + 1) or real()))
+        store.get_shareable_all(tmp_repo)
+        assert calls["n"] <= 1  # resolved once per operation, not once per decision

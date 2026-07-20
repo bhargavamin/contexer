@@ -675,3 +675,64 @@ def test_sync_shim_reactive_refresh_only_for_transport_auth(monkeypatch):
                         lambda p: pytest.fail("authz denial must not refresh"))
     with pytest.raises(RemoteAuthError):
         _team_store().push_decision(type="constraint", content="c", repo=None)
+
+
+# ── outbound secret redaction (remote._wire_args — the hard egress guarantee) ──
+
+_WIRE_AWS = "AKIAIOSFODNN7EXAMPLE"
+_WIRE_GH = "ghp_" + "b" * 36
+
+
+def test_wire_args_redacts_content_evidence_rationale():
+    args = remote._wire_args(
+        type="architecture",
+        content=f"deploy with {_WIRE_AWS}",
+        evidence=[f"seen token {_WIRE_GH}", "plain evidence"],
+        rationale=f"chosen because api_key = \"{_WIRE_AWS}\"",
+    )
+    assert _WIRE_AWS not in args["content"]
+    assert "[REDACTED:aws_key]" in args["content"]
+    assert all(_WIRE_GH not in e for e in args["evidence"])
+    assert "plain evidence" in args["evidence"]  # non-secret evidence preserved
+    assert _WIRE_AWS not in args["rationale"]
+
+
+def test_wire_args_redacts_legacy_content_bypassing_capture():
+    # A decision stored before redaction shipped: raw secret arrives at the wire and
+    # must still be scrubbed — this is the only protection for legacy on-disk secrets.
+    args = remote._wire_args(type="constraint", content=f"legacy key {_WIRE_AWS}")
+    assert _WIRE_AWS not in args["content"]
+
+
+def test_wire_args_respects_opt_out(monkeypatch):
+    monkeypatch.setattr(remote, "_redaction_enabled", lambda: False)
+    args = remote._wire_args(type="constraint", content=f"key {_WIRE_AWS}")
+    assert _WIRE_AWS in args["content"]  # user opted out of redaction entirely
+
+
+def test_wire_args_no_evidence_key_when_none():
+    args = remote._wire_args(type="constraint", content="plain", evidence=None)
+    assert "evidence" not in args  # None optional still omitted after redaction wiring
+
+
+def test_wire_args_redact_param_overrides_config():
+    on = remote._wire_args(type="c", content=f"key {_WIRE_AWS}", redact_on=True)
+    off = remote._wire_args(type="c", content=f"key {_WIRE_AWS}", redact_on=False)
+    assert _WIRE_AWS not in on["content"]
+    assert _WIRE_AWS in off["content"]  # caller-resolved flag wins over a config read
+
+
+def test_batch_push_reads_config_once(monkeypatch):
+    # apush_decisions serializes N rows through _wire_args; the redaction flag must be resolved
+    # ONCE for the batch, not re-read from config.toml per row.
+    calls = {"n": 0}
+    real = remote._redaction_enabled
+    monkeypatch.setattr(remote, "_redaction_enabled",
+                        lambda: (calls.__setitem__("n", calls["n"] + 1) or real()))
+    monkeypatch.setattr(remote, "_acall_tool",
+                        lambda e, t, n, args, to: _result(structured={"results": [], "skipped": []}))
+    rs = RemoteStore("https://t/mcp", "tok")
+    rows = [{"type": "constraint", "content": f"c{i} plain", "repo": "github.com/a/b"}
+            for i in range(3)]
+    rs.push_decisions(rows)
+    assert calls["n"] <= 1

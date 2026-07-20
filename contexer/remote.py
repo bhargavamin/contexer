@@ -19,9 +19,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
+from contexer import redact
 from contexer.config import Profile
 
 T = TypeVar("T")
+
+
+def _redaction_enabled() -> bool:
+    """Whether outbound secret redaction is on (default True; opt out with redact_secrets=false).
+    Fail-soft: any config error keeps redaction ON so a broken config can't leak secrets."""
+    try:
+        from contexer.config import load_profile
+        return load_profile().redact_secrets
+    except Exception:
+        return True
 
 # push_decision returns a text message "Saved decision <id> to your personal context."
 _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
@@ -31,10 +42,26 @@ _DEFAULT_TIMEOUT = 10.0
 def _wire_args(*, type: str, content: str, repo: str | None = None,
                rationale: str | None = None, agent: str | None = None,
                confidence: int | None = None, evidence: list[str] | None = None,
-               source: str | None = None, decision_id: str | None = None) -> dict:
+               source: str | None = None, decision_id: str | None = None,
+               redact_on: bool | None = None) -> dict:
     """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
     reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
-    wire-serialization, shared by apush_decision (one) and apush_decisions (batch)."""
+    wire-serialization, shared by apush_decision (one) and apush_decisions (batch).
+
+    This is also the last-mile secret-redaction chokepoint: every push (single, batch, and
+    outbox drain) funnels through here, so scrubbing content/evidence/rationale here is the hard
+    guarantee that no secret egresses — including legacy on-disk secrets that predate capture-time
+    redaction. Idempotent with the capture scrub (the [REDACTED] placeholder never re-matches).
+
+    `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
+    config.toml per row); None means resolve it here for a lone call."""
+    scrub = _redaction_enabled() if redact_on is None else redact_on
+    if scrub:
+        content = redact.scrub_text(content)
+        if rationale is not None:
+            rationale = redact.scrub_text(rationale)
+        if evidence is not None:
+            evidence = [redact.scrub_text(e) for e in evidence]
     args: dict = {"type": type, "content": content}
     if repo is not None:
         args["repo"] = repo
@@ -155,8 +182,10 @@ class RemoteStore:
         queued and drops permanent ones. Per-row validation on the server means one bad row is
         skipped, never sinking the batch. Raises RemoteStoreError if the response omits a submitted
         decisionId - an unconfirmed row must not be treated as done, so it stays queued."""
+        redact_on = _redaction_enabled()  # resolved once for the whole batch, not per row
         result = await self._ainvoke(
-            "push_decisions", {"decisions": [_wire_args(**kw) for kw in kwargs_list]})
+            "push_decisions",
+            {"decisions": [_wire_args(**kw, redact_on=redact_on) for kw in kwargs_list]})
         structured = getattr(result, "structuredContent", None) or {}
         results = structured.get("results") or []
         skipped_rows = structured.get("skipped") or []
