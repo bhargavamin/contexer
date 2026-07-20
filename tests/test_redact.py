@@ -66,6 +66,22 @@ def test_bearer_token_redacted():
     assert "[REDACTED:bearer_token]" in out
 
 
+def test_lowercase_bearer_token_redacted():
+    # Authorization schemes are case-insensitive — a lowercase `bearer` must still be caught.
+    out, n = redact.scrub("authorization: bearer abcDEF123456ghiJKL789mnoPQR")
+    assert "abcDEF123456ghiJKL789mnoPQR" not in out
+    assert "[REDACTED:bearer_token]" in out
+
+
+def test_quoted_multiword_secret_fully_redacted():
+    # A quoted value may contain spaces; the whole quoted span must be redacted, not just the
+    # first word (else the rest of a passphrase leaks onto the wire).
+    out, n = redact.scrub('password = "Correct Horse Battery Staple"')
+    assert "Horse" not in out and "Staple" not in out
+    assert "[REDACTED:secret]" in out
+    assert n == 1
+
+
 def test_connection_string_password_redacted():
     out, n = redact.scrub("postgres://admin:s3cr3tP4ss@db.example.com:5432/app")
     assert "s3cr3tP4ss" not in out

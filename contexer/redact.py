@@ -39,12 +39,16 @@ _FULL: list[tuple[re.Pattern, str]] = [
 ]
 
 # ── group-replace patterns (preserve context, redact only the secret span) ───
-_BEARER = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}")
+# Bearer is IGNORECASE: HTTP auth schemes are case-insensitive, so `bearer <tok>` must match too.
+_BEARER = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE)
 _CONN = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*)://([^:@/\s]+):([^@/\s]+)@")
+# Generic keyword=value. The value is either a QUOTED span (may contain spaces — so a quoted
+# passphrase is redacted whole, not just its first word) or a bare non-whitespace token.
 _GENERIC = re.compile(
     r"(?i)\b(password|passwd|pwd|secret_key|secret|api[_-]?key|access[_-]?key|"
     r"access[_-]?token|client[_-]?secret|private[_-]?key|auth_token|auth|token)"
-    r"(\s*[:=]\s*)(['\"]?)([^\s'\"]+)(['\"]?)")
+    r"(\s*[:=]\s*)"
+    r"(?:(['\"])(.+?)\3|([^\s'\"]+))")
 
 _MIN_VALUE_LEN = 6
 # A plain lowercase word or hyphenated/apostrophed phrase ("required", "short-lived",
@@ -102,12 +106,15 @@ def scrub(text: str) -> tuple[str, int]:
 
         def _generic(m: re.Match) -> str:
             nonlocal total
-            value = m.group(4)
+            quote = m.group(3)                       # the quote char, or None for a bare value
+            value = m.group(4) if quote else m.group(5)
             if _is_placeholder(value) or not _looks_secretlike(value):
                 return m.group(0)
             total += 1
-            return (f"{m.group(1)}{m.group(2)}{m.group(3)}"
-                    f"{_PLACEHOLDER.format('secret')}{m.group(5)}")
+            secret = _PLACEHOLDER.format("secret")
+            if quote:
+                return f"{m.group(1)}{m.group(2)}{quote}{secret}{quote}"
+            return f"{m.group(1)}{m.group(2)}{secret}"
 
         text = _BEARER.sub(_bearer, text)
         text = _CONN.sub(_conn, text)

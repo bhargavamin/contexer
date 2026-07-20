@@ -722,6 +722,32 @@ def test_wire_args_redact_param_overrides_config():
     assert _WIRE_AWS in off["content"]  # caller-resolved flag wins over a config read
 
 
+def test_wire_honors_store_profile_over_global(monkeypatch):
+    # A RemoteStore built from a profile with redaction ON must redact even when the GLOBAL
+    # config says OFF — otherwise an explicit opt-in caller silently leaks raw secrets.
+    monkeypatch.setattr(remote, "_redaction_enabled", lambda: False)  # global OFF
+    captured = {}
+    monkeypatch.setattr(remote, "_acall_tool",
+                        lambda e, t, n, args, to: captured.update(args=args)
+                        or _result(content=[_text("Saved decision d1 to your personal context.")]))
+    prof = Profile(mode="team", endpoint="https://t/mcp", token="tok", redact_secrets=True)
+    rs = RemoteStore("https://t/mcp", "tok", profile=prof)
+    rs.push_decision(type="constraint", content=f"key {_WIRE_AWS}", repo=None)
+    assert _WIRE_AWS not in captured["args"]["content"]
+
+
+def test_batch_honors_store_profile_over_global(monkeypatch):
+    monkeypatch.setattr(remote, "_redaction_enabled", lambda: False)  # global OFF
+    captured = {}
+    monkeypatch.setattr(remote, "_acall_tool",
+                        lambda e, t, n, args, to: captured.update(args=args)
+                        or _result(structured={"results": [], "skipped": []}))
+    prof = Profile(mode="team", endpoint="https://t/mcp", token="tok", redact_secrets=True)
+    rs = RemoteStore("https://t/mcp", "tok", profile=prof)
+    rs.push_decisions([{"type": "constraint", "content": f"k {_WIRE_AWS}", "repo": "github.com/a/b"}])
+    assert _WIRE_AWS not in captured["args"]["decisions"][0]["content"]
+
+
 def test_batch_push_reads_config_once(monkeypatch):
     # apush_decisions serializes N rows through _wire_args; the redaction flag must be resolved
     # ONCE for the batch, not re-read from config.toml per row.

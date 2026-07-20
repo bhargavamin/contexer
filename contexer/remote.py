@@ -157,6 +157,12 @@ class RemoteStore:
     # shims add is reactive token refresh — kept OFF the async core on purpose so the awaited
     # push never spawns an uncancellable refresh thread (see _run_with_reactive_refresh).
 
+    def _redact_on(self) -> bool:
+        """Redaction policy for THIS store: honor the Profile it was built from (an explicit
+        opt-in must not be lost to a global opt-out on disk); fall back to the global config
+        only for a profile-less store (direct construction / tests)."""
+        return self._profile.redact_secrets if self._profile is not None else _redaction_enabled()
+
     async def apush_decision(self, *, type: str, content: str, repo: str | None,
                              rationale: str | None = None, agent: str | None = None,
                              confidence: int | None = None, evidence: list[str] | None = None,
@@ -164,7 +170,8 @@ class RemoteStore:
         """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
         result = await self._ainvoke("push_decision", _wire_args(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
-            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id))
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
+            redact_on=self._redact_on()))
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
@@ -182,7 +189,7 @@ class RemoteStore:
         queued and drops permanent ones. Per-row validation on the server means one bad row is
         skipped, never sinking the batch. Raises RemoteStoreError if the response omits a submitted
         decisionId - an unconfirmed row must not be treated as done, so it stays queued."""
-        redact_on = _redaction_enabled()  # resolved once for the whole batch, not per row
+        redact_on = self._redact_on()  # resolved once for the whole batch (honors this store's profile)
         result = await self._ainvoke(
             "push_decisions",
             {"decisions": [_wire_args(**kw, redact_on=redact_on) for kw in kwargs_list]})
