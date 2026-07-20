@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.24.0](https://github.com/bhargavamin/contexer/compare/v0.23.1...v0.24.0) (2026-07-20)
+
+
+### Features
+
+* **redact:** scrub secrets on egress to the remote MCP ([ff0163a](https://github.com/bhargavamin/contexer/commit/ff0163a5afdfb9fb188ac3be6a4cafaf18435525))
+* **redact:** scrub secrets on egress to the remote MCP ([63d6566](https://github.com/bhargavamin/contexer/commit/63d65662379d9c8afb9dcf7ec1d9b37be3be26bf))
+* **remote:** batch push_decisions client method ([3263ecf](https://github.com/bhargavamin/contexer/commit/3263ecf8f44e815ffaf1e9ff565f077995692e9c))
+* **share:** batch share --all via push_decisions; report unknown ids ([988b870](https://github.com/bhargavamin/contexer/commit/988b870118eec5e382e8907197c057fa0bfd2da6))
+* **share:** batch share --all/share_ids/drain via push_decisions ([0d90c38](https://github.com/bhargavamin/contexer/commit/0d90c383a3fa19f4e4f215fc1462d24a3d08ac69))
+
+
+### Bug Fixes
+
+* **redact:** address Greptile P1s — lowercase Bearer, quoted spans, store profile ([a1c740f](https://github.com/bhargavamin/contexer/commit/a1c740fc0c86327c87bf24a532ce15eceebc3f15))
+* **share:** classify batch skips - drop invalid rows, keep capacity queued ([be8d65e](https://github.com/bhargavamin/contexer/commit/be8d65e4ae84cdfc24fdc63c3bde0edf9ab9b5c7))
+* **share:** honest degrade message - surface the server's reason, not 'unreachable' ([1a52037](https://github.com/bhargavamin/contexer/commit/1a520379084f1f895fe579c7f039491e1eb1f01a))
+
 ## [0.23.1](https://github.com/bhargavamin/contexer/compare/v0.23.0...v0.23.1) (2026-07-18)
 
 
