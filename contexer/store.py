@@ -18,6 +18,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
+MAX_TITLE_LEN = 100
 _SCHEMA_VERSION = 2               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
@@ -418,6 +419,28 @@ def _is_storable(content: str) -> bool:
     or whitespace-only content is rejected — this preserves the pre-refactor behavior
     where empty-token content was treated as non-novel and never stored."""
     return bool(_tokenize(content))
+
+
+def _normalize_title(title: str) -> str:
+    """Collapse a title to a single stripped line, capped at MAX_TITLE_LEN (adds an
+    ellipsis when it has to cut)."""
+    one_line = " ".join(title.split())
+    if len(one_line) <= MAX_TITLE_LEN:
+        return one_line
+    return one_line[:MAX_TITLE_LEN - 1].rstrip() + "…"
+
+
+def _derive_title(content: str) -> str:
+    """Deterministic fallback title from content: verbatim when the whole thing is short,
+    otherwise the first sentence/line, capped at MAX_TITLE_LEN."""
+    one_line = " ".join(content.split())
+    if not one_line:
+        return ""
+    if len(one_line) <= MAX_TITLE_LEN:
+        return one_line
+    first_line = content.strip().splitlines()[0]
+    first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
+    return _normalize_title(first_sentence)
 
 
 def _is_novel(content: str, existing: list) -> bool:

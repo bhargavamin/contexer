@@ -3856,3 +3856,38 @@ class TestFollowThroughLog:
         store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
         path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
         assert not path.exists()
+
+
+# ── Title helpers (Task 1) ─────────────────────────────────────────────────────
+
+class TestTitleHelpers:
+    def test_normalize_flattens_and_strips(self):
+        assert store._normalize_title("  hello\n  world \t") == "hello world"
+
+    def test_normalize_truncates_with_ellipsis(self):
+        long = "x" * 150
+        out = store._normalize_title(long)
+        assert len(out) == store.MAX_TITLE_LEN
+        assert out.endswith("…")
+
+    def test_normalize_empty(self):
+        assert store._normalize_title("   \n ") == ""
+
+    def test_derive_verbatim_when_short(self):
+        c = "Never commit spec or plan files to git."
+        assert store._derive_title(c) == c  # <= 100 -> whole content, no ellipsis
+
+    def test_derive_first_sentence_when_long(self):
+        c = ("Native contexer-teams entry removed. Team sync is the Python path; "
+             "kept a legacy janitor pop; login now refreshes status.")
+        out = store._derive_title(c)
+        assert out.startswith("Native contexer-teams entry removed.")
+        assert len(out) <= store.MAX_TITLE_LEN
+
+    def test_derive_truncates_long_first_sentence(self):
+        c = "A " + "very " * 60 + "long first sentence with no early period"
+        out = store._derive_title(c)
+        assert len(out) == store.MAX_TITLE_LEN and out.endswith("…")
+
+    def test_derive_empty(self):
+        assert store._derive_title("") == ""
