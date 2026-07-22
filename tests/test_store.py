@@ -3053,6 +3053,61 @@ class TestPendingReviewFlag:
         assert "Use Redis for caching" in out and "Store blobs in object storage" in out
 
 
+# ── edited-file signal sidecar (Doc Drift Layer 1, Task 1.1) ───────────────────
+
+class TestEditedFiles:
+    """record_edited_file appends to a per-repo sidecar (dedup: moves an already-recorded
+    path to the end; caps at the 50 most recent). _read_edited_files reads it back and, by
+    default, clears it — the next-prompt drift hook must see each edit exactly once."""
+
+    def test_record_then_read_returns_and_clears(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+        assert store._read_edited_files(tmp_repo) == []  # cleared by the prior read
+
+    def test_appends_multiple_oldest_to_newest(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        store.record_edited_file(tmp_repo, "b.py")
+        assert store._read_edited_files(tmp_repo) == ["a.py", "b.py"]
+
+    def test_dedupes_moves_existing_path_to_end(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        store.record_edited_file(tmp_repo, "b.py")
+        store.record_edited_file(tmp_repo, "a.py")
+        assert store._read_edited_files(tmp_repo) == ["b.py", "a.py"]
+
+    def test_caps_at_50_keeping_most_recent(self, tmp_repo):
+        for i in range(55):
+            store.record_edited_file(tmp_repo, f"f{i}.py")
+        result = store._read_edited_files(tmp_repo, clear=False)
+        assert len(result) == 50
+        assert result[0] == "f5.py"     # oldest 5 dropped from the front
+        assert result[-1] == "f54.py"   # newest kept at the end
+
+    def test_read_without_clear_is_idempotent(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        assert store._read_edited_files(tmp_repo, clear=False) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, clear=False) == ["a.py"]
+
+    def test_corrupt_file_reads_as_empty(self, tmp_repo):
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        store._edited_files_path(tmp_repo).write_text("{not json", encoding="utf-8")
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_empty_file_path_is_silent_noop(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "")
+        assert not store._edited_files_path(tmp_repo).exists()
+
+    def test_sidecar_written_mode_0600(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        mode = store._edited_files_path(tmp_repo).stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_paths_stored_exactly_as_passed(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "../outside/weird path.py")
+        assert store._read_edited_files(tmp_repo) == ["../outside/weird path.py"]
+
+
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
 
 class TestInsightCache:
