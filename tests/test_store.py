@@ -3350,6 +3350,46 @@ class TestBM25Router:
         assert store.get_context_for_prompt(tmp_repo, "why do birds fly south?") == ""
 
 
+class TestRenderPromptDecisions:
+    """_render_prompt_decisions feeds the BM25 strong-match auto-injection path — it must
+    render the SAME two-line shape as get_context (title-bearing bullet line, then a
+    `    `-indented content line), not the old title-less single line."""
+
+    def test_two_line_shape_with_title_on_bullet_content_on_next(self, tmp_repo):
+        _, id1 = store.update_decision(
+            tmp_repo, "Use postgres for the storage layer", RV1_SESSION,
+            "architecture", title="Postgres storage layer",
+        )
+        _, id2 = store.update_decision(
+            tmp_repo, "JWT refresh tokens live in httpOnly cookies", RV1_SESSION,
+            "architecture", title="JWT refresh in cookies",
+        )
+        rendered = store._render_prompt_decisions(tmp_repo, [id1, id2])
+        lines = rendered.splitlines()
+        assert len(lines) == 4   # 2 decisions x (bullet line + indented content line)
+
+        assert lines[0].startswith("- [")
+        assert "Postgres storage layer" in lines[0]
+        assert "Use postgres for the storage layer" not in lines[0]   # content not on bullet
+        assert lines[1] == "    Use postgres for the storage layer"
+
+        assert lines[2].startswith("- [")
+        assert "JWT refresh in cookies" in lines[2]
+        assert lines[3] == "    JWT refresh tokens live in httpOnly cookies"
+
+    def test_derives_title_when_none_stored(self, tmp_repo):
+        # No explicit title -> falls back to _derive_title(content), same as get_context.
+        _, eid = store.update_decision(
+            tmp_repo, "Settings load from a TOML file validated at startup", RV1_SESSION,
+            "convention",
+        )
+        rendered = store._render_prompt_decisions(tmp_repo, [eid])
+        lines = rendered.splitlines()
+        assert len(lines) == 2
+        assert lines[0].startswith("- [")
+        assert lines[1] == "    Settings load from a TOML file validated at startup"
+
+
 class TestContextForPromptMeta:
     """get_context_for_prompt_with_meta hands back structured data instead of a caller
     (claude.rationale) having to scrape the rendered text."""

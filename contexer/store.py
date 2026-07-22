@@ -2967,7 +2967,8 @@ def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> 
 
 
 def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
-    """Render the given decisions in the same line format `get_context` uses. Skips
+    """Render the given decisions in the same two-line format `get_context` uses: a bullet
+    line ending in the title, then a `    `-indented line with the current content. Skips
     ignored / missing entries; empty string when nothing renders."""
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
@@ -2981,7 +2982,9 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {_current_content(e)}{id_tag}")
+        title = e.get("title") or _derive_title(_current_content(e))
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {title}{id_tag}")
+        lines.append(f"    {_current_content(e)}")
     return "\n".join(lines)
 
 
