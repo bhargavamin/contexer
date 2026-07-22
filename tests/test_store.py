@@ -3985,3 +3985,23 @@ class TestTitleRevision:
         assert promoted["revision"] == 2
         assert promoted["title"] == "Rollback endpoint is /api/v3/rollback with retries"
         assert promoted["title"] != "Gated new title"
+
+
+class TestTitleBackfill:
+    def test_legacy_entry_gets_title_on_load(self, tmp_repo, monkeypatch):
+        # Write a store file with a revision-model entry that predates `title`.
+        store.update_decision(tmp_repo, "Legacy decision body kept verbatim.", "s1",
+                              subtype="architecture")
+        data = store._load(tmp_repo)
+        for e in data["entries"]:
+            e.pop("title", None)
+            for r in e.get("revisions", []):
+                r.pop("title", None)
+        data["schema_version"] = 2  # simulate an older store
+        store._save(tmp_repo, data)
+        # Next load must backfill.
+        reloaded = store._load(tmp_repo)
+        e = reloaded["entries"][0]
+        assert e["title"] == "Legacy decision body kept verbatim."
+        assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
+        assert reloaded.get("schema_version") == 3

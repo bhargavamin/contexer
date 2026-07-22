@@ -19,7 +19,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
 MAX_TITLE_LEN = 100
-_SCHEMA_VERSION = 2               # bumped when the on-disk entry shape changes; gates migration
+_SCHEMA_VERSION = 3               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
@@ -1155,6 +1155,20 @@ def _append_revision(entry: dict, content: str, source: str,
     return rev
 
 
+def _backfill_titles(entry: dict) -> bool:
+    """Set a derived `title` on any revision that lacks one, then re-sync the HEAD cache.
+    Idempotent; returns True if anything changed."""
+    changed = False
+    for rev in entry.get("revisions", []):
+        if not rev.get("title"):
+            rev["title"] = _derive_title(rev.get("content", ""))
+            changed = True
+    if changed or not entry.get("title"):
+        _sync_decision_cache(entry)
+        changed = True
+    return changed
+
+
 def _migrate_decision(entry: dict) -> bool:
     """Transparently upgrade a legacy decision entry to the revision model. Idempotent.
     Builds full revision objects from the legacy historical snapshots (`revisions[]`, which
@@ -1173,12 +1187,14 @@ def _migrate_decision(entry: dict) -> bool:
         # decision-level content cache (e.g. an earlier buggy migration that re-capitalized
         # the revision), restore the revision to the cached value - that is the value replay
         # has always shown, so it is the original-of-record. No-op when consistent.
+        healed = False
         cur = _current_revision(entry)
         cached = entry.get("content")
         if cur is not None and cached is not None and cur.get("content") != cached:
             cur["content"] = cached
-            return True
-        return False
+            healed = True
+        backfilled = _backfill_titles(entry)
+        return healed or backfilled
 
     did = entry.get("id", "")
     created_by = entry.get("created_by", "ai")
@@ -1212,6 +1228,7 @@ def _migrate_decision(entry: dict) -> bool:
     entry["revisions"] = full
     entry["current_revision_id"] = current["revision_id"]
     entry["revision"] = current["version_number"]
+    _backfill_titles(entry)
     return True
 
 
