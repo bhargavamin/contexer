@@ -4200,3 +4200,76 @@ def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
         return out
     except Exception:
         return []
+
+
+# ── Doc Drift Layer 1 — Task 1.3: approved-decision matcher ────────────────────
+# The decision side of the drift pairing: given an edited file, find the recorded
+# decisions most likely to be about it. Task 1.5 pairs this against a Task 1.2 doc
+# excerpt from the same file; nothing consumes this output yet.
+_DRIFT_MAX = 3  # cap on decisions surfaced per file check; reused by later drift tasks.
+
+# Provenance the drift anchor trusts (red-team C2, Global Constraint 2a): 'approved'
+# status alone is NOT human-confirmed in this store — a memory import or an AI
+# suggestion can reach 'approved'. Only a current revision sourced human/scan/bootstrap
+# counts as trustworthy enough to anchor an advisory.
+_DRIFT_TRUSTED_SOURCES = frozenset({"human", "scan", "bootstrap"})
+
+
+def _file_keywords(file_path: str) -> list[str]:
+    """BM25 query terms for a file path: extracted artifacts, plus path segments
+    (split on `/`, `.`, `_`, len>=3), plus derived topics."""
+    keywords = list(_extract_artifacts(file_path))
+    for seg in re.split(r"[/._]", file_path or ""):
+        seg = seg.lower()
+        if len(seg) >= 3:
+            keywords.append(seg)
+    keywords += _derive_topics(file_path)
+    return keywords
+
+
+def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | None,
+                                 decisions: list[dict] | None = None) -> list[dict]:
+    """Rank the store's APPROVED, trusted-provenance decisions most likely to be about
+    `file_path`, via the existing BM25 index (no second index — reuses `_bm25_rank` over
+    the sidecar `_read_retrieval_index` already builds). Returns up to `_DRIFT_MAX`
+    `{"id": <short 8-char id>, "content": ..., "topics": [...]}` dicts, highest-ranked
+    first. `None` index -> [].
+
+    The index carries no provenance (see `_build_retrieval_index`), so this filters in two
+    passes: rank + `status=="approved"` against the index, THEN resolve each surviving id
+    to its entry and gate on the current revision's `source` — a missing revision or a
+    revision without a `source` is excluded (fail closed), never assumed trustworthy.
+
+    `decisions`, when given, replaces the local-store lookup with this list of entries —
+    the same rank/gate logic runs over either source, so Layer 2 reuses this unchanged to
+    match team-shared conventions against an index built over its own decision list."""
+    if index is None:
+        return []
+    keywords = _file_keywords(file_path)
+    if not keywords:
+        return []
+    docs = index.get("docs", {})
+    ranked = _bm25_rank(keywords, index)
+    approved_ids = [did for did, _score, _hits in ranked
+                    if docs.get(did, {}).get("status") == "approved"]
+    if not approved_ids:
+        return []
+    if decisions is None:
+        data = _load(repo_path)
+        by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    else:
+        by_id = {e.get("id"): e for e in decisions}
+    out: list[dict] = []
+    for did in approved_ids:
+        entry = by_id.get(did)
+        if entry is None:
+            continue
+        rev = _current_revision(entry)
+        if not rev or rev.get("source") not in _DRIFT_TRUSTED_SOURCES:
+            continue
+        content = _current_content(entry)
+        out.append({"id": (entry.get("id") or "")[:8], "content": content,
+                    "topics": _derive_topics(content)})
+        if len(out) >= _DRIFT_MAX:
+            break
+    return out

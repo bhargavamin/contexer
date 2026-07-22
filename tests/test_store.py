@@ -4367,3 +4367,112 @@ class TestDocsForFile:
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text('"""doc"""\n', encoding="utf-8")
             assert store._docs_for_file(tmp_repo, rel) == []
+
+
+# ── Doc Drift Layer 1 — Task 1.3: approved-decision matcher ────────────────────
+# The decision side of the drift pairing (Task 1.5 pairs this against a Task 1.2 doc
+# excerpt from the same edited file). Nothing consumes this output yet.
+
+class TestApprovedDecisionsForFile:
+    def _seed_raw(self, tmp_repo, entries):
+        """entries: list of (content, subtype, created_by, status). Bypasses the novelty
+        filter (direct store append) so fixtures can share vocabulary freely. Returns
+        {content: entry_id}."""
+        with store._store_lock(store._slug(tmp_repo)):
+            data = store._load(tmp_repo)
+            ids = {}
+            for content, subtype, created_by, status in entries:
+                entry = store._new_decision_entry(
+                    content, RV1_SESSION, subtype, created_by=created_by, status=status)
+                data["entries"].append(entry)
+                ids[content] = entry["id"]
+            store._save(tmp_repo, data)
+        return ids
+
+    def test_approved_included_suggested_excluded(self, tmp_repo):
+        store.update_decision(tmp_repo, "hot counter uses Memcached, not Redis",
+                              RV1_SESSION, "architecture", created_by="human")
+        store.update_decision(tmp_repo, "Consider Redis for the hot counter cache",
+                              RV1_SESSION, "architecture")  # created_by="ai" -> suggested
+        idx = store._read_retrieval_index(tmp_repo)
+        result = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx)
+        contents = [r["content"] for r in result]
+        assert any("Memcached" in c for c in contents)
+        assert not any("Consider Redis" in c for c in contents)
+
+    def test_none_index_returns_empty(self, tmp_repo):
+        assert store._approved_decisions_for_file(tmp_repo, "cache/redis.py", None) == []
+
+    def test_provenance_memory_excluded(self, tmp_repo):
+        self._seed_raw(tmp_repo, [
+            ("Redis cache uses a five minute TTL for the hot counter", "architecture",
+             "memory", "approved"),
+        ])
+        idx = store._read_retrieval_index(tmp_repo)
+        assert store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx) == []
+
+    def test_provenance_ai_excluded(self, tmp_repo):
+        self._seed_raw(tmp_repo, [
+            ("Redis powers the hot counter cache layer end to end", "architecture",
+             "ai", "approved"),
+        ])
+        idx = store._read_retrieval_index(tmp_repo)
+        assert store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx) == []
+
+    def test_provenance_human_scan_bootstrap_included(self, tmp_repo):
+        ids = self._seed_raw(tmp_repo, [
+            ("Redis handles the hot counter cache, human-confirmed", "architecture",
+             "human", "approved"),
+            ("Redis handles the hot counter cache, per repo-wide scan evidence",
+             "architecture", "scan", "approved"),
+            ("Redis handles the hot counter cache, via bootstrap consolidation",
+             "architecture", "bootstrap", "approved"),
+        ])
+        idx = store._read_retrieval_index(tmp_repo)
+        result = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx)
+        returned_ids = {r["id"] for r in result}
+        assert len(result) == 3
+        for entry_id in ids.values():
+            assert entry_id[:8] in returned_ids
+
+    def test_capped_at_drift_max(self, tmp_repo):
+        entries = [
+            (f"Redis backs the hot counter shard number {i} for this repo", "architecture",
+             "human", "approved")
+            for i in range(5)
+        ]
+        self._seed_raw(tmp_repo, entries)
+        idx = store._read_retrieval_index(tmp_repo)
+        result = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx)
+        assert len(result) == store._DRIFT_MAX == 3
+
+    def test_missing_or_sourceless_revision_excluded(self, tmp_repo):
+        # Built via decisions= (not saved to disk) so _load's migration self-heal — which
+        # would legitimately reconstruct a missing revision from the entry-level cache —
+        # never gets a chance to run; this isolates the gate itself.
+        no_source = store._new_decision_entry(
+            "Redis backs the hot counter with no revision source recorded",
+            RV1_SESSION, "architecture", created_by="human", status="approved")
+        del no_source["revisions"][0]["source"]
+        no_revision = store._new_decision_entry(
+            "Redis backs the hot counter with an empty revisions list",
+            RV1_SESSION, "architecture", created_by="human", status="approved")
+        no_revision["revisions"] = []
+        no_revision["current_revision_id"] = None
+        idx = store._build_retrieval_index({"entries": [no_source, no_revision]})
+        result = store._approved_decisions_for_file(
+            tmp_repo, "cache/redis.py", idx, decisions=[no_source, no_revision])
+        assert result == []
+
+    def test_decisions_override_bypasses_local_store(self, tmp_repo):
+        # A decision stored locally must NOT leak into a decisions= override call.
+        store.update_decision(tmp_repo, "hot counter uses Memcached, not Redis",
+                              RV1_SESSION, "architecture", created_by="human")
+        override_entry = store._new_decision_entry(
+            "Redis backs the hot counter per an externally supplied team decision",
+            RV1_SESSION, "architecture", created_by="human", status="approved")
+        override_index = store._build_retrieval_index({"entries": [override_entry]})
+        result = store._approved_decisions_for_file(
+            tmp_repo, "cache/redis.py", override_index, decisions=[override_entry])
+        assert len(result) == 1
+        assert "externally supplied" in result[0]["content"]
