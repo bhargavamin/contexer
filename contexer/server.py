@@ -31,7 +31,7 @@ mcp = FastMCP("contexer", instructions=_INSTRUCTIONS)
 
 @mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
-                   created_by: str = "ai", replace_id: str = "") -> str:
+                   created_by: str = "ai", replace_id: str = "", title: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
@@ -45,6 +45,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 - a significant change (architecture/constraint) becomes a Suggested Update
                   attached to the live decision and returns an approval prompt - the current
                   revision stays trusted until the developer approves.
+    title: optional short one-line heading (imperative, <= 100 chars) shown when the decision
+           is listed/injected. Omit it and the store derives one from `content`.
 
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
     does not block your work — keep going. Surface it to the developer for approval at a natural
@@ -55,7 +57,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     if not resolved:
         return "Skipped — repo path not detected."
     stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
-                                             created_by=created_by, replace_id=replace_id)
+                                             created_by=created_by, replace_id=replace_id,
+                                             title=title)
     if not stored:
         return "Filtered — did not meet storage criteria."
     prompt = store.get_pending_approval_prompt(resolved, entry_id)
@@ -291,7 +294,7 @@ def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
 
 
 @mcp.tool()
-def update_global_context(content: str, subtype: str = "") -> str:
+def update_global_context(content: str, subtype: str = "", title: str = "") -> str:
     """Stores a cross-cutting rule in the global store — applies to ALL repos.
 
     Use this only for constraints or conventions that genuinely apply everywhere:
@@ -299,8 +302,9 @@ def update_global_context(content: str, subtype: str = "") -> str:
     Do NOT use for repo-specific decisions — use update_context instead.
 
     subtype: constraint | convention (defaults to convention if omitted)
+    title: optional short one-line heading; derived from content if omitted.
     """
-    stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype)
+    stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype, title=title)
     if stored:
         return f"Stored globally. id={entry_id}"
     return "Filtered — must be a novel constraint or convention (architecture/pattern are always repo-specific)."

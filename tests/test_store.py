@@ -4005,3 +4005,15 @@ class TestTitleBackfill:
         assert e["title"] == "Legacy decision body kept verbatim."
         assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
         assert reloaded.get("schema_version") == 3
+
+
+class TestServerTitleParam:
+    def test_update_context_forwards_title(self, tmp_repo, monkeypatch):
+        from contexer import server
+        seen = {}
+        def fake_update(repo, content, sid, subtype="", created_by="ai", replace_id="", title=""):
+            seen.update(title=title, content=content); return True, "id123"
+        monkeypatch.setattr(server.store, "update_decision", fake_update)
+        monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
+        server.update_context("body", subtype="architecture", title="My Title")
+        assert seen["title"] == "My Title"
