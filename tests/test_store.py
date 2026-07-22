@@ -3056,56 +3056,85 @@ class TestPendingReviewFlag:
 # ── edited-file signal sidecar (Doc Drift Layer 1, Task 1.1) ───────────────────
 
 class TestEditedFiles:
-    """record_edited_file appends to a per-repo sidecar (dedup: moves an already-recorded
-    path to the end; caps at the 50 most recent). _read_edited_files reads it back and, by
-    default, clears it — the next-prompt drift hook must see each edit exactly once."""
+    """record_edited_file appends to a per-repo, PER-SESSION sidecar (dedup: moves an
+    already-recorded path to the end; caps at the 50 most recent). _read_edited_files
+    reads it back and, by default, clears it — the next-prompt drift hook must see each
+    edit exactly once. Keyed per session_id (red-team H4): two windows on the same repo,
+    or Claude and Codex concurrently, must never steal or clear each other's edit list —
+    same idiom as the .ws_<slug>_<sid> working-set sidecar's sid=="" handling."""
 
     def test_record_then_read_returns_and_clears(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "src/a.py")
-        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
-        assert store._read_edited_files(tmp_repo) == []  # cleared by the prior read
+        store.record_edited_file(tmp_repo, "src/a.py", "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a") == ["src/a.py"]
+        assert store._read_edited_files(tmp_repo, "sess-a") == []  # cleared by the prior read
 
     def test_appends_multiple_oldest_to_newest(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py")
-        store.record_edited_file(tmp_repo, "b.py")
-        assert store._read_edited_files(tmp_repo) == ["a.py", "b.py"]
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        store.record_edited_file(tmp_repo, "b.py", "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a") == ["a.py", "b.py"]
 
     def test_dedupes_moves_existing_path_to_end(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py")
-        store.record_edited_file(tmp_repo, "b.py")
-        store.record_edited_file(tmp_repo, "a.py")
-        assert store._read_edited_files(tmp_repo) == ["b.py", "a.py"]
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        store.record_edited_file(tmp_repo, "b.py", "sess-a")
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a") == ["b.py", "a.py"]
 
     def test_caps_at_50_keeping_most_recent(self, tmp_repo):
         for i in range(55):
-            store.record_edited_file(tmp_repo, f"f{i}.py")
-        result = store._read_edited_files(tmp_repo, clear=False)
+            store.record_edited_file(tmp_repo, f"f{i}.py", "sess-a")
+        result = store._read_edited_files(tmp_repo, "sess-a", clear=False)
         assert len(result) == 50
         assert result[0] == "f5.py"     # oldest 5 dropped from the front
         assert result[-1] == "f54.py"   # newest kept at the end
 
     def test_read_without_clear_is_idempotent(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py")
-        assert store._read_edited_files(tmp_repo, clear=False) == ["a.py"]
-        assert store._read_edited_files(tmp_repo, clear=False) == ["a.py"]
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a", clear=False) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, "sess-a", clear=False) == ["a.py"]
 
     def test_corrupt_file_reads_as_empty(self, tmp_repo):
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        store._edited_files_path(tmp_repo).write_text("{not json", encoding="utf-8")
-        assert store._read_edited_files(tmp_repo) == []
+        store._edited_files_path(tmp_repo, "sess-a").write_text("{not json", encoding="utf-8")
+        assert store._read_edited_files(tmp_repo, "sess-a") == []
 
     def test_empty_file_path_is_silent_noop(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "")
-        assert not store._edited_files_path(tmp_repo).exists()
+        store.record_edited_file(tmp_repo, "", "sess-a")
+        assert not store._edited_files_path(tmp_repo, "sess-a").exists()
 
     def test_sidecar_written_mode_0600(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py")
-        mode = store._edited_files_path(tmp_repo).stat().st_mode & 0o777
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        mode = store._edited_files_path(tmp_repo, "sess-a").stat().st_mode & 0o777
         assert mode == 0o600
 
     def test_paths_stored_exactly_as_passed(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "../outside/weird path.py")
-        assert store._read_edited_files(tmp_repo) == ["../outside/weird path.py"]
+        store.record_edited_file(tmp_repo, "../outside/weird path.py", "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a") == ["../outside/weird path.py"]
+
+    # ── H4 red-team regression: per-session isolation ──────────────────────────
+    def test_different_sessions_do_not_see_each_others_entries(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        store.record_edited_file(tmp_repo, "b.py", "sess-b")
+        assert store._read_edited_files(tmp_repo, "sess-a", clear=False) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, "sess-b", clear=False) == ["b.py"]
+
+    def test_clearing_session_a_does_not_clear_session_b(self, tmp_repo):
+        # The actual H4 regression: a destructive read under one session must never
+        # steal/clear another session's edit list.
+        store.record_edited_file(tmp_repo, "a.py", "sess-a")
+        store.record_edited_file(tmp_repo, "b.py", "sess-b")
+        assert store._read_edited_files(tmp_repo, "sess-a", clear=True) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, "sess-a", clear=False) == []      # A cleared
+        assert store._read_edited_files(tmp_repo, "sess-b", clear=False) == ["b.py"]  # B untouched
+
+    def test_empty_session_id_writes_no_file_and_reads_empty(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "")
+        assert store._read_edited_files(tmp_repo, "") == []
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        assert not list(store.STORE_DIR.glob(".edited_*"))
+
+    def test_paths_stored_exactly_as_passed(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "../outside/weird path.py", "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a") == ["../outside/weird path.py"]
 
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────

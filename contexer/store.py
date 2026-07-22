@@ -1345,34 +1345,44 @@ def pending_review_nudge(repo_path: str) -> str | None:
 _EDITED_FILES_CAP = 50  # most recent edits kept; a drift check only cares about those
 
 
-def _edited_files_path(repo_path: str) -> Path:
-    """Per-repo sidecar recording files edited this turn, for a later UserPromptSubmit
-    hook to read (and normally clear) — Doc Drift Layer 1's edit signal."""
-    return STORE_DIR / f".edited_{_slug(repo_path)}.json"
+def _edited_files_path(repo_path: str, session_id: str) -> Path:
+    """Per-repo, PER-SESSION sidecar recording files edited this turn, for a later
+    UserPromptSubmit hook to read (and normally clear) — Doc Drift Layer 1's edit signal.
+    Keyed per session (red-team H4): a repo-only key made a destructive read a
+    single-claimant race — two Claude Code windows on the same repo, or Claude and Codex
+    concurrently, would steal and clear each other's edit list."""
+    return STORE_DIR / f".edited_{_slug(repo_path)}_{session_id[:32]}.json"
 
 
-def record_edited_file(repo_path: str, file_path: str) -> None:
-    """Append file_path to the per-repo edited-files sidecar. Dedup: a path already present
-    is moved to the end (most recent). Capped at the _EDITED_FILES_CAP most recent paths.
-    Silent no-op on a falsy file_path. Fail-soft: a write error must never break the caller."""
-    if not file_path:
+def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> None:
+    """Append file_path to this session's edited-files sidecar. Dedup: a path already
+    present is moved to the end (most recent). Capped at the _EDITED_FILES_CAP most recent
+    paths. Silent no-op on a falsy file_path OR an empty session_id (mirrors
+    working_set_ids/_ws_add: no session id means dedup/signal is off, no file is written).
+    Fail-soft: a write error must never break the caller."""
+    if not file_path or not session_id:
         return
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        files = _read_edited_files(repo_path, clear=False)
+        files = _read_edited_files(repo_path, session_id, clear=False)
         files = [f for f in files if f != file_path]
         files.append(file_path)
         files = files[-_EDITED_FILES_CAP:]
-        _atomic_write(_edited_files_path(repo_path), json.dumps(files))
+        _atomic_write(_edited_files_path(repo_path, session_id), json.dumps(files))
     except OSError:
         pass
 
 
-def _read_edited_files(repo_path: str, clear: bool = True) -> list[str]:
-    """Files recorded as edited this turn, oldest to newest. Fail-soft: a missing or
-    corrupt sidecar reads as []. clear=True (the default, used by the prompt-time hook)
-    deletes the sidecar after reading so a subsequent read in the same turn returns []."""
-    path = _edited_files_path(repo_path)
+def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True) -> list[str]:
+    """Files recorded as edited this turn by THIS session, oldest to newest. [] immediately
+    when session_id is empty (same rule as working_set_ids) — never touches another
+    session's sidecar. Fail-soft: a missing or corrupt sidecar reads as []. clear=True (the
+    default, used by the prompt-time hook) deletes only this session's sidecar after
+    reading, so a subsequent read by the same session in the same turn returns [] while
+    every other session's list is untouched."""
+    if not session_id:
+        return []
+    path = _edited_files_path(repo_path, session_id)
     try:
         files = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(files, list):
