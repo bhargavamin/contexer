@@ -1394,6 +1394,101 @@ def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True)
     return files
 
 
+# ── Doc Drift Layer 1: excerpt sanitization, trust framing, drift log ────────────
+# Red-team C1/M7: repo text is attacker-controlled in realistic cases (vendored deps, a
+# PR branch checked out for review, a cloned repo). The original plan piped raw doc/
+# docstring text into a block wearing a trusted `[Contexer: ...]` header — a README
+# section could close the delimiter and forge its own "Confirmed decision:" block,
+# hijacking the model. Nothing else in Layer 1 (or Layer 2, where the attacker is
+# remote via PR content) is safe to build until this sanitization layer exists.
+_DOC_EXCERPT_MAX = 800  # hard length cap on a sanitized excerpt, enforced LAST
+_DRIFT_LOG_CAP = 200    # drift-advisory log is tail-capped, same policy as retrieval log
+
+# Control chars (C0/C1, excluding \t \n \r — those are handled by the whitespace-collapse
+# step below, not stripped here) plus zero-width spaces/joiners and bidi override/isolate
+# codepoints. These are exactly the smuggling vectors a line could use to hide an
+# impersonating marker (e.g. a zero-width space inside "[Contexer") from the line filter,
+# so they must be stripped FIRST, before that filter ever runs.
+_DRIFT_HIDDEN_CODEPOINT_RANGES = (
+    (0x00, 0x09),      # C0 controls before tab
+    (0x0B, 0x0D),      # vertical tab, form feed (between tab and CR)
+    (0x0E, 0x20),      # C0 controls after CR, up to (not incl.) space
+    (0x7F, 0xA0),      # DEL + C1 controls
+    (0x200B, 0x2010),  # zero-width space/joiners, LRM/RLM
+    (0x202A, 0x202F),  # bidi embedding/override controls
+    (0x2060, 0x2065),  # word joiner + invisible math operators
+    (0xFEFF, 0xFF00),  # BOM / zero-width no-break space
+)
+_DRIFT_HIDDEN_CODEPOINTS_RE = re.compile(
+    "[" + "".join(f"{chr(lo)}-{chr(hi - 1)}" for lo, hi in _DRIFT_HIDDEN_CODEPOINT_RANGES) + "]"
+)
+# Substrings that could impersonate Contexer's own trusted output frame. Checked
+# case-insensitively against each line's stripped content; a match drops the WHOLE line
+# (safer than trying to escape just the matched part).
+_DRIFT_IMPERSONATION_MARKERS = ("[contexer", "confirmed decision", "in-repo (")
+# The delimiter fence a later task wraps excerpts in. Neutralized (not dropped — this
+# runs on the already-collapsed single-line text, not per source line) so a reassembled
+# excerpt can never contain a literal close-fence, even if the token was split across a
+# line boundary in the original source and so evaded the per-line marker filter above.
+_DRIFT_FENCE_RE = re.compile(r"</excerpt", re.IGNORECASE)
+
+
+def _sanitize_excerpt(text) -> str:
+    """Render a repo doc/docstring excerpt safe to embed inside Contexer's own trusted
+    output frame (Tasks 1.2/1.5 build the caller; nothing calls this yet). Line-oriented:
+    split into lines, drop any line that could impersonate Contexer's own output frame,
+    join survivors with single spaces. Dropping the whole line is deliberate and safer
+    than escaping parts of it.
+
+    Order matters and is fixed: strip hidden codepoints FIRST (so a zero-width/bidi
+    codepoint can't smuggle a marker past the line filter) -> drop impersonating lines
+    -> collapse whitespace (newlines/tabs/CR to single spaces, single-line result) ->
+    neutralize the fence token -> truncate to `_DOC_EXCERPT_MAX` LAST, so the length cap
+    always holds on the final output.
+
+    Idempotent: `_sanitize_excerpt(_sanitize_excerpt(x)) == _sanitize_excerpt(x)`.
+    Never raises: any input, including None/bytes/a non-str object, returns "" rather
+    than throwing — a hook must never break prompt submission.
+    """
+    try:
+        if not isinstance(text, str):
+            return ""
+        stripped = _DRIFT_HIDDEN_CODEPOINTS_RE.sub("", text)
+        kept_lines = []
+        for line in stripped.splitlines():
+            low = line.strip().lower()
+            if not low:
+                continue
+            if low.startswith("→"):  # a line starting with an arrow ("→")
+                continue
+            if any(marker in low for marker in _DRIFT_IMPERSONATION_MARKERS):
+                continue
+            kept_lines.append(line)
+        collapsed = " ".join(" ".join(kept_lines).split())
+        neutralized = _DRIFT_FENCE_RE.sub("[fence]", collapsed)
+        return neutralized[:_DOC_EXCERPT_MAX]
+    except Exception:
+        return ""
+
+
+def _drift_nonce() -> str:
+    """8 hex chars, unique per call. A per-block nonce so a forged excerpt can't predict
+    (and therefore spoof) the wrapper a later task uses around it."""
+    return uuid.uuid4().hex[:8]
+
+
+def _drift_log_path(repo_path: str) -> Path:
+    return STORE_DIR / f".drift_{_slug(repo_path)}.jsonl"
+
+
+def _log_drift(repo_path: str, event: dict) -> None:
+    """Append one JSON object to the drift-advisory log, tail-capped at `_DRIFT_LOG_CAP`
+    lines. Mirrors (and reuses, via `_append_jsonl_capped`) the existing
+    `.retrieval_<slug>.jsonl` tail-cap code path rather than a second implementation.
+    Fail-soft: a corrupt or unwritable log is a silent no-op, never raised."""
+    _append_jsonl_capped(_drift_log_path(repo_path), event, _DRIFT_LOG_CAP)
+
+
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
                     created_by: str = "ai", replace_id: str = "") -> tuple[bool, str | None]:
     content = _normalize_content(content)
@@ -2876,20 +2971,27 @@ def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
         pass
 
 
-def _retrieval_log(repo_path: str, event: dict) -> None:
-    """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
-    path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
+def _append_jsonl_capped(path: Path, event: dict, cap: int) -> None:
+    """Append one JSON line to `path`, tail-capped at `cap` lines. Fail-soft: any I/O
+    error is a silent no-op, never raised. The one tail-capped-append code path shared
+    by `_retrieval_log` and Doc Drift's `_log_drift` — reused, not reimplemented."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         lines: list[str] = []
         if path.exists():
             lines = path.read_text(encoding="utf-8").splitlines()
         lines.append(json.dumps(event))
-        if len(lines) > _RETRIEVAL_LOG_CAP:
-            lines = lines[-_RETRIEVAL_LOG_CAP:]
+        if len(lines) > cap:
+            lines = lines[-cap:]
         _atomic_write(path, "\n".join(lines) + "\n")
     except OSError:
         pass
+
+
+def _retrieval_log(repo_path: str, event: dict) -> None:
+    """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
+    path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
+    _append_jsonl_capped(path, event, _RETRIEVAL_LOG_CAP)
 
 
 # ── Retrieval V1 Part B: session-start integration (standing map, compact rehydration,
