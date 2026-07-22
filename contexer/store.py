@@ -1137,7 +1137,8 @@ def _append_revision(entry: dict, content: str, source: str,
                      approved_at: str | None = None, title: str = "") -> dict:
     """Create the next revision for a decision, make it current, and resync the cache.
     Confidence is computed from the decision's aggregate evidence at this moment and
-    snapshotted onto the revision. Returns the new revision."""
+    snapshotted onto the revision. `title` wins when given; otherwise it is re-derived
+    from `content` via `_normalize_title`/`_derive_title`. Returns the new revision."""
     revs = entry.setdefault("revisions", [])
     next_version = (revs[-1]["version_number"] + 1) if revs else 1
     score, factors = _compute_confidence(entry)
@@ -1273,7 +1274,7 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 
 
 def _build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
-                    source: str = "ai") -> dict:
+                    source: str = "ai", title: str = "") -> dict:
     """A Suggested Update (pending revision) attached to a live decision: the detected new
     value, its confidence/evidence, and provenance. The live decision is NOT modified - this
     proposal waits for developer approval, at which point it is promoted to a new revision."""
@@ -1284,8 +1285,9 @@ def _build_proposal(target: dict, content: str, subtype: str, session_id: str, n
         "session_ids": sessions,
         "memory_key": target.get("memory_key"),
     })
-    return {
-        "content": _normalize_content(content),
+    normalized_content = _normalize_content(content)
+    proposal = {
+        "content": normalized_content,
         "subtype": subtype or target.get("subtype", ""),
         "session_id": session_id,
         "source": source,
@@ -1293,12 +1295,17 @@ def _build_proposal(target: dict, content: str, subtype: str, session_id: str, n
         "confidence": score,
         "confidence_factors": factors,
     }
+    proposal["title"] = _normalize_title(title) or _derive_title(normalized_content)
+    return proposal
 
 
 def _promote_proposal(entry: dict, content: str | None = None) -> None:
     """Approve a pending proposed_revision: append it as a new immutable revision and move
     current_revision_id forward. Prior revisions are preserved (never overwritten). `content`
-    (an edited value) overrides the proposal's content when given."""
+    (an edited value) overrides the proposal's content when given. The proposal's title carries
+    forward only when the promoted content matches the proposal's content unchanged; if an
+    edit at approval time changed the content, the title is dropped so _append_revision
+    re-derives it from the final content instead of carrying a stale one."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1310,9 +1317,12 @@ def _promote_proposal(entry: dict, content: str | None = None) -> None:
         sessions.add(prop_session)
         entry["session_ids"] = sorted(sessions)
         entry["occurrence_count"] = entry.get("occurrence_count", 1) + 1
-    new_content = content if content else prop.get("content", _current_content(entry))
+    prop_content = prop.get("content", _current_content(entry))
+    new_content = content if content else prop_content
     now = datetime.now(timezone.utc).isoformat()
-    _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now)
+    carried_title = prop.get("title", "") if new_content == prop_content else ""
+    _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now,
+                     title=carried_title)
     entry.pop("proposed_revision", None)
 
 
@@ -1399,7 +1409,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     if existing_prop and existing_prop.get("content", "") == content:
                         return True, target["id"]
                     target["proposed_revision"] = _build_proposal(
-                        target, content, subtype, session_id, now)
+                        target, content, subtype, session_id, now, title=title)
                     _save(repo_path, data)
                     _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"]

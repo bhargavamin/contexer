@@ -3933,3 +3933,55 @@ class TestTitleRevision:
                               created_by="human", replace_id=eid[:8], title="Explicit new title")
         d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
         assert d["title"] == "Explicit new title"
+
+    def test_gated_proposal_carries_title_through_approval(self, tmp_repo):
+        # An AI-authored change to an architecture/constraint decision routes through the
+        # approval gate (Suggested Update) instead of revising immediately - the title must
+        # survive capture -> proposal -> promoted revision.
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        eid = entry["id"]
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+
+        # default created_by="ai" -> significant change on an architecture decision is gated.
+        ok, rid = store.update_decision(
+            tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+            subtype="architecture", replace_id=eid, title="Gated new title")
+        assert ok is True and rid == eid
+
+        gated = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        # still gated: live revision untouched, but the pending proposal carries the title.
+        assert gated["revision"] == 1
+        assert gated["proposed_revision"]["title"] == "Gated new title"
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok is True
+        promoted = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert promoted["revision"] == 2
+        assert promoted["title"] == "Gated new title"
+        assert store._current_revision(promoted)["title"] == "Gated new title"
+
+    def test_gated_proposal_title_rederived_when_edited_at_approval(self, tmp_repo):
+        # If the lead edits the content while approving a Suggested Update, the proposal's
+        # title (derived for the ORIGINAL proposed content) must not be carried onto the
+        # edited content - it should re-derive instead of going stale.
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        eid = entry["id"]
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+
+        store.update_decision(
+            tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+            subtype="architecture", replace_id=eid, title="Gated new title")
+
+        ok, _msg = store.approve_decision(
+            tmp_repo, eid, "edit", content="Rollback endpoint is /api/v3/rollback with retries")
+        assert ok is True
+        promoted = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert promoted["revision"] == 2
+        assert promoted["title"] == "Rollback endpoint is /api/v3/rollback with retries"
+        assert promoted["title"] != "Gated new title"
