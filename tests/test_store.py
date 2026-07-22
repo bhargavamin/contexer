@@ -4026,3 +4026,17 @@ class TestServerTitleParam:
         monkeypatch.setattr(server.store, "update_global_decision", fake_update_global)
         server.update_global_context("body", subtype="constraint", title="My Global Title")
         assert seen["title"] == "My Global Title"
+
+
+class TestTitleDisplay:
+    def test_get_context_leads_with_title(self, tmp_repo):
+        long_body = ("Adopt the outbox pattern for share retries. " + "detail " * 30)
+        store.update_decision(tmp_repo, long_body, "s1", subtype="architecture",
+                              title="Adopt outbox for share retries")
+        out = store.get_context(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if "Adopt outbox for share retries" in l)
+        # title on the bullet line; full body on the following indented line
+        idx = lines.index(head)
+        assert lines[idx].lstrip().startswith("- [")
+        assert lines[idx + 1].startswith("    ") and "outbox pattern" in lines[idx + 1]

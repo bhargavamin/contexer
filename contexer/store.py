@@ -282,7 +282,9 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
         lines.append(f"## Global decisions{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
+            title = d.get("title") or _derive_title(d.get("content", ""))
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {title}")
+            lines.append(f"    {d['content']}")
     elif is_filtered:
         lines.append("No matching global decisions found.")
 
@@ -408,8 +410,7 @@ def _near_misses(content: str, existing: list) -> list[str]:
     scored.sort(key=lambda t: t[0], reverse=True)
     out = []
     for _ratio, e in scored[:_NEAR_MISS_CAP]:
-        text = _current_content(e)
-        preview = text[:80] + ("..." if len(text) > 80 else "")
+        preview = e.get("title") or _derive_title(_current_content(e))
         out.append(f'{(e.get("id") or "")[:8]} "{preview}"')
     return out
 
@@ -3244,7 +3245,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {d['content']}{id_tag}")
+            title = d.get("title") or _derive_title(_current_content(d))
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
+            lines.append(f"    {_current_content(d)}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
