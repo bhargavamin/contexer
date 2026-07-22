@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import hashlib
 import json
@@ -4086,3 +4087,106 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
                 _touch_pending_review(repo_path)  # medium-tier items await review (after save)
 
     return {**result, "stored": stored, "pending": pending, "skipped": skipped}
+
+
+# ── Doc Drift Layer 1 — Task 1.2: in-repo doc extractor (edited file only) ────────
+# Scope cut (task-1.2-brief.md, 2026-07-22): v1 pulls doc-ish text ONLY from the file the
+# developer just edited — its module docstring, its class/function docstrings, or (when
+# the file doesn't parse as Python) a leading comment block. The walk-up README search
+# and docs/adr scan are deferred to v1.1. Nothing consumes this output yet (Task 1.5 does).
+_DRIFT_READ_MAX = 65536  # cap on bytes read from a candidate file; larger files are read
+                          # truncated, never whole — bounds worst-case read cost/memory.
+_LEADING_COMMENT_MAX_LINES = 20
+
+
+def _leading_comment_block(text: str, rel_path: str) -> list[dict]:
+    """Fallback extractor: the contiguous run of leading `#` comment lines within the
+    first `_LEADING_COMMENT_MAX_LINES` lines of the file. Stops at the first blank/code
+    line once the block has started; leading blank lines before the block are skipped."""
+    block_lines: list[str] = []
+    start_line = None
+    for i, raw_line in enumerate(text.splitlines()[:_LEADING_COMMENT_MAX_LINES], start=1):
+        stripped = raw_line.strip()
+        if stripped.startswith("#"):
+            if start_line is None:
+                start_line = i
+            block_lines.append(stripped.lstrip("#").strip())
+        elif start_line is None:
+            continue  # skip blank/non-comment lines before the block starts
+        else:
+            break  # first non-comment line ends the block
+    if start_line is None:
+        return []
+    excerpt = " ".join(line for line in block_lines if line)
+    if not excerpt:
+        return []
+    return [{"source_ref": f"{rel_path}:{start_line}", "excerpt": excerpt}]
+
+
+def _extract_doc_excerpts(text: str, rel_path: str) -> list[dict]:
+    """Parse `text` as Python and pull the module docstring plus every ClassDef/
+    FunctionDef docstring. A SyntaxError (or anything else going wrong) degrades to the
+    leading-comment-block fallback, never raises. `source_ref` lineno points at the
+    docstring literal itself (the def's first body statement), not the def line."""
+    try:
+        tree = ast.parse(text)
+    except Exception:
+        return _leading_comment_block(text, rel_path)
+    excerpts: list[dict] = []
+    if tree.body and ast.get_docstring(tree):
+        excerpts.append({"source_ref": f"{rel_path}:{tree.body[0].lineno}",
+                          "excerpt": ast.get_docstring(tree)})
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+            doc = ast.get_docstring(node)
+            if doc and node.body:
+                excerpts.append({"source_ref": f"{rel_path}:{node.body[0].lineno}",
+                                  "excerpt": doc})
+    if not excerpts:
+        return _leading_comment_block(text, rel_path)
+    return excerpts
+
+
+def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
+    """Extract doc-ish excerpts from ONE file — the file the developer just edited.
+    Returns `[{"source_ref": "<repo-relative-path>:<lineno>", "excerpt": ...}]`.
+
+    Every excerpt AND source_ref is passed through `_sanitize_excerpt` before it leaves
+    this function — the file's text is attacker-controlled in realistic cases (vendored
+    deps, a PR branch checked out for review, a cloned repo), and this is the security
+    boundary that stops a forged `[Contexer: ...]` block from ever reaching a caller.
+
+    Guard order (fixed, not a suggestion): (1) skip `.git`/any dot-dir/`miner._SKIP_DIRS`
+    -> (2) realpath containment under `repo_path` (blocks symlink escape) -> (3) read at
+    most `_DRIFT_READ_MAX` bytes -> (4) sanitize every excerpt and source_ref.
+    Never raises — a hook depends on this; any failure degrades to []."""
+    try:
+        if not rel_path:
+            return []
+        from contexer import miner  # function-level: mirrors bootstrap_apply's
+                                     # cycle-avoidance style used elsewhere in this file.
+        parts = Path(rel_path).parts
+        if any(part == ".git" or part.startswith(".") or part in miner._SKIP_DIRS
+               for part in parts):
+            return []
+        candidate = os.path.join(repo_path, rel_path)
+        real_repo = os.path.realpath(repo_path)
+        real_candidate = os.path.realpath(candidate)
+        if not real_candidate.startswith(real_repo + os.sep):
+            return []
+        try:
+            with open(real_candidate, "rb") as f:
+                raw = f.read(_DRIFT_READ_MAX)
+        except OSError:
+            return []
+        text = raw.decode("utf-8", errors="replace")
+        found = _extract_doc_excerpts(text, rel_path)
+        out = []
+        for item in found:
+            excerpt = _sanitize_excerpt(item["excerpt"])
+            source_ref = _sanitize_excerpt(item["source_ref"])
+            if excerpt and source_ref:
+                out.append({"source_ref": source_ref, "excerpt": excerpt})
+        return out
+    except Exception:
+        return []
