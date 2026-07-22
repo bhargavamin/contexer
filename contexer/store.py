@@ -220,7 +220,7 @@ def _save_global(data: dict) -> None:
     _atomic_write(_global_path(), json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def update_global_decision(content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+def update_global_decision(content: str, session_id: str, subtype: str = "", title: str = "") -> tuple[bool, str | None]:
     """Store a cross-cutting decision in the global store.
     Only constraint and convention subtypes are accepted — architecture and pattern
     decisions are always repo-specific.
@@ -240,7 +240,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
             _record_recurrence(match, session_id)
             _save_global(data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype, status="approved")
+        entry = _new_decision_entry(content, session_id, subtype, status="approved", title=title)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save_global(data)
@@ -1134,17 +1134,18 @@ def _sync_decision_cache(entry: dict) -> None:
 
 
 def _append_revision(entry: dict, content: str, source: str,
-                     approved_at: str | None = None) -> dict:
+                     approved_at: str | None = None, title: str = "") -> dict:
     """Create the next revision for a decision, make it current, and resync the cache.
     Confidence is computed from the decision's aggregate evidence at this moment and
     snapshotted onto the revision. Returns the new revision."""
     revs = entry.setdefault("revisions", [])
     next_version = (revs[-1]["version_number"] + 1) if revs else 1
     score, factors = _compute_confidence(entry)
+    effective_title = _normalize_title(title) or _derive_title(content)
     rev = _new_revision(
         entry.get("id", ""), next_version, content,
         source=source, confidence_score=score, evidence=factors,
-        approved_at=approved_at,
+        approved_at=approved_at, title=effective_title,
     )
     revs.append(rev)
     entry["current_revision_id"] = rev["revision_id"]
@@ -1357,7 +1358,7 @@ def pending_review_nudge(repo_path: str) -> str | None:
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
-                    created_by: str = "ai", replace_id: str = "") -> tuple[bool, str | None]:
+                    created_by: str = "ai", replace_id: str = "", title: str = "") -> tuple[bool, str | None]:
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -1407,7 +1408,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # prior revision stays in revisions[]; current_revision_id moves forward.
                 if subtype:
                     target["subtype"] = subtype
-                _append_revision(target, content, source=created_by, approved_at=now)
+                _append_revision(target, content, source=created_by, approved_at=now, title=title)
                 _save(repo_path, data)
                 return True, target["id"]
             # replace_id not found — fall through to normal storage
@@ -1419,7 +1420,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             _record_recurrence(match, session_id)
             _save(repo_path, data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by)
+        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)

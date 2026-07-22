@@ -3912,3 +3912,24 @@ class TestTitleOnEntry:
         store._current_revision(e)["title"] = "T2"
         store._sync_decision_cache(e)
         assert e["title"] == "T2"
+
+
+# ── Title through update paths (Task 3) ───────────────────────────────────────
+
+class TestTitleRevision:
+    def test_revision_rederives_title_when_omitted(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Original short body.", "s1",
+                                       subtype="architecture", created_by="human", title="Original title")
+        # revise with new content, no title -> re-derive from new content
+        store.update_decision(tmp_repo, "Brand new short body.", "s1",
+                              subtype="architecture", created_by="human", replace_id=eid[:8])
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Brand new short body."   # re-derived, not carried forward
+        assert d["revision"] == 2
+
+    def test_revision_uses_authored_title(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Body one.", "s1", subtype="architecture", created_by="human")
+        store.update_decision(tmp_repo, "Body two.", "s1", subtype="architecture",
+                              created_by="human", replace_id=eid[:8], title="Explicit new title")
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Explicit new title"
