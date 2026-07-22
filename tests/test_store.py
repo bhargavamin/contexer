@@ -4017,3 +4017,12 @@ class TestServerTitleParam:
         monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
         server.update_context("body", subtype="architecture", title="My Title")
         assert seen["title"] == "My Title"
+
+    def test_update_global_context_forwards_title(self, monkeypatch):
+        from contexer import server
+        seen = {}
+        def fake_update_global(content, sid, subtype="", title=""):
+            seen.update(title=title, content=content); return True, "id456"
+        monkeypatch.setattr(server.store, "update_global_decision", fake_update_global)
+        server.update_global_context("body", subtype="constraint", title="My Global Title")
+        assert seen["title"] == "My Global Title"

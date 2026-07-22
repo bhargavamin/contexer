@@ -17,8 +17,11 @@ _INSTRUCTIONS = (
     "CAPTURE - call update_context whenever you make, or the user states, a significant decision: a "
     "technology or approach chosen over alternatives (subtype=architecture), a naming/structure "
     "convention (pattern/convention), a rule like 'always X'/'never Y' (constraint), or anything that "
-    "would surprise a future session. Pass the full reasoning, not just the conclusion. The server "
-    "silently filters duplicates, so err on the side of calling it.\n"
+    "would surprise a future session. Pass the full reasoning, not just the conclusion, and always "
+    "pass a concise, one-line, imperative title (<= 100 chars) summarizing the decision — e.g. 'Use "
+    "Postgres for decision store' — omit it only if you truly can't summarize better than the store's "
+    "own derivation from content. The server silently filters duplicates, so err on the side of "
+    "calling it.\n"
     "MATURITY - store observations and settled or user-ratified decisions freely, but keep your OWN "
     "not-yet-approved proposals provisional (created_by=ai records them as 'suggested', not "
     "authoritative) instead of writing them as fact. A decision from an approved-but-unimplemented "
@@ -45,8 +48,10 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 - a significant change (architecture/constraint) becomes a Suggested Update
                   attached to the live decision and returns an approval prompt - the current
                   revision stays trusted until the developer approves.
-    title: optional short one-line heading (imperative, <= 100 chars) shown when the decision
-           is listed/injected. Omit it and the store derives one from `content`.
+    title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the decision,
+           shown when it's listed/injected — e.g. 'Use Postgres for decision store'. Only omit it
+           when you can't summarize better than the content itself; the store then derives one
+           from `content`.
 
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
     does not block your work — keep going. Surface it to the developer for approval at a natural
@@ -302,7 +307,9 @@ def update_global_context(content: str, subtype: str = "", title: str = "") -> s
     Do NOT use for repo-specific decisions — use update_context instead.
 
     subtype: constraint | convention (defaults to convention if omitted)
-    title: optional short one-line heading; derived from content if omitted.
+    title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the rule.
+           Only omit it when you can't summarize better than the content itself; the store
+           then derives one from `content`.
     """
     stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype, title=title)
     if stored:
