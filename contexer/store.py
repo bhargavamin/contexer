@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1416,24 +1417,30 @@ def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True)
 _DOC_EXCERPT_MAX = 800  # hard length cap on a sanitized excerpt, enforced LAST
 _DRIFT_LOG_CAP = 200    # drift-advisory log is tail-capped, same policy as retrieval log
 
-# Control chars (C0/C1, excluding \t \n \r — those are handled by the whitespace-collapse
-# step below, not stripped here) plus zero-width spaces/joiners and bidi override/isolate
-# codepoints. These are exactly the smuggling vectors a line could use to hide an
-# impersonating marker (e.g. a zero-width space inside "[Contexer") from the line filter,
-# so they must be stripped FIRST, before that filter ever runs.
-_DRIFT_HIDDEN_CODEPOINT_RANGES = (
-    (0x00, 0x09),      # C0 controls before tab
-    (0x0B, 0x0D),      # vertical tab, form feed (between tab and CR)
-    (0x0E, 0x20),      # C0 controls after CR, up to (not incl.) space
-    (0x7F, 0xA0),      # DEL + C1 controls
-    (0x200B, 0x2010),  # zero-width space/joiners, LRM/RLM
-    (0x202A, 0x202F),  # bidi embedding/override controls
-    (0x2060, 0x2065),  # word joiner + invisible math operators
-    (0xFEFF, 0xFF00),  # BOM / zero-width no-break space
-)
-_DRIFT_HIDDEN_CODEPOINTS_RE = re.compile(
-    "[" + "".join(f"{chr(lo)}-{chr(hi - 1)}" for lo, hi in _DRIFT_HIDDEN_CODEPOINT_RANGES) + "]"
-)
+# Hidden-codepoint stripping is a CATEGORY test, not a hand-picked codepoint table. A
+# reviewer-confirmed bypass showed why: the original table enumerated bidi OVERRIDE
+# codepoints (0x202A-0x202E) but omitted bidi ISOLATE codepoints (U+2066-U+2069,
+# LRI/RLI/FSI/PDI) — both render zero-width in essentially every terminal, so missing
+# either lets an attacker's docstring smuggle an invisible codepoint inside "[Contexer"
+# and defeat the line filter below, which only sees the (now-broken) literal substring.
+# Unicode category Cf ("format control") covers every zero-width/bidi-override/bidi-
+# isolate/BOM formatter by construction — present and future — so a category test cannot
+# have the same enumeration blind spot a hand-picked table did. Cc (C0/C1 controls) is
+# stripped too, except \n \r \t, which the whitespace-collapse step below handles instead
+# (deleting them here would silently change existing behavior for ordinary multi-line
+# text). These must be stripped FIRST, before the line filter ever runs.
+_DRIFT_PRESERVED_CONTROL_CHARS = ("\n", "\r", "\t")
+
+
+def _strip_hidden_codepoints(text: str) -> str:
+    """Strip every Cf (format-control) and Cc (C0/C1 control) codepoint from `text`,
+    except \\n/\\r/\\t. Pure, never raises on a str input."""
+    return "".join(
+        ch for ch in text
+        if ch in _DRIFT_PRESERVED_CONTROL_CHARS or unicodedata.category(ch) not in ("Cf", "Cc")
+    )
+
+
 # Substrings that could impersonate Contexer's own trusted output frame. Checked
 # case-insensitively against each line's stripped content; a match drops the WHOLE line
 # (safer than trying to escape just the matched part).
@@ -1471,7 +1478,7 @@ def _sanitize_excerpt(text) -> str:
     try:
         if not isinstance(text, str):
             return ""
-        stripped = _DRIFT_HIDDEN_CODEPOINTS_RE.sub("", text)
+        stripped = _strip_hidden_codepoints(text)
         kept_lines = []
         for line in stripped.splitlines():
             low = line.strip().lower()
@@ -2997,18 +3004,21 @@ def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
 
 def _append_jsonl_capped(path: Path, event: dict, cap: int) -> None:
     """Append one JSON line to `path`, tail-capped at `cap` lines. Fail-soft: any I/O
-    error is a silent no-op, never raised. The one tail-capped-append code path shared
+    error, or a non-JSON-serializable value in `event` (json.dumps raises TypeError/
+    ValueError, not OSError), is a silent no-op — never raised. `default=str` degrades a
+    stray non-serializable value to its string form so one bad field loses only that
+    field's fidelity, not the whole log line. The one tail-capped-append code path shared
     by `_retrieval_log` and Doc Drift's `_log_drift` — reused, not reimplemented."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         lines: list[str] = []
         if path.exists():
             lines = path.read_text(encoding="utf-8").splitlines()
-        lines.append(json.dumps(event))
+        lines.append(json.dumps(event, default=str))
         if len(lines) > cap:
             lines = lines[-cap:]
         _atomic_write(path, "\n".join(lines) + "\n")
-    except OSError:
+    except (OSError, TypeError, ValueError):
         pass
 
 
