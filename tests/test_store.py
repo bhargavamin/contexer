@@ -3891,3 +3891,24 @@ class TestTitleHelpers:
 
     def test_derive_empty(self):
         assert store._derive_title("") == ""
+
+
+# ── Title on entry + first revision (Task 2) ───────────────────────────────────
+
+class TestTitleOnEntry:
+    def test_authored_title_wins(self):
+        e = store._new_decision_entry("some long body " * 10, "s1", "architecture",
+                                       title="Short authored title")
+        assert e["title"] == "Short authored title"
+        assert store._current_revision(e)["title"] == "Short authored title"
+
+    def test_derived_when_omitted(self):
+        e = store._new_decision_entry("Use Postgres for the queue.", "s1", "architecture")
+        assert e["title"] == "Use Postgres for the queue."  # short -> verbatim
+        assert store._current_revision(e)["title"] == "Use Postgres for the queue."
+
+    def test_sync_cache_mirrors_revision_title(self):
+        e = store._new_decision_entry("Body.", "s1", "architecture", title="T1")
+        store._current_revision(e)["title"] = "T2"
+        store._sync_decision_cache(e)
+        assert e["title"] == "T2"

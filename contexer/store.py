@@ -1075,7 +1075,7 @@ def _normalize_content(content: str) -> str:
 def _new_revision(decision_id: str, version_number: int, content: str, source: str,
                   confidence_score: int = 0, evidence: list | None = None,
                   approved_at: str | None = None, created_at: str | None = None,
-                  normalize: bool = True) -> dict:
+                  normalize: bool = True, title: str = "") -> dict:
     """Build one immutable revision object. `source` is the provenance
     (ai | human | scan | bootstrap | memory) and maps to the upstream push contract.
 
@@ -1087,6 +1087,7 @@ def _new_revision(decision_id: str, version_number: int, content: str, source: s
         "decision_id": decision_id,
         "version_number": version_number,
         "content": _normalize_content(content) if normalize else content,
+        "title": title,
         "confidence_score": confidence_score,
         "evidence": list(evidence or []),
         "created_at": created_at or now,
@@ -1122,6 +1123,7 @@ def _sync_decision_cache(entry: dict) -> None:
     if rev is None:
         return
     entry["content"] = rev.get("content", "")
+    entry["title"] = rev.get("title") or _derive_title(rev.get("content", ""))
     entry["revision"] = rev.get("version_number", 1)
     entry["confidence"] = rev.get("confidence_score", entry.get("confidence", 0))
     evidence = rev.get("evidence") or []
@@ -1227,10 +1229,12 @@ def _migrate_entries(data: dict) -> None:
 def _new_decision_entry(content: str, session_id: str, subtype: str,
                         memory_key: str | None = None,
                         created_by: str = "ai",
-                        status: str = "") -> dict:
+                        status: str = "",
+                        title: str = "") -> dict:
     """Build a decision entry with its first revision. Single source of truth for the
     entry schema - both manual capture (`update_decision`) and memory import use this."""
     content = _normalize_content(content)
+    effective_title = _normalize_title(title) or _derive_title(content)
     if not status:
         level = _classify_level(content, subtype, created_by)
         status = _level_to_status(level)
@@ -1241,6 +1245,7 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
         "type": "decision",
         "subtype": subtype,
         "content": content,         # HEAD-cache of the current revision (see _sync_decision_cache)
+        "title": effective_title,   # HEAD-cache of the current revision title
         "session_id": session_id,
         "session_ids": [session_id],
         "timestamp": now,           # Created At - immutable
@@ -1258,7 +1263,8 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
     score, factors = _compute_confidence(entry)
     rev = _new_revision(decision_id, 1, content, source=created_by,
                         confidence_score=score, evidence=factors,
-                        approved_at=approved_at, created_at=now)
+                        approved_at=approved_at, created_at=now,
+                        title=effective_title)
     entry["revisions"] = [rev]
     entry["current_revision_id"] = rev["revision_id"]
     _sync_decision_cache(entry)
