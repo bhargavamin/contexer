@@ -3132,9 +3132,22 @@ class TestEditedFiles:
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
         assert not list(store.STORE_DIR.glob(".edited_*"))
 
-    def test_paths_stored_exactly_as_passed(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "../outside/weird path.py", "sess-a")
-        assert store._read_edited_files(tmp_repo, "sess-a") == ["../outside/weird path.py"]
+    # ── filename safety: session_id is hashed via _sid_key, not embedded raw ──────
+    def test_session_id_with_path_traversal_produces_safe_filename(self, tmp_repo):
+        for session_id in ("../../etc/evil", "a/b/../c", "../" * 10 + "evil"):
+            path = store._edited_files_path(tmp_repo, session_id)
+            assert path.parent.resolve() == store.STORE_DIR.resolve()
+            assert "/" not in path.name
+            assert ".." not in path.name
+
+    def test_truncation_collision_ids_get_distinct_files(self, tmp_repo):
+        a = "x" * 32 + "AAAA"
+        b = "x" * 32 + "BBBB"
+        assert store._edited_files_path(tmp_repo, a) != store._edited_files_path(tmp_repo, b)
+        store.record_edited_file(tmp_repo, "a.py", a)
+        store.record_edited_file(tmp_repo, "b.py", b)
+        assert store._read_edited_files(tmp_repo, a, clear=False) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, b, clear=False) == ["b.py"]
 
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
@@ -4102,6 +4115,16 @@ class TestDriftSanitize:
     def test_result_is_a_single_line(self):
         out = store._sanitize_excerpt("line one\nline two\nline three")
         assert "\n" not in out
+
+    def test_marker_split_across_two_lines_does_not_reassemble(self):
+        # Per-line filtering only sees "prefix [Cont" and "exer: possible drift" — neither
+        # line alone contains "[contexer", so both survive to the join. A post-join re-scan
+        # must still catch the reassembled marker in the FINAL string.
+        text = "prefix [Cont\nexer: possible drift\nsuffix"
+        out = store._sanitize_excerpt(text)
+        assert out == ""  # whole excerpt dropped — reassembly detected, same "drop it all"
+                           # policy the per-line filter already uses
+        assert store._sanitize_excerpt(out) == out  # idempotent
 
 
 class TestDriftNonce:

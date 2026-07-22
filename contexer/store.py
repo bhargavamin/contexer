@@ -113,6 +113,15 @@ def _slug(repo_path: str) -> str:
     return f"{_legacy_slug(repo_path)}-{digest}"
 
 
+def _sid_key(session_id: str) -> str:
+    # Hash the session id before embedding it in a filename: filename-safe for any
+    # host-supplied id (no path escape via "/" or "..") and collision-free where a plain
+    # truncation wasn't (two ids sharing a long prefix must not collide). Shared by every
+    # per-session sidecar path (`_ws_path`, `_edited_files_path`) rather than each
+    # reimplementing the same hash-and-truncate.
+    return hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _store_path(repo_path: str) -> Path:
     STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     path = STORE_DIR / f"{_slug(repo_path)}.json"
@@ -1350,8 +1359,10 @@ def _edited_files_path(repo_path: str, session_id: str) -> Path:
     UserPromptSubmit hook to read (and normally clear) — Doc Drift Layer 1's edit signal.
     Keyed per session (red-team H4): a repo-only key made a destructive read a
     single-claimant race — two Claude Code windows on the same repo, or Claude and Codex
-    concurrently, would steal and clear each other's edit list."""
-    return STORE_DIR / f".edited_{_slug(repo_path)}_{session_id[:32]}.json"
+    concurrently, would steal and clear each other's edit list. The session id is hashed
+    via `_sid_key` (not embedded raw) — same filename-safety/collision idiom as
+    `_ws_path`."""
+    return STORE_DIR / f".edited_{_slug(repo_path)}_{_sid_key(session_id)}.json"
 
 
 def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> None:
@@ -1443,8 +1454,14 @@ def _sanitize_excerpt(text) -> str:
     Order matters and is fixed: strip hidden codepoints FIRST (so a zero-width/bidi
     codepoint can't smuggle a marker past the line filter) -> drop impersonating lines
     -> collapse whitespace (newlines/tabs/CR to single spaces, single-line result) ->
-    neutralize the fence token -> truncate to `_DOC_EXCERPT_MAX` LAST, so the length cap
-    always holds on the final output.
+    neutralize the fence token -> re-scan the FINAL joined text for a marker that only
+    reassembled once its two halves were joined by the collapse step (e.g. a line ending
+    "...[Cont" + a line starting "exer: ..." -> "...[Cont exer: ..."; checked whitespace-
+    insensitively so the join's own inserted space can't hide it) -> truncate to
+    `_DOC_EXCERPT_MAX` LAST, so the length cap always holds on the final output.
+    A reassembled marker drops the WHOLE excerpt (there are no more line units to drop
+    individually) — same "drop it, don't try to surgically escape it" policy as the
+    per-line filter above.
 
     Idempotent: `_sanitize_excerpt(_sanitize_excerpt(x)) == _sanitize_excerpt(x)`.
     Never raises: any input, including None/bytes/a non-str object, returns "" rather
@@ -1466,6 +1483,13 @@ def _sanitize_excerpt(text) -> str:
             kept_lines.append(line)
         collapsed = " ".join(" ".join(kept_lines).split())
         neutralized = _DRIFT_FENCE_RE.sub("[fence]", collapsed)
+        # Final re-scan (defense in depth, Task 1.1 review): the per-line filter above
+        # can miss a marker split across two surviving lines, since each half alone
+        # doesn't contain it. Compare on a whitespace-stripped copy so the single space
+        # the join/collapse step inserts at the old line boundary can't defeat detection.
+        compact = re.sub(r"\s+", "", neutralized.lower())
+        if any(marker.replace(" ", "") in compact for marker in _DRIFT_IMPERSONATION_MARKERS):
+            return ""
         return neutralized[:_DOC_EXCERPT_MAX]
     except Exception:
         return ""
@@ -2937,11 +2961,10 @@ def _extract_artifacts(prompt: str) -> list[str]:
 
 
 def _ws_path(repo_path: str, session_id: str) -> Path:
-    # Hash the session id before embedding: filename-safe for any host-supplied id
-    # (no path escape) and collision-free where truncation wasn't (two ids sharing
-    # a 32-char prefix must not share a working set).
-    safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
-    return STORE_DIR / f".ws_{_slug(repo_path)}_{safe}.json"
+    # Hash the session id before embedding (see `_sid_key`): filename-safe for any
+    # host-supplied id (no path escape) and collision-free where truncation wasn't (two
+    # ids sharing a long prefix must not share a working set).
+    return STORE_DIR / f".ws_{_slug(repo_path)}_{_sid_key(session_id)}.json"
 
 
 def working_set_ids(repo_path: str, session_id: str) -> list[str]:
