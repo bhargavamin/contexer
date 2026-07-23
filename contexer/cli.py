@@ -225,9 +225,11 @@ def review() -> None:
             print(f'  Detected:                "{prop.get("content", "")}"\n')
         else:
             score, factors = store._compute_confidence(entry)
-            title = entry.get("title") or store._derive_title(entry["content"])
+            title, body = store._title_and_body(entry)
             print(f"[{subtype}] {title}")
-            print(f'  "{entry["content"]}"\n')
+            if body is not None:
+                print(f'  "{body}"')
+            print()
         print(f"Confidence: {score}%")
         if factors:
             print("Evidence:")

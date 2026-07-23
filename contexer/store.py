@@ -282,9 +282,10 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
         lines.append(f"## Global decisions{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            title = d.get("title") or _derive_title(d.get("content", ""))
+            title, body = _title_and_body(d)
             lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {title}")
-            lines.append(f"    {d['content']}")
+            if body is not None:
+                lines.append(f"    {body}")
     elif is_filtered:
         lines.append("No matching global decisions found.")
 
@@ -442,6 +443,17 @@ def _derive_title(content: str) -> str:
     first_line = content.strip().splitlines()[0]
     first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
     return _normalize_title(first_sentence)
+
+
+def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str | None]:
+    """Rendering primitive: (title, body) for a decision. `title` is the entry's title
+    (or derived from content). `body` is the content to show on the indented second line,
+    or None when it would merely repeat the title (a short decision whose derived title IS
+    its content) — callers skip the duplicate. Single content source: the current revision."""
+    body = _current_content(entry) if content is None else content
+    title = entry.get("title") or _derive_title(body)
+    collapsed = " ".join(body.split())
+    return title, (body if collapsed and collapsed != title else None)
 
 
 def _is_novel(content: str, existing: list) -> bool:
@@ -1629,7 +1641,10 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f'    detected: "{prop.get("content", "")}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
         else:
-            lines.append(f'- {eid} [{st}] "{_current_content(d)}"')
+            title, body = _title_and_body(d)
+            lines.append(f'- {eid} [{st}] {title}')
+            if body is not None:
+                lines.append(f'    "{body}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
     lines.append("\nReview each with the developer before approving. To clear several at once, "
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
@@ -2314,7 +2329,11 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
-            sys_parts.extend(f"- [{d.get('subtype', '')}] {d['content']}" for d in global_rules)
+            for d in global_rules:
+                title, body = _title_and_body(d)
+                sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+                if body is not None:
+                    sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         return {
@@ -2331,7 +2350,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
             for d in global_rules:
-                sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+                title, body = _title_and_body(d)
+                sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+                if body is not None:
+                    sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(lines)
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
@@ -2354,14 +2376,20 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     if global_rules:
         sys_parts.append("## Global rules (apply to ALL repos):")
         for d in global_rules:
-            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+            title, body = _title_and_body(d)
+            sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+            if body is not None:
+                sys_parts.append(f"    {body}")
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
-            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {d['content']}")
+            title, body = _title_and_body(d)
+            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}")
+            if body is not None:
+                sys_parts.append(f"    {body}")
     if global_rules or pre_loaded:
         sys_parts.append(
             "If the current task conflicts with any of these decisions, "
@@ -2897,7 +2925,10 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
         if not e or _entry_status(e) not in ("approved", "suggested"):
             continue
         subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {_current_content(e)}")
+        title, body = _title_and_body(e)
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}")
+        if body is not None:
+            lines.append(f"    {body}")
     if not lines:
         return ""
     return "## Rehydrated working context:\n" + "\n".join(lines)
@@ -2982,9 +3013,10 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
-        title = e.get("title") or _derive_title(_current_content(e))
+        title, body = _title_and_body(e)
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {title}{id_tag}")
-        lines.append(f"    {_current_content(e)}")
+        if body is not None:
+            lines.append(f"    {body}")
     return "\n".join(lines)
 
 
@@ -3248,9 +3280,10 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
-            title = d.get("title") or _derive_title(_current_content(d))
+            title, body = _title_and_body(d)
             lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
-            lines.append(f"    {_current_content(d)}")
+            if body is not None:
+                lines.append(f"    {body}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."

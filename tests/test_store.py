@@ -2923,6 +2923,32 @@ class TestReviewPendingAndSharePreview:
     def test_format_pending_review_empty(self, tmp_repo):
         assert store.format_pending_review(tmp_repo) == "Nothing pending review."
 
+    def test_format_pending_review_shows_title_and_quoted_body_when_distinct(self, tmp_repo):
+        # Non-proposed branch routes through _title_and_body: title leads the bullet line,
+        # and the (now-quoted) body only appears on its own line when it isn't a dup of the title.
+        store.update_decision(
+            tmp_repo, "Never deploy database migrations on Fridays before a long weekend",
+            "s1", "constraint", title="No Friday migrations")
+        out = store.format_pending_review(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if l.startswith("- "))
+        assert "No Friday migrations" in head
+        assert "Never deploy database migrations" not in head  # body not on the bullet line
+        idx = lines.index(head)
+        assert lines[idx + 1] == '    "Never deploy database migrations on Fridays before a long weekend"'
+
+    def test_format_pending_review_short_untitled_dedups_no_quoted_line(self, tmp_repo):
+        # Finding #1 applied to review_pending: short untitled content must not repeat as
+        # both the bullet-line title and a quoted body line underneath.
+        store.update_decision(tmp_repo, "Never deploy on Fridays", "s1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if l.startswith("- "))
+        assert "Never deploy on Fridays" in head
+        # the very next line is the action line, not a quoted repeat of the content
+        idx = lines.index(head)
+        assert lines[idx + 1].strip().startswith("approve_decision(")
+
 
 class TestPendingReviewFlag:
     """update_decision drops a PER-REPO .pending_review flag ONLY when it creates a state that
@@ -3377,17 +3403,32 @@ class TestRenderPromptDecisions:
         assert "JWT refresh in cookies" in lines[2]
         assert lines[3] == "    JWT refresh tokens live in httpOnly cookies"
 
-    def test_derives_title_when_none_stored(self, tmp_repo):
+    def test_derives_title_when_none_stored_short_content_dedups_to_one_line(self, tmp_repo):
         # No explicit title -> falls back to _derive_title(content), same as get_context.
+        # Content is short (<=100 chars) so the derived title IS the content verbatim —
+        # showing it again on an indented line would just repeat it, so there's no 2nd line.
         _, eid = store.update_decision(
             tmp_repo, "Settings load from a TOML file validated at startup", RV1_SESSION,
             "convention",
         )
         rendered = store._render_prompt_decisions(tmp_repo, [eid])
         lines = rendered.splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("- [")
+        assert "Settings load from a TOML file validated at startup" in lines[0]
+
+    def test_derives_title_when_none_stored_long_content_keeps_two_lines(self, tmp_repo):
+        # Long content (>100 chars) derives a truncated title distinct from the full body,
+        # so the body still gets its own indented line.
+        long_content = ("Settings load from a TOML file validated at startup against a strict "
+                        "schema before anything else in the app is allowed to run.")
+        _, eid = store.update_decision(tmp_repo, long_content, RV1_SESSION, "convention")
+        rendered = store._render_prompt_decisions(tmp_repo, [eid])
+        lines = rendered.splitlines()
         assert len(lines) == 2
         assert lines[0].startswith("- [")
-        assert lines[1] == "    Settings load from a TOML file validated at startup"
+        assert long_content not in lines[0]
+        assert lines[1] == f"    {long_content}"
 
 
 class TestContextForPromptMeta:
@@ -3756,6 +3797,24 @@ class TestCompactRehydration:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "Rehydrated working context" not in ctx
 
+    def test_rehydrate_working_set_shows_title_via_helper(self, tmp_repo):
+        # _rehydrate_working_set must route through _title_and_body: the bullet line
+        # leads with the title, and the content only repeats on an indented line when
+        # it's not a duplicate of the title.
+        # created_by="human" -> auto-approved (see _classify_level), so the entry is
+        # deterministically "active" and passes _rehydrate_working_set's status filter.
+        _, eid = store.update_decision(
+            tmp_repo, "Use postgres for storage, not sqlite", RV1_SESSION,
+            "architecture", created_by="human", title="Postgres over sqlite")
+        store._ws_add(tmp_repo, "sess-title", [eid])
+        rendered = store._rehydrate_working_set(tmp_repo, "sess-title")
+        lines = rendered.splitlines()
+        head = next(l for l in lines if l.startswith("- ["))
+        assert "Postgres over sqlite" in head
+        assert "Use postgres for storage, not sqlite" not in head  # not on the bullet
+        idx = lines.index(head)
+        assert lines[idx + 1] == "    Use postgres for storage, not sqlite"
+
 
 class TestWorkingSetGC:
     def test_gc_removes_stale_and_keeps_fresh(self, tmp_repo):
@@ -3933,6 +3992,50 @@ class TestTitleHelpers:
         assert store._derive_title("") == ""
 
 
+# ── _title_and_body: the shared render primitive (findings #1-#3) ──────────────
+
+class TestTitleAndBody:
+    """_title_and_body(entry) -> (title, body). body is None whenever it would just repeat
+    the title on an indented second line — the dedup fix for finding #1."""
+
+    def test_short_untitled_dedups_body_to_none(self):
+        # No authored title, content <=100 chars -> derived title IS the content ->
+        # body is None so callers don't print the same text twice.
+        c = "Never commit spec or plan files to git."
+        e = store._new_decision_entry(c, "s1", "architecture")
+        title, body = store._title_and_body(e)
+        assert title == c
+        assert body is None
+
+    def test_long_untitled_keeps_full_body(self):
+        # No authored title, content >100 chars -> derived title is a truncated first
+        # sentence, distinct from the full body -> body is the full content.
+        c = ("Native contexer-teams entry removed. Team sync is the Python path; "
+             "kept a legacy janitor pop; login now refreshes status.")
+        e = store._new_decision_entry(c, "s1", "architecture")
+        title, body = store._title_and_body(e)
+        assert title == store._derive_title(c)
+        assert title != c
+        assert body == c
+
+    def test_authored_title_distinct_from_content_keeps_body(self):
+        # Authored title differs from content (even short content) -> body still renders,
+        # since it is NOT a repeat of the title.
+        c = "Use Postgres for the queue."
+        e = store._new_decision_entry(c, "s1", "architecture", title="Queue backend: Postgres")
+        title, body = store._title_and_body(e)
+        assert title == "Queue backend: Postgres"
+        assert body == c
+
+    def test_content_param_overrides_current_revision(self):
+        # Explicit `content` (e.g. a proposed_revision's content) is used instead of the
+        # entry's current revision.
+        e = store._new_decision_entry("Original short body.", "s1", "architecture")
+        title, body = store._title_and_body(e, content="A different candidate body.")
+        assert title == e["title"]  # authored/derived title on the entry itself is unchanged
+        assert body == "A different candidate body."
+
+
 # ── Title on entry + first revision (Task 2) ───────────────────────────────────
 
 class TestTitleOnEntry:
@@ -4080,3 +4183,29 @@ class TestTitleDisplay:
         idx = lines.index(head)
         assert lines[idx].lstrip().startswith("- [")
         assert lines[idx + 1].startswith("    ") and "outbox pattern" in lines[idx + 1]
+
+    def test_get_context_short_untitled_decision_renders_one_line(self, tmp_repo):
+        # Finding #1: an untitled decision whose content is <=100 chars must NOT print the
+        # content twice (bullet-line title + indented content line). One line only.
+        short_body = "Never store plaintext passwords, always use bcrypt"
+        store.update_decision(tmp_repo, short_body, "s1", subtype="constraint")
+        out = store.get_context(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if short_body in l)
+        idx = lines.index(head)
+        assert lines[idx].lstrip().startswith("- [")
+        # no follow-up indented duplicate of the same content
+        assert idx + 1 >= len(lines) or not lines[idx + 1].startswith("    ")
+
+    def test_get_context_long_untitled_decision_still_shows_two_lines(self, tmp_repo):
+        # A long untitled decision still gets a derived (truncated) title on the bullet
+        # line and the FULL content on the indented line below it.
+        long_body = ("We rejected sharding the primary database this quarter because the "
+                     "write volume does not yet justify the operational complexity it adds.")
+        store.update_decision(tmp_repo, long_body, "s1", subtype="architecture")
+        out = store.get_context(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if l.lstrip().startswith("- [") and "sharding" in l)
+        idx = lines.index(head)
+        assert long_body not in lines[idx]          # bullet line has the truncated title, not the full body
+        assert lines[idx + 1] == f"    {long_body}"  # full body on the next, indented line
