@@ -1430,20 +1430,40 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # from wiping a trusted decision.
                 if not _is_storable(content):
                     return False, None
-                # No-op guard - identical content creates no revision and no proposal. But a
-                # title-only correction (same content, new title) must still persist: otherwise
-                # update_context(replace_id=.., title=..) reports success while dropping the
-                # corrected title. Title is display metadata on the current (content-unchanged)
-                # revision, so fix it in place - no new revision, no approval-gate detour.
+                # No-op guard - identical content creates no revision. A title-only correction
+                # (same content, new title) is still handled, but must respect the SAME approval
+                # gate as any change: the title renders as a trusted leading heading, so an AI
+                # retitling a trusted architecture/constraint decision could reframe it as trusted
+                # context - that goes through review, never applied in place.
                 if content == target.get("content", ""):
                     new_title = _normalize_title(title)
-                    if new_title and new_title != target.get("title", ""):
-                        cur = _current_revision(target)
-                        if cur is not None:
-                            cur["title"] = new_title
-                            target["updated_at"] = datetime.now(timezone.utc).isoformat()
-                            _sync_decision_cache(target)
-                            _save(repo_path, data)
+                    if not new_title or new_title == target.get("title", ""):
+                        return True, target["id"]  # nothing meaningful changed
+                    now = datetime.now(timezone.utc).isoformat()
+                    st = target.get("subtype", "")
+                    if (_update_needs_approval(subtype or st, created_by)
+                            or _update_needs_approval(st, created_by)):
+                        # Gated: attach a Suggested Update carrying the new title (content
+                        # unchanged) for developer review - never retitle trusted context silently.
+                        if _entry_status(target) == "pending_approval":
+                            return True, target["id"]
+                        existing_prop = target.get("proposed_revision")
+                        if (existing_prop and existing_prop.get("content", "") == content
+                                and existing_prop.get("title", "") == new_title):
+                            return True, target["id"]  # identical title proposal already pending
+                        target["proposed_revision"] = _build_proposal(
+                            target, content, subtype, session_id, now, title=title)
+                        _save(repo_path, data)
+                        _touch_pending_review(repo_path)
+                        return True, target["id"]
+                    # Not gated (human/scan/bootstrap, or pattern/convention): correct the
+                    # current revision's title in place - no new revision.
+                    cur = _current_revision(target)
+                    if cur is not None:
+                        cur["title"] = new_title
+                        target["updated_at"] = now
+                        _sync_decision_cache(target)
+                        _save(repo_path, data)
                     return True, target["id"]
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")

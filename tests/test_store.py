@@ -4078,8 +4078,8 @@ class TestTitleRevision:
         assert d["title"] == "Explicit new title"
 
     def test_title_only_correction_persists_without_new_revision(self, tmp_repo):
-        # replace_id with UNCHANGED content but a new title must persist the corrected title
-        # in place (no spurious revision) rather than silently no-op'ing.
+        # NON-gated (human) replace_id with UNCHANGED content but a new title persists the
+        # corrected title in place (no spurious revision) rather than silently no-op'ing.
         _, eid = store.update_decision(tmp_repo, "Some short decision body.", "s1",
                                        subtype="architecture", created_by="human",
                                        title="Original title")
@@ -4092,6 +4092,24 @@ class TestTitleRevision:
         assert d["content"] == "Some short decision body."
         assert d["revision"] == 1                          # no new revision created
         assert store._current_revision(d)["title"] == "Corrected title"
+
+    def test_gated_title_only_change_goes_through_approval(self, tmp_repo):
+        # SECURITY: an AI title-only change to a trusted architecture/constraint decision must
+        # NOT be applied in place (it would reframe trusted context) - it becomes a Suggested
+        # Update awaiting developer approval; the live title is untouched until then.
+        _, eid = store.update_decision(tmp_repo, "Some approved arch body.", "s1",
+                                       subtype="architecture", created_by="human",
+                                       title="Original title")
+        store.update_decision(tmp_repo, "Some approved arch body.", "s1",
+                              subtype="architecture", created_by="ai",
+                              replace_id=eid[:8], title="AI reframed title")
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Original title"                          # live title unchanged
+        assert d.get("proposed_revision", {}).get("title") == "AI reframed title"  # pending review
+        # ...and approving it promotes the new title.
+        store.approve_decision(tmp_repo, eid, "approve")
+        d2 = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d2["title"] == "AI reframed title"
 
     def test_unchanged_content_and_title_is_noop(self, tmp_repo):
         # Same content, no (or identical) title -> pure no-op, current behavior preserved.
