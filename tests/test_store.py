@@ -4077,6 +4077,33 @@ class TestTitleRevision:
         d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
         assert d["title"] == "Explicit new title"
 
+    def test_title_only_correction_persists_without_new_revision(self, tmp_repo):
+        # replace_id with UNCHANGED content but a new title must persist the corrected title
+        # in place (no spurious revision) rather than silently no-op'ing.
+        _, eid = store.update_decision(tmp_repo, "Some short decision body.", "s1",
+                                       subtype="architecture", created_by="human",
+                                       title="Original title")
+        ok, rid = store.update_decision(tmp_repo, "Some short decision body.", "s1",
+                                        subtype="architecture", created_by="human",
+                                        replace_id=eid[:8], title="Corrected title")
+        assert ok and rid == eid
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Corrected title"           # persisted
+        assert d["content"] == "Some short decision body."
+        assert d["revision"] == 1                          # no new revision created
+        assert store._current_revision(d)["title"] == "Corrected title"
+
+    def test_unchanged_content_and_title_is_noop(self, tmp_repo):
+        # Same content, no (or identical) title -> pure no-op, current behavior preserved.
+        _, eid = store.update_decision(tmp_repo, "A short body here.", "s1",
+                                       subtype="architecture", created_by="human")
+        before = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        before_updated = before["updated_at"]
+        store.update_decision(tmp_repo, "A short body here.", "s1", subtype="architecture",
+                              created_by="human", replace_id=eid[:8])
+        after = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert after["updated_at"] == before_updated       # untouched
+
     def test_gated_proposal_carries_title_through_approval(self, tmp_repo):
         # An AI-authored change to an architecture/constraint decision routes through the
         # approval gate (Suggested Update) instead of revising immediately - the title must
