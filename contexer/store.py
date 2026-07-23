@@ -1441,12 +1441,15 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         return True, target["id"]  # nothing meaningful changed
                     now = datetime.now(timezone.utc).isoformat()
                     st = target.get("subtype", "")
-                    if (_update_needs_approval(subtype or st, created_by)
-                            or _update_needs_approval(st, created_by)):
-                        # Gated: attach a Suggested Update carrying the new title (content
-                        # unchanged) for developer review - never retitle trusted context silently.
-                        if _entry_status(target) == "pending_approval":
-                            return True, target["id"]
+                    gated = (_update_needs_approval(subtype or st, created_by)
+                             or _update_needs_approval(st, created_by))
+                    # A gated title change to an ALREADY-TRUSTED (approved/suggested) decision
+                    # must be reviewed - the title renders as trusted, injected context. A pending
+                    # (untrusted) decision is NOT injected, so its title is corrected in place like
+                    # the non-gated case; the developer still reviews the base with the fixed title.
+                    if gated and _entry_status(target) != "pending_approval":
+                        # Attach a Suggested Update carrying the new title (content unchanged) for
+                        # review. Dedup on content AND title so a corrected-title retry rebuilds it.
                         existing_prop = target.get("proposed_revision")
                         if (existing_prop and existing_prop.get("content", "") == content
                                 and existing_prop.get("title", "") == new_title):
@@ -1456,8 +1459,8 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         _save(repo_path, data)
                         _touch_pending_review(repo_path)
                         return True, target["id"]
-                    # Not gated (human/scan/bootstrap, or pattern/convention): correct the
-                    # current revision's title in place - no new revision.
+                    # Non-gated (human/scan/bootstrap, or pattern/convention) OR pending/untrusted:
+                    # correct the current revision's title in place - no new revision.
                     cur = _current_revision(target)
                     if cur is not None:
                         cur["title"] = new_title
@@ -1479,10 +1482,14 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     # the developer needs to review the base first.
                     if _entry_status(target) == "pending_approval":
                         return True, target["id"]
-                    # Fix: don't overwrite an existing proposal if the new content is
-                    # identical - the proposal is already pending for the same change.
+                    # Fix: don't overwrite an existing proposal if the new content AND its
+                    # effective title are identical - the proposal is already pending for the same
+                    # change. A same-content retry with a CHANGED title must rebuild it, or approval
+                    # would promote the stale proposal title.
                     existing_prop = target.get("proposed_revision")
-                    if existing_prop and existing_prop.get("content", "") == content:
+                    new_prop_title = _normalize_title(title) or _derive_title(content)
+                    if (existing_prop and existing_prop.get("content", "") == content
+                            and existing_prop.get("title", "") == new_prop_title):
                         return True, target["id"]
                     target["proposed_revision"] = _build_proposal(
                         target, content, subtype, session_id, now, title=title)

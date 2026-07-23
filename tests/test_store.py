@@ -2135,6 +2135,20 @@ class TestSuggestedUpdate:
         # Proposal should still exist and be from s2 (not silently replaced by s3).
         assert entry["proposed_revision"]["session_id"] == "s2"
 
+    def test_proposal_retry_with_changed_title_rebuilds(self, tmp_repo):
+        # Same proposed content but a CORRECTED title must rebuild the proposal (dedup keys on
+        # content AND title), so approval promotes the corrected title, not the stale one.
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid, title="Old proposal title")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s3",
+                              "architecture", replace_id=eid, title="Corrected proposal title")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["proposed_revision"]["title"] == "Corrected proposal title"
+        store.approve_decision(tmp_repo, eid, "approve")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["title"] == "Corrected proposal title"
+
     def test_approve_merges_proposing_session_into_session_ids(self, tmp_repo):
         eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
@@ -4110,6 +4124,22 @@ class TestTitleRevision:
         store.approve_decision(tmp_repo, eid, "approve")
         d2 = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
         assert d2["title"] == "AI reframed title"
+
+    def test_title_only_correction_on_pending_applies_in_place(self, tmp_repo):
+        # A PENDING (untrusted, not-injected) decision's title is corrected in place, not dropped
+        # and not gated: the developer reviews the base with the fixed title.
+        store.update_decision(tmp_repo, "Use Kafka instead of RabbitMQ for event streaming", "s1",
+                              subtype="architecture")  # ai + L3 signal -> pending_approval
+        e = next(x for x in store._load(tmp_repo)["entries"] if x.get("type") == "decision")
+        assert e["status"] == "pending_approval"
+        eid = e["id"]
+        store.update_decision(tmp_repo, "Use Kafka instead of RabbitMQ for event streaming", "s1",
+                              subtype="architecture", replace_id=eid,
+                              title="Kafka for event streaming")
+        d = next(x for x in store._load(tmp_repo)["entries"] if x.get("id") == eid)
+        assert d["title"] == "Kafka for event streaming"   # applied in place
+        assert d["status"] == "pending_approval"           # still pending
+        assert "proposed_revision" not in d                 # no proposal stacked
 
     def test_unchanged_content_and_title_is_noop(self, tmp_repo):
         # Same content, no (or identical) title -> pure no-op, current behavior preserved.
