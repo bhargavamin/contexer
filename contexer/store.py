@@ -1460,13 +1460,20 @@ def _sanitize_excerpt(text) -> str:
     than escaping parts of it.
 
     Order matters and is fixed: strip hidden codepoints FIRST (so a zero-width/bidi
-    codepoint can't smuggle a marker past the line filter) -> drop impersonating lines
-    -> collapse whitespace (newlines/tabs/CR to single spaces, single-line result) ->
-    neutralize the fence token -> re-scan the FINAL joined text for a marker that only
-    reassembled once its two halves were joined by the collapse step (e.g. a line ending
-    "...[Cont" + a line starting "exer: ..." -> "...[Cont exer: ..."; checked whitespace-
-    insensitively so the join's own inserted space can't hide it) -> truncate to
-    `_DOC_EXCERPT_MAX` LAST, so the length cap always holds on the final output.
+    codepoint can't smuggle a marker past the line filter) -> NFKC-normalize (folds
+    fullwidth/circled/other compatibility homoglyphs to their plain ASCII form — an LLM
+    reads e.g. fullwidth "Contexer" as semantically identical to ASCII "Contexer", so the
+    semantic reading is what must be caught; this must run AFTER the hidden-codepoint
+    strip, since normalization does not remove Cf/Cc codepoints and a stripped-away
+    codepoint could otherwise change what normalizes, and BEFORE the marker filter below
+    so homoglyphs fold to ASCII and the existing filter catches them without new marker
+    variants) -> drop impersonating lines -> collapse whitespace (newlines/tabs/CR to
+    single spaces, single-line result) -> neutralize the fence token -> re-scan the FINAL
+    joined text for a marker that only reassembled once its two halves were joined by the
+    collapse step (e.g. a line ending "...[Cont" + a line starting "exer: ..." ->
+    "...[Cont exer: ..."; checked whitespace-insensitively so the join's own inserted
+    space can't hide it) -> truncate to `_DOC_EXCERPT_MAX` LAST, so the length cap always
+    holds on the final output.
     A reassembled marker drops the WHOLE excerpt (there are no more line units to drop
     individually) — same "drop it, don't try to surgically escape it" policy as the
     per-line filter above.
@@ -1479,8 +1486,9 @@ def _sanitize_excerpt(text) -> str:
         if not isinstance(text, str):
             return ""
         stripped = _strip_hidden_codepoints(text)
+        normalized = unicodedata.normalize("NFKC", stripped)
         kept_lines = []
-        for line in stripped.splitlines():
+        for line in normalized.splitlines():
             low = line.strip().lower()
             if not low:
                 continue
@@ -4122,7 +4130,9 @@ def _leading_comment_block(text: str, rel_path: str) -> list[dict]:
                 start_line = i
             block_lines.append(stripped.lstrip("#").strip())
         elif start_line is None:
-            continue  # skip blank/non-comment lines before the block starts
+            if stripped:
+                break  # a code line before any comment block ends the leading region
+            continue  # skip leading blank lines before the block starts
         else:
             break  # first non-comment line ends the block
     if start_line is None:
@@ -4176,7 +4186,7 @@ def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
         from contexer import miner  # function-level: mirrors bootstrap_apply's
                                      # cycle-avoidance style used elsewhere in this file.
         parts = Path(rel_path).parts
-        if any(part == ".git" or part.startswith(".") or part in miner._SKIP_DIRS
+        if any(part.startswith(".") or part in miner._SKIP_DIRS
                for part in parts):
             return []
         candidate = os.path.join(repo_path, rel_path)
