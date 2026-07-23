@@ -1407,6 +1407,60 @@ def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True)
     return files
 
 
+# ── surfaced-advisory dedup sidecar (Doc Drift Layer 1, Task 1.4) ───────────────
+def _drift_hash(decision_id: str, source_ref: str) -> str:
+    """Identity for one (decision, doc-location) advisory. The excerpt is deliberately
+    NOT part of the key (red-team H5): hashing the excerpt would re-fire the advisory
+    every time the nagged-about doc changes by one character — including when the
+    developer edits it in response to the advisory, which is exactly the over-eager-
+    linter death the product guards against. Dedup identity is (decision, doc-location),
+    not (decision, doc-location, exact-text)."""
+    return hashlib.sha1(f"{decision_id}\x00{source_ref}".encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _drift_seen_path(repo_path: str, session_id: str) -> Path:
+    """Per-repo, PER-SESSION sidecar recording which drift advisories have already been
+    surfaced this session — same session-keying idiom as `_edited_files_path` (hashed via
+    `_sid_key`, never a raw session id embedded in the filename)."""
+    return STORE_DIR / f".drift_seen_{_slug(repo_path)}_{_sid_key(session_id)}.json"
+
+
+def record_drift_surfaced(repo_path: str, drift_hash: str, session_id: str = "") -> None:
+    """Mark drift_hash as surfaced for this session. Silent no-op on an empty session_id
+    (mirrors record_edited_file: no session id means no file is written). Fail-soft: a
+    write error must never break the caller."""
+    if not session_id:
+        return
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        seen = _read_drift_seen(repo_path, session_id)
+        seen.add(drift_hash)
+        _atomic_write(_drift_seen_path(repo_path, session_id), json.dumps(sorted(seen)))
+    except OSError:
+        pass
+
+
+def _read_drift_seen(repo_path: str, session_id: str = "") -> set[str]:
+    """The set of drift hashes already surfaced this session. Empty immediately when
+    session_id is empty (same rule as _read_edited_files). Fail-soft: a missing or
+    corrupt sidecar reads as an empty set."""
+    if not session_id:
+        return set()
+    path = _drift_seen_path(repo_path, session_id)
+    try:
+        hashes = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(hashes, list):
+            hashes = []
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        hashes = []
+    return set(hashes)
+
+
+def drift_already_surfaced(repo_path: str, drift_hash: str, session_id: str = "") -> bool:
+    """True if drift_hash was already recorded as surfaced this session."""
+    return drift_hash in _read_drift_seen(repo_path, session_id)
+
+
 # ── Doc Drift Layer 1: excerpt sanitization, trust framing, drift log ────────────
 # Red-team C1/M7: repo text is attacker-controlled in realistic cases (vendored deps, a
 # PR branch checked out for review, a cloned repo). The original plan piped raw doc/

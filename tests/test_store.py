@@ -3127,6 +3127,62 @@ class TestEditedFiles:
         assert store._read_edited_files(tmp_repo, "sess-a", clear=False) == []      # A cleared
         assert store._read_edited_files(tmp_repo, "sess-b", clear=False) == ["b.py"]  # B untouched
 
+
+# ── surfaced-advisory dedup sidecar (Doc Drift Layer 1, Task 1.4) ──────────────
+
+class TestDriftSurfaced:
+    """_drift_hash keys dedup identity on (decision_id, source_ref) only — the excerpt
+    is deliberately excluded (red-team H5): hashing the excerpt would re-fire the
+    advisory every time the nagged-about doc changes by even one character, including
+    when the developer edits it in response to the advisory. The surfaced-set sidecar
+    at .drift_seen_<slug>_<sid>.json follows the exact .edited_ idiom: fail-soft load,
+    atomic write, sid=="" writes/reads nothing."""
+
+    def test_hash_is_stable_for_same_inputs(self):
+        assert store._drift_hash("d1", "f.py:10") == store._drift_hash("d1", "f.py:10")
+
+    def test_hash_differs_when_decision_id_changes(self):
+        assert store._drift_hash("d1", "f.py:10") != store._drift_hash("d2", "f.py:10")
+
+    def test_hash_differs_when_source_ref_changes(self):
+        assert store._drift_hash("d1", "f.py:10") != store._drift_hash("d1", "f.py:11")
+
+    # ── H5 red-team regression: excerpt is not part of the key ─────────────────
+    def test_hash_signature_omits_excerpt_and_is_stable_across_calls(self):
+        # The function signature itself takes only (decision_id, source_ref) — no
+        # excerpt parameter exists to vary. Two calls with the same (id, ref) must
+        # match even though the doc content ("excerpt") conceptually changed between
+        # them, since the excerpt was never part of the hash to begin with.
+        import inspect
+        params = list(inspect.signature(store._drift_hash).parameters)
+        assert params == ["decision_id", "source_ref"]
+        h1 = store._drift_hash("d1", "f.py:10")  # excerpt conceptually: "old text"
+        h2 = store._drift_hash("d1", "f.py:10")  # excerpt conceptually: "new text"
+        assert h1 == h2
+
+    def test_record_then_check_persists_and_skips(self, tmp_repo):
+        h = store._drift_hash("d1", "f.py:10")
+        assert not store.drift_already_surfaced(tmp_repo, h, "sess-a")
+        store.record_drift_surfaced(tmp_repo, h, "sess-a")
+        assert store.drift_already_surfaced(tmp_repo, h, "sess-a")
+
+    def test_empty_session_id_writes_no_file(self, tmp_repo):
+        h = store._drift_hash("d1", "f.py:10")
+        store.record_drift_surfaced(tmp_repo, h, "")
+        assert list(store.STORE_DIR.glob(".drift_seen_*")) == []
+        assert store.drift_already_surfaced(tmp_repo, h, "") is False
+
+    def test_corrupt_sidecar_reads_as_empty(self, tmp_repo):
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        store._drift_seen_path(tmp_repo, "sess-a").write_text("{not json", encoding="utf-8")
+        assert store.drift_already_surfaced(tmp_repo, "anyhash", "sess-a") is False
+
+    def test_different_sessions_do_not_see_each_others_surfaced_hashes(self, tmp_repo):
+        h = store._drift_hash("d1", "f.py:10")
+        store.record_drift_surfaced(tmp_repo, h, "sess-a")
+        assert store.drift_already_surfaced(tmp_repo, h, "sess-a") is True
+        assert store.drift_already_surfaced(tmp_repo, h, "sess-b") is False
+
     def test_empty_session_id_writes_no_file_and_reads_empty(self, tmp_repo):
         store.record_edited_file(tmp_repo, "a.py", "")
         assert store._read_edited_files(tmp_repo, "") == []
