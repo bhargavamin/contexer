@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from contexer import redact          # pure stdlib leaf (no cycle): secret redaction
+
 try:
     import fcntl                       # POSIX advisory file locks (macOS/Linux)
 except ImportError:                    # pragma: no cover - non-POSIX fallback
@@ -1072,6 +1074,18 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     )
 
 
+def _redaction_enabled() -> bool:
+    """Whether outbound secret redaction is on. Default True (safety holds unconfigured); opt
+    out with redact_secrets=false in config.toml. Fail-soft: any config error keeps redaction ON.
+    Governs the EGRESS path only (share projection + wire) — capture is deliberately NOT scrubbed
+    so the local store stays a faithful record; redaction happens when a decision LEAVES."""
+    try:
+        from contexer.config import load_profile
+        return load_profile().redact_secrets
+    except Exception:
+        return True
+
+
 def _normalize_content(content: str) -> str:
     """Strip whitespace, collapse internal runs, capitalize first character."""
     normalized = " ".join(content.split())
@@ -1714,18 +1728,38 @@ def overlap_report(repo_path: str) -> list[list[dict]]:
         return []
 
 
-def _share_projection(entry: dict) -> dict:
+def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     """Project a decision entry onto the push wire shape {id, type, content, confidence,
     evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
-    the push omits it."""
+    the push omits it. `redact_on` lets a batch caller (or a preview with an explicit profile)
+    resolve the redaction flag ONCE and pass it in; None means resolve it here."""
+    if redact_on is None:
+        redact_on = _redaction_enabled()
     rev = _current_revision(entry) or {}
+    content = _current_content(entry)
+    evidence = rev.get("evidence") or None
+    # Redact at the projection so the confirm-preview and durable outbox show exactly what
+    # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
+    # `redacted` counts scrubbed secrets for the preview banner; extra key ignored by the
+    # wire/outbox builders (they read named fields), and re-scrubbed idempotently at _wire_args.
+    redacted = 0
+    if redact_on:
+        content, redacted = redact.scrub(content)
+        if evidence:
+            scrubbed = []
+            for e in evidence:
+                se, ne = redact.scrub(e)
+                scrubbed.append(se)
+                redacted += ne
+            evidence = scrubbed
     return {
         "id": entry.get("id", ""),
         "type": entry.get("subtype", "") or "convention",
-        "content": _current_content(entry),
+        "content": content,
         "confidence": rev.get("confidence_score"),
-        "evidence": rev.get("evidence") or None,
+        "evidence": evidence,
         "source": rev.get("source"),
+        "redacted": redacted,
     }
 
 
@@ -1734,11 +1768,15 @@ def _shareable_entries(repo_path: str) -> list[dict]:
             if e.get("type") == "decision" and _entry_status(e) != "ignored"]
 
 
-def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
+def get_shareable(repo_path: str, decision_id: str = "",
+                  redact_on: bool | None = None) -> dict | None:
     """Return a decision's current shareable fields, or None (C4).
 
     Resolves `decision_id` (full UUID or 8-char prefix) or, when omitted, the most
-    recently updated decision. Ignored decisions are excluded."""
+    recently updated decision. Ignored decisions are excluded. `redact_on` threads a
+    caller-resolved redaction flag (e.g. a preview's explicit profile); None resolves it."""
+    if redact_on is None:
+        redact_on = _redaction_enabled()
     decisions = _shareable_entries(repo_path)
     if not decisions:
         return None
@@ -1748,16 +1786,19 @@ def get_shareable(repo_path: str, decision_id: str = "") -> dict | None:
         entry = max(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp", ""))
     if entry is None:
         return None
-    return _share_projection(entry)
+    return _share_projection(entry, redact_on)
 
 
-def get_shareable_all(repo_path: str) -> list[dict]:
+def get_shareable_all(repo_path: str, redact_on: bool | None = None) -> list[dict]:
     """Every non-ignored decision as a push wire projection, oldest first (C4 --all).
 
     Ordered by creation timestamp so a bulk share pushes decisions in the order they
-    were made - the server's updatedSince consumers then see them chronologically."""
+    were made - the server's updatedSince consumers then see them chronologically.
+    The redaction flag is resolved ONCE for the whole batch (not per decision)."""
+    if redact_on is None:
+        redact_on = _redaction_enabled()
     decisions = sorted(_shareable_entries(repo_path), key=lambda e: e.get("timestamp", ""))
-    return [_share_projection(e) for e in decisions]
+    return [_share_projection(e, redact_on) for e in decisions]
 
 
 # A personal-cloud push is OUTWARD — the single source of this warning clause, shared by the
@@ -1795,14 +1836,16 @@ def format_shareable_list(repo_path: str) -> str:
     return "\n".join(lines)
 
 
-def _resolve_share_projections(repo_path: str, decision_id: str) -> list[dict]:
+def _resolve_share_projections(repo_path: str, decision_id: str,
+                               redact_on: bool | None = None) -> list[dict]:
     """Resolve a possibly comma-separated `decision_id` to shareable projections (order and
-    duplicates preserved as given; empty -> the single most-recent decision)."""
+    duplicates preserved as given; empty -> the single most-recent decision). `redact_on`
+    threads a caller-resolved redaction flag through to every projection."""
     ids = [i.strip() for i in decision_id.split(",") if i.strip()]
     if not ids:
-        proj = get_shareable(repo_path, "")
+        proj = get_shareable(repo_path, "", redact_on)
         return [proj] if proj else []
-    return [p for p in (get_shareable(repo_path, i) for i in ids) if p is not None]
+    return [p for p in (get_shareable(repo_path, i, redact_on) for i in ids) if p is not None]
 
 
 def format_share_preview(repo_path: str, decision_id: str = "", profile=None) -> str:
@@ -1810,15 +1853,19 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
     id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml."""
-    projs = _resolve_share_projections(repo_path, decision_id)
+    from contexer.config import default_endpoint, load_profile
+    prof = profile or load_profile()  # resolved ONCE — governs both endpoint and redaction
+    projs = _resolve_share_projections(repo_path, decision_id, prof.redact_secrets)
     if not projs:
         return "Nothing to share — no matching decision found."
-    from contexer.config import default_endpoint, load_profile
-    endpoint = (profile or load_profile()).endpoint or default_endpoint()
+    endpoint = prof.endpoint or default_endpoint()
     ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
     lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}) — "
              f"{_SHARE_OUTWARD_WARNING}:\n"]
     lines += [_share_item_line(p) for p in projs]
+    redacted = sum(p.get("redacted", 0) for p in projs)
+    if redacted:
+        lines.append(f"\n  ({_pl(redacted, 'secret')} redacted before sending)")
     lines += [
         "",
         "Confirm with the developer before sending.",
