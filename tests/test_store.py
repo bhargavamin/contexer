@@ -3127,6 +3127,29 @@ class TestEditedFiles:
         assert store._read_edited_files(tmp_repo, "sess-a", clear=False) == []      # A cleared
         assert store._read_edited_files(tmp_repo, "sess-b", clear=False) == ["b.py"]  # B untouched
 
+    def test_empty_session_id_writes_no_file_and_reads_empty(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "")
+        assert store._read_edited_files(tmp_repo, "") == []
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        assert not list(store.STORE_DIR.glob(".edited_*"))
+
+    # ── filename safety: session_id is hashed via _sid_key, not embedded raw ──────
+    def test_session_id_with_path_traversal_produces_safe_filename(self, tmp_repo):
+        for session_id in ("../../etc/evil", "a/b/../c", "../" * 10 + "evil"):
+            path = store._edited_files_path(tmp_repo, session_id)
+            assert path.parent.resolve() == store.STORE_DIR.resolve()
+            assert "/" not in path.name
+            assert ".." not in path.name
+
+    def test_truncation_collision_ids_get_distinct_files(self, tmp_repo):
+        a = "x" * 32 + "AAAA"
+        b = "x" * 32 + "BBBB"
+        assert store._edited_files_path(tmp_repo, a) != store._edited_files_path(tmp_repo, b)
+        store.record_edited_file(tmp_repo, "a.py", a)
+        store.record_edited_file(tmp_repo, "b.py", b)
+        assert store._read_edited_files(tmp_repo, a, clear=False) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, b, clear=False) == ["b.py"]
+
 
 # ── surfaced-advisory dedup sidecar (Doc Drift Layer 1, Task 1.4) ──────────────
 
@@ -3183,28 +3206,17 @@ class TestDriftSurfaced:
         assert store.drift_already_surfaced(tmp_repo, h, "sess-a") is True
         assert store.drift_already_surfaced(tmp_repo, h, "sess-b") is False
 
-    def test_empty_session_id_writes_no_file_and_reads_empty(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py", "")
-        assert store._read_edited_files(tmp_repo, "") == []
-        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        assert not list(store.STORE_DIR.glob(".edited_*"))
+    def test_recording_same_hash_twice_is_idempotent(self, tmp_repo):
+        h = store._drift_hash("d1", "f.py:10")
+        store.record_drift_surfaced(tmp_repo, h, "sess-a")
+        store.record_drift_surfaced(tmp_repo, h, "sess-a")
+        assert store._read_drift_seen(tmp_repo, "sess-a") == {h}
 
-    # ── filename safety: session_id is hashed via _sid_key, not embedded raw ──────
-    def test_session_id_with_path_traversal_produces_safe_filename(self, tmp_repo):
-        for session_id in ("../../etc/evil", "a/b/../c", "../" * 10 + "evil"):
-            path = store._edited_files_path(tmp_repo, session_id)
-            assert path.parent.resolve() == store.STORE_DIR.resolve()
-            assert "/" not in path.name
-            assert ".." not in path.name
-
-    def test_truncation_collision_ids_get_distinct_files(self, tmp_repo):
-        a = "x" * 32 + "AAAA"
-        b = "x" * 32 + "BBBB"
-        assert store._edited_files_path(tmp_repo, a) != store._edited_files_path(tmp_repo, b)
-        store.record_edited_file(tmp_repo, "a.py", a)
-        store.record_edited_file(tmp_repo, "b.py", b)
-        assert store._read_edited_files(tmp_repo, a, clear=False) == ["a.py"]
-        assert store._read_edited_files(tmp_repo, b, clear=False) == ["b.py"]
+    def test_sidecar_written_mode_0600(self, tmp_repo):
+        h = store._drift_hash("d1", "f.py:10")
+        store.record_drift_surfaced(tmp_repo, h, "sess-a")
+        mode = store._drift_seen_path(tmp_repo, "sess-a").stat().st_mode & 0o777
+        assert mode == 0o600
 
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
