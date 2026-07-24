@@ -4857,6 +4857,34 @@ class TestDocsForFile:
         result = store._docs_for_file(tmp_repo, "widget.py")
         assert any(r["excerpt"] == "A configurable widget." for r in result)
 
+    def test_async_function_docstring_extracted(self, tmp_repo):
+        # Greptile P1: ast.AsyncFunctionDef is a distinct node from FunctionDef; without it
+        # an `async def`'s docstring (and its drift advisory) is silently missed.
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        code = (
+            '"""Module doc."""\n'
+            "async def fetch(key):\n"
+            '    """Async fetch a value by key."""\n'
+            "    pass\n"
+        )
+        (Path(tmp_repo) / "aio.py").write_text(code, encoding="utf-8")
+        excerpts = {r["excerpt"] for r in store._docs_for_file(tmp_repo, "aio.py")}
+        assert "Async fetch a value by key." in excerpts
+
+    def test_absolute_and_relative_path_yield_same_source_ref(self, tmp_repo):
+        # Greptile P1: an absolute spelling (a host reporting tool_input.file_path absolute)
+        # and a relative one (git status) for the SAME file must produce the SAME source_ref,
+        # or the drift dedup/dismiss hash differs and a suppressed advisory reappears.
+        Path(tmp_repo, "cache").mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo, "cache") / "redis.py").write_text(
+            '"""Redis client docstring."""\n', encoding="utf-8")
+        by_rel = store._docs_for_file(tmp_repo, "cache/redis.py")
+        by_abs = store._docs_for_file(tmp_repo, os.path.join(tmp_repo, "cache/redis.py"))
+        assert by_rel and by_abs
+        assert [r["source_ref"] for r in by_rel] == [r["source_ref"] for r in by_abs]
+        # and it's the repo-relative spelling, never the absolute one
+        assert all(not r["source_ref"].startswith("/") for r in by_abs)
+
     def test_leading_comment_block_non_python_file(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         text = "# Overview of this config\n# second line of overview\nkey: value\n"
@@ -4990,6 +5018,20 @@ class TestApprovedDecisionsForFile:
         contents = [r["content"] for r in result]
         assert any("Memcached" in c for c in contents)
         assert not any("Consider Redis" in c for c in contents)
+
+    def test_limit_can_exceed_drift_max(self, tmp_repo):
+        # Greptile P1: drift_check_payload must be able to fetch MORE than _DRIFT_MAX
+        # candidates so the artifact gate downstream isn't starved by the file-level BM25
+        # rank. The default stays at _DRIFT_MAX; a larger limit returns more.
+        self._seed_raw(tmp_repo, [
+            (f"redis.py policy for {topic}", "architecture", "human", "approved")
+            for topic in ("caching", "eviction", "ttl", "clustering", "pipelining", "pubsub")
+        ])
+        idx = store._read_retrieval_index(tmp_repo)
+        default = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx)
+        wide = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx, limit=25)
+        assert len(default) <= store._DRIFT_MAX
+        assert len(wide) > store._DRIFT_MAX
 
     def test_none_index_returns_empty(self, tmp_repo):
         assert store._approved_decisions_for_file(tmp_repo, "cache/redis.py", None) == []

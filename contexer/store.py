@@ -4412,7 +4412,9 @@ def _extract_doc_excerpts(text: str, rel_path: str) -> list[dict]:
         excerpts.append({"source_ref": f"{rel_path}:{tree.body[0].lineno}",
                           "excerpt": ast.get_docstring(tree)})
     for node in ast.walk(tree):
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+        # AsyncFunctionDef is a distinct node from FunctionDef; without it an `async def`'s
+        # docstring (and its drift advisory) would be silently missed (Greptile P1).
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             doc = ast.get_docstring(node)
             if doc and node.body:
                 excerpts.append({"source_ref": f"{rel_path}:{node.body[0].lineno}",
@@ -4440,14 +4442,20 @@ def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
             return []
         from contexer import miner  # function-level: mirrors bootstrap_apply's
                                      # cycle-avoidance style used elsewhere in this file.
-        parts = Path(rel_path).parts
-        if any(part.startswith(".") or part in miner._SKIP_DIRS
-               for part in parts):
-            return []
-        candidate = os.path.join(repo_path, rel_path)
+        candidate = os.path.join(repo_path, rel_path)  # an absolute rel_path wins here
         real_repo = os.path.realpath(repo_path)
         real_candidate = os.path.realpath(candidate)
         if not real_candidate.startswith(real_repo + os.sep):
+            return []
+        # Canonical repo-relative path. An absolute spelling (a host reporting
+        # tool_input.file_path as an absolute path) and a relative one (git status) for the
+        # SAME file must produce the SAME source_ref — otherwise the drift dedup/dismiss hash
+        # differs and an already-surfaced or permanently-dismissed advisory reappears
+        # (Greptile P1). Derived from the realpaths, so the skip-dir check and the source_ref
+        # both see within-repo components only.
+        rel = os.path.relpath(real_candidate, real_repo)
+        if any(part.startswith(".") or part in miner._SKIP_DIRS
+               for part in Path(rel).parts):
             return []
         try:
             with open(real_candidate, "rb") as f:
@@ -4455,7 +4463,7 @@ def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
         except OSError:
             return []
         text = raw.decode("utf-8", errors="replace")
-        found = _extract_doc_excerpts(text, rel_path)
+        found = _extract_doc_excerpts(text, rel)
         out = []
         for item in found:
             excerpt = _sanitize_excerpt(item["excerpt"])
@@ -4472,6 +4480,13 @@ def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
 # decisions most likely to be about it. Task 1.5 pairs this against a Task 1.2 doc
 # excerpt from the same file; nothing consumes this output yet.
 _DRIFT_MAX = 3  # cap on decisions surfaced per file check; reused by later drift tasks.
+# Candidate breadth BEFORE the artifact gate. The matcher ranks by FILE-level BM25, but the
+# gate (`_pair_drift`) matches a decision against the EXCERPT (docstring) — a different axis —
+# so an artifact-matching decision can rank below _DRIFT_MAX and be dropped before the gate
+# ever sees it (Greptile P1). drift_check_payload fetches this many candidates and lets its
+# own emission loop apply the real _DRIFT_MAX bound after pairing. Bounded so a huge store
+# can't blow the time budget; far above _DRIFT_MAX so the gate is never starved.
+_DRIFT_CANDIDATE_MAX = 25
 
 # Provenance the drift anchor trusts (red-team C2, Global Constraint 2a): 'approved'
 # status alone is NOT human-confirmed in this store — a memory import or an AI
@@ -4494,12 +4509,14 @@ def _file_keywords(file_path: str) -> list[str]:
 
 def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | None,
                                  decisions: list[dict] | None = None,
-                                 include_untrusted: bool = False) -> list[dict]:
+                                 include_untrusted: bool = False,
+                                 limit: int = _DRIFT_MAX) -> list[dict]:
     """Rank the store's APPROVED, trusted-provenance decisions most likely to be about
     `file_path`, via the existing BM25 index (no second index — reuses `_bm25_rank` over
-    the sidecar `_read_retrieval_index` already builds). Returns up to `_DRIFT_MAX`
-    `{"id": <short 8-char id>, "content": ..., "topics": [...]}` dicts, highest-ranked
-    first. `None` index -> [].
+    the sidecar `_read_retrieval_index` already builds). Returns up to `limit` (default
+    `_DRIFT_MAX`) `{"id": <short 8-char id>, "content": ..., "topics": [...]}` dicts,
+    highest-ranked first. `None` index -> []. `drift_check_payload` passes a larger `limit`
+    so the artifact gate downstream isn't starved by the file-level BM25 ranking.
 
     The index carries no provenance (see `_build_retrieval_index`), so this filters in two
     passes: rank + `status=="approved"` against the index, THEN resolve each surviving id
@@ -4551,7 +4568,7 @@ def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | N
             if include_untrusted:
                 item["trusted"] = trusted
             out.append(item)
-            if not include_untrusted and len(out) >= _DRIFT_MAX:
+            if not include_untrusted and len(out) >= limit:
                 break
         return out
     except Exception:
@@ -4723,7 +4740,12 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
             docs = _docs_for_file(repo_path, rel_path)
             if not docs:
                 continue
-            decisions = _approved_decisions_for_file(repo_path, rel_path, index)
+            # Fetch a broad candidate set (not just _DRIFT_MAX): the artifact gate below is
+            # the real filter, and capping at _DRIFT_MAX here would drop an artifact-matching
+            # decision that ranks low in file-level BM25 before the gate sees it (Greptile P1).
+            # The emission loop applies the true _DRIFT_MAX bound after pairing.
+            decisions = _approved_decisions_for_file(repo_path, rel_path, index,
+                                                     limit=_DRIFT_CANDIDATE_MAX)
             if not decisions:
                 continue
             for doc in docs:
