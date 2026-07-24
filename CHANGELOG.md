@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.25.0](https://github.com/bhargavamin/contexer/compare/v0.24.0...v0.25.0) (2026-07-24)
+
+
+### Features
+
+* **cli:** review shows the decision title as the headline ([98f755e](https://github.com/bhargavamin/contexer/commit/98f755e9bc947f8d9535b68e52232b543c1ee6dc))
+* decision titles (v1, OSS-local) ([4552192](https://github.com/bhargavamin/contexer/commit/4552192e0cae94f1ce55c7f0e29e46068b968bb3))
+* **mcp:** update_context/update_global_context accept optional title ([1171550](https://github.com/bhargavamin/contexer/commit/1171550f65c12ebb9d8657085ace40a3fa28ec14))
+* **store:** add title helpers (normalize + derive, cap 100) ([bdc3665](https://github.com/bhargavamin/contexer/commit/bdc366595212078e44701daaabe6bd2c7ac1551a))
+* **store:** lazy title backfill for legacy entries; bump schema to v3 ([1bab9ab](https://github.com/bhargavamin/contexer/commit/1bab9ab7fb65ca6389c1db3b6603b5c92428f749))
+* **store:** leading-heading display (title line + content) in get_context ([5174597](https://github.com/bhargavamin/contexer/commit/5174597e7cb8d35ba7f5a2bc71ccbfc8abf19cc8))
+* **store:** plumb title through update_decision + revisions (re-derive on omit) ([7727fc4](https://github.com/bhargavamin/contexer/commit/7727fc4eaacb09fe4e82c438fbf58dd44e3b7679))
+* **store:** title field on decision entry + revision, synced to HEAD cache ([6f56a43](https://github.com/bhargavamin/contexer/commit/6f56a434baddd2bd837e53a8b201f994644cc51c))
+
+
+### Bug Fixes
+
+* **mcp:** direct the agent to author decision titles at capture ([8db362a](https://github.com/bhargavamin/contexer/commit/8db362a0547742e8cce7113230153306b8ea8643))
+* **store:** carry title through the approval-gated proposal path ([1a44b7c](https://github.com/bhargavamin/contexer/commit/1a44b7cd7d23e343e98040d5c332c7e99a77000f))
+* **store:** gate AI title-only changes to trusted decisions (review P1) ([ed12439](https://github.com/bhargavamin/contexer/commit/ed12439e41e13f76c21e248402d88e9d3a016b33))
+* **store:** persist title-only corrections on the replace_id no-op path ([90444dc](https://github.com/bhargavamin/contexer/commit/90444dc29bbda5127af082f3572142b2526d88a5))
+* **store:** title corrections no longer dropped for pending/proposal states ([7d1b902](https://github.com/bhargavamin/contexer/commit/7d1b9021c4d6b3f651084337fc7a61c4773c00f3))
+* **store:** titles in the indexed prompt-injection formatter (_render_prompt_decisions) ([6da6296](https://github.com/bhargavamin/contexer/commit/6da6296814f32b525558bcbe5c257784e7245d76))
+
 ## [0.24.0](https://github.com/bhargavamin/contexer/compare/v0.23.1...v0.24.0) (2026-07-20)
 
 
