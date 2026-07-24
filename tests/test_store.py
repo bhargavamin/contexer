@@ -5226,6 +5226,26 @@ class TestDriftCheckPayload:
         assert "Rejected alternative: Redis" in out
         assert 'nonce="' in out
 
+    def test_budget_checked_mid_file_not_only_per_file(self, tmp_repo, monkeypatch):
+        # Greptile: with uncapped candidates, the time budget must be re-checked mid-file so
+        # one file's pairing can't run past the deadline and starve later files. This setup
+        # WOULD emit; the clock passes the per-file check (calls 1-2 = 0) then trips at the
+        # first mid-file doc-loop check (call 3 = way past budget), so nothing is emitted even
+        # though the file was entered.
+        store.update_decision(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+                              RV1_SESSION, "architecture", created_by="human")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        store.record_edited_file(tmp_repo, "cache/redis.py", "budget-sess")
+        calls = {"n": 0}
+        def fake_monotonic():
+            calls["n"] += 1
+            return 0.0 if calls["n"] <= 2 else 999.0  # start + per-file check pass; mid-file trips
+        monkeypatch.setattr(store.time, "monotonic", fake_monotonic)
+        assert store.drift_check_payload(tmp_repo, "budget-sess") == ""
+        ev = self._log_events(tmp_repo)[-1]
+        assert ev["files_checked"] >= 1  # entered the file (passed the per-file check), then bailed
+        assert ev["emitted"] == 0
+
     def test_no_index_returns_empty(self, tmp_repo):
         # No store/index at all, but a file recorded as edited.
         self._write(tmp_repo, "cache/redis.py", '"""doc in cache/redis.py"""\n')

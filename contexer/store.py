@@ -4759,12 +4759,19 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
             # top-N: ANY finite candidate cap here can drop an artifact-matching decision that
             # ranks lower by file-level BM25 before _pair_drift — the real gate — ever sees it
             # (Greptile P1). Safe/bounded because _bm25_rank returns only decisions sharing a
-            # keyword with the file, and the per-file _DRIFT_TIME_BUDGET backstops a
-            # pathological store. The emission loop below applies the true _DRIFT_MAX bound.
+            # keyword with the file, and the time budget is re-checked mid-file below. The
+            # emission loop applies the true _DRIFT_MAX bound.
             decisions = _approved_decisions_for_file(repo_path, rel_path, index, limit=None)
             if not decisions:
                 continue
+            budget_spent = False
             for doc in docs:
+                # Re-check the budget per doc, not just per file: with uncapped candidates a
+                # single file's pairing could otherwise run well past the deadline and starve
+                # every later edited file (Greptile). Breaking here lets the outer loop halt.
+                if time.monotonic() - start > _DRIFT_TIME_BUDGET:
+                    budget_spent = True
+                    break
                 source_ref = doc.get("source_ref", "")
                 excerpt = doc.get("excerpt", "")
                 for decision in decisions:
@@ -4781,6 +4788,8 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
                         continue
                     candidates.append((pair["score"], decision, excerpt, source_ref, h,
                                        pair["rejected_alternative"]))
+            if budget_spent:
+                break  # time budget hit mid-file — stop before starting the next file
         candidates.sort(key=lambda c: c[0], reverse=True)
         blocks = []
         for _score, decision, excerpt, source_ref, h, rejected in candidates[:_DRIFT_MAX]:
