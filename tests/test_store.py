@@ -3120,6 +3120,17 @@ class TestEditedFiles:
         store.record_edited_file(tmp_repo, "a.py", "sess-a")
         assert store._read_edited_files(tmp_repo, "sess-a") == ["b.py", "a.py"]
 
+    def test_alias_spellings_dedup_to_one_entry(self, tmp_repo):
+        # Greptile P1: alternate spellings of the SAME file (relative, ./-prefixed, absolute)
+        # must collapse to ONE edited-files entry, or the aliases each consume a
+        # _DRIFT_MAX_FILES slot and displace a distinct edited file.
+        Path(tmp_repo, "src").mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo, "src") / "file.py").write_text("x = 1\n", encoding="utf-8")
+        store.record_edited_file(tmp_repo, "src/file.py", "sess-a")
+        store.record_edited_file(tmp_repo, "./src/file.py", "sess-a")
+        store.record_edited_file(tmp_repo, os.path.join(tmp_repo, "src/file.py"), "sess-a")
+        assert store._read_edited_files(tmp_repo, "sess-a") == ["src/file.py"]
+
     def test_caps_at_50_keeping_most_recent(self, tmp_repo):
         for i in range(55):
             store.record_edited_file(tmp_repo, f"f{i}.py", "sess-a")

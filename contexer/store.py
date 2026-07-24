@@ -1426,6 +1426,22 @@ def pending_review_nudge(repo_path: str) -> str | None:
 _EDITED_FILES_CAP = 50  # most recent edits kept; a drift check only cares about those
 
 
+def _repo_relpath(repo_path: str, path: str) -> str:
+    """Canonical repo-relative spelling of `path` — an absolute path, a `./`-prefixed one,
+    and a bare relative one for the SAME file all collapse to one identity. Normalizing at
+    the entry points keeps the edited-files dedup, the `_DRIFT_MAX_FILES` cap, and the drift
+    dedup/dismiss hash from treating alternate spellings of one file as distinct (Greptile
+    P1). Fail-soft: returns `path` unchanged when it can't be resolved under `repo_path`."""
+    try:
+        real_repo = os.path.realpath(repo_path)
+        real = os.path.realpath(os.path.join(repo_path, path))
+        if real == real_repo or not real.startswith(real_repo + os.sep):
+            return path
+        return os.path.relpath(real, real_repo)
+    except Exception:
+        return path
+
+
 def _edited_files_path(repo_path: str, session_id: str) -> Path:
     """Per-repo, PER-SESSION sidecar recording files edited this turn, for a later
     UserPromptSubmit hook to read (and normally clear) — Doc Drift Layer 1's edit signal.
@@ -1446,6 +1462,10 @@ def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> 
     if not file_path or not session_id:
         return
     try:
+        # Canonicalize first so `src/f.py`, `./src/f.py`, and an absolute spelling of the
+        # SAME file dedup to one entry instead of each consuming a _DRIFT_MAX_FILES slot and
+        # displacing a distinct edited file (Greptile P1).
+        file_path = _repo_relpath(repo_path, file_path)
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         files = _read_edited_files(repo_path, session_id, clear=False)
         files = [f for f in files if f != file_path]
