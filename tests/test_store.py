@@ -4966,6 +4966,16 @@ class TestDriftCandidates:
     engine: no session, no recording, no mutation — used by both `contexer drift` (pending
     only) and `contexer drift --explain` (every considered pair + why)."""
 
+    def test_git_changed_files_first_path_intact_when_git_output_stripped(self, tmp_repo, monkeypatch):
+        # Regression: `_git` strips the whole `git status --porcelain` output, so the FIRST
+        # line loses its leading status space. A fixed `line[3:]` slice then ate the first
+        # path's leading character (silently dropping the first changed file from the CLI).
+        # Realistic stripped porcelain: line 1 lost its leading space, line 2 kept it.
+        monkeypatch.setattr(store, "_git",
+                            lambda *a, **k: "M contexer/config.py\n M uv.lock\n?? new/doc.py")
+        assert store._git_changed_files(tmp_repo) == [
+            "contexer/config.py", "uv.lock", "new/doc.py"]
+
     def _write(self, tmp_repo, rel_path, code):
         parts = Path(rel_path).parts
         Path(tmp_repo, *parts[:-1]).mkdir(parents=True, exist_ok=True)

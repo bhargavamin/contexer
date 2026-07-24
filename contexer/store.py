@@ -4641,9 +4641,15 @@ def _git_changed_files(repo_path: str) -> list[str]:
         return []
     files = []
     for line in out.splitlines():
-        if len(line) < 4:
+        # porcelain: a 2-column XY status, a space, then the path. Do NOT slice a fixed
+        # `line[3:]`: `_git` strips the whole output, so the FIRST line loses its leading
+        # status space and a fixed slice would eat the path's first character (only the
+        # first file, silently). Match a 1-or-2-char status + whitespace, tolerant of the
+        # stripped leading column, and take the rest as the path.
+        m = re.match(r"^\s*\S{1,2}\s+(.+)$", line)
+        if not m:
             continue
-        path = line[3:].strip()
+        path = m.group(1).strip()
         if " -> " in path:  # rename/copy: "old -> new"
             path = path.split(" -> ", 1)[1]
         path = path.strip().strip('"')
