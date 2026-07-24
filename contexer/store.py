@@ -22,7 +22,8 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
-_SCHEMA_VERSION = 2               # bumped when the on-disk entry shape changes; gates migration
+MAX_TITLE_LEN = 100
+_SCHEMA_VERSION = 3               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
@@ -232,7 +233,7 @@ def _save_global(data: dict) -> None:
     _atomic_write(_global_path(), json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def update_global_decision(content: str, session_id: str, subtype: str = "") -> tuple[bool, str | None]:
+def update_global_decision(content: str, session_id: str, subtype: str = "", title: str = "") -> tuple[bool, str | None]:
     """Store a cross-cutting decision in the global store.
     Only constraint and convention subtypes are accepted — architecture and pattern
     decisions are always repo-specific.
@@ -252,7 +253,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "") -> 
             _record_recurrence(match, session_id)
             _save_global(data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype, status="approved")
+        entry = _new_decision_entry(content, session_id, subtype, status="approved", title=title)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save_global(data)
@@ -294,7 +295,10 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
         lines.append(f"## Global decisions{filter_note}")
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {d['content']}")
+            title, body = _title_and_body(d)
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{_recur_suffix(d)} {title}")
+            if body is not None:
+                lines.append(f"    {body}")
     elif is_filtered:
         lines.append("No matching global decisions found.")
 
@@ -420,8 +424,7 @@ def _near_misses(content: str, existing: list) -> list[str]:
     scored.sort(key=lambda t: t[0], reverse=True)
     out = []
     for _ratio, e in scored[:_NEAR_MISS_CAP]:
-        text = _current_content(e)
-        preview = text[:80] + ("..." if len(text) > 80 else "")
+        preview = e.get("title") or _derive_title(_current_content(e))
         out.append(f'{(e.get("id") or "")[:8]} "{preview}"')
     return out
 
@@ -431,6 +434,39 @@ def _is_storable(content: str) -> bool:
     or whitespace-only content is rejected — this preserves the pre-refactor behavior
     where empty-token content was treated as non-novel and never stored."""
     return bool(_tokenize(content))
+
+
+def _normalize_title(title: str) -> str:
+    """Collapse a title to a single stripped line, capped at MAX_TITLE_LEN (adds an
+    ellipsis when it has to cut)."""
+    one_line = " ".join(title.split())
+    if len(one_line) <= MAX_TITLE_LEN:
+        return one_line
+    return one_line[:MAX_TITLE_LEN - 1].rstrip() + "…"
+
+
+def _derive_title(content: str) -> str:
+    """Deterministic fallback title from content: verbatim when the whole thing is short,
+    otherwise the first sentence/line, capped at MAX_TITLE_LEN."""
+    one_line = " ".join(content.split())
+    if not one_line:
+        return ""
+    if len(one_line) <= MAX_TITLE_LEN:
+        return one_line
+    first_line = content.strip().splitlines()[0]
+    first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
+    return _normalize_title(first_sentence)
+
+
+def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str | None]:
+    """Rendering primitive: (title, body) for a decision. `title` is the entry's title
+    (or derived from content). `body` is the content to show on the indented second line,
+    or None when it would merely repeat the title (a short decision whose derived title IS
+    its content) — callers skip the duplicate. Single content source: the current revision."""
+    body = _current_content(entry) if content is None else content
+    title = entry.get("title") or _derive_title(body)
+    collapsed = " ".join(body.split())
+    return title, (body if collapsed and collapsed != title else None)
 
 
 def _is_novel(content: str, existing: list) -> bool:
@@ -1077,7 +1113,7 @@ def _normalize_content(content: str) -> str:
 def _new_revision(decision_id: str, version_number: int, content: str, source: str,
                   confidence_score: int = 0, evidence: list | None = None,
                   approved_at: str | None = None, created_at: str | None = None,
-                  normalize: bool = True) -> dict:
+                  normalize: bool = True, title: str = "") -> dict:
     """Build one immutable revision object. `source` is the provenance
     (ai | human | scan | bootstrap | memory) and maps to the upstream push contract.
 
@@ -1089,6 +1125,7 @@ def _new_revision(decision_id: str, version_number: int, content: str, source: s
         "decision_id": decision_id,
         "version_number": version_number,
         "content": _normalize_content(content) if normalize else content,
+        "title": title,
         "confidence_score": confidence_score,
         "evidence": list(evidence or []),
         "created_at": created_at or now,
@@ -1124,6 +1161,7 @@ def _sync_decision_cache(entry: dict) -> None:
     if rev is None:
         return
     entry["content"] = rev.get("content", "")
+    entry["title"] = rev.get("title") or _derive_title(rev.get("content", ""))
     entry["revision"] = rev.get("version_number", 1)
     entry["confidence"] = rev.get("confidence_score", entry.get("confidence", 0))
     evidence = rev.get("evidence") or []
@@ -1134,23 +1172,39 @@ def _sync_decision_cache(entry: dict) -> None:
 
 
 def _append_revision(entry: dict, content: str, source: str,
-                     approved_at: str | None = None) -> dict:
+                     approved_at: str | None = None, title: str = "") -> dict:
     """Create the next revision for a decision, make it current, and resync the cache.
     Confidence is computed from the decision's aggregate evidence at this moment and
-    snapshotted onto the revision. Returns the new revision."""
+    snapshotted onto the revision. `title` wins when given; otherwise it is re-derived
+    from `content` via `_normalize_title`/`_derive_title`. Returns the new revision."""
     revs = entry.setdefault("revisions", [])
     next_version = (revs[-1]["version_number"] + 1) if revs else 1
     score, factors = _compute_confidence(entry)
+    effective_title = _normalize_title(title) or _derive_title(content)
     rev = _new_revision(
         entry.get("id", ""), next_version, content,
         source=source, confidence_score=score, evidence=factors,
-        approved_at=approved_at,
+        approved_at=approved_at, title=effective_title,
     )
     revs.append(rev)
     entry["current_revision_id"] = rev["revision_id"]
     entry["updated_at"] = rev["created_at"]
     _sync_decision_cache(entry)
     return rev
+
+
+def _backfill_titles(entry: dict) -> bool:
+    """Set a derived `title` on any revision that lacks one, then re-sync the HEAD cache.
+    Idempotent; returns True if anything changed."""
+    changed = False
+    for rev in entry.get("revisions", []):
+        if not rev.get("title"):
+            rev["title"] = _derive_title(rev.get("content", ""))
+            changed = True
+    if changed or not entry.get("title"):
+        _sync_decision_cache(entry)
+        changed = True
+    return changed
 
 
 def _migrate_decision(entry: dict) -> bool:
@@ -1171,12 +1225,14 @@ def _migrate_decision(entry: dict) -> bool:
         # decision-level content cache (e.g. an earlier buggy migration that re-capitalized
         # the revision), restore the revision to the cached value - that is the value replay
         # has always shown, so it is the original-of-record. No-op when consistent.
+        healed = False
         cur = _current_revision(entry)
         cached = entry.get("content")
         if cur is not None and cached is not None and cur.get("content") != cached:
             cur["content"] = cached
-            return True
-        return False
+            healed = True
+        backfilled = _backfill_titles(entry)
+        return healed or backfilled
 
     did = entry.get("id", "")
     created_by = entry.get("created_by", "ai")
@@ -1210,6 +1266,7 @@ def _migrate_decision(entry: dict) -> bool:
     entry["revisions"] = full
     entry["current_revision_id"] = current["revision_id"]
     entry["revision"] = current["version_number"]
+    _backfill_titles(entry)
     return True
 
 
@@ -1229,10 +1286,12 @@ def _migrate_entries(data: dict) -> None:
 def _new_decision_entry(content: str, session_id: str, subtype: str,
                         memory_key: str | None = None,
                         created_by: str = "ai",
-                        status: str = "") -> dict:
+                        status: str = "",
+                        title: str = "") -> dict:
     """Build a decision entry with its first revision. Single source of truth for the
     entry schema - both manual capture (`update_decision`) and memory import use this."""
     content = _normalize_content(content)
+    effective_title = _normalize_title(title) or _derive_title(content)
     if not status:
         level = _classify_level(content, subtype, created_by)
         status = _level_to_status(level)
@@ -1243,6 +1302,7 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
         "type": "decision",
         "subtype": subtype,
         "content": content,         # HEAD-cache of the current revision (see _sync_decision_cache)
+        "title": effective_title,   # HEAD-cache of the current revision title
         "session_id": session_id,
         "session_ids": [session_id],
         "timestamp": now,           # Created At - immutable
@@ -1260,7 +1320,8 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
     score, factors = _compute_confidence(entry)
     rev = _new_revision(decision_id, 1, content, source=created_by,
                         confidence_score=score, evidence=factors,
-                        approved_at=approved_at, created_at=now)
+                        approved_at=approved_at, created_at=now,
+                        title=effective_title)
     entry["revisions"] = [rev]
     entry["current_revision_id"] = rev["revision_id"]
     _sync_decision_cache(entry)
@@ -1268,7 +1329,7 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 
 
 def _build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
-                    source: str = "ai") -> dict:
+                    source: str = "ai", title: str = "") -> dict:
     """A Suggested Update (pending revision) attached to a live decision: the detected new
     value, its confidence/evidence, and provenance. The live decision is NOT modified - this
     proposal waits for developer approval, at which point it is promoted to a new revision."""
@@ -1279,8 +1340,9 @@ def _build_proposal(target: dict, content: str, subtype: str, session_id: str, n
         "session_ids": sessions,
         "memory_key": target.get("memory_key"),
     })
-    return {
-        "content": _normalize_content(content),
+    normalized_content = _normalize_content(content)
+    proposal = {
+        "content": normalized_content,
         "subtype": subtype or target.get("subtype", ""),
         "session_id": session_id,
         "source": source,
@@ -1288,12 +1350,17 @@ def _build_proposal(target: dict, content: str, subtype: str, session_id: str, n
         "confidence": score,
         "confidence_factors": factors,
     }
+    proposal["title"] = _normalize_title(title) or _derive_title(normalized_content)
+    return proposal
 
 
 def _promote_proposal(entry: dict, content: str | None = None) -> None:
     """Approve a pending proposed_revision: append it as a new immutable revision and move
     current_revision_id forward. Prior revisions are preserved (never overwritten). `content`
-    (an edited value) overrides the proposal's content when given."""
+    (an edited value) overrides the proposal's content when given. The proposal's title carries
+    forward only when the promoted content matches the proposal's content unchanged; if an
+    edit at approval time changed the content, the title is dropped so _append_revision
+    re-derives it from the final content instead of carrying a stale one."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1305,9 +1372,12 @@ def _promote_proposal(entry: dict, content: str | None = None) -> None:
         sessions.add(prop_session)
         entry["session_ids"] = sorted(sessions)
         entry["occurrence_count"] = entry.get("occurrence_count", 1) + 1
-    new_content = content if content else prop.get("content", _current_content(entry))
+    prop_content = prop.get("content", _current_content(entry))
+    new_content = content if content else prop_content
     now = datetime.now(timezone.utc).isoformat()
-    _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now)
+    carried_title = prop.get("title", "") if new_content == prop_content else ""
+    _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now,
+                     title=carried_title)
     entry.pop("proposed_revision", None)
 
 
@@ -1638,7 +1708,7 @@ def _log_drift(repo_path: str, event: dict) -> None:
 
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
-                    created_by: str = "ai", replace_id: str = "") -> tuple[bool, str | None]:
+                    created_by: str = "ai", replace_id: str = "", title: str = "") -> tuple[bool, str | None]:
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -1656,8 +1726,43 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # from wiping a trusted decision.
                 if not _is_storable(content):
                     return False, None
-                # Fix: no-op guard - identical content creates no revision and no proposal.
+                # No-op guard - identical content creates no revision. A title-only correction
+                # (same content, new title) is still handled, but must respect the SAME approval
+                # gate as any change: the title renders as a trusted leading heading, so an AI
+                # retitling a trusted architecture/constraint decision could reframe it as trusted
+                # context - that goes through review, never applied in place.
                 if content == target.get("content", ""):
+                    new_title = _normalize_title(title)
+                    if not new_title or new_title == target.get("title", ""):
+                        return True, target["id"]  # nothing meaningful changed
+                    now = datetime.now(timezone.utc).isoformat()
+                    st = target.get("subtype", "")
+                    gated = (_update_needs_approval(subtype or st, created_by)
+                             or _update_needs_approval(st, created_by))
+                    # A gated title change to an ALREADY-TRUSTED (approved/suggested) decision
+                    # must be reviewed - the title renders as trusted, injected context. A pending
+                    # (untrusted) decision is NOT injected, so its title is corrected in place like
+                    # the non-gated case; the developer still reviews the base with the fixed title.
+                    if gated and _entry_status(target) != "pending_approval":
+                        # Attach a Suggested Update carrying the new title (content unchanged) for
+                        # review. Dedup on content AND title so a corrected-title retry rebuilds it.
+                        existing_prop = target.get("proposed_revision")
+                        if (existing_prop and existing_prop.get("content", "") == content
+                                and existing_prop.get("title", "") == new_title):
+                            return True, target["id"]  # identical title proposal already pending
+                        target["proposed_revision"] = _build_proposal(
+                            target, content, subtype, session_id, now, title=title)
+                        _save(repo_path, data)
+                        _touch_pending_review(repo_path)
+                        return True, target["id"]
+                    # Non-gated (human/scan/bootstrap, or pattern/convention) OR pending/untrusted:
+                    # correct the current revision's title in place - no new revision.
+                    cur = _current_revision(target)
+                    if cur is not None:
+                        cur["title"] = new_title
+                        target["updated_at"] = now
+                        _sync_decision_cache(target)
+                        _save(repo_path, data)
                     return True, target["id"]
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")
@@ -1673,13 +1778,17 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     # the developer needs to review the base first.
                     if _entry_status(target) == "pending_approval":
                         return True, target["id"]
-                    # Fix: don't overwrite an existing proposal if the new content is
-                    # identical - the proposal is already pending for the same change.
+                    # Fix: don't overwrite an existing proposal if the new content AND its
+                    # effective title are identical - the proposal is already pending for the same
+                    # change. A same-content retry with a CHANGED title must rebuild it, or approval
+                    # would promote the stale proposal title.
                     existing_prop = target.get("proposed_revision")
-                    if existing_prop and existing_prop.get("content", "") == content:
+                    new_prop_title = _normalize_title(title) or _derive_title(content)
+                    if (existing_prop and existing_prop.get("content", "") == content
+                            and existing_prop.get("title", "") == new_prop_title):
                         return True, target["id"]
                     target["proposed_revision"] = _build_proposal(
-                        target, content, subtype, session_id, now)
+                        target, content, subtype, session_id, now, title=title)
                     _save(repo_path, data)
                     _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"]
@@ -1688,7 +1797,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # prior revision stays in revisions[]; current_revision_id moves forward.
                 if subtype:
                     target["subtype"] = subtype
-                _append_revision(target, content, source=created_by, approved_at=now)
+                _append_revision(target, content, source=created_by, approved_at=now, title=title)
                 _save(repo_path, data)
                 return True, target["id"]
             # replace_id not found — fall through to normal storage
@@ -1700,7 +1809,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             _record_recurrence(match, session_id)
             _save(repo_path, data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by)
+        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -1881,7 +1990,10 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f'    detected: "{prop.get("content", "")}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
         else:
-            lines.append(f'- {eid} [{st}] "{_current_content(d)}"')
+            title, body = _title_and_body(d)
+            lines.append(f'- {eid} [{st}] {title}')
+            if body is not None:
+                lines.append(f'    "{body}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
     lines.append("\nReview each with the developer before approving. To clear several at once, "
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
@@ -2599,7 +2711,11 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
-            sys_parts.extend(f"- [{d.get('subtype', '')}] {d['content']}" for d in global_rules)
+            for d in global_rules:
+                title, body = _title_and_body(d)
+                sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+                if body is not None:
+                    sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         return {
@@ -2616,7 +2732,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
             for d in global_rules:
-                sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+                title, body = _title_and_body(d)
+                sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+                if body is not None:
+                    sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(lines)
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
@@ -2639,14 +2758,20 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     if global_rules:
         sys_parts.append("## Global rules (apply to ALL repos):")
         for d in global_rules:
-            sys_parts.append(f"- [{d.get('subtype', '')}] {d['content']}")
+            title, body = _title_and_body(d)
+            sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+            if body is not None:
+                sys_parts.append(f"    {body}")
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
         for d in pre_loaded:
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
-            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {d['content']}")
+            title, body = _title_and_body(d)
+            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}")
+            if body is not None:
+                sys_parts.append(f"    {body}")
     if global_rules or pre_loaded:
         sys_parts.append(
             "If the current task conflicts with any of these decisions, "
@@ -3191,7 +3316,10 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
         if not e or _entry_status(e) not in ("approved", "suggested"):
             continue
         subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {_current_content(e)}")
+        title, body = _title_and_body(e)
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}")
+        if body is not None:
+            lines.append(f"    {body}")
     if not lines:
         return ""
     return "## Rehydrated working context:\n" + "\n".join(lines)
@@ -3273,7 +3401,8 @@ def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> 
 
 
 def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
-    """Render the given decisions in the same line format `get_context` uses. Skips
+    """Render the given decisions in the same two-line format `get_context` uses: a bullet
+    line ending in the title, then a `    `-indented line with the current content. Skips
     ignored / missing entries; empty string when nothing renders."""
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
@@ -3287,7 +3416,10 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {_current_content(e)}{id_tag}")
+        title, body = _title_and_body(e)
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {title}{id_tag}")
+        if body is not None:
+            lines.append(f"    {body}")
     return "\n".join(lines)
 
 
@@ -3551,7 +3683,10 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
-            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {d['content']}{id_tag}")
+            title, body = _title_and_body(d)
+            lines.append(f"- [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
+            if body is not None:
+                lines.append(f"    {body}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
