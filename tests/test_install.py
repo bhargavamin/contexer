@@ -741,6 +741,31 @@ class TestDriftHookInstall:
                         if str(grp.get("matcher", "")).startswith("Write")]
         assert len(write_groups) == 1
 
+    def test_migration_replaces_old_one_arg_post_write(self, clean_home):
+        # Simulates an install from before this fix: post_write's hook had no `git
+        # rev-parse --show-toplevel` prefix and called post_write(sys.stdin.read()) with a
+        # single arg. install() must replace it with the $REPO-threading version, and stay
+        # idempotent on repeated installs thereafter.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        old_cmd = (f'"{sys.executable}" -c "from contexer.adapters import claude; import sys; '
+                   'print(claude.post_write(sys.stdin.read()))" '
+                   '# contexer-managed-hook .pending_capture')
+        settings_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command",
+             "command": old_cmd}]}]}}))
+        install()
+        cmds = self._cmds(clean_home, "PostToolUse")
+        post_write_cmds = [c for c in cmds if "claude.post_write" in c]
+        assert len(post_write_cmds) == 1
+        assert "show-toplevel" in post_write_cmds[0]
+        assert "sys.argv[1]" in post_write_cmds[0]
+        # Idempotent: a second install doesn't duplicate or re-churn the (now current) hook.
+        install()
+        cmds2 = self._cmds(clean_home, "PostToolUse")
+        assert sum("claude.post_write" in c for c in cmds2) == 1
+        assert [c for c in cmds2 if "claude.post_write" in c] == post_write_cmds
+
     def test_install_idempotent_single_post_write(self, clean_home):
         install()
         install()
@@ -768,6 +793,31 @@ class TestDriftHookInstall:
                        "claude.review_nudge"]:
             assert claude._in_groups(ups, marker), f"missing {marker}"
         assert claude._in_groups(ups, "claude.drift")
+
+    def test_post_write_and_drift_resolve_repo_identically(self, installed_home):
+        # THE BUG (regression): post_write's installed shell wrapper used to resolve the repo
+        # from raw os.getcwd() inside Python, with no `git rev-parse --show-toplevel`
+        # normalization, while drift's wrapper (like every sibling UserPromptSubmit hook)
+        # computes REPO in the shell first. In a monorepo subdirectory those diverge, so
+        # post_write's sidecar write and drift's sidecar read land under different repo slugs
+        # and drift silently never fires — no error, no failing unit test, because the
+        # pure-Python handshake test drives both functions with a hand-passed repo and can't
+        # see this shell-layer divergence. Assert both installed wrappers share the identical
+        # repo-resolution shell prefix.
+        put_cmds = self._cmds(installed_home, "PostToolUse")
+        ups_cmds = self._cmds(installed_home, "UserPromptSubmit")
+        post_write_cmd = next(c for c in put_cmds if "claude.post_write" in c)
+        drift_cmd = next(c for c in ups_cmds if "claude.drift" in c)
+        repo_prefix = "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "
+        assert post_write_cmd.startswith(repo_prefix), (
+            f"post_write's wrapper does not resolve $REPO via git-toplevel: {post_write_cmd!r}")
+        assert drift_cmd.startswith(repo_prefix), (
+            f"drift's wrapper does not resolve $REPO via git-toplevel: {drift_cmd!r}")
+        # Both must pass $REPO into the python call the same way (positional argv[1]).
+        assert '"$REPO"' in post_write_cmd
+        assert '"$REPO"' in drift_cmd
+        assert "sys.argv[1]" in post_write_cmd
+        assert "sys.argv[1]" in drift_cmd
 
     def test_uninstall_strips_post_write_and_drift(self, installed_home):
         uninstall()

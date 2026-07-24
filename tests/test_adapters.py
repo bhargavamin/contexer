@@ -181,8 +181,9 @@ class TestClaudeCaptureEntrypoints:
 
 class TestClaudePostWrite:
     """post_write records edited files into the per-(repo, session) drift sidecar and arms
-    the .pending_capture flag. It resolves the repo from its OWN cwd (no repo arg — exactly
-    how the installed PostToolUse hook runs) and threads the host session_id."""
+    the .pending_capture flag. It takes the same (repo_path, raw) shape as drift — the
+    installed PostToolUse hook passes the shell's git-toplevel $REPO, and an empty repo_path
+    falls back to cwd via store._hook_cwd_repo — and threads the host session_id."""
     SID = "sess-postwrite-1"
 
     def _stdin(self, file_path=None, edits=None, session_id=SID):
@@ -202,7 +203,19 @@ class TestClaudePostWrite:
     def test_records_edited_file_with_session(self, tmp_repo, monkeypatch):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(tmp_repo)
-        assert claude.post_write(self._stdin(file_path="src/app.py")) == "{}"
+        assert claude.post_write("", self._stdin(file_path="src/app.py")) == "{}"
+        recorded = store._read_edited_files(tmp_repo, self.SID, clear=False)
+        assert "src/app.py" in recorded
+
+    def test_records_edited_file_with_explicit_repo(self, tmp_repo, monkeypatch, tmp_path):
+        # Mirrors the installed shell wrapper: cwd is elsewhere (e.g. a monorepo subdir),
+        # but $REPO (git-toplevel) is passed explicitly and must be honored, exactly as
+        # drift honors its repo_path arg. This is the seam the bug lived in.
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        assert claude.post_write(tmp_repo, self._stdin(file_path="src/app.py")) == "{}"
         recorded = store._read_edited_files(tmp_repo, self.SID, clear=False)
         assert "src/app.py" in recorded
 
@@ -213,7 +226,7 @@ class TestClaudePostWrite:
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(tmp_repo)
         raw = _json.dumps({"tool_input": {"file_path": "src/app.py"}})
-        assert claude.post_write(raw) == "{}"
+        assert claude.post_write("", raw) == "{}"
         assert list(store.STORE_DIR.glob(".edited_*")) == []
 
     def test_multiedit_records_every_path(self, tmp_repo, monkeypatch):
@@ -221,7 +234,7 @@ class TestClaudePostWrite:
         monkeypatch.chdir(tmp_repo)
         raw = self._stdin(file_path="top.py",
                           edits=[{"file_path": "a.py"}, {"file_path": "b.py"}])
-        claude.post_write(raw)
+        claude.post_write("", raw)
         recorded = set(store._read_edited_files(tmp_repo, self.SID, clear=False))
         assert {"top.py", "a.py", "b.py"} <= recorded
 
@@ -231,12 +244,12 @@ class TestClaudePostWrite:
         (tmp_path / ".contexer").mkdir(parents=True, exist_ok=True)
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(tmp_repo)
-        claude.post_write(self._stdin(file_path="src/app.py"))
+        claude.post_write("", self._stdin(file_path="src/app.py"))
         assert (tmp_path / ".contexer" / ".pending_capture").exists()
 
     def test_failsoft_on_bad_stdin(self, tmp_repo):
-        assert claude.post_write("garbage not json") == "{}"
-        assert claude.post_write("") == "{}"
+        assert claude.post_write("", "garbage not json") == "{}"
+        assert claude.post_write("", "") == "{}"
 
 
 class TestClaudeDrift:
@@ -300,14 +313,35 @@ class TestClaudeDriftHandshake:
 
     def test_post_write_then_drift_same_session_renders(self, tmp_repo, monkeypatch):
         target = self._seed(tmp_repo)
-        # post_write resolves the repo from its own cwd, exactly as the installed PostToolUse
-        # hook runs (no repo arg), so drive it FROM the repo dir.
+        # post_write now takes the same (repo_path, raw) shape as drift — drive it FROM the
+        # repo dir with repo_path passed explicitly, exactly as the installed PostToolUse
+        # hook's shell wrapper passes $REPO.
         monkeypatch.chdir(tmp_repo)
         post_stdin = _json.dumps({
             "session_id": self.SID, "hook_event_name": "PostToolUse", "tool_name": "Write",
             "tool_input": {"file_path": target, "content": "..."}, "cwd": tmp_repo})
-        assert claude.post_write(post_stdin) == "{}"
+        assert claude.post_write(tmp_repo, post_stdin) == "{}"
         # SAME session id => the advisory renders through the drift hook.
+        same = _json.dumps({"session_id": self.SID, "hook_event_name": "UserPromptSubmit",
+                            "prompt": "keep going"})
+        out = _json.loads(claude.drift(tmp_repo, same))
+        assert "additionalContext" in out["hookSpecificOutput"]
+        assert "Memcached" in out["hookSpecificOutput"]["additionalContext"]
+
+    def test_post_write_then_drift_from_monorepo_subdir_renders(self, tmp_repo, tmp_path, monkeypatch):
+        # THE BUG: Claude Code launched with cwd = a subdirectory of the git root (a monorepo
+        # package dir). Both hooks' shell wrappers compute $REPO via `git rev-parse
+        # --show-toplevel`, so both receive the SAME toplevel repo_path regardless of cwd —
+        # post_write must honor it (not fall back to raw cwd), or its sidecar write lands
+        # under a different slug than drift's read and the advisory silently never fires.
+        target = self._seed(tmp_repo)
+        subdir = Path(tmp_repo) / "packages" / "sub"
+        subdir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(subdir)  # cwd is the subdir; $REPO (passed explicitly) is the toplevel
+        post_stdin = _json.dumps({
+            "session_id": self.SID, "hook_event_name": "PostToolUse", "tool_name": "Write",
+            "tool_input": {"file_path": target, "content": "..."}, "cwd": str(subdir)})
+        assert claude.post_write(tmp_repo, post_stdin) == "{}"
         same = _json.dumps({"session_id": self.SID, "hook_event_name": "UserPromptSubmit",
                             "prompt": "keep going"})
         out = _json.loads(claude.drift(tmp_repo, same))
@@ -320,7 +354,7 @@ class TestClaudeDriftHandshake:
         post_stdin = _json.dumps({
             "session_id": self.SID, "hook_event_name": "PostToolUse", "tool_name": "Write",
             "tool_input": {"file_path": target}, "cwd": tmp_repo})
-        claude.post_write(post_stdin)
+        claude.post_write(tmp_repo, post_stdin)
         # A DIFFERENT session never wrote a sidecar => nothing to surface (isolation holds).
         other = _json.dumps({"session_id": "some-other-session", "prompt": "keep going"})
         assert claude.drift(tmp_repo, other) == "{}"

@@ -213,21 +213,25 @@ def review_nudge(repo_path: str, raw: str) -> str:
         return "{}"
 
 
-def post_write(raw: str) -> str:
+def post_write(repo_path: str, raw: str) -> str:
     """PostToolUse (Write|Edit|MultiEdit): record the files edited this turn into the
     per-(repo, session) drift sidecar AND arm the .pending_capture flag. Silent, fail-soft,
     never raises; always returns "{}".
 
-    GAP-1: the drift UserPromptSubmit hook reads that sidecar under the SAME session id, so
-    this hook MUST thread the host session_id (store.record_edited_file writes NOTHING for an
-    empty session_id — the write would land nowhere and drift would silently never fire). The
-    repo is resolved from this hook's own cwd (store._hook_cwd_repo("")) — hosts run PostToolUse
-    with cwd = the project dir — mirroring the drift hook's $REPO so both key the same sidecar.
-    Touching ~/.contexer/.pending_capture preserves the capture-reminder signal the legacy shell
-    hook this replaces used to set (consumed by the next UserPromptSubmit anchor)."""
+    GAP-1: the drift UserPromptSubmit hook reads that sidecar under the SAME session id AND
+    repo, so this hook MUST thread the host session_id (store.record_edited_file writes NOTHING
+    for an empty session_id — the write would land nowhere and drift would silently never fire)
+    and resolve the SAME repo drift does. Takes the same (repo_path, raw) shape as drift and
+    resolves via store._hook_cwd_repo(repo_path) — the installed shell wrapper computes
+    `git rev-parse --show-toplevel` exactly like drift's wrapper and passes it as $REPO, so both
+    hooks key the sidecar off the same git-toplevel-normalized repo (previously post_write used
+    raw os.getcwd(), which diverges from drift's toplevel when Claude Code's cwd is a monorepo
+    subdirectory — the sidecar written here would never be found by drift). Touching
+    ~/.contexer/.pending_capture preserves the capture-reminder signal the legacy shell hook
+    this replaces used to set (consumed by the next UserPromptSubmit anchor)."""
     try:
         sid = store.session_from_hook_stdin(raw)
-        repo = store._hook_cwd_repo("")
+        repo = store._hook_cwd_repo(repo_path)
         try:
             data = json.loads(raw)
         except Exception:
@@ -259,9 +263,10 @@ def post_write(raw: str) -> str:
 def drift(repo_path: str, raw: str) -> str:
     """UserPromptSubmit (every prompt): surface the doc-drift advisory for files edited this
     session. Reads the same per-(repo, session) sidecar post_write writes — both resolve the
-    host session_id via session_from_hook_stdin (GAP-1) and the same repo (post_write from cwd,
-    this hook from its $REPO arg). Mirrors rationale's additionalContext envelope; "" body =>
-    silent "{}". Fail-soft, never raises."""
+    host session_id via session_from_hook_stdin (GAP-1) and the same repo, via the identical
+    store._hook_cwd_repo($REPO) call, where $REPO is computed by the same shell
+    `git rev-parse --show-toplevel` prefix in both installed hook commands. Mirrors rationale's
+    additionalContext envelope; "" body => silent "{}". Fail-soft, never raises."""
     try:
         body = store.drift_check_payload(
             store._hook_cwd_repo(repo_path), store.session_from_hook_stdin(raw))
@@ -511,12 +516,16 @@ def install(home: Path) -> list[str]:
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
     # Doc Drift Layer 1. post_write records edited files (PostToolUse) and drift renders the
-    # advisory (UserPromptSubmit). post_write takes NO $REPO — it resolves the repo from its own
-    # cwd like the legacy shell hook it replaces; drift is passed $REPO like the other UPS hooks.
-    # The trailing `.pending_capture` marker keeps the migration/reinstall/uninstall detection
-    # (which keys on that token) and the existing PostToolUse assertions working across the swap.
-    post_write_cmd = (f'"{python}" -c "from contexer.adapters import claude; import sys; '
-                      f'print(claude.post_write(sys.stdin.read()))" '
+    # advisory (UserPromptSubmit). Both hooks MUST resolve the same repo or post_write's sidecar
+    # is keyed under one slug and drift reads a different one (silent, no error — GAP-1). So
+    # post_write's wrapper computes $REPO via the SAME `git rev-parse --show-toplevel` prefix as
+    # every other UserPromptSubmit hook (cap_drift, cap_con, cap_rat, ...) and passes it in,
+    # instead of letting the Python side fall back to raw os.getcwd(). The trailing
+    # `.pending_capture` marker keeps the migration/reinstall/uninstall detection (which keys on
+    # that token) and the existing PostToolUse assertions working across the swap.
+    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      f'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       f'# {_HOOK_SENTINEL} .pending_capture')
     cap_drift = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
@@ -584,6 +593,14 @@ def install(home: Path) -> list[str]:
     # which the migrated hook also carries, so this is a one-time swap and idempotent thereafter.
     if _in_groups(put, ".pending_capture") and not _in_groups(put, "claude.post_write"):
         put = _filter_groups(put, [".pending_capture"])
+        hooks["PostToolUse"] = put
+    # Migrate: the original post_write hook resolved the repo from raw os.getcwd() (no $REPO
+    # threading) — in a monorepo subdirectory that diverges from drift's git-toplevel repo, so
+    # post_write's sidecar write and drift's sidecar read land under different slugs and drift
+    # silently never fires. Replace it with the $REPO-threading version (same shell prefix as
+    # drift's wrapper). Detected by the absence of "show-toplevel" alongside "claude.post_write".
+    if _in_groups(put, "claude.post_write") and not _in_groups(put, "show-toplevel"):
+        put = _filter_groups(put, ["claude.post_write"])
         hooks["PostToolUse"] = put
     if not _in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command",
