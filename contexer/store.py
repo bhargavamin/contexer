@@ -1461,6 +1461,54 @@ def drift_already_surfaced(repo_path: str, drift_hash: str, session_id: str = ""
     return drift_hash in _read_drift_seen(repo_path, session_id)
 
 
+# ── permanent, cross-session dismissal sidecar (Doc Drift Layer 1, Task 1.8) ────
+# Per-session dedup (above) only DELAYS a bad advisory — it re-fires next session, forever.
+# This is the permanent antidote: keyed by REPO ONLY (no session), so a dismissed pair is
+# never surfaced again in ANY session. Also, deliberately, the precision dataset: a
+# dismissal is a confirmed negative. `_gc_stale_session_files` explicitly excludes
+# `.drift_dismissed_*` from its sweep — a dismissal must survive forever, not just outlive
+# one session's GC window.
+def _drift_dismissed_path(repo_path: str) -> Path:
+    return STORE_DIR / f".drift_dismissed_{_slug(repo_path)}.json"
+
+
+def _dismiss_hash(repo_path: str, drift_hash: str) -> None:
+    """Persist one already-computed drift_hash as permanently dismissed. Idempotent
+    (dismissing the same hash twice is a no-op) and fail-soft (a write error is a silent
+    no-op). The primitive both `dismiss_drift` and a CLI `--dismiss <hash>` call use."""
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        dismissed = _dismissed_drift(repo_path)
+        if drift_hash in dismissed:
+            return
+        dismissed.add(drift_hash)
+        _atomic_write(_drift_dismissed_path(repo_path), json.dumps(sorted(dismissed)))
+    except OSError:
+        pass
+
+
+def dismiss_drift(repo_path: str, decision_id: str, source_ref: str) -> None:
+    """Permanently dismiss one (decision_id, source_ref) advisory pair, repo-wide and
+    cross-session. Keyed by `_drift_hash` — the same identity the per-session seen-set uses
+    — so a changed excerpt does not un-dismiss the pair (same rationale as Task 1.4).
+    Unknown ids are accepted silently (the caller may be a CLI index/hash lookup with no
+    live decision to validate against). Fail-soft: never raises."""
+    _dismiss_hash(repo_path, _drift_hash(decision_id, source_ref))
+
+
+def _dismissed_drift(repo_path: str) -> set[str]:
+    """The set of permanently dismissed drift-pair hashes for this repo. Fail-soft: a
+    missing or corrupt file reads as no dismissals, never raises."""
+    path = _drift_dismissed_path(repo_path)
+    try:
+        hashes = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(hashes, list):
+            hashes = []
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        hashes = []
+    return set(hashes)
+
+
 # ── Doc Drift Layer 1: excerpt sanitization, trust framing, drift log ────────────
 # Red-team C1/M7: repo text is attacker-controlled in realistic cases (vendored deps, a
 # PR branch checked out for review, a cloned repo). The original plan piped raw doc/
@@ -4304,7 +4352,8 @@ def _file_keywords(file_path: str) -> list[str]:
 
 
 def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | None,
-                                 decisions: list[dict] | None = None) -> list[dict]:
+                                 decisions: list[dict] | None = None,
+                                 include_untrusted: bool = False) -> list[dict]:
     """Rank the store's APPROVED, trusted-provenance decisions most likely to be about
     `file_path`, via the existing BM25 index (no second index — reuses `_bm25_rank` over
     the sidecar `_read_retrieval_index` already builds). Returns up to `_DRIFT_MAX`
@@ -4318,7 +4367,13 @@ def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | N
 
     `decisions`, when given, replaces the local-store lookup with this list of entries —
     the same rank/gate logic runs over either source, so Layer 2 reuses this unchanged to
-    match team-shared conventions against an index built over its own decision list."""
+    match team-shared conventions against an index built over its own decision list.
+
+    `include_untrusted=True` (Task 1.8, used only by `drift_candidates`/`--explain`) returns
+    EVERY ranked approved-status match instead of silently dropping untrusted-provenance
+    ones, tags each with `"trusted": bool`, and drops the `_DRIFT_MAX` cap — `--explain`'s
+    whole point is to show what the engine drops and why. The default (False) is
+    byte-for-byte the engine's existing behavior."""
     if index is None:
         return []
     keywords = _file_keywords(file_path)
@@ -4341,12 +4396,16 @@ def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | N
         if entry is None:
             continue
         rev = _current_revision(entry)
-        if not rev or rev.get("source") not in _DRIFT_TRUSTED_SOURCES:
+        trusted = bool(rev) and rev.get("source") in _DRIFT_TRUSTED_SOURCES
+        if not trusted and not include_untrusted:
             continue
         content = _current_content(entry)
-        out.append({"id": (entry.get("id") or "")[:8], "content": content,
-                    "topics": _derive_topics(content)})
-        if len(out) >= _DRIFT_MAX:
+        item = {"id": (entry.get("id") or "")[:8], "content": content,
+                "topics": _derive_topics(content)}
+        if include_untrusted:
+            item["trusted"] = trusted
+        out.append(item)
+        if not include_untrusted and len(out) >= _DRIFT_MAX:
             break
     return out
 
@@ -4412,6 +4471,23 @@ def _extract_rejected_alternative(content: str) -> tuple[bool, str | None]:
     return True, term
 
 
+def _drift_signals(decision: dict, excerpt: str) -> dict:
+    """Every pairing signal between one decision and one excerpt — shared artifacts, shared
+    topics, whether a preference marker fired, the extracted rejected alternative, and rank
+    score — computed regardless of whether the artifact-required gate would pass.
+    `_pair_drift` wraps this with the gate; `drift_candidates`/`--explain` (Task 1.8) calls
+    it directly so a REJECTED pair can still be shown WHY, not just that it was dropped."""
+    content = decision.get("content", "") if isinstance(decision, dict) else ""
+    shared_artifacts = set(_extract_artifacts(content)) & set(_extract_artifacts(excerpt))
+    dec_topics = set(decision.get("topics") or _derive_topics(content))
+    shared_topics = dec_topics & set(_derive_topics(excerpt))
+    marker_found, rejected = _extract_rejected_alternative(content)
+    score = 2.0 * len(shared_artifacts) + (5.0 if marker_found else 0.0) + len(shared_topics)
+    return {"score": score, "rejected_alternative": rejected,
+            "shared_artifacts": sorted(shared_artifacts),
+            "shared_topics": sorted(shared_topics), "marker_found": marker_found}
+
+
 def _pair_drift(decision: dict, excerpt: str) -> dict | None:
     """Pure (decision, excerpt) → pairing verdict. No I/O, so it is directly testable and
     Layer 2 reuses it unchanged.
@@ -4419,19 +4495,13 @@ def _pair_drift(decision: dict, excerpt: str) -> dict | None:
     Gate is ARTIFACT-REQUIRED (revised 2026-07-22): the decision and the excerpt must share
     at least one concrete artifact (file path / dotted module / *Error / route) — topic
     overlap is NEVER sufficient alone, it only ranks. Returns None when the gate fails,
-    else a dict carrying the rank `score` and the extracted `rejected_alternative` (or
-    None). A preference marker in the decision boosts the score and yields the rejected
-    alternative; topic overlap is a tiebreaker only."""
-    content = decision.get("content", "") if isinstance(decision, dict) else ""
-    shared_artifacts = set(_extract_artifacts(content)) & set(_extract_artifacts(excerpt))
-    if not shared_artifacts:
+    else `_drift_signals`' dict, carrying the rank `score` and the extracted
+    `rejected_alternative` (or None). A preference marker in the decision boosts the score
+    and yields the rejected alternative; topic overlap is a tiebreaker only."""
+    signals = _drift_signals(decision, excerpt)
+    if not signals["shared_artifacts"]:
         return None
-    dec_topics = set(decision.get("topics") or _derive_topics(content))
-    shared_topics = dec_topics & set(_derive_topics(excerpt))
-    marker_found, rejected = _extract_rejected_alternative(content)
-    score = 2.0 * len(shared_artifacts) + (5.0 if marker_found else 0.0) + len(shared_topics)
-    return {"score": score, "rejected_alternative": rejected,
-            "shared_artifacts": sorted(shared_artifacts)}
+    return signals
 
 
 def _attr_safe(s: str) -> str:
@@ -4489,6 +4559,7 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
     files_checked = 0
     pairs_considered = 0
     gate_rejected = 0
+    dismissed_skipped = 0
     emitted = 0
     try:
         files = _read_edited_files(repo_path, session_id, clear=True)[-_DRIFT_MAX_FILES:]
@@ -4496,6 +4567,7 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
         if index is None:
             return ""
         candidates: list[tuple] = []  # (score, decision, excerpt, source_ref, drift_hash, rejected)
+        dismissed = _dismissed_drift(repo_path)  # loaded once per call, not per pair (Task 1.8)
         for rel_path in files:
             if time.monotonic() - start > _DRIFT_TIME_BUDGET:
                 break
@@ -4516,7 +4588,9 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
                         gate_rejected += 1
                         continue
                     h = _drift_hash(decision.get("id", ""), source_ref)
-                    # Task 1.8 will also skip dismissed pairs here.
+                    if h in dismissed:
+                        dismissed_skipped += 1
+                        continue
                     if drift_already_surfaced(repo_path, h, session_id):
                         continue
                     candidates.append((pair["score"], decision, excerpt, source_ref, h,
@@ -4537,4 +4611,126 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
     finally:
         _log_drift(repo_path, {"files_checked": files_checked,
                                "pairs_considered": pairs_considered,
-                               "gate_rejected": gate_rejected, "emitted": emitted})
+                               "gate_rejected": gate_rejected,
+                               "dismissed_skipped": dismissed_skipped, "emitted": emitted})
+
+
+# ── Doc Drift Layer 1 — Task 1.8: read-only listing engine (`contexer drift`) ───
+# drift_check_payload's file list comes from `.edited_<slug>_<session>.json`, a per-session
+# sidecar that the hook itself clears the moment it reads it (`_read_edited_files(...,
+# clear=True)`) — by the time a developer opens a terminal to run `contexer drift`, that
+# sidecar is normally already gone. The CLI therefore uses a durable, session-independent
+# file signal instead: `git status --porcelain` (staged + unstaged + untracked). The
+# matching engine itself (`_docs_for_file`, `_approved_decisions_for_file`, `_drift_signals`
+# / `_pair_drift`) is reused unchanged.
+def _git_changed_files(repo_path: str) -> list[str]:
+    """Repo-relative paths with uncommitted changes (staged, unstaged, or untracked), via
+    `git status --porcelain`. `--untracked-files=all` is deliberate: without it, an entirely
+    untracked directory collapses to one `?? cache/` line instead of listing the file
+    inside it, which would hide a brand-new doc/decision pair from the CLI. Fail-soft: not a
+    git repo / git unavailable -> []."""
+    out = _git(repo_path, "status", "--porcelain", "--untracked-files=all")
+    if not out:
+        return []
+    files = []
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:  # rename/copy: "old -> new"
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().strip('"')
+        if path:
+            files.append(path)
+    return files
+
+
+def _all_drift_seen_for_repo(repo_path: str) -> set[str]:
+    """Union of every session's per-session surfaced-dedup sidecar for this repo — read-only,
+    used only by `drift_candidates`/`--explain` for the 'already-seen' observability
+    category. Never mutates, and never used by the engine's own per-session fire-once gate
+    (that stays exactly session-scoped via `drift_already_surfaced`)."""
+    hashes: set[str] = set()
+    try:
+        for p in STORE_DIR.glob(f".drift_seen_{_slug(repo_path)}_*.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    hashes.update(data)
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                continue
+    except OSError:
+        pass
+    return hashes
+
+
+def drift_candidates(repo_path: str, explain: bool = False) -> list[dict]:
+    """Read-only counterpart to `drift_check_payload`'s matching engine, for `contexer
+    drift` and `--explain`. NEVER records surfaced-state, never mutates a session sidecar,
+    never touches the dismissal file's write path (`dismiss_drift`/`_dismiss_hash` are the
+    only writers there).
+
+    Each returned dict carries `decision_id`, `content`, `source_ref`, `excerpt`, `score`,
+    `rejected_alternative`, `hash`, `status` (`"pending"` | `"rejected"`), and `reason`
+    (`None` when pending, else one of `"provenance"` | `"no-artifact"` | `"dismissed"` |
+    `"already-seen"`).
+
+    explain=False (default — what `contexer drift` lists) returns only PENDING pairs,
+    highest-score first: the stable 1-based index a caller dismisses by IS this list's
+    order, reproducible on the next call as long as nothing about the underlying state
+    changed in between. explain=True (what `--explain` renders) returns EVERY considered
+    pair, including rejected ones, each tagged with why.
+
+    Bounded like the engine: at most `_DRIFT_MAX_FILES` (of the files `git status`
+    reports changed) are examined. Fail-soft: any exception -> []."""
+    try:
+        index = _read_retrieval_index(repo_path)
+        if index is None:
+            return []
+        files = _git_changed_files(repo_path)[-_DRIFT_MAX_FILES:]
+        if not files:
+            return []
+        dismissed = _dismissed_drift(repo_path)
+        seen = _all_drift_seen_for_repo(repo_path)
+        out: list[dict] = []
+        for rel_path in files:
+            docs = _docs_for_file(repo_path, rel_path)
+            if not docs:
+                continue
+            decisions = _approved_decisions_for_file(repo_path, rel_path, index,
+                                                      include_untrusted=True)
+            if not decisions:
+                continue
+            for doc in docs:
+                source_ref = doc.get("source_ref", "")
+                excerpt = doc.get("excerpt", "")
+                for decision in decisions:
+                    did = decision.get("id", "")
+                    h = _drift_hash(did, source_ref)
+                    base = {"decision_id": did, "content": decision.get("content", ""),
+                            "source_ref": source_ref, "excerpt": excerpt, "hash": h}
+                    if not decision.get("trusted", True):
+                        out.append({**base, "score": 0.0, "rejected_alternative": None,
+                                   "status": "rejected", "reason": "provenance"})
+                        continue
+                    signals = _drift_signals(decision, excerpt)
+                    if not signals["shared_artifacts"]:
+                        out.append({**base, "score": signals["score"],
+                                   "rejected_alternative": signals["rejected_alternative"],
+                                   "status": "rejected", "reason": "no-artifact"})
+                        continue
+                    if h in dismissed:
+                        reason, status = "dismissed", "rejected"
+                    elif h in seen:
+                        reason, status = "already-seen", "rejected"
+                    else:
+                        reason, status = None, "pending"
+                    out.append({**base, "score": signals["score"],
+                               "rejected_alternative": signals["rejected_alternative"],
+                               "status": status, "reason": reason})
+        out.sort(key=lambda c: c["score"], reverse=True)
+        if explain:
+            return out
+        return [c for c in out if c["status"] == "pending"]
+    except Exception:
+        return []

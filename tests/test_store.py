@@ -4875,3 +4875,157 @@ class TestDriftCheckPayload:
                     "content": "hot counter uses Memcached, not Redis in cache/redis.py"}
         out = store._render_drift_block(decision, "Redis cache client", "cache/redis.py:10", None)
         assert 'src="cache/redis.py:10"' in out
+
+
+# ── Doc Drift Layer 1 — Task 1.8: permanent, cross-session dismissal ────────────
+class TestDriftDismiss:
+    """Per-session dedup only delays a bad advisory (it re-fires next session, forever).
+    dismiss_drift/_dismissed_drift are the PERMANENT, cross-session antidote — keyed by
+    repo only (no session), and never GC'd (see test_gc_never_prunes_dismissed_drift_files)."""
+
+    SID = "drift-dismiss-sess"
+
+    def _dismissed_path(self, tmp_repo):
+        return store.STORE_DIR / f".drift_dismissed_{store._slug(tmp_repo)}.json"
+
+    def _write(self, tmp_repo, rel_path, code):
+        parts = Path(rel_path).parts
+        Path(tmp_repo, *parts[:-1]).mkdir(parents=True, exist_ok=True)
+        Path(tmp_repo, rel_path).write_text(code, encoding="utf-8")
+
+    def test_dismiss_persists_to_file(self, tmp_repo):
+        store.dismiss_drift(tmp_repo, "dec123", "cache/redis.py:1")
+        path = self._dismissed_path(tmp_repo)
+        assert path.exists()
+        h = store._drift_hash("dec123", "cache/redis.py:1")
+        assert h in json.loads(path.read_text())
+
+    def test_dismiss_idempotent(self, tmp_repo):
+        store.dismiss_drift(tmp_repo, "dec123", "cache/redis.py:1")
+        store.dismiss_drift(tmp_repo, "dec123", "cache/redis.py:1")
+        hashes = json.loads(self._dismissed_path(tmp_repo).read_text())
+        assert hashes.count(store._drift_hash("dec123", "cache/redis.py:1")) == 1
+
+    def test_dismiss_unknown_id_accepted_silently(self, tmp_repo):
+        store.dismiss_drift(tmp_repo, "does-not-exist", "nope.py:1")  # must not raise
+        assert self._dismissed_path(tmp_repo).exists()
+
+    def test_corrupt_file_reads_no_dismissals(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        self._dismissed_path(tmp_repo).write_text("not json{{{")
+        assert store._dismissed_drift(tmp_repo) == set()
+
+    def test_missing_file_reads_no_dismissals(self, tmp_repo):
+        assert store._dismissed_drift(tmp_repo) == set()
+
+    def test_dismissed_pair_never_emitted_even_in_new_session(self, tmp_repo):
+        ok, decision_id = store.update_decision(
+            tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+            RV1_SESSION, "architecture", created_by="human")
+        assert ok
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        store.dismiss_drift(tmp_repo, decision_id[:8], "cache/redis.py:1")
+
+        store.record_edited_file(tmp_repo, "cache/redis.py", self.SID)
+        assert store.drift_check_payload(tmp_repo, self.SID) == ""
+
+        # A brand-new session — the per-session seen-set is empty here, but dismissal is
+        # global and cross-session, so it must still be suppressed.
+        store.record_edited_file(tmp_repo, "cache/redis.py", "another-session")
+        assert store.drift_check_payload(tmp_repo, "another-session") == ""
+
+    def test_dismissal_survives_changed_excerpt(self, tmp_repo):
+        ok, decision_id = store.update_decision(
+            tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+            RV1_SESSION, "architecture", created_by="human")
+        assert ok
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        store.dismiss_drift(tmp_repo, decision_id[:8], "cache/redis.py:1")
+
+        # The doc text at the SAME source_ref changes; the dismissal must still hold — the
+        # hash identity deliberately excludes the excerpt (same rationale as Task 1.4's
+        # per-session seen-set).
+        self._write(tmp_repo, "cache/redis.py",
+                    '"""A completely different docstring, still about cache/redis.py."""\n')
+        store.record_edited_file(tmp_repo, "cache/redis.py", self.SID)
+        assert store.drift_check_payload(tmp_repo, self.SID) == ""
+
+    def test_non_dismissed_pair_still_emits(self, tmp_repo):
+        # Sanity: dismissing one pair must not silently suppress every advisory.
+        store.update_decision(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+                              RV1_SESSION, "architecture", created_by="human")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        store.dismiss_drift(tmp_repo, "some-other-decision", "cache/redis.py:1")
+        store.record_edited_file(tmp_repo, "cache/redis.py", self.SID)
+        assert store.drift_check_payload(tmp_repo, self.SID) != ""
+
+
+# ── Doc Drift Layer 1 — Task 1.8: read-only candidate listing (`contexer drift`) ─
+class TestDriftCandidates:
+    """drift_candidates is the read-only counterpart to drift_check_payload's matching
+    engine: no session, no recording, no mutation — used by both `contexer drift` (pending
+    only) and `contexer drift --explain` (every considered pair + why)."""
+
+    def _write(self, tmp_repo, rel_path, code):
+        parts = Path(rel_path).parts
+        Path(tmp_repo, *parts[:-1]).mkdir(parents=True, exist_ok=True)
+        Path(tmp_repo, rel_path).write_text(code, encoding="utf-8")
+
+    def _git_init(self, tmp_repo):
+        os.makedirs(tmp_repo, exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_repo, check=True)
+        subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=tmp_repo, check=True)
+        subprocess.run(["git", "config", "user.name", "a"], cwd=tmp_repo, check=True)
+
+    def _seed(self, tmp_repo, content, created_by, status="approved"):
+        with store._store_lock(store._slug(tmp_repo)):
+            data = store._load(tmp_repo)
+            entry = store._new_decision_entry(content, RV1_SESSION, "architecture",
+                                              created_by=created_by, status=status)
+            data["entries"].append(entry)
+            store._save(tmp_repo, data)
+        return entry["id"]
+
+    def test_no_index_returns_empty(self, tmp_repo):
+        self._git_init(tmp_repo)
+        self._write(tmp_repo, "cache/redis.py", '"""doc"""\n')
+        assert store.drift_candidates(tmp_repo) == []
+
+    def test_pending_pair_listed(self, tmp_repo):
+        self._git_init(tmp_repo)
+        self._seed(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        candidates = store.drift_candidates(tmp_repo)
+        assert len(candidates) == 1
+        assert candidates[0]["status"] == "pending"
+        assert "Memcached" in candidates[0]["content"]
+        assert candidates[0]["source_ref"] == "cache/redis.py:1"
+
+    def test_dismissed_pair_excluded_from_default_listing(self, tmp_repo):
+        self._git_init(tmp_repo)
+        did = self._seed(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        store.dismiss_drift(tmp_repo, did[:8], "cache/redis.py:1")
+        assert store.drift_candidates(tmp_repo) == []
+
+    def test_explain_reasons_dismissed_and_provenance(self, tmp_repo):
+        self._git_init(tmp_repo)
+        trusted_id = self._seed(
+            tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
+        untrusted_id = self._seed(
+            tmp_repo, "cache/redis.py also backs the warm counter, per an AI guess", "ai")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        store.dismiss_drift(tmp_repo, trusted_id[:8], "cache/redis.py:1")
+
+        candidates = store.drift_candidates(tmp_repo, explain=True)
+        reasons = {c["decision_id"]: c["reason"] for c in candidates}
+        assert reasons.get(trusted_id[:8]) == "dismissed"
+        assert reasons.get(untrusted_id[:8]) == "provenance"
+        # explain never omits a rejected pair — every considered pair is shown.
+        assert all(c["status"] in ("pending", "rejected") for c in candidates)
+
+    def test_no_uncommitted_changes_returns_empty(self, tmp_repo):
+        self._git_init(tmp_repo)
+        self._seed(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
+        # No files written/changed - nothing for git status to report.
+        assert store.drift_candidates(tmp_repo) == []

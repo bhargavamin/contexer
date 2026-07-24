@@ -595,3 +595,128 @@ class TestInstallOnCorruptConfig:
         with pytest.raises(SystemExit) as exc:
             cli._run_guarded(lambda: install([]))
         assert exc.value.code == 1
+
+
+# ── drift (Task 1.8) ────────────────────────────────────────────────────────────
+class TestDriftCommand:
+    """`contexer drift` — list / --dismiss / --explain. store.drift_candidates is
+    monkeypatched directly (its own engine is covered by tests/test_store.py); these tests
+    exercise CLI parsing, index resolution, and output formatting."""
+
+    PENDING = [
+        {"decision_id": "aaa11111", "content": "use Postgres, not MySQL",
+         "source_ref": "db/schema.py:1", "excerpt": "MySQL notes here",
+         "score": 7.0, "rejected_alternative": "MySQL", "hash": "hash-aaa", "status": "pending",
+         "reason": None},
+        {"decision_id": "bbb22222", "content": "use Redis, not Memcached",
+         "source_ref": "cache/redis.py:3", "excerpt": "Memcached notes here",
+         "score": 5.0, "rejected_alternative": "Memcached", "hash": "hash-bbb", "status": "pending",
+         "reason": None},
+    ]
+
+    def _patch_repo(self, monkeypatch):
+        from contexer import store
+        monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+
+    def test_no_git_repo_errors(self, monkeypatch, capsys):
+        from contexer import store
+        monkeypatch.setattr(store, "_git_root", lambda p: None)
+        monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+        with pytest.raises(SystemExit) as exc:
+            cli.drift([])
+        assert exc.value.code == 1
+        assert "git repo" in capsys.readouterr().err.lower()
+
+    def test_lists_pending_with_stable_index(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: self.PENDING)
+        cli.drift([])
+        out = capsys.readouterr().out
+        assert "1." in out and "2." in out
+        assert "Postgres" in out and "Redis" in out
+        assert "db/schema.py:1" in out and "cache/redis.py:3" in out
+
+    def test_no_pending_message(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: [])
+        cli.drift([])
+        assert "no pending drift" in capsys.readouterr().out.lower()
+
+    def test_dismiss_by_index(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: self.PENDING)
+        calls = []
+        monkeypatch.setattr(store, "dismiss_drift",
+                            lambda repo, did, ref: calls.append((repo, did, ref)))
+        cli.drift(["--dismiss", "2"])
+        assert calls == [("/repo", "bbb22222", "cache/redis.py:3")]
+        assert "Dismissed" in capsys.readouterr().out
+
+    def test_dismiss_by_index_out_of_range(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: self.PENDING)
+        with pytest.raises(SystemExit) as exc:
+            cli.drift(["--dismiss", "99"])
+        assert exc.value.code == 1
+        assert "99" in capsys.readouterr().err
+
+    def test_dismiss_by_hash(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: self.PENDING)
+        calls = []
+        monkeypatch.setattr(store, "dismiss_drift",
+                            lambda repo, did, ref: calls.append((repo, did, ref)))
+        cli.drift(["--dismiss", "hash-aaa"])
+        assert calls == [("/repo", "aaa11111", "db/schema.py:1")]
+        assert "Dismissed" in capsys.readouterr().out
+
+    def test_dismiss_by_hash_not_in_current_listing(self, monkeypatch, capsys):
+        # A hash from an earlier --explain listing that is no longer 'pending' — dismiss_drift
+        # accepts unknown ids silently, so dismissing by raw hash must still work.
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: [])
+        calls = []
+        monkeypatch.setattr(store, "_dismiss_hash", lambda repo, h: calls.append((repo, h)))
+        cli.drift(["--dismiss", "some-other-hash"])
+        assert calls == [("/repo", "some-other-hash")]
+        assert "some-other-hash" in capsys.readouterr().out
+
+    def test_explain_shows_gate_decision_and_reason(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        explained = [
+            {"decision_id": "aaa11111", "content": "use Postgres, not MySQL",
+             "source_ref": "db/schema.py:1", "excerpt": "MySQL notes here",
+             "score": 7.0, "rejected_alternative": "MySQL", "hash": "hash-aaa",
+             "status": "pending", "reason": None},
+            {"decision_id": "ccc33333", "content": "an AI guess about db/schema.py",
+             "source_ref": "db/schema.py:1", "excerpt": "MySQL notes here",
+             "score": 0.0, "rejected_alternative": None, "hash": "hash-ccc",
+             "status": "rejected", "reason": "provenance"},
+        ]
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: explained)
+        cli.drift(["--explain"])
+        out = capsys.readouterr().out
+        assert "EMITTED" in out
+        assert "REJECTED" in out and "provenance" in out
+
+    def test_explain_no_candidates_message(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: [])
+        cli.drift(["--explain"])
+        assert "no candidate" in capsys.readouterr().out.lower()
+
+    def test_main_dispatch_routes_to_drift(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: [])
+        monkeypatch.setattr(sys, "argv", ["contexer", "drift"])
+        cli.main()
+        assert "no pending drift" in capsys.readouterr().out.lower()

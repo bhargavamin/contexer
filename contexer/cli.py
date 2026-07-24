@@ -26,6 +26,9 @@ Commands:
   review        Interactively approve, edit, or ignore pending engineering decisions;
                 also surfaces possibly-overlapping rules for manual consolidation.
   share         Push local decisions to your team cloud context: share [id | --all] (default: latest).
+  drift         List pending doc-drift advisories for the current repo. --dismiss <n|hash>
+                permanently dismisses one; --explain shows every candidate pair and why it
+                was emitted or rejected.
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -667,6 +670,121 @@ def logout_cmd(rest: list | None = None) -> None:
         print("Not logged in.")
 
 
+def _drift_repo() -> str:
+    """Resolve the current repo the normal CLI way (not a hook, so no hook-cwd fallback
+    needed) — git root first, then the shared `.current_repo` pointer. Exits with an
+    actionable message when neither resolves, matching `pull`/`share_cmd`."""
+    from contexer import store
+
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    if not repo:
+        print("No git repo detected - run `contexer drift` inside a repository.", file=sys.stderr)
+        sys.exit(1)
+    return repo
+
+
+def _drift_list(repo: str) -> None:
+    """`contexer drift` (no args): the current repo's pending advisories, highest-ranked
+    first, with a stable 1-based index — stable because it is `drift_candidates`' own
+    deterministic order, recomputed identically by a later `--dismiss <n>` call as long as
+    nothing about the underlying decisions/files/dismissals changed in between."""
+    from contexer import store
+
+    pending = store.drift_candidates(repo)
+    if not pending:
+        print("No pending drift advisories.")
+        return
+    print(f"{len(pending)} pending drift advisory(ies) for {Path(repo).name}:\n")
+    for i, c in enumerate(pending, 1):
+        print(f"{i}. [{c['hash']}] {c['content']}")
+        print(f"   in {c['source_ref']}")
+        if c.get("rejected_alternative"):
+            print(f"   rejected alternative: {c['rejected_alternative']}")
+        print()
+    print("Dismiss one permanently: contexer drift --dismiss <n|hash>")
+    print("See every candidate pair and why:  contexer drift --explain")
+
+
+def _drift_dismiss(repo: str, token: str) -> None:
+    """`contexer drift --dismiss <n|hash>`. A digit token is a 1-based index into the SAME
+    pending listing `contexer drift` would print right now; anything else is treated as a
+    drift_hash and dismissed directly — `dismiss_drift`/`_dismiss_hash` accept unknown ids
+    silently, so a hash from an older `--explain` listing (no longer 'pending') still works."""
+    from contexer import store
+
+    token = token.strip()
+    if token.isdigit():
+        pending = store.drift_candidates(repo)
+        idx = int(token)
+        if not (1 <= idx <= len(pending)):
+            print(f"contexer drift: no advisory numbered {idx} "
+                  f"(there are {len(pending)}) — run `contexer drift` to see the list.",
+                  file=sys.stderr)
+            sys.exit(1)
+        target = pending[idx - 1]
+        store.dismiss_drift(repo, target["decision_id"], target["source_ref"])
+        print(f"Dismissed advisory {idx} — decision {target['decision_id']} "
+              f"in {target['source_ref']}.")
+        return
+
+    pending = store.drift_candidates(repo)
+    target = next((c for c in pending if c["hash"] == token), None)
+    if target is not None:
+        store.dismiss_drift(repo, target["decision_id"], target["source_ref"])
+        print(f"Dismissed advisory [{token}] — decision {target['decision_id']} "
+              f"in {target['source_ref']}.")
+        return
+    store._dismiss_hash(repo, token)
+    print(f"Dismissed {token}.")
+
+
+def _drift_explain(repo: str) -> None:
+    """`contexer drift --explain`: the observability tool. With drift otherwise silent
+    (fail-soft, no "no drift" message), --explain is how "never fires" is told apart from
+    "working correctly" — every candidate pair the engine considered, emitted or rejected
+    and why."""
+    from contexer import store
+
+    candidates = store.drift_candidates(repo, explain=True)
+    if not candidates:
+        print(f"No candidate file/decision pairs found for {Path(repo).name}.")
+        print("(No file with uncommitted changes has both a doc excerpt and an approved "
+              "decision sharing an artifact.)")
+        return
+    print(f"{len(candidates)} candidate pair(s) examined for {Path(repo).name}:\n")
+    for c in candidates:
+        verdict = "EMITTED" if c["status"] == "pending" else f"REJECTED ({c['reason']})"
+        print(f"[{verdict}] decision {c['decision_id']} <-> {c['source_ref']} "
+              f"(hash={c['hash']})")
+        print(f"   decision: {c['content']}")
+        print(f"   excerpt:  {c['excerpt'][:120]}")
+        if c.get("rejected_alternative"):
+            print(f"   rejected alternative: {c['rejected_alternative']}")
+        print(f"   score: {c['score']}")
+        print()
+
+
+def drift(rest: list | None = None) -> None:
+    """`contexer drift [--dismiss <n|hash> | --explain]`: list, permanently dismiss, or
+    explain doc-drift advisories for the current repo."""
+    rest = rest or []
+    repo = _drift_repo()
+
+    if "--explain" in rest:
+        _drift_explain(repo)
+        return
+
+    if "--dismiss" in rest:
+        i = rest.index("--dismiss")
+        if i + 1 >= len(rest):
+            print("contexer drift: --dismiss requires an index or hash", file=sys.stderr)
+            sys.exit(1)
+        _drift_dismiss(repo, rest[i + 1])
+        return
+
+    _drift_list(repo)
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -694,6 +812,8 @@ def main() -> None:
         _run_guarded(lambda: pull(rest))
     elif cmd == "share":
         _run_guarded(lambda: share_cmd(rest))
+    elif cmd == "drift":
+        _run_guarded(lambda: drift(rest))
     elif cmd == "login":
         _run_guarded(lambda: login_cmd(rest))
     elif cmd == "logout":
