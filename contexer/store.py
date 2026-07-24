@@ -4480,13 +4480,6 @@ def _docs_for_file(repo_path: str, rel_path: str) -> list[dict]:
 # decisions most likely to be about it. Task 1.5 pairs this against a Task 1.2 doc
 # excerpt from the same file; nothing consumes this output yet.
 _DRIFT_MAX = 3  # cap on decisions surfaced per file check; reused by later drift tasks.
-# Candidate breadth BEFORE the artifact gate. The matcher ranks by FILE-level BM25, but the
-# gate (`_pair_drift`) matches a decision against the EXCERPT (docstring) — a different axis —
-# so an artifact-matching decision can rank below _DRIFT_MAX and be dropped before the gate
-# ever sees it (Greptile P1). drift_check_payload fetches this many candidates and lets its
-# own emission loop apply the real _DRIFT_MAX bound after pairing. Bounded so a huge store
-# can't blow the time budget; far above _DRIFT_MAX so the gate is never starved.
-_DRIFT_CANDIDATE_MAX = 25
 
 # Provenance the drift anchor trusts (red-team C2, Global Constraint 2a): 'approved'
 # status alone is NOT human-confirmed in this store — a memory import or an AI
@@ -4510,13 +4503,15 @@ def _file_keywords(file_path: str) -> list[str]:
 def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | None,
                                  decisions: list[dict] | None = None,
                                  include_untrusted: bool = False,
-                                 limit: int = _DRIFT_MAX) -> list[dict]:
+                                 limit: int | None = _DRIFT_MAX) -> list[dict]:
     """Rank the store's APPROVED, trusted-provenance decisions most likely to be about
     `file_path`, via the existing BM25 index (no second index — reuses `_bm25_rank` over
-    the sidecar `_read_retrieval_index` already builds). Returns up to `limit` (default
-    `_DRIFT_MAX`) `{"id": <short 8-char id>, "content": ..., "topics": [...]}` dicts,
-    highest-ranked first. `None` index -> []. `drift_check_payload` passes a larger `limit`
-    so the artifact gate downstream isn't starved by the file-level BM25 ranking.
+    the sidecar `_read_retrieval_index` already builds). Returns up to `limit`
+    `{"id": <short 8-char id>, "content": ..., "topics": [...]}` dicts, highest-ranked
+    first; `limit=None` returns every match (no count cap). `None` index -> [].
+    `drift_check_payload` passes `limit=None` so the artifact gate downstream is never
+    starved by the file-level BM25 ranking — safe because `_bm25_rank` already returns only
+    decisions that share a keyword with the file (naturally bounded to the relevant set).
 
     The index carries no provenance (see `_build_retrieval_index`), so this filters in two
     passes: rank + `status=="approved"` against the index, THEN resolve each surviving id
@@ -4568,7 +4563,7 @@ def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | N
             if include_untrusted:
                 item["trusted"] = trusted
             out.append(item)
-            if not include_untrusted and len(out) >= limit:
+            if not include_untrusted and limit is not None and len(out) >= limit:
                 break
         return out
     except Exception:
@@ -4740,12 +4735,13 @@ def drift_check_payload(repo_path: str, session_id: str = "") -> str:
             docs = _docs_for_file(repo_path, rel_path)
             if not docs:
                 continue
-            # Fetch a broad candidate set (not just _DRIFT_MAX): the artifact gate below is
-            # the real filter, and capping at _DRIFT_MAX here would drop an artifact-matching
-            # decision that ranks low in file-level BM25 before the gate sees it (Greptile P1).
-            # The emission loop applies the true _DRIFT_MAX bound after pairing.
-            decisions = _approved_decisions_for_file(repo_path, rel_path, index,
-                                                     limit=_DRIFT_CANDIDATE_MAX)
+            # Pair against ALL file-relevant trusted decisions (limit=None), not a fixed
+            # top-N: ANY finite candidate cap here can drop an artifact-matching decision that
+            # ranks lower by file-level BM25 before _pair_drift — the real gate — ever sees it
+            # (Greptile P1). Safe/bounded because _bm25_rank returns only decisions sharing a
+            # keyword with the file, and the per-file _DRIFT_TIME_BUDGET backstops a
+            # pathological store. The emission loop below applies the true _DRIFT_MAX bound.
+            decisions = _approved_decisions_for_file(repo_path, rel_path, index, limit=None)
             if not decisions:
                 continue
             for doc in docs:

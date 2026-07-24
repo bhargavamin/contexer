@@ -5019,19 +5019,20 @@ class TestApprovedDecisionsForFile:
         assert any("Memcached" in c for c in contents)
         assert not any("Consider Redis" in c for c in contents)
 
-    def test_limit_can_exceed_drift_max(self, tmp_repo):
-        # Greptile P1: drift_check_payload must be able to fetch MORE than _DRIFT_MAX
-        # candidates so the artifact gate downstream isn't starved by the file-level BM25
-        # rank. The default stays at _DRIFT_MAX; a larger limit returns more.
+    def test_limit_none_returns_all_relevant(self, tmp_repo):
+        # Greptile P1: drift_check_payload passes limit=None so the artifact gate downstream
+        # is never starved — no finite candidate cap can drop an artifact-matcher that ranks
+        # lower by file-level BM25. The default still caps at _DRIFT_MAX; limit=None returns
+        # every file-relevant match.
+        topics = ("caching", "eviction", "ttl", "clustering", "pipelining", "pubsub")
         self._seed_raw(tmp_repo, [
-            (f"redis.py policy for {topic}", "architecture", "human", "approved")
-            for topic in ("caching", "eviction", "ttl", "clustering", "pipelining", "pubsub")
+            (f"redis.py policy for {t}", "architecture", "human", "approved") for t in topics
         ])
         idx = store._read_retrieval_index(tmp_repo)
         default = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx)
-        wide = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx, limit=25)
+        unbounded = store._approved_decisions_for_file(tmp_repo, "cache/redis.py", idx, limit=None)
         assert len(default) <= store._DRIFT_MAX
-        assert len(wide) > store._DRIFT_MAX
+        assert len(unbounded) == len(topics)  # all six, no cap
 
     def test_none_index_returns_empty(self, tmp_repo):
         assert store._approved_decisions_for_file(tmp_repo, "cache/redis.py", None) == []
