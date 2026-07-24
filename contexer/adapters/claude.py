@@ -213,6 +213,66 @@ def review_nudge(repo_path: str, raw: str) -> str:
         return "{}"
 
 
+def post_write(raw: str) -> str:
+    """PostToolUse (Write|Edit|MultiEdit): record the files edited this turn into the
+    per-(repo, session) drift sidecar AND arm the .pending_capture flag. Silent, fail-soft,
+    never raises; always returns "{}".
+
+    GAP-1: the drift UserPromptSubmit hook reads that sidecar under the SAME session id, so
+    this hook MUST thread the host session_id (store.record_edited_file writes NOTHING for an
+    empty session_id — the write would land nowhere and drift would silently never fire). The
+    repo is resolved from this hook's own cwd (store._hook_cwd_repo("")) — hosts run PostToolUse
+    with cwd = the project dir — mirroring the drift hook's $REPO so both key the same sidecar.
+    Touching ~/.contexer/.pending_capture preserves the capture-reminder signal the legacy shell
+    hook this replaces used to set (consumed by the next UserPromptSubmit anchor)."""
+    try:
+        sid = store.session_from_hook_stdin(raw)
+        repo = store._hook_cwd_repo("")
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+        tool_input = data.get("tool_input") if isinstance(data, dict) else None
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        paths: list[str] = []
+        fp = tool_input.get("file_path")
+        if isinstance(fp, str) and fp:
+            paths.append(fp)
+        edits = tool_input.get("edits")
+        if isinstance(edits, list):  # a MultiEdit carries several edit specs
+            for e in edits:
+                efp = e.get("file_path") if isinstance(e, dict) else None
+                if isinstance(efp, str) and efp:
+                    paths.append(efp)
+        for p in paths:
+            store.record_edited_file(repo, p, sid)
+        try:
+            Path("~/.contexer/.pending_capture").expanduser().touch()
+        except Exception:
+            pass
+        return "{}"
+    except Exception:
+        return "{}"
+
+
+def drift(repo_path: str, raw: str) -> str:
+    """UserPromptSubmit (every prompt): surface the doc-drift advisory for files edited this
+    session. Reads the same per-(repo, session) sidecar post_write writes — both resolve the
+    host session_id via session_from_hook_stdin (GAP-1) and the same repo (post_write from cwd,
+    this hook from its $REPO arg). Mirrors rationale's additionalContext envelope; "" body =>
+    silent "{}". Fail-soft, never raises."""
+    try:
+        body = store.drift_check_payload(
+            store._hook_cwd_repo(repo_path), store.session_from_hook_stdin(raw))
+        if not body:
+            return "{}"
+        return json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": body}})
+    except Exception:
+        return "{}"
+
+
 def _retire_capture_task_hook() -> None:
     """Remove the pre-#58 capture-task hook group from ~/.claude/settings.json.
 
@@ -450,6 +510,17 @@ def install(home: Path) -> list[str]:
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
+    # Doc Drift Layer 1. post_write records edited files (PostToolUse) and drift renders the
+    # advisory (UserPromptSubmit). post_write takes NO $REPO — it resolves the repo from its own
+    # cwd like the legacy shell hook it replaces; drift is passed $REPO like the other UPS hooks.
+    # The trailing `.pending_capture` marker keeps the migration/reinstall/uninstall detection
+    # (which keys on that token) and the existing PostToolUse assertions working across the swap.
+    post_write_cmd = (f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      f'print(claude.post_write(sys.stdin.read()))" '
+                      f'# {_HOOK_SENTINEL} .pending_capture')
+    cap_drift = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                 f'print(claude.drift(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # Nudge to review decisions pending the developer (dropped by store.update_decision). A Python
     # entrypoint (not pure shell) so it is per-repo and can verify the store still has something
@@ -507,9 +578,16 @@ def install(home: Path) -> list[str]:
     # latency + tokens and depended on model behavior for no functional gain (the anchor
     # already delivers the same reminder deterministically).
     put = hooks.setdefault("PostToolUse", [])
-    if not _in_groups(put, ".pending_capture"):
-        put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
+    # Migrate: replace the legacy shell `.pending_capture` touch hook with the Python
+    # post_write hook (Doc Drift Layer 1) — it records edited files into the per-session drift
+    # sidecar AND still touches .pending_capture. Detected by the `.pending_capture` marker,
+    # which the migrated hook also carries, so this is a one-time swap and idempotent thereafter.
+    if _in_groups(put, ".pending_capture") and not _in_groups(put, "claude.post_write"):
+        put = _filter_groups(put, [".pending_capture"])
+        hooks["PostToolUse"] = put
+    if not _in_groups(put, "claude.post_write"):
+        put.append({"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command",
+            "command": post_write_cmd}]})
     # Plan-approval capture: separate matcher on ExitPlanMode, injects the reminder directly.
     if not _in_groups(put, "plan approved"):
         put.append({"matcher": "ExitPlanMode", "hooks": [{"type": "command",
@@ -616,6 +694,10 @@ def install(home: Path) -> list[str]:
     if not _in_groups(ups, "claude.review_nudge"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
+    # Doc Drift Layer 1: surface advisories for docs that drifted from recorded decisions.
+    if not _in_groups(ups, "claude.drift"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for doc drift...", "command": cap_drift}]})
 
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for p in [
@@ -717,13 +799,14 @@ def uninstall(home: Path) -> list[str]:
         event_markers = {
             "SessionStart":     ["get_session_start_context", _HOOK_SENTINEL],
             "SessionEnd":       ["sync_memory", _HOOK_SENTINEL],
-            "PostToolUse":      [".pending_capture", "plan approved", _HOOK_SENTINEL],
+            "PostToolUse":      [".pending_capture", "claude.post_write", "plan approved",
+                                 _HOOK_SENTINEL],
             "Stop":             [".pending_capture", _HOOK_SENTINEL],
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
             "UserPromptSubmit": [".current_repo", ".pending_capture", "claude.review_nudge",
-                                 "get_bootstrap_context_prompt",
+                                 "claude.drift", "get_bootstrap_context_prompt",
                                  "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                                  "Reminder: if you make a significant decision",
                                  _HOOK_SENTINEL],

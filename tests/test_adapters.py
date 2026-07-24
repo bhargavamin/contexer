@@ -177,6 +177,155 @@ class TestClaudeCaptureEntrypoints:
         assert claude.rationale(tmp_repo, "garbage") == "{}"
 
 
+# ── Doc Drift Layer 1 — Task 1.6: Claude entrypoints (post_write / drift) ───────
+
+class TestClaudePostWrite:
+    """post_write records edited files into the per-(repo, session) drift sidecar and arms
+    the .pending_capture flag. It resolves the repo from its OWN cwd (no repo arg — exactly
+    how the installed PostToolUse hook runs) and threads the host session_id."""
+    SID = "sess-postwrite-1"
+
+    def _stdin(self, file_path=None, edits=None, session_id=SID):
+        data = {
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {},
+            "cwd": "/whatever",
+        }
+        if file_path is not None:
+            data["tool_input"]["file_path"] = file_path
+        if edits is not None:
+            data["tool_input"]["edits"] = edits
+        return _json.dumps(data)
+
+    def test_records_edited_file_with_session(self, tmp_repo, monkeypatch):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(tmp_repo)
+        assert claude.post_write(self._stdin(file_path="src/app.py")) == "{}"
+        recorded = store._read_edited_files(tmp_repo, self.SID, clear=False)
+        assert "src/app.py" in recorded
+
+    def test_empty_session_records_nothing(self, tmp_repo, monkeypatch):
+        # GAP-1 failure mode spelled out: no session_id => record_edited_file writes NO
+        # sidecar, so drift would silently never fire.
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(tmp_repo)
+        raw = _json.dumps({"tool_input": {"file_path": "src/app.py"}})
+        assert claude.post_write(raw) == "{}"
+        assert list(store.STORE_DIR.glob(".edited_*")) == []
+
+    def test_multiedit_records_every_path(self, tmp_repo, monkeypatch):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(tmp_repo)
+        raw = self._stdin(file_path="top.py",
+                          edits=[{"file_path": "a.py"}, {"file_path": "b.py"}])
+        claude.post_write(raw)
+        recorded = set(store._read_edited_files(tmp_repo, self.SID, clear=False))
+        assert {"top.py", "a.py", "b.py"} <= recorded
+
+    def test_touches_pending_capture(self, tmp_repo, tmp_path, monkeypatch):
+        # ~/.contexer/.pending_capture must still be armed (the anchor's capture reminder).
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".contexer").mkdir(parents=True, exist_ok=True)
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(tmp_repo)
+        claude.post_write(self._stdin(file_path="src/app.py"))
+        assert (tmp_path / ".contexer" / ".pending_capture").exists()
+
+    def test_failsoft_on_bad_stdin(self, tmp_repo):
+        assert claude.post_write("garbage not json") == "{}"
+        assert claude.post_write("") == "{}"
+
+
+class TestClaudeDrift:
+    """drift renders the doc-drift advisory for files edited this session, mirroring the
+    rationale entrypoint's additionalContext envelope. Fail-soft, never raises."""
+    SID = "sess-drift-1"
+
+    def _seed(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+            "human-sess", "architecture", created_by="human")
+        target = Path(tmp_repo) / "cache" / "redis.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('"""Redis cache client in cache/redis.py."""\n', encoding="utf-8")
+        return str(target)
+
+    def _prompt_stdin(self, session_id=SID, prompt="continue the work"):
+        return _json.dumps({"session_id": session_id, "hook_event_name": "UserPromptSubmit",
+                            "prompt": prompt})
+
+    def test_renders_when_payload_nonempty(self, tmp_repo):
+        target = self._seed(tmp_repo)
+        store.record_edited_file(tmp_repo, target, self.SID)
+        out = _json.loads(claude.drift(tmp_repo, self._prompt_stdin()))
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[Contexer] Checked" in ctx
+        assert "Memcached" in ctx
+
+    def test_empty_payload_returns_brace(self, tmp_repo):
+        # Nothing recorded as edited this session -> silent.
+        assert claude.drift(tmp_repo, self._prompt_stdin()) == "{}"
+
+    def test_mirrors_rationale_envelope(self, tmp_repo):
+        target = self._seed(tmp_repo)
+        store.record_edited_file(tmp_repo, target, self.SID)
+        out = _json.loads(claude.drift(tmp_repo, self._prompt_stdin()))
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert "additionalContext" in out["hookSpecificOutput"]
+
+    def test_failsoft_on_bad_stdin(self, tmp_repo):
+        assert claude.drift(tmp_repo, "garbage") == "{}"
+
+
+class TestClaudeDriftHandshake:
+    """GAP-1 (the whole point of the task): post_write WRITES the per-(repo, session) sidecar
+    and drift READS it — they must resolve the SAME session_id AND repo, or post_write's
+    write lands where drift never looks and the advisory silently never fires while every
+    unit test stays green. This drives both hooks with realistic host stdin fixtures."""
+    SID = "handshake-session-9f3a"
+
+    def _seed(self, tmp_repo):
+        # An approved, human-sourced (drift-trusted) decision that contradicts the docstring
+        # of the file it co-references.
+        store.update_decision(
+            tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+            "human-sess", "architecture", created_by="human")
+        target = Path(tmp_repo) / "cache" / "redis.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('"""Redis cache client in cache/redis.py."""\n', encoding="utf-8")
+        return str(target)
+
+    def test_post_write_then_drift_same_session_renders(self, tmp_repo, monkeypatch):
+        target = self._seed(tmp_repo)
+        # post_write resolves the repo from its own cwd, exactly as the installed PostToolUse
+        # hook runs (no repo arg), so drive it FROM the repo dir.
+        monkeypatch.chdir(tmp_repo)
+        post_stdin = _json.dumps({
+            "session_id": self.SID, "hook_event_name": "PostToolUse", "tool_name": "Write",
+            "tool_input": {"file_path": target, "content": "..."}, "cwd": tmp_repo})
+        assert claude.post_write(post_stdin) == "{}"
+        # SAME session id => the advisory renders through the drift hook.
+        same = _json.dumps({"session_id": self.SID, "hook_event_name": "UserPromptSubmit",
+                            "prompt": "keep going"})
+        out = _json.loads(claude.drift(tmp_repo, same))
+        assert "additionalContext" in out["hookSpecificOutput"]
+        assert "Memcached" in out["hookSpecificOutput"]["additionalContext"]
+
+    def test_different_session_does_not_render(self, tmp_repo, monkeypatch):
+        target = self._seed(tmp_repo)
+        monkeypatch.chdir(tmp_repo)
+        post_stdin = _json.dumps({
+            "session_id": self.SID, "hook_event_name": "PostToolUse", "tool_name": "Write",
+            "tool_input": {"file_path": target}, "cwd": tmp_repo})
+        claude.post_write(post_stdin)
+        # A DIFFERENT session never wrote a sidecar => nothing to surface (isolation holds).
+        other = _json.dumps({"session_id": "some-other-session", "prompt": "keep going"})
+        assert claude.drift(tmp_repo, other) == "{}"
+
+
 from contexer.adapters import cursor
 
 

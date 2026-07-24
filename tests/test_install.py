@@ -695,3 +695,105 @@ class TestCaptureTaskStubs:
         before = p.read_text()
         codex.retire_capture_task(clean_home)          # nothing stale: no churn
         assert p.read_text() == before
+
+
+# ── Doc Drift Layer 1 — Task 1.6: post_write migration + drift hook install ─────
+
+class TestDriftHookInstall:
+    def _cmds(self, home, event):
+        settings = json.loads((home / ".claude" / "settings.json").read_text())
+        return [h.get("command", "") for grp in settings["hooks"].get(event, [])
+                for h in grp.get("hooks", [])]
+
+    def test_post_write_hook_registered(self, installed_home):
+        cmds = self._cmds(installed_home, "PostToolUse")
+        assert any("claude.post_write" in c for c in cmds)
+
+    def test_legacy_shell_touch_hook_gone(self, installed_home):
+        cmds = self._cmds(installed_home, "PostToolUse")
+        # The legacy hook was a bare shell `touch ... && echo`; the migrated hook invokes
+        # the Python post_write entrypoint instead.
+        assert not any(c.strip().startswith("touch ~/.contexer/.pending_capture")
+                       for c in cmds)
+
+    def test_post_write_hook_keeps_pending_capture_marker(self, installed_home):
+        # The migrated hook keeps the `.pending_capture` marker so the anchor's flag semantics,
+        # the reinstall/migration detection, and the uninstall marker table all key on it.
+        cmds = self._cmds(installed_home, "PostToolUse")
+        assert any(".pending_capture" in c for c in cmds)
+
+    def test_migration_replaces_legacy_shell_group(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit", "hooks": [{"type": "command",
+             "command": "touch ~/.contexer/.pending_capture && echo '{}' "
+                        "# contexer-managed-hook"}]}]}}))
+        install()
+        settings = json.loads(settings_path.read_text())
+        cmds = [h.get("command", "") for grp in settings["hooks"]["PostToolUse"]
+                for h in grp.get("hooks", [])]
+        assert any("claude.post_write" in c for c in cmds)
+        # legacy shell group stripped, not left alongside the new one
+        assert not any(c.strip().startswith("touch ~/.contexer/.pending_capture")
+                       for c in cmds)
+        write_groups = [grp for grp in settings["hooks"]["PostToolUse"]
+                        if str(grp.get("matcher", "")).startswith("Write")]
+        assert len(write_groups) == 1
+
+    def test_install_idempotent_single_post_write(self, clean_home):
+        install()
+        install()
+        install()
+        cmds = self._cmds(clean_home, "PostToolUse")
+        assert sum("claude.post_write" in c for c in cmds) == 1
+
+    def test_drift_hook_registered(self, installed_home):
+        cmds = self._cmds(installed_home, "UserPromptSubmit")
+        assert any("claude.drift" in c for c in cmds)
+
+    def test_install_idempotent_single_drift(self, clean_home):
+        install()
+        install()
+        cmds = self._cmds(clean_home, "UserPromptSubmit")
+        assert sum("claude.drift" in c for c in cmds) == 1
+
+    def test_drift_does_not_disturb_other_ups_hooks(self, installed_home):
+        # GAP-4: the drift group is ADDED, never replacing anchor/constraint/rationale/
+        # team-poll/bootstrap/review-nudge.
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        ups = settings["hooks"]["UserPromptSubmit"]
+        for marker in [".current_repo", "claude.capture_constraint", "claude.rationale",
+                       "claude.team_poll", "get_bootstrap_context_prompt",
+                       "claude.review_nudge"]:
+            assert claude._in_groups(ups, marker), f"missing {marker}"
+        assert claude._in_groups(ups, "claude.drift")
+
+    def test_uninstall_strips_post_write_and_drift(self, installed_home):
+        uninstall()
+        settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        hooks = settings.get("hooks", {})
+        put_cmds = [h.get("command", "") for grp in hooks.get("PostToolUse", [])
+                    for h in grp.get("hooks", [])]
+        ups_cmds = [h.get("command", "") for grp in hooks.get("UserPromptSubmit", [])
+                    for h in grp.get("hooks", [])]
+        assert not any("claude.post_write" in c for c in put_cmds)
+        assert not any("claude.drift" in c for c in ups_cmds)
+
+    def test_uninstall_preserves_foreign_hooks(self, clean_home):
+        install()
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["hooks"].setdefault("PostToolUse", []).append(
+            {"matcher": "Write", "hooks": [{"type": "command", "command": "./my-linter.sh"}]})
+        settings["hooks"].setdefault("UserPromptSubmit", []).append(
+            {"hooks": [{"type": "command", "command": "./my-own-ups.sh"}]})
+        settings_path.write_text(json.dumps(settings))
+        uninstall()
+        settings = json.loads(settings_path.read_text())
+        put_cmds = [h.get("command", "") for grp in settings["hooks"].get("PostToolUse", [])
+                    for h in grp.get("hooks", [])]
+        ups_cmds = [h.get("command", "") for grp in settings["hooks"].get("UserPromptSubmit", [])
+                    for h in grp.get("hooks", [])]
+        assert "./my-linter.sh" in put_cmds
+        assert "./my-own-ups.sh" in ups_cmds
