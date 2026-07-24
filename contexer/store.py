@@ -1409,13 +1409,19 @@ def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True)
 
 # ── surfaced-advisory dedup sidecar (Doc Drift Layer 1, Task 1.4) ───────────────
 def _drift_hash(decision_id: str, source_ref: str) -> str:
-    """Identity for one (decision, doc-location) advisory. The excerpt is deliberately
-    NOT part of the key (red-team H5): hashing the excerpt would re-fire the advisory
-    every time the nagged-about doc changes by one character — including when the
-    developer edits it in response to the advisory, which is exactly the over-eager-
-    linter death the product guards against. Dedup identity is (decision, doc-location),
-    not (decision, doc-location, exact-text)."""
-    return hashlib.sha1(f"{decision_id}\x00{source_ref}".encode("utf-8", "replace")).hexdigest()[:16]
+    """Identity for one (decision, doc-FILE) advisory. Two things are deliberately kept
+    OUT of the key so a suppressed advisory (seen this session, or permanently dismissed)
+    is NOT resurrected by ordinary editing of the file it targets — the over-eager-linter
+    death the product guards against:
+      - the excerpt text (red-team H5): editing the nagged-about doc, including in response
+        to the advisory, must not re-fire it; and
+      - the LINE NUMBER (whole-branch review): `source_ref` is "<path>:<lineno>", and an
+        edit ABOVE the docstring shifts its lineno — on exactly the actively-edited files
+        this feature targets — which would otherwise re-nag. So key on the FILE path only.
+    Identity is (decision, file), not (decision, file, line, exact-text)."""
+    base, _, tail = source_ref.rpartition(":")
+    loc = base if (base and tail.isdigit()) else source_ref  # strip a trailing :lineno only
+    return hashlib.sha1(f"{decision_id}\x00{loc}".encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _drift_seen_path(repo_path: str, session_id: str) -> Path:

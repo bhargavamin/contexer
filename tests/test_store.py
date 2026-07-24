@@ -3168,7 +3168,16 @@ class TestDriftSurfaced:
         assert store._drift_hash("d1", "f.py:10") != store._drift_hash("d2", "f.py:10")
 
     def test_hash_differs_when_source_ref_changes(self):
-        assert store._drift_hash("d1", "f.py:10") != store._drift_hash("d1", "f.py:11")
+        # Different FILES differ; the line number is deliberately NOT part of the key.
+        assert store._drift_hash("d1", "f.py:10") != store._drift_hash("d1", "g.py:10")
+
+    def test_hash_ignores_line_number(self):
+        # Whole-branch review: source_ref is "<path>:<lineno>". An edit ABOVE the docstring
+        # shifts its lineno; that must NOT resurrect a seen/dismissed advisory on the very
+        # files this feature targets. Same file + decision => same hash regardless of line.
+        assert store._drift_hash("d1", "f.py:10") == store._drift_hash("d1", "f.py:9999")
+        # A source_ref with no numeric line suffix is hashed whole (no path component eaten).
+        assert store._drift_hash("d1", "pkg/mod.py") == store._drift_hash("d1", "pkg/mod.py")
 
     # ── H5 red-team regression: excerpt is not part of the key ─────────────────
     def test_hash_signature_omits_excerpt_and_is_stable_across_calls(self):
