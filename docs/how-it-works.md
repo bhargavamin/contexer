@@ -75,6 +75,20 @@ AI-proposed architecture and constraint decisions — and any change to a decisi
 
 Approved decisions are versioned: a change never overwrites the previous value — it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
 
+## Catching stale docs (doc drift)
+
+Rules files and docstrings go stale the moment the code moves on. Contexer watches for that from the other direction: when you edit a file, it checks the file's own docstrings and comments against your **approved** decisions. If a doc looks like it contradicts one, your agent gets a short advisory on the next prompt and raises it with you.
+
+It's built to stay quiet rather than nag — the one thing that kills this kind of feature:
+
+- It reads only the edited file's docs, never a repo-wide scan.
+- It anchors only on decisions you've **approved** (not AI-proposed ones), and only when the doc and the decision point at the same concrete thing — a file, module, error, or route. Overlapping words alone aren't enough.
+- The agent decides whether it's a real contradiction; a consistent doc produces nothing.
+- It's advisory only — it never edits your code, your docs, or the store.
+- Anything you dismiss (`contexer drift --dismiss`) stays dismissed for good.
+
+Because it anchors on approved decisions, it's naturally quiet on a fresh store and gets more useful as your decision history grows. Run `contexer drift --explain` any time to see exactly what it considered and why. Wired for Claude Code, Codex, and Gemini CLI; not yet for Cursor.
+
 ## Deduplication
 
 **Deduplication is not an LLM call.** Before storing, Contexer checks token overlap against existing decisions. Over 70% overlap is treated as a duplicate and silently dropped. It's deterministic, costs no tokens, and is why you can "over-call" store without bloating anything.

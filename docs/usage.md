@@ -37,6 +37,20 @@ contexer review
 
 For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
 
+## Catch stale docs (doc drift)
+
+When you edit a file, Contexer checks its docstrings and comments against your **approved** decisions. If a doc looks like it contradicts one — say a docstring still describes the old approach — your agent gets a quiet, advisory note on the next prompt, and mentions it to you. It never edits the doc or the store; you decide what to do.
+
+It stays quiet on purpose: it only anchors on decisions you've approved, only fires when the doc and the decision refer to the same thing (a file, module, error, or route), and any advisory can be dismissed for good.
+
+You can also check it from the terminal:
+
+```bash
+contexer drift              # list pending advisories for this repo
+contexer drift --explain    # show every candidate and why it was flagged or skipped
+contexer drift --dismiss 2  # permanently dismiss advisory #2 (or a hash)
+```
+
 ## Update or remove
 
 ```
@@ -57,6 +71,9 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |
+| `contexer drift` | List pending doc-drift advisories for the current repo — docstrings or comments that may contradict an approved decision |
+| `contexer drift --explain` | Show every candidate file/decision pair and why each was flagged or skipped (diagnostic) |
+| `contexer drift --dismiss <n\|hash>` | Permanently dismiss an advisory so it never surfaces again |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
@@ -113,4 +130,5 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 - **Deduplication is lexical, not semantic.** Duplicates are detected by token overlap, with no understanding of meaning — the same rule phrased with different words ("commit on approval" vs "commit automatically") can accumulate as separate entries. Containment restatements (re-typing a rule with extra words, or a terse version of it) are consolidated automatically; synonym phrasings are only flagged in the capture ack and surface in review for you to merge manually.
 - **Cursor parity is partial.** Cursor's hooks can't inject per-prompt context or restore after compaction; Cursor steering rides on the session-start nudge plus an always-apply rule file. See [integrations](integrations.md).
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.
+- **Doc drift is quiet by design.** It only checks the edited file's own docstrings and comments (not a repo-wide scan), and only against decisions you've **approved** — so on a fresh store it rarely fires, and it gets more useful as you approve more of your own decisions. It flags *possible* contradictions for you to judge; it never edits code, docs, or the store. Not yet wired for Cursor.
 - **Contexer steers, it doesn't enforce.** Agents are told your rules before writing code; your CI and PR gates still verify.

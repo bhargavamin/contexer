@@ -131,6 +131,8 @@ You drive it in plain English:
 
 Trust is explicit: AI-*proposed* decisions are held for your review (`contexer review`) and never reach a session until you approve them. Approved decisions are versioned — history preserved, latest approved revision replayed. Cost is flat and tiny (roughly 26 tokens per rule at session start, nothing on unrelated prompts).
 
+And it watches the other direction too: when you edit a file, Contexer flags docstrings or comments that contradict a decision you've already approved — a quiet, dismissible heads-up, never an auto-edit. (Claude Code, Codex, and Gemini CLI.)
+
 Deep dive: **[how it works](docs/how-it-works.md)** · **[day-to-day usage & CLI](docs/usage.md)**
 
 ### Honest limits
