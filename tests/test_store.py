@@ -2135,6 +2135,20 @@ class TestSuggestedUpdate:
         # Proposal should still exist and be from s2 (not silently replaced by s3).
         assert entry["proposed_revision"]["session_id"] == "s2"
 
+    def test_proposal_retry_with_changed_title_rebuilds(self, tmp_repo):
+        # Same proposed content but a CORRECTED title must rebuild the proposal (dedup keys on
+        # content AND title), so approval promotes the corrected title, not the stale one.
+        eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid, title="Old proposal title")
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s3",
+                              "architecture", replace_id=eid, title="Corrected proposal title")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["proposed_revision"]["title"] == "Corrected proposal title"
+        store.approve_decision(tmp_repo, eid, "approve")
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["title"] == "Corrected proposal title"
+
     def test_approve_merges_proposing_session_into_session_ids(self, tmp_repo):
         eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
@@ -2923,6 +2937,32 @@ class TestReviewPendingAndSharePreview:
     def test_format_pending_review_empty(self, tmp_repo):
         assert store.format_pending_review(tmp_repo) == "Nothing pending review."
 
+    def test_format_pending_review_shows_title_and_quoted_body_when_distinct(self, tmp_repo):
+        # Non-proposed branch routes through _title_and_body: title leads the bullet line,
+        # and the (now-quoted) body only appears on its own line when it isn't a dup of the title.
+        store.update_decision(
+            tmp_repo, "Never deploy database migrations on Fridays before a long weekend",
+            "s1", "constraint", title="No Friday migrations")
+        out = store.format_pending_review(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if l.startswith("- "))
+        assert "No Friday migrations" in head
+        assert "Never deploy database migrations" not in head  # body not on the bullet line
+        idx = lines.index(head)
+        assert lines[idx + 1] == '    "Never deploy database migrations on Fridays before a long weekend"'
+
+    def test_format_pending_review_short_untitled_dedups_no_quoted_line(self, tmp_repo):
+        # Finding #1 applied to review_pending: short untitled content must not repeat as
+        # both the bullet-line title and a quoted body line underneath.
+        store.update_decision(tmp_repo, "Never deploy on Fridays", "s1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if l.startswith("- "))
+        assert "Never deploy on Fridays" in head
+        # the very next line is the action line, not a quoted repeat of the content
+        idx = lines.index(head)
+        assert lines[idx + 1].strip().startswith("approve_decision(")
+
 
 class TestPendingReviewFlag:
     """update_decision drops a PER-REPO .pending_review flag ONLY when it creates a state that
@@ -3350,6 +3390,61 @@ class TestBM25Router:
         assert store.get_context_for_prompt(tmp_repo, "why do birds fly south?") == ""
 
 
+class TestRenderPromptDecisions:
+    """_render_prompt_decisions feeds the BM25 strong-match auto-injection path — it must
+    render the SAME two-line shape as get_context (title-bearing bullet line, then a
+    `    `-indented content line), not the old title-less single line."""
+
+    def test_two_line_shape_with_title_on_bullet_content_on_next(self, tmp_repo):
+        _, id1 = store.update_decision(
+            tmp_repo, "Use postgres for the storage layer", RV1_SESSION,
+            "architecture", title="Postgres storage layer",
+        )
+        _, id2 = store.update_decision(
+            tmp_repo, "JWT refresh tokens live in httpOnly cookies", RV1_SESSION,
+            "architecture", title="JWT refresh in cookies",
+        )
+        rendered = store._render_prompt_decisions(tmp_repo, [id1, id2])
+        lines = rendered.splitlines()
+        assert len(lines) == 4   # 2 decisions x (bullet line + indented content line)
+
+        assert lines[0].startswith("- [")
+        assert "Postgres storage layer" in lines[0]
+        assert "Use postgres for the storage layer" not in lines[0]   # content not on bullet
+        assert lines[1] == "    Use postgres for the storage layer"
+
+        assert lines[2].startswith("- [")
+        assert "JWT refresh in cookies" in lines[2]
+        assert lines[3] == "    JWT refresh tokens live in httpOnly cookies"
+
+    def test_derives_title_when_none_stored_short_content_dedups_to_one_line(self, tmp_repo):
+        # No explicit title -> falls back to _derive_title(content), same as get_context.
+        # Content is short (<=100 chars) so the derived title IS the content verbatim —
+        # showing it again on an indented line would just repeat it, so there's no 2nd line.
+        _, eid = store.update_decision(
+            tmp_repo, "Settings load from a TOML file validated at startup", RV1_SESSION,
+            "convention",
+        )
+        rendered = store._render_prompt_decisions(tmp_repo, [eid])
+        lines = rendered.splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("- [")
+        assert "Settings load from a TOML file validated at startup" in lines[0]
+
+    def test_derives_title_when_none_stored_long_content_keeps_two_lines(self, tmp_repo):
+        # Long content (>100 chars) derives a truncated title distinct from the full body,
+        # so the body still gets its own indented line.
+        long_content = ("Settings load from a TOML file validated at startup against a strict "
+                        "schema before anything else in the app is allowed to run.")
+        _, eid = store.update_decision(tmp_repo, long_content, RV1_SESSION, "convention")
+        rendered = store._render_prompt_decisions(tmp_repo, [eid])
+        lines = rendered.splitlines()
+        assert len(lines) == 2
+        assert lines[0].startswith("- [")
+        assert long_content not in lines[0]
+        assert lines[1] == f"    {long_content}"
+
+
 class TestContextForPromptMeta:
     """get_context_for_prompt_with_meta hands back structured data instead of a caller
     (claude.rationale) having to scrape the rendered text."""
@@ -3716,6 +3811,24 @@ class TestCompactRehydration:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "Rehydrated working context" not in ctx
 
+    def test_rehydrate_working_set_shows_title_via_helper(self, tmp_repo):
+        # _rehydrate_working_set must route through _title_and_body: the bullet line
+        # leads with the title, and the content only repeats on an indented line when
+        # it's not a duplicate of the title.
+        # created_by="human" -> auto-approved (see _classify_level), so the entry is
+        # deterministically "active" and passes _rehydrate_working_set's status filter.
+        _, eid = store.update_decision(
+            tmp_repo, "Use postgres for storage, not sqlite", RV1_SESSION,
+            "architecture", created_by="human", title="Postgres over sqlite")
+        store._ws_add(tmp_repo, "sess-title", [eid])
+        rendered = store._rehydrate_working_set(tmp_repo, "sess-title")
+        lines = rendered.splitlines()
+        head = next(l for l in lines if l.startswith("- ["))
+        assert "Postgres over sqlite" in head
+        assert "Use postgres for storage, not sqlite" not in head  # not on the bullet
+        idx = lines.index(head)
+        assert lines[idx + 1] == "    Use postgres for storage, not sqlite"
+
 
 class TestWorkingSetGC:
     def test_gc_removes_stale_and_keeps_fresh(self, tmp_repo):
@@ -3856,6 +3969,321 @@ class TestFollowThroughLog:
         store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
         path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
         assert not path.exists()
+
+
+# ── Title helpers (Task 1) ─────────────────────────────────────────────────────
+
+class TestTitleHelpers:
+    def test_normalize_flattens_and_strips(self):
+        assert store._normalize_title("  hello\n  world \t") == "hello world"
+
+    def test_normalize_truncates_with_ellipsis(self):
+        long = "x" * 150
+        out = store._normalize_title(long)
+        assert len(out) == store.MAX_TITLE_LEN
+        assert out.endswith("…")
+
+    def test_normalize_empty(self):
+        assert store._normalize_title("   \n ") == ""
+
+    def test_derive_verbatim_when_short(self):
+        c = "Never commit spec or plan files to git."
+        assert store._derive_title(c) == c  # <= 100 -> whole content, no ellipsis
+
+    def test_derive_first_sentence_when_long(self):
+        c = ("Native contexer-teams entry removed. Team sync is the Python path; "
+             "kept a legacy janitor pop; login now refreshes status.")
+        out = store._derive_title(c)
+        assert out.startswith("Native contexer-teams entry removed.")
+        assert len(out) <= store.MAX_TITLE_LEN
+
+    def test_derive_truncates_long_first_sentence(self):
+        c = "A " + "very " * 60 + "long first sentence with no early period"
+        out = store._derive_title(c)
+        assert len(out) == store.MAX_TITLE_LEN and out.endswith("…")
+
+    def test_derive_empty(self):
+        assert store._derive_title("") == ""
+
+
+# ── _title_and_body: the shared render primitive (findings #1-#3) ──────────────
+
+class TestTitleAndBody:
+    """_title_and_body(entry) -> (title, body). body is None whenever it would just repeat
+    the title on an indented second line — the dedup fix for finding #1."""
+
+    def test_short_untitled_dedups_body_to_none(self):
+        # No authored title, content <=100 chars -> derived title IS the content ->
+        # body is None so callers don't print the same text twice.
+        c = "Never commit spec or plan files to git."
+        e = store._new_decision_entry(c, "s1", "architecture")
+        title, body = store._title_and_body(e)
+        assert title == c
+        assert body is None
+
+    def test_long_untitled_keeps_full_body(self):
+        # No authored title, content >100 chars -> derived title is a truncated first
+        # sentence, distinct from the full body -> body is the full content.
+        c = ("Native contexer-teams entry removed. Team sync is the Python path; "
+             "kept a legacy janitor pop; login now refreshes status.")
+        e = store._new_decision_entry(c, "s1", "architecture")
+        title, body = store._title_and_body(e)
+        assert title == store._derive_title(c)
+        assert title != c
+        assert body == c
+
+    def test_authored_title_distinct_from_content_keeps_body(self):
+        # Authored title differs from content (even short content) -> body still renders,
+        # since it is NOT a repeat of the title.
+        c = "Use Postgres for the queue."
+        e = store._new_decision_entry(c, "s1", "architecture", title="Queue backend: Postgres")
+        title, body = store._title_and_body(e)
+        assert title == "Queue backend: Postgres"
+        assert body == c
+
+    def test_content_param_overrides_current_revision(self):
+        # Explicit `content` (e.g. a proposed_revision's content) is used instead of the
+        # entry's current revision.
+        e = store._new_decision_entry("Original short body.", "s1", "architecture")
+        title, body = store._title_and_body(e, content="A different candidate body.")
+        assert title == e["title"]  # authored/derived title on the entry itself is unchanged
+        assert body == "A different candidate body."
+
+
+# ── Title on entry + first revision (Task 2) ───────────────────────────────────
+
+class TestTitleOnEntry:
+    def test_authored_title_wins(self):
+        e = store._new_decision_entry("some long body " * 10, "s1", "architecture",
+                                       title="Short authored title")
+        assert e["title"] == "Short authored title"
+        assert store._current_revision(e)["title"] == "Short authored title"
+
+    def test_derived_when_omitted(self):
+        e = store._new_decision_entry("Use Postgres for the queue.", "s1", "architecture")
+        assert e["title"] == "Use Postgres for the queue."  # short -> verbatim
+        assert store._current_revision(e)["title"] == "Use Postgres for the queue."
+
+    def test_sync_cache_mirrors_revision_title(self):
+        e = store._new_decision_entry("Body.", "s1", "architecture", title="T1")
+        store._current_revision(e)["title"] = "T2"
+        store._sync_decision_cache(e)
+        assert e["title"] == "T2"
+
+
+# ── Title through update paths (Task 3) ───────────────────────────────────────
+
+class TestTitleRevision:
+    def test_revision_rederives_title_when_omitted(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Original short body.", "s1",
+                                       subtype="architecture", created_by="human", title="Original title")
+        # revise with new content, no title -> re-derive from new content
+        store.update_decision(tmp_repo, "Brand new short body.", "s1",
+                              subtype="architecture", created_by="human", replace_id=eid[:8])
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Brand new short body."   # re-derived, not carried forward
+        assert d["revision"] == 2
+
+    def test_revision_uses_authored_title(self, tmp_repo):
+        _, eid = store.update_decision(tmp_repo, "Body one.", "s1", subtype="architecture", created_by="human")
+        store.update_decision(tmp_repo, "Body two.", "s1", subtype="architecture",
+                              created_by="human", replace_id=eid[:8], title="Explicit new title")
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Explicit new title"
+
+    def test_title_only_correction_persists_without_new_revision(self, tmp_repo):
+        # NON-gated (human) replace_id with UNCHANGED content but a new title persists the
+        # corrected title in place (no spurious revision) rather than silently no-op'ing.
+        _, eid = store.update_decision(tmp_repo, "Some short decision body.", "s1",
+                                       subtype="architecture", created_by="human",
+                                       title="Original title")
+        ok, rid = store.update_decision(tmp_repo, "Some short decision body.", "s1",
+                                        subtype="architecture", created_by="human",
+                                        replace_id=eid[:8], title="Corrected title")
+        assert ok and rid == eid
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Corrected title"           # persisted
+        assert d["content"] == "Some short decision body."
+        assert d["revision"] == 1                          # no new revision created
+        assert store._current_revision(d)["title"] == "Corrected title"
+
+    def test_gated_title_only_change_goes_through_approval(self, tmp_repo):
+        # SECURITY: an AI title-only change to a trusted architecture/constraint decision must
+        # NOT be applied in place (it would reframe trusted context) - it becomes a Suggested
+        # Update awaiting developer approval; the live title is untouched until then.
+        _, eid = store.update_decision(tmp_repo, "Some approved arch body.", "s1",
+                                       subtype="architecture", created_by="human",
+                                       title="Original title")
+        store.update_decision(tmp_repo, "Some approved arch body.", "s1",
+                              subtype="architecture", created_by="ai",
+                              replace_id=eid[:8], title="AI reframed title")
+        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d["title"] == "Original title"                          # live title unchanged
+        assert d.get("proposed_revision", {}).get("title") == "AI reframed title"  # pending review
+        # ...and approving it promotes the new title.
+        store.approve_decision(tmp_repo, eid, "approve")
+        d2 = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert d2["title"] == "AI reframed title"
+
+    def test_title_only_correction_on_pending_applies_in_place(self, tmp_repo):
+        # A PENDING (untrusted, not-injected) decision's title is corrected in place, not dropped
+        # and not gated: the developer reviews the base with the fixed title.
+        store.update_decision(tmp_repo, "Use Kafka instead of RabbitMQ for event streaming", "s1",
+                              subtype="architecture")  # ai + L3 signal -> pending_approval
+        e = next(x for x in store._load(tmp_repo)["entries"] if x.get("type") == "decision")
+        assert e["status"] == "pending_approval"
+        eid = e["id"]
+        store.update_decision(tmp_repo, "Use Kafka instead of RabbitMQ for event streaming", "s1",
+                              subtype="architecture", replace_id=eid,
+                              title="Kafka for event streaming")
+        d = next(x for x in store._load(tmp_repo)["entries"] if x.get("id") == eid)
+        assert d["title"] == "Kafka for event streaming"   # applied in place
+        assert d["status"] == "pending_approval"           # still pending
+        assert "proposed_revision" not in d                 # no proposal stacked
+
+    def test_unchanged_content_and_title_is_noop(self, tmp_repo):
+        # Same content, no (or identical) title -> pure no-op, current behavior preserved.
+        _, eid = store.update_decision(tmp_repo, "A short body here.", "s1",
+                                       subtype="architecture", created_by="human")
+        before = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        before_updated = before["updated_at"]
+        store.update_decision(tmp_repo, "A short body here.", "s1", subtype="architecture",
+                              created_by="human", replace_id=eid[:8])
+        after = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert after["updated_at"] == before_updated       # untouched
+
+    def test_gated_proposal_carries_title_through_approval(self, tmp_repo):
+        # An AI-authored change to an architecture/constraint decision routes through the
+        # approval gate (Suggested Update) instead of revising immediately - the title must
+        # survive capture -> proposal -> promoted revision.
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        eid = entry["id"]
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+
+        # default created_by="ai" -> significant change on an architecture decision is gated.
+        ok, rid = store.update_decision(
+            tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+            subtype="architecture", replace_id=eid, title="Gated new title")
+        assert ok is True and rid == eid
+
+        gated = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        # still gated: live revision untouched, but the pending proposal carries the title.
+        assert gated["revision"] == 1
+        assert gated["proposed_revision"]["title"] == "Gated new title"
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok is True
+        promoted = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert promoted["revision"] == 2
+        assert promoted["title"] == "Gated new title"
+        assert store._current_revision(promoted)["title"] == "Gated new title"
+
+    def test_gated_proposal_title_rederived_when_edited_at_approval(self, tmp_repo):
+        # If the lead edits the content while approving a Suggested Update, the proposal's
+        # title (derived for the ORIGINAL proposed content) must not be carried onto the
+        # edited content - it should re-derive instead of going stale.
+        store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        eid = entry["id"]
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+
+        store.update_decision(
+            tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
+            subtype="architecture", replace_id=eid, title="Gated new title")
+
+        ok, _msg = store.approve_decision(
+            tmp_repo, eid, "edit", content="Rollback endpoint is /api/v3/rollback with retries")
+        assert ok is True
+        promoted = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert promoted["revision"] == 2
+        assert promoted["title"] == "Rollback endpoint is /api/v3/rollback with retries"
+        assert promoted["title"] != "Gated new title"
+
+
+class TestTitleBackfill:
+    def test_legacy_entry_gets_title_on_load(self, tmp_repo, monkeypatch):
+        # Write a store file with a revision-model entry that predates `title`.
+        store.update_decision(tmp_repo, "Legacy decision body kept verbatim.", "s1",
+                              subtype="architecture")
+        data = store._load(tmp_repo)
+        for e in data["entries"]:
+            e.pop("title", None)
+            for r in e.get("revisions", []):
+                r.pop("title", None)
+        data["schema_version"] = 2  # simulate an older store
+        store._save(tmp_repo, data)
+        # Next load must backfill.
+        reloaded = store._load(tmp_repo)
+        e = reloaded["entries"][0]
+        assert e["title"] == "Legacy decision body kept verbatim."
+        assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
+        assert reloaded.get("schema_version") == 3
+
+
+class TestServerTitleParam:
+    def test_update_context_forwards_title(self, tmp_repo, monkeypatch):
+        from contexer import server
+        seen = {}
+        def fake_update(repo, content, sid, subtype="", created_by="ai", replace_id="", title=""):
+            seen.update(title=title, content=content); return True, "id123"
+        monkeypatch.setattr(server.store, "update_decision", fake_update)
+        monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
+        server.update_context("body", subtype="architecture", title="My Title")
+        assert seen["title"] == "My Title"
+
+    def test_update_global_context_forwards_title(self, monkeypatch):
+        from contexer import server
+        seen = {}
+        def fake_update_global(content, sid, subtype="", title=""):
+            seen.update(title=title, content=content); return True, "id456"
+        monkeypatch.setattr(server.store, "update_global_decision", fake_update_global)
+        server.update_global_context("body", subtype="constraint", title="My Global Title")
+        assert seen["title"] == "My Global Title"
+
+
+class TestTitleDisplay:
+    def test_get_context_leads_with_title(self, tmp_repo):
+        long_body = ("Adopt the outbox pattern for share retries. " + "detail " * 30)
+        store.update_decision(tmp_repo, long_body, "s1", subtype="architecture",
+                              title="Adopt outbox for share retries")
+        out = store.get_context(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if "Adopt outbox for share retries" in l)
+        # title on the bullet line; full body on the following indented line
+        idx = lines.index(head)
+        assert lines[idx].lstrip().startswith("- [")
+        assert lines[idx + 1].startswith("    ") and "outbox pattern" in lines[idx + 1]
+
+    def test_get_context_short_untitled_decision_renders_one_line(self, tmp_repo):
+        # Finding #1: an untitled decision whose content is <=100 chars must NOT print the
+        # content twice (bullet-line title + indented content line). One line only.
+        short_body = "Never store plaintext passwords, always use bcrypt"
+        store.update_decision(tmp_repo, short_body, "s1", subtype="constraint")
+        out = store.get_context(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if short_body in l)
+        idx = lines.index(head)
+        assert lines[idx].lstrip().startswith("- [")
+        # no follow-up indented duplicate of the same content
+        assert idx + 1 >= len(lines) or not lines[idx + 1].startswith("    ")
+
+    def test_get_context_long_untitled_decision_still_shows_two_lines(self, tmp_repo):
+        # A long untitled decision still gets a derived (truncated) title on the bullet
+        # line and the FULL content on the indented line below it.
+        long_body = ("We rejected sharding the primary database this quarter because the "
+                     "write volume does not yet justify the operational complexity it adds.")
+        store.update_decision(tmp_repo, long_body, "s1", subtype="architecture")
+        out = store.get_context(tmp_repo)
+        lines = out.splitlines()
+        head = next(l for l in lines if l.lstrip().startswith("- [") and "sharding" in l)
+        idx = lines.index(head)
+        assert long_body not in lines[idx]          # bullet line has the truncated title, not the full body
+        assert lines[idx + 1] == f"    {long_body}"  # full body on the next, indented line
 
 
 # ── secret redaction on the EGRESS path only (share projection + preview) ─────

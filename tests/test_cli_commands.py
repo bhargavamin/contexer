@@ -595,3 +595,36 @@ class TestInstallOnCorruptConfig:
         with pytest.raises(SystemExit) as exc:
             cli._run_guarded(lambda: install([]))
         assert exc.value.code == 1
+
+
+# ── review: title headline ───────────────────────────────────────────────────
+
+class TestReviewTitleHeadline:
+    def test_pending_decision_shows_title_as_headline(self, tmp_repo, monkeypatch, capsys):
+        """The non-proposed branch of review() leads with the title, content beneath —
+        mirrors TestReviewOverlapSection's real-store driving style in test_overlap_report.py
+        (tmp_repo redirects STORE_DIR; _git_root is patched to point at it)."""
+        from contexer import store
+
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        # subtype="constraint" always lands pending_approval (see _classify_level), so this
+        # is deterministically in the review queue regardless of content-signal heuristics.
+        stored, _entry_id = store.update_decision(
+            tmp_repo,
+            "Long body explaining the outbox pattern in detail for share retries.",
+            "s1",
+            subtype="constraint",
+            title="Adopt outbox for retries",
+        )
+        assert stored
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")  # skip past the prompt
+        cli.review()
+
+        out = capsys.readouterr().out
+        assert "[constraint] Adopt outbox for retries" in out
+        assert '"Long body explaining the outbox pattern in detail for share retries."' in out
+        # title heading must come before the quoted body, on its own line
+        head_idx = out.index("Adopt outbox for retries")
+        body_idx = out.index("Long body explaining the outbox pattern")
+        assert head_idx < body_idx
