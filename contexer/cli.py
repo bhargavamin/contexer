@@ -713,8 +713,8 @@ def _drift_dismiss(repo: str, token: str) -> None:
     from contexer import store
 
     token = token.strip()
+    pending = store.drift_candidates(repo)  # prefetched once; reused by both branches below
     if token.isdigit():
-        pending = store.drift_candidates(repo)
         idx = int(token)
         if not (1 <= idx <= len(pending)):
             print(f"contexer drift: no advisory numbered {idx} "
@@ -727,7 +727,6 @@ def _drift_dismiss(repo: str, token: str) -> None:
               f"in {target['source_ref']}.")
         return
 
-    pending = store.drift_candidates(repo)
     target = next((c for c in pending if c["hash"] == token), None)
     if target is not None:
         store.dismiss_drift(repo, target["decision_id"], target["source_ref"])
@@ -760,6 +759,11 @@ def _drift_explain(repo: str) -> None:
         print(f"   excerpt:  {c['excerpt'][:120]}")
         if c.get("rejected_alternative"):
             print(f"   rejected alternative: {c['rejected_alternative']}")
+        artifacts = c.get("shared_artifacts") or []
+        print(f"   artifact match: {'yes (' + ', '.join(artifacts) + ')' if artifacts else 'no'}")
+        print(f"   marker: {'yes' if c.get('marker_found') else 'no'}")
+        topics = c.get("shared_topics") or []
+        print(f"   shared topics: {', '.join(topics) if topics else 'none'}")
         print(f"   score: {c['score']}")
         print()
 

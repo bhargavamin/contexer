@@ -146,6 +146,29 @@ class TestCodexInstall:
         assert "claude.post_write" in codex._EVENT_MARKERS["PostToolUse"]
         assert "claude.drift" in codex._EVENT_MARKERS["UserPromptSubmit"]
 
+    def test_post_write_and_drift_resolve_repo_identically(self, home):
+        # Codex mirrors Claude's structural regression guard (test_install.py::
+        # test_post_write_and_drift_resolve_repo_identically): post_write's PostToolUse
+        # wrapper and drift's UserPromptSubmit wrapper must share the IDENTICAL
+        # git-toplevel $REPO-resolution prefix, including the `|| true` fallback (not
+        # `|| pwd`) — a diverging fallback between the two would let post_write's sidecar
+        # write and drift's sidecar read land under different repo slugs, silently
+        # breaking drift in a monorepo subdirectory (the M3 Critical).
+        codex.install(home)
+        put_cmds = [h["command"] for g in _hooks(home)["hooks"]["PostToolUse"] for h in g["hooks"]]
+        ups_cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+        post_write_cmd = next(c for c in put_cmds if "claude.post_write" in c)
+        drift_cmd = next(c for c in ups_cmds if "claude.drift" in c)
+        repo_prefix = "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "
+        assert post_write_cmd.startswith(repo_prefix), (
+            f"post_write's wrapper does not resolve $REPO via git-toplevel: {post_write_cmd!r}")
+        assert drift_cmd.startswith(repo_prefix), (
+            f"drift's wrapper does not resolve $REPO via git-toplevel: {drift_cmd!r}")
+        assert '"$REPO"' in post_write_cmd
+        assert '"$REPO"' in drift_cmd
+        assert "sys.argv[1]" in post_write_cmd
+        assert "sys.argv[1]" in drift_cmd
+
     def test_uninstall_removes_post_write_and_drift(self, home):
         codex.install(home)
         codex.uninstall(home)

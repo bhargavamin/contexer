@@ -5029,3 +5029,41 @@ class TestDriftCandidates:
         self._seed(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
         # No files written/changed - nothing for git status to report.
         assert store.drift_candidates(tmp_repo) == []
+
+    def test_explain_surfaces_signal_breakdown(self, tmp_repo):
+        self._git_init(tmp_repo)
+        self._seed(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        candidates = store.drift_candidates(tmp_repo, explain=True)
+        assert len(candidates) == 1
+        c = candidates[0]
+        # Per-signal breakdown must be forwarded, not just score/reason.
+        assert c["shared_artifacts"]
+        assert c["marker_found"] is True
+        assert isinstance(c["shared_topics"], list)
+
+    def test_explain_no_artifact_still_carries_signals(self, tmp_repo):
+        self._git_init(tmp_repo)
+        # Shares topics (redis/cache/auth) with the excerpt below but no concrete artifact
+        # (no path/module/route in either) -> rejected on the artifact gate, not omitted.
+        self._seed(tmp_repo, "we use redis and postgres for the cache with jwt login token",
+                   "human")
+        self._write(tmp_repo, "cache/redis.py",
+                   '"""redis and postgres back the cache using jwt login token."""\n')
+        candidates = store.drift_candidates(tmp_repo, explain=True)
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert c["status"] == "rejected"
+        assert c["reason"] == "no-artifact"
+        assert c["shared_artifacts"] == []
+        assert len(c["shared_topics"]) >= 1
+
+    def test_non_explain_output_omits_signal_breakdown(self, tmp_repo):
+        self._git_init(tmp_repo)
+        self._seed(tmp_repo, "hot counter uses Memcached, not Redis; see cache/redis.py", "human")
+        self._write(tmp_repo, "cache/redis.py", '"""Redis cache client in cache/redis.py."""\n')
+        candidates = store.drift_candidates(tmp_repo)
+        assert len(candidates) == 1
+        assert "shared_artifacts" not in candidates[0]
+        assert "shared_topics" not in candidates[0]
+        assert "marker_found" not in candidates[0]

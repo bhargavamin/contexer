@@ -160,6 +160,10 @@ def after_write(repo_path: str, raw: str) -> str:
         if repo:
             data = json.loads(raw)
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
+            # UNVERIFIED: assumes write_file/replace's AfterTool payload nests the path at
+            # tool_input.file_path — not confirmed against upstream Gemini CLI's actual
+            # schema. Wrong shape degrades to silence (edit not recorded), not a crash;
+            # follow-up to confirm against a real Gemini CLI AfterTool payload.
             fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             session_id = store.session_from_hook_stdin(raw)
             if isinstance(fp, str) and fp:

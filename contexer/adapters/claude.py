@@ -245,6 +245,9 @@ def post_write(repo_path: str, raw: str) -> str:
             paths.append(fp)
         edits = tool_input.get("edits")
         if isinstance(edits, list):  # a MultiEdit carries several edit specs
+            # Defensive/spec-driven, not schema-verified: the real Claude Code MultiEdit
+            # payload carries a single top-level file_path (already captured above), so a
+            # per-edit file_path here is belt-and-suspenders in case that ever changes.
             for e in edits:
                 efp = e.get("file_path") if isinstance(e, dict) else None
                 if isinstance(efp, str) and efp:

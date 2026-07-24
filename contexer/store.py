@@ -4374,40 +4374,47 @@ def _approved_decisions_for_file(repo_path: str, file_path: str, index: dict | N
     ones, tags each with `"trusted": bool`, and drops the `_DRIFT_MAX` cap — `--explain`'s
     whole point is to show what the engine drops and why. The default (False) is
     byte-for-byte the engine's existing behavior."""
-    if index is None:
+    try:
+        if index is None:
+            return []
+        keywords = _file_keywords(file_path)
+        if not keywords:
+            return []
+        docs = index.get("docs", {})
+        ranked = _bm25_rank(keywords, index)
+        approved_ids = [did for did, _score, _hits in ranked
+                        if docs.get(did, {}).get("status") == "approved"]
+        if not approved_ids:
+            return []
+        if decisions is None:
+            data = _load(repo_path)
+            by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+        else:
+            by_id = {e.get("id"): e for e in decisions}
+        out: list[dict] = []
+        for did in approved_ids:
+            entry = by_id.get(did)
+            if entry is None:
+                continue
+            rev = _current_revision(entry)
+            trusted = bool(rev) and rev.get("source") in _DRIFT_TRUSTED_SOURCES
+            if not trusted and not include_untrusted:
+                continue
+            content = _current_content(entry)
+            # Recomputed here deliberately, not read off the index's own topics field: the
+            # index can be stale relative to `content` (a revision approved after the index
+            # was last built) — recomputing against the fresh current content is the guard,
+            # not an oversight.
+            item = {"id": (entry.get("id") or "")[:8], "content": content,
+                    "topics": _derive_topics(content)}
+            if include_untrusted:
+                item["trusted"] = trusted
+            out.append(item)
+            if not include_untrusted and len(out) >= _DRIFT_MAX:
+                break
+        return out
+    except Exception:
         return []
-    keywords = _file_keywords(file_path)
-    if not keywords:
-        return []
-    docs = index.get("docs", {})
-    ranked = _bm25_rank(keywords, index)
-    approved_ids = [did for did, _score, _hits in ranked
-                    if docs.get(did, {}).get("status") == "approved"]
-    if not approved_ids:
-        return []
-    if decisions is None:
-        data = _load(repo_path)
-        by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
-    else:
-        by_id = {e.get("id"): e for e in decisions}
-    out: list[dict] = []
-    for did in approved_ids:
-        entry = by_id.get(did)
-        if entry is None:
-            continue
-        rev = _current_revision(entry)
-        trusted = bool(rev) and rev.get("source") in _DRIFT_TRUSTED_SOURCES
-        if not trusted and not include_untrusted:
-            continue
-        content = _current_content(entry)
-        item = {"id": (entry.get("id") or "")[:8], "content": content,
-                "topics": _derive_topics(content)}
-        if include_untrusted:
-            item["trusted"] = trusted
-        out.append(item)
-        if not include_untrusted and len(out) >= _DRIFT_MAX:
-            break
-    return out
 
 
 # ── Doc Drift Layer 1 — Task 1.5: the orchestrator ─────────────────────────────
@@ -4673,7 +4680,11 @@ def drift_candidates(repo_path: str, explain: bool = False) -> list[dict]:
     Each returned dict carries `decision_id`, `content`, `source_ref`, `excerpt`, `score`,
     `rejected_alternative`, `hash`, `status` (`"pending"` | `"rejected"`), and `reason`
     (`None` when pending, else one of `"provenance"` | `"no-artifact"` | `"dismissed"` |
-    `"already-seen"`).
+    `"already-seen"`). When `explain=True`, each dict additionally carries the per-signal
+    breakdown from `_drift_signals`: `shared_artifacts` (list), `shared_topics` (list), and
+    `marker_found` (bool) — so `--explain` can show WHY a pair scored/rejected the way it
+    did, not just the verdict. explain=False output is unchanged (no extra keys) to avoid
+    bloating the normal listing.
 
     explain=False (default — what `contexer drift` lists) returns only PENDING pairs,
     highest-score first: the stable 1-based index a caller dismisses by IS this list's
@@ -4710,14 +4721,25 @@ def drift_candidates(repo_path: str, explain: bool = False) -> list[dict]:
                     base = {"decision_id": did, "content": decision.get("content", ""),
                             "source_ref": source_ref, "excerpt": excerpt, "hash": h}
                     if not decision.get("trusted", True):
-                        out.append({**base, "score": 0.0, "rejected_alternative": None,
-                                   "status": "rejected", "reason": "provenance"})
+                        entry = {**base, "score": 0.0, "rejected_alternative": None,
+                                 "status": "rejected", "reason": "provenance"}
+                        if explain:
+                            sig = _drift_signals(decision, excerpt)
+                            entry.update(shared_artifacts=sig["shared_artifacts"],
+                                        shared_topics=sig["shared_topics"],
+                                        marker_found=sig["marker_found"])
+                        out.append(entry)
                         continue
                     signals = _drift_signals(decision, excerpt)
                     if not signals["shared_artifacts"]:
-                        out.append({**base, "score": signals["score"],
-                                   "rejected_alternative": signals["rejected_alternative"],
-                                   "status": "rejected", "reason": "no-artifact"})
+                        entry = {**base, "score": signals["score"],
+                                 "rejected_alternative": signals["rejected_alternative"],
+                                 "status": "rejected", "reason": "no-artifact"}
+                        if explain:
+                            entry.update(shared_artifacts=signals["shared_artifacts"],
+                                        shared_topics=signals["shared_topics"],
+                                        marker_found=signals["marker_found"])
+                        out.append(entry)
                         continue
                     if h in dismissed:
                         reason, status = "dismissed", "rejected"
@@ -4725,9 +4747,14 @@ def drift_candidates(repo_path: str, explain: bool = False) -> list[dict]:
                         reason, status = "already-seen", "rejected"
                     else:
                         reason, status = None, "pending"
-                    out.append({**base, "score": signals["score"],
-                               "rejected_alternative": signals["rejected_alternative"],
-                               "status": status, "reason": reason})
+                    entry = {**base, "score": signals["score"],
+                             "rejected_alternative": signals["rejected_alternative"],
+                             "status": status, "reason": reason}
+                    if explain:
+                        entry.update(shared_artifacts=signals["shared_artifacts"],
+                                    shared_topics=signals["shared_topics"],
+                                    marker_found=signals["marker_found"])
+                    out.append(entry)
         out.sort(key=lambda c: c["score"], reverse=True)
         if explain:
             return out

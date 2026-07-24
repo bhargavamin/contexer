@@ -706,6 +706,30 @@ class TestDriftCommand:
         assert "EMITTED" in out
         assert "REJECTED" in out and "provenance" in out
 
+    def test_explain_shows_signal_breakdown(self, monkeypatch, capsys):
+        from contexer import store
+        self._patch_repo(monkeypatch)
+        explained = [
+            {"decision_id": "aaa11111", "content": "use Postgres, not MySQL",
+             "source_ref": "db/schema.py:1", "excerpt": "MySQL notes here",
+             "score": 7.0, "rejected_alternative": "MySQL", "hash": "hash-aaa",
+             "status": "pending", "reason": None,
+             "shared_artifacts": ["db/schema.py"], "shared_topics": ["db"],
+             "marker_found": True},
+            {"decision_id": "ccc33333", "content": "an unrelated decision about auth",
+             "source_ref": "db/schema.py:1", "excerpt": "MySQL notes here",
+             "score": 1.0, "rejected_alternative": None, "hash": "hash-ccc",
+             "status": "rejected", "reason": "no-artifact",
+             "shared_artifacts": [], "shared_topics": ["db"], "marker_found": False},
+        ]
+        monkeypatch.setattr(store, "drift_candidates", lambda repo, explain=False: explained)
+        cli.drift(["--explain"])
+        out = capsys.readouterr().out
+        assert "artifact match: yes (db/schema.py)" in out
+        assert "artifact match: no" in out
+        assert "marker: yes" in out and "marker: no" in out
+        assert "shared topics: db" in out
+
     def test_explain_no_candidates_message(self, monkeypatch, capsys):
         from contexer import store
         self._patch_repo(monkeypatch)
