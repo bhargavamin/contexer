@@ -3923,6 +3923,48 @@ class TestWorkingSetGC:
         store.get_session_start_context(tmp_repo, "resume")
         assert stale_ws.exists()  # resume takes the early-return path — GC never runs
 
+    def test_gc_prunes_stale_drift_sidecars(self, tmp_repo):
+        # Task 1.7: both drift per-session sidecars (.drift_seen_*, .edited_*) and the
+        # per-repo drift-advisory log (.drift_*.jsonl) accumulate one file per session per
+        # repo, so GC is load-bearing here, not hygiene.
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        slug = store._slug(tmp_repo)
+        stale_seen = store.STORE_DIR / f".drift_seen_{slug}_stale.json"
+        stale_edited = store.STORE_DIR / f".edited_{slug}_stale.json"
+        stale_driftlog = store.STORE_DIR / f".drift_{slug}.jsonl"
+        fresh_seen = store.STORE_DIR / f".drift_seen_{slug}_fresh.json"
+        stale_seen.write_text("[]")
+        stale_edited.write_text("[]")
+        stale_driftlog.write_text('{"e": "check"}\n')
+        fresh_seen.write_text("[]")
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(stale_seen, (old, old))
+        os.utime(stale_edited, (old, old))
+        os.utime(stale_driftlog, (old, old))
+        # fresh_seen keeps the mtime from the write above (just now)
+
+        store._gc_stale_session_files()
+
+        assert not stale_seen.exists()
+        assert not stale_edited.exists()
+        assert not stale_driftlog.exists()
+        assert fresh_seen.exists()
+
+    def test_gc_never_prunes_dismissed_drift_files(self, tmp_repo):
+        # A dismissal is a permanent developer judgment and the precision dataset for a
+        # future task — it must survive GC forever, even when stale (unlike every other
+        # drift sidecar).
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        slug = store._slug(tmp_repo)
+        dismissed = store.STORE_DIR / f".drift_dismissed_{slug}.json"
+        dismissed.write_text("[]")
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(dismissed, (old, old))
+
+        store._gc_stale_session_files()
+
+        assert dismissed.exists()
+
 
 class TestRationaleSessionIdPlumbing:
     def test_rationale_passes_session_id_dedups_second_prompt(self, tmp_repo):

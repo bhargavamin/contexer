@@ -3146,11 +3146,23 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
 def _gc_stale_session_files() -> None:
     """At non-resume session start: drop working-set dedup files and retrieval logs whose
     session is well over — old enough that dedup/history no longer matters. Fail-soft,
-    a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2)."""
+    a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2).
+
+    Task 1.7 extends this to the Doc Drift Layer 1 sidecars: `.drift_seen_*` and `.edited_*`
+    are per-(repo, session), so they accumulate one file per session per repo just like
+    `.ws_*` — GC is load-bearing here, not hygiene. `.drift_*.jsonl` is the per-repo
+    drift-advisory log, tail-capped but still worth reclaiming once stale. `.drift_dismissed_*`
+    is deliberately NEVER globbed here — a dismissal is a permanent developer judgment and the
+    precision dataset for a future task, so it must survive GC forever; the `"dismissed"`
+    skip is explicit (not just relying on the glob patterns not overlapping it) so a future
+    naming change can't silently start deleting it."""
     try:
         cutoff = time.time() - _WS_GC_AGE_SECONDS
-        for pattern in (".ws_*.json", ".retrieval_*.jsonl"):
+        for pattern in (".ws_*.json", ".retrieval_*.jsonl",
+                        ".drift_seen_*.json", ".edited_*.json", ".drift_*.jsonl"):
             for p in STORE_DIR.glob(pattern):
+                if "dismissed" in p.name:
+                    continue
                 try:
                     if p.stat().st_mtime < cutoff:
                         p.unlink(missing_ok=True)

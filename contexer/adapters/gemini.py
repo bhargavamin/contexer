@@ -133,13 +133,39 @@ def before_agent(repo_path: str, raw: str) -> str:
         rationale = store.get_context_for_prompt(repo, prompt, session_id)
         if rationale:
             contexts.append(rationale)
+
+        # Doc Drift Layer 1 (Task 1.7): surface advisories for docs that drifted from recorded
+        # decisions, for files after_write recorded this session. Reads the same
+        # per-(repo, session) sidecar after_write writes — both resolve repo via
+        # store._resolve_repo(repo_path), and repo_path is the SAME git-toplevel $REPO the
+        # installed shell wrapper computes for every Gemini hook (_cmd), so the two calls
+        # can't diverge the way the pre-fix Claude/Codex wrappers did.
+        drift = store.drift_check_payload(repo, session_id)
+        if drift:
+            contexts.append(drift)
         return _output("BeforeAgent", contexts)
     except Exception:
         return _output("BeforeAgent", [])
 
 
 def after_write(repo_path: str, raw: str) -> str:
-    """AfterTool(write_file|replace): immediately remind the AI to surface and store any decision."""
+    """AfterTool(write_file|replace): immediately remind the AI to surface and store any decision,
+    AND record the edited file into the per-(repo, session) drift sidecar (Doc Drift Layer 1,
+    Task 1.7) that before_agent's drift check reads. Resolves repo the same way before_agent
+    does (store._resolve_repo) so both calls agree on the same store file — the installed
+    shell wrapper (_cmd) computes git-toplevel $REPO identically for every Gemini hook, so
+    there is no separate wrapper-divergence seam here the way there was for Claude/Codex."""
+    try:
+        repo = store._resolve_repo(repo_path)
+        if repo:
+            data = json.loads(raw)
+            tool_input = data.get("tool_input") if isinstance(data, dict) else None
+            fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+            session_id = store.session_from_hook_stdin(raw)
+            if isinstance(fp, str) and fp:
+                store.record_edited_file(repo, fp, session_id)
+    except Exception:
+        pass
     try:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         (store.STORE_DIR / _PENDING_CAPTURE).touch()

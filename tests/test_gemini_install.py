@@ -196,6 +196,86 @@ class TestGeminiRuntime:
         assert isinstance(entry("", "garbage"), str)
 
 
+# ── Doc Drift Layer 1 — Task 1.7: Gemini AfterTool records edits, before_agent drifts ──────
+
+class TestGeminiDrift:
+    SID = "gemini-drift-sess-1"
+
+    def _seed(self, repo):
+        store.update_decision(
+            repo, "hot counter uses Memcached, not Redis; see cache/redis.py",
+            "human-sess", "architecture", created_by="human")
+        target = Path(repo) / "cache" / "redis.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('"""Redis cache client in cache/redis.py."""\n', encoding="utf-8")
+        return str(target)
+
+    def test_after_write_records_edited_file(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        Path(repo).mkdir(parents=True, exist_ok=True)
+        raw = json.dumps({
+            "session_id": self.SID,
+            "tool_name": "write_file",
+            "tool_input": {"file_path": "src/app.py"},
+        })
+        gemini.after_write(repo, raw)
+        recorded = store._read_edited_files(repo, self.SID, clear=False)
+        assert "src/app.py" in recorded
+
+    def test_after_write_empty_session_records_nothing(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        Path(repo).mkdir(parents=True, exist_ok=True)
+        raw = json.dumps({"tool_input": {"file_path": "src/app.py"}})
+        gemini.after_write(repo, raw)
+        assert list(store.STORE_DIR.glob(".edited_*")) == []
+
+    def test_before_agent_renders_drift_advisory(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        Path(repo).mkdir(parents=True, exist_ok=True)
+        target = self._seed(repo)
+        store.record_edited_file(repo, target, self.SID)
+        raw = json.dumps({"session_id": self.SID, "prompt": "keep going"})
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "[Contexer] Checked" in context
+        assert "Memcached" in context
+
+    def test_before_agent_no_edits_no_drift_context(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        Path(repo).mkdir(parents=True, exist_ok=True)
+        raw = json.dumps({"session_id": self.SID, "prompt": "keep going"})
+        out = json.loads(gemini.before_agent(repo, raw))
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "[Contexer] Checked" not in context
+
+    def test_after_write_then_before_agent_same_session_handshake(self, home, tmp_path):
+        # GAP-1 parity for Gemini: after_write WRITES the sidecar and before_agent READS it —
+        # they must resolve the SAME repo. Gemini's shell wrapper computes git-toplevel $REPO
+        # for every hook (unlike Claude/Codex's split wrapper-per-hook), so repo_path passed
+        # in here already mirrors what the installed hook would pass for both events.
+        repo = str(tmp_path / "repo")
+        Path(repo).mkdir(parents=True, exist_ok=True)
+        target = self._seed(repo)
+        post_raw = json.dumps({
+            "session_id": self.SID, "tool_name": "replace",
+            "tool_input": {"file_path": target},
+        })
+        gemini.after_write(repo, post_raw)
+        same = json.dumps({"session_id": self.SID, "prompt": "keep going"})
+        out = json.loads(gemini.before_agent(repo, same))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "Memcached" in context
+        # A DIFFERENT session never wrote a sidecar => nothing to surface (isolation holds).
+        other = json.dumps({"session_id": "some-other-gemini-session", "prompt": "keep going"})
+        out_other = json.loads(gemini.before_agent(repo, other))
+        assert "[Contexer] Checked" not in out_other.get(
+            "hookSpecificOutput", {}).get("additionalContext", "")
+
+    def test_after_write_failsoft_on_bad_stdin(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        assert isinstance(gemini.after_write(repo, "garbage"), str)
+
+
 class TestGeminiUninstallAndStatus:
     def test_uninstall_removes_only_managed_entries(self, home):
         path = home / ".gemini" / "settings.json"

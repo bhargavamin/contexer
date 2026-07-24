@@ -112,6 +112,87 @@ class TestCodexInstall:
         cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])]
         assert not any("claude.review_nudge" in c for c in cmds)
 
+    # ── Doc Drift Layer 1 — Task 1.7: Codex reuses claude.post_write/claude.drift verbatim ──
+
+    def test_post_write_hook_registered_with_git_toplevel_wrapper(self, home):
+        codex.install(home)
+        put = _hooks(home)["hooks"]["PostToolUse"]
+        cmds = [h["command"] for g in put for h in g["hooks"]]
+        matches = [c for c in cmds if "claude.post_write" in c]
+        assert matches
+        # LOAD-BEARING: identical git-toplevel $REPO resolution to drift's wrapper —
+        # not a raw-cwd or one-arg version.
+        assert "git rev-parse --show-toplevel" in matches[0]
+        assert "$REPO" in matches[0]
+        assert "sys.argv[1]" in matches[0]
+
+    def test_post_write_matcher_covers_write_edit(self, home):
+        codex.install(home)
+        put = _hooks(home)["hooks"]["PostToolUse"]
+        matches = [g for g in put if any("claude.post_write" in h["command"] for h in g["hooks"])]
+        assert matches
+        assert matches[0].get("matcher") == "Write|Edit"
+
+    def test_drift_hook_registered_on_user_prompt_submit(self, home):
+        codex.install(home)
+        ups = _hooks(home)["hooks"]["UserPromptSubmit"]
+        cmds = [h["command"] for g in ups for h in g["hooks"]]
+        matches = [c for c in cmds if "claude.drift" in c]
+        assert matches
+        assert "git rev-parse --show-toplevel" in matches[0]
+        assert "sys.argv[1]" in matches[0]
+
+    def test_post_write_and_drift_in_event_markers(self):
+        assert "claude.post_write" in codex._EVENT_MARKERS["PostToolUse"]
+        assert "claude.drift" in codex._EVENT_MARKERS["UserPromptSubmit"]
+
+    def test_uninstall_removes_post_write_and_drift(self, home):
+        codex.install(home)
+        codex.uninstall(home)
+        hooks = _hooks(home).get("hooks", {})
+        put_cmds = [h.get("command", "") for g in hooks.get("PostToolUse", []) for h in g.get("hooks", [])]
+        ups_cmds = [h.get("command", "") for g in hooks.get("UserPromptSubmit", []) for h in g.get("hooks", [])]
+        assert not any("claude.post_write" in c for c in put_cmds)
+        assert not any("claude.drift" in c for c in ups_cmds)
+
+    def test_install_preserves_foreign_post_tool_use_hook(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "./mine.sh"}]}]}}))
+        codex.install(home)
+        cmds = [h.get("command", "") for g in _hooks(home)["hooks"]["PostToolUse"]
+                for h in g.get("hooks", [])]
+        assert "./mine.sh" in cmds
+
+    def test_post_write_and_drift_wired_once(self, home):
+        codex.install(home)
+        codex.install(home)
+        put_cmds = [h["command"] for g in _hooks(home)["hooks"]["PostToolUse"] for h in g["hooks"]]
+        ups_cmds = [h["command"] for g in _hooks(home)["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+        assert sum("claude.post_write" in c for c in put_cmds) == 1
+        assert sum("claude.drift" in c for c in ups_cmds) == 1
+
+    def test_migrates_old_one_arg_post_write(self, home):
+        # A pre-git-toplevel-fix install resolved the repo from raw os.getcwd() (no $REPO
+        # threading) — that diverges from drift's git-toplevel repo in a monorepo subdir, so
+        # post_write's sidecar write and drift's read land under different slugs and drift
+        # silently never fires. Reinstall must replace it in place with the $REPO-threading
+        # version, detected the same way claude.py detects it: absence of "show-toplevel"
+        # alongside "claude.post_write".
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('"py" -c "from contexer.adapters import claude; import sys; '
+               'print(claude.post_write(\'\', sys.stdin.read()))"')
+        hooks_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        put = _hooks(home)["hooks"]["PostToolUse"]
+        cmds = [h["command"] for g in put for h in g["hooks"]]
+        matches = [c for c in cmds if "claude.post_write" in c]
+        assert len(matches) == 1  # replaced in place, not duplicated
+        assert "show-toplevel" in matches[0]
+
     # ── T2: team sync ────────────────────────────────────────────────────────────
 
     def test_session_start_pulls_team(self, home):

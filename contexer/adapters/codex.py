@@ -192,6 +192,20 @@ def install(home: Path) -> list[str]:
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
+    # Doc Drift Layer 1 (Task 1.7): reuse claude.post_write / claude.drift VERBATIM — Codex
+    # shares Claude's PostToolUse/UserPromptSubmit hookSpecificOutput schema, so the same
+    # runtime entrypoints apply unchanged. The wrapper is the IDENTICAL updated shape Claude
+    # installs (`git rev-parse --show-toplevel` -> $REPO -> sys.argv[1]), not the `|| pwd`
+    # fallback the rest of this file's wrappers use: post_write's sidecar write and drift's
+    # sidecar read MUST resolve the SAME repo (GAP-1) or drift silently never fires when
+    # Codex launches in a git subdirectory — `|| pwd` could paper over that divergence by
+    # resolving a subdir repo instead of surfacing the real toplevel mismatch.
+    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO"')
+    cap_drift = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                 'print(claude.drift(sys.argv[1], sys.stdin.read()))" "$REPO"')
 
     # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
@@ -224,13 +238,27 @@ def install(home: Path) -> list[str]:
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...", "command": _py(ss_code)}]})
 
-    # PostToolUse sets the deterministic .pending_capture flag; the next UserPromptSubmit
+    # PostToolUse: claude.post_write records edited files into the per-session drift sidecar
+    # AND still touches the deterministic .pending_capture flag; the next UserPromptSubmit
     # (anchor_cmd) consumes it and injects the capture reminder. No Stop hook - end-of-turn
     # prompting added latency/tokens with no functional gain over the next-prompt anchor.
     put = hooks.setdefault("PostToolUse", [])
-    if not base._in_groups(put, ".pending_capture"):
+    # Migrate: replace the legacy bare-shell `.pending_capture` touch hook with
+    # claude.post_write (Doc Drift Layer 1) — same trigger, adds edited-file recording.
+    if base._in_groups(put, ".pending_capture") and not base._in_groups(put, "claude.post_write"):
+        put = base._filter_groups(put, [".pending_capture"])
+        hooks["PostToolUse"] = put
+    # Migrate: an old post_write hook installed before the git-toplevel fix resolved the repo
+    # from raw os.getcwd() — in a monorepo subdirectory that diverges from drift's
+    # git-toplevel repo, so the sidecar write and drift's read land under different slugs and
+    # drift silently never fires. Replace it with the $REPO-threading version. Detected by the
+    # absence of "show-toplevel" alongside "claude.post_write" (mirrors claude.py's migration).
+    if base._in_groups(put, "claude.post_write") and not base._in_groups(put, "show-toplevel"):
+        put = base._filter_groups(put, ["claude.post_write"])
+        hooks["PostToolUse"] = put
+    if not base._in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+            "command": post_write_cmd}]})
 
     # Retire any previously-installed Stop hook. The Stop entry stays in _EVENT_MARKERS so
     # uninstall/reinstall strips an old Stop hook from hooks.json.
@@ -299,6 +327,10 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, "claude.review_nudge"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
+    # Doc Drift Layer 1: surface advisories for docs that drifted from recorded decisions.
+    if not base._in_groups(ups, "claude.drift"):
+        ups.append({"hooks": [{"type": "command",
+            "statusMessage": "Checking for doc drift...", "command": cap_drift}]})
 
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.codex/hooks.json")
@@ -308,12 +340,12 @@ def install(home: Path) -> list[str]:
 
 _EVENT_MARKERS = {
     "SessionStart":     ["get_session_start_context"],
-    "PostToolUse":      [".pending_capture"],
+    "PostToolUse":      [".pending_capture", "claude.post_write"],
     "Stop":             [".pending_capture"],
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],
     "UserPromptSubmit": [".current_repo", ".pending_capture", "claude.review_nudge",
-                         "get_bootstrap_context_prompt",
+                         "claude.drift", "get_bootstrap_context_prompt",
                          "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                          "claude.team_poll"],
 }
