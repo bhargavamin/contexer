@@ -11,8 +11,8 @@ from contexer.remote import RemoteContext, RemoteDecision, RemoteUnavailableErro
 TEAM = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
 
 
-def _rd(id, content, scope="team", type="architecture"):
-    return RemoteDecision(id=id, type=type, content=content, rationale=None,
+def _rd(id, content, scope="team", type="architecture", title=None):
+    return RemoteDecision(id=id, type=type, title=title, content=content, rationale=None,
                           repo="github.com/a/b", agent=None, scope=scope)
 
 

@@ -4368,3 +4368,241 @@ class TestSecretRedactionOutbound:
                             lambda: (calls.__setitem__("n", calls["n"] + 1) or real()))
         store.get_shareable_all(tmp_repo)
         assert calls["n"] <= 1  # resolved once per operation, not once per decision
+
+
+# ── _share_projection: title on the push wire shape (Decision Titles v2, Task 4) ──
+
+class TestShareProjectionTitle:
+    def test_share_projection_includes_authored_title(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for the queue.", "s1",
+                              subtype="architecture", title="Queue backend: Postgres")
+        proj = store.get_shareable(tmp_repo, "")
+        assert proj["title"] == "Queue backend: Postgres"
+
+    def test_share_projection_derives_title_for_short_untitled_decision(self, tmp_repo):
+        # No authored title, content <=100 chars -> derived title IS the content, same
+        # rule as _title_and_body.
+        c = "Never commit spec or plan files to git."
+        store.update_decision(tmp_repo, c, "s1", subtype="architecture")
+        proj = store.get_shareable(tmp_repo, "")
+        assert proj["title"] == c
+
+    def test_share_projection_derives_title_for_long_untitled_decision(self, tmp_repo):
+        long_body = ("Adopt the outbox pattern for share retries. " + "detail " * 30)
+        store.update_decision(tmp_repo, long_body, "s1", subtype="architecture")
+        proj = store.get_shareable(tmp_repo, "")
+        assert proj["title"] == store._derive_title(long_body)
+        assert proj["title"] != long_body
+
+    def test_share_projection_all_includes_title_per_row(self, tmp_repo):
+        store.update_decision(tmp_repo, "first decision here", "s1", subtype="architecture",
+                              title="First")
+        store.update_decision(tmp_repo, "second newer decision", "s1", subtype="constraint")
+        titles = [d["title"] for d in store.get_shareable_all(tmp_repo)]
+        assert titles == ["First", "Second newer decision"]
+
+
+class TestShareProjectionTitleRedaction:
+    """SECURITY: a title is derived from content, so it can carry the same secrets as
+    content/evidence. It must be scrubbed at the projection (here) AND independently at
+    the wire (remote._wire_args, tested in test_remote.py) — the last-mile chokepoint."""
+
+    def test_authored_title_secret_redacted(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "_redaction_enabled", lambda: True)
+        store.update_decision(tmp_repo, "deploy uses a key for prod", "s1",
+                              subtype="architecture", title=f"Prod key is {_AWS}")
+        proj = store.get_shareable(tmp_repo, "")
+        assert _AWS not in proj["title"]
+        assert proj["redacted"] >= 1
+
+    def test_derived_title_secret_redacted(self, tmp_repo, monkeypatch):
+        # No authored title: a short decision's derived title mirrors its content
+        # verbatim, so a secret in the content reaches the title too and must still
+        # be scrubbed there.
+        monkeypatch.setattr(store, "_redaction_enabled", lambda: True)
+        store.update_decision(tmp_repo, f"legacy key {_AWS}", "s1", subtype="architecture")
+        proj = store.get_shareable(tmp_repo, "")
+        assert _AWS not in proj["title"]
+        assert proj["redacted"] >= 1
+
+    def test_title_redaction_respects_opt_out(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "_redaction_enabled", lambda: False)
+        store.update_decision(tmp_repo, "deploy uses a key for prod", "s1",
+                              subtype="architecture", title=f"Prod key is {_AWS}")
+        proj = store.get_shareable(tmp_repo, "")
+        assert _AWS in proj["title"]  # opted out, title sent as-is like content
+
+
+# ── _share_item_line: title-led preview matching the wire (Task 4) ────────────
+
+class TestShareItemLine:
+    def test_shows_title_and_dedups_when_equal_to_content(self):
+        # Short decision: derived title equals content -> one line, no repeated quote.
+        proj = {"id": "abc12345", "type": "architecture",
+                "title": "Use Postgres for the queue.",
+                "content": "Use Postgres for the queue."}
+        line = store._share_item_line(proj)
+        assert line.count("Use Postgres for the queue.") == 1
+        assert '"' not in line  # no quoted body line appended
+
+    def test_shows_title_then_indented_content_when_distinct(self):
+        proj = {"id": "abc12345", "type": "architecture",
+                "title": "Queue backend: Postgres",
+                "content": "Use Postgres for the queue, not MySQL."}
+        line = store._share_item_line(proj)
+        assert "Queue backend: Postgres" in line
+        assert '"Use Postgres for the queue, not MySQL."' in line
+        lines = line.splitlines()
+        assert len(lines) == 2
+
+    def test_falls_back_to_quoted_content_when_no_title(self):
+        proj = {"id": "abc12345", "type": "architecture", "title": None,
+                "content": "Some content with no title at all."}
+        line = store._share_item_line(proj)
+        assert line == '  abc12345 [architecture] "Some content with no title at all."'
+
+    def test_maxlen_truncates_content_but_dedup_uses_full_content(self):
+        # A long decision whose title equals the FULL content must still dedup (no
+        # spurious body line) even though the displayed content gets truncated.
+        long_c = "x" * 200
+        proj = {"id": "abc12345", "type": "architecture", "title": long_c, "content": long_c}
+        line = store._share_item_line(proj, maxlen=20)
+        assert '"' not in line  # still deduped, not shown as a mismatched truncated quote
+
+    def test_dedup_uses_collapsed_whitespace_like_title_and_body(self):
+        # _title_and_body compares COLLAPSED whitespace (" ".join(x.split())), so a title
+        # derived from content with irregular internal whitespace (newlines, doubled spaces)
+        # must still dedup here the same way - a strict `title == content` equality would
+        # wrongly show a repeated body line for this exact case.
+        content = "Use   Postgres\nfor the queue."
+        title = " ".join(content.split())  # "Use Postgres for the queue." - what _derive_title yields
+        proj = {"id": "abc12345", "type": "architecture", "title": title, "content": content}
+        line = store._share_item_line(proj)
+        assert line.count("Use Postgres for the queue.") == 1
+        assert '"' not in line  # deduped: no separate quoted body line
+
+
+# ── _share_item_block: labelled block for the HUMAN terminal share surfaces ───────
+
+class TestShareItemBlock:
+    def test_no_rendered_line_exceeds_width(self):
+        # `width` is the whole line budget: the indent and the "title: "/"desc:  " label must
+        # come out of it. A derived title runs to MAX_TITLE_LEN (100), so without truncation
+        # the title line alone would overflow the terminal.
+        long_body = ("Stack: all-TypeScript pnpm monorepo, Node >=24, Postgres 16 + Drizzle ORM, "
+                     "Vitest, Docker Compose for local Postgres, GitHub Actions CI, ECS deploy.")
+        proj = {"id": "c609aa4c1234", "type": "architecture", "content": long_body}
+        for width in (76, 60, 40):
+            block = store._share_item_block(proj, index=1, width=width)
+            assert max(len(ln) for ln in block.splitlines()) <= width, (width, block)
+        title_line = next(ln for ln in store._share_item_block(proj, index=1).splitlines()
+                          if "title:" in ln)
+        assert title_line.endswith("…")  # truncated, still one line
+
+    def test_renders_labelled_fields_with_index(self):
+        proj = {"id": "c609aa4c1234", "type": "architecture",
+                "title": "Stack: all-TypeScript pnpm monorepo",
+                "content": "Stack: all-TypeScript pnpm monorepo, Node 18."}
+        block = store._share_item_block(proj, index=1)
+        lines = block.splitlines()
+        assert lines[0] == "  1. id:    c609aa4c"
+        assert lines[1] == "     type:  architecture"
+        assert lines[2] == "     title: Stack: all-TypeScript pnpm monorepo"
+        assert lines[3] == "     desc:  Stack: all-TypeScript pnpm monorepo, Node 18."
+
+    def test_omits_desc_when_title_equals_collapsed_content(self):
+        # Same dedup rule as _share_item_line: a short decision that IS its own title must
+        # not print the same text twice under title: and desc:.
+        proj = {"id": "aaa11111", "type": "constraint",
+                "title": "Never store private decisions server-side.",
+                "content": "Never store private decisions server-side."}
+        block = store._share_item_block(proj, index=2)
+        assert "desc:" not in block
+        assert block.count("Never store private decisions server-side.") == 1
+
+    def test_omits_desc_using_collapsed_whitespace_comparison(self):
+        # Mirrors _share_item_line's collapsed-whitespace dedup: a title derived from content
+        # with irregular internal whitespace must still dedup, not show a spurious desc line.
+        content = "Use   Postgres\nfor the queue."
+        title = " ".join(content.split())
+        proj = {"id": "abc12345", "type": "architecture", "title": title, "content": content}
+        block = store._share_item_block(proj)
+        assert "desc:" not in block
+
+    def test_wraps_long_desc_with_aligned_continuation(self):
+        long_desc = " ".join(f"word{i}" for i in range(40))  # forces multiple wrapped lines
+        proj = {"id": "abc12345", "type": "architecture", "title": "Short title",
+                "content": long_desc}
+        block = store._share_item_block(proj, index=1, width=40)
+        lines = block.splitlines()
+        assert lines[3].startswith("     desc:  ")  # first desc line: 5-char index pad + label
+        cont_lines = lines[4:]
+        assert len(cont_lines) > 1  # wrapped onto more than one continuation line
+        # Every continuation line aligns under the desc VALUE column: 5-char index pad
+        # ("     ") + 7-char label pad ("desc:  ") = 12 spaces, no relabeling.
+        for cont in cont_lines:
+            assert cont.startswith(" " * 12)
+            assert cont[12] != " "
+            assert not cont.strip().startswith(("id:", "type:", "title:", "desc:"))
+        # No content is dropped by the wrap - rejoining recovers the full collapsed text.
+        desc_line0 = lines[3].split("desc:", 1)[1].strip()
+        rejoined = " ".join([desc_line0] + [c.strip() for c in cont_lines])
+        assert rejoined == long_desc
+
+    def test_no_index_uses_two_space_indent(self):
+        proj = {"id": "abc12345", "type": "convention", "title": "T", "content": "T body here."}
+        block = store._share_item_block(proj)
+        lines = block.splitlines()
+        assert lines[0] == "  id:    abc12345"
+        assert lines[1] == "  type:  convention"
+        assert lines[2] == "  title: T"
+        assert lines[3] == "  desc:  T body here."
+
+    def test_missing_title_falls_back_to_derived_title(self):
+        proj = {"id": "abc12345", "type": "architecture", "title": None,
+                "content": "Some content with no stored title at all, long enough to differ."}
+        block = store._share_item_block(proj)
+        assert "title: Some content with no stored title at all" in block
+
+    def test_status_pill_renders_before_shared_marker(self):
+        # The review state must be visible at a glance so a not-yet-approved decision isn't
+        # pushed by accident; it precedes the ✓ shared marker on the id line.
+        proj = {"id": "c609aa4c1234", "type": "architecture", "status": "pending_approval",
+                "title": "Stack heading", "content": "Stack heading and then some body."}
+        first = store._share_item_block(proj, index=1, shared=True).splitlines()[0]
+        assert first == "  1. id:    c609aa4c  [pending_approval]  ✓ shared"
+        # unshared keeps the status pill alone
+        assert store._share_item_block(proj, index=1).splitlines()[0] == \
+            "  1. id:    c609aa4c  [pending_approval]"
+
+    def test_status_pill_absent_when_projection_has_no_status(self):
+        # Hand-built projections (older callers/tests) must degrade to no pill, not "None".
+        proj = {"id": "abc12345", "type": "architecture", "content": "Body content here."}
+        assert store._share_item_block(proj, index=1).splitlines()[0] == "  1. id:    abc12345"
+
+    def test_share_projection_carries_status(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for the queue.", "s1",
+                              subtype="architecture", created_by="human")
+        proj = store.get_shareable_all(tmp_repo)[0]
+        assert proj["status"] in ("approved", "suggested", "pending_approval")
+
+    def test_shared_marker_renders_on_id_line(self):
+        proj = {"id": "c609aa4c1234", "type": "architecture",
+                "title": "Stack: all-TypeScript pnpm monorepo",
+                "content": "Stack: all-TypeScript pnpm monorepo, Node 18."}
+        block = store._share_item_block(proj, index=1, shared=True)
+        lines = block.splitlines()
+        assert lines[0] == "  1. id:    c609aa4c  ✓ shared"
+
+    def test_shared_marker_omitted_by_default_and_when_false(self):
+        proj = {"id": "abc12345", "type": "architecture", "content": "Body content here."}
+        assert "✓ shared" not in store._share_item_block(proj, index=1)
+        assert "✓ shared" not in store._share_item_block(proj, index=1, shared=False)
+
+    def test_shared_marker_never_exceeds_width(self):
+        long_body = ("Stack: all-TypeScript pnpm monorepo, Node >=24, Postgres 16 + Drizzle ORM, "
+                     "Vitest, Docker Compose for local Postgres, GitHub Actions CI, ECS deploy.")
+        proj = {"id": "c609aa4c1234", "type": "architecture", "content": long_body}
+        for width in (76, 60, 40):
+            block = store._share_item_block(proj, index=1, width=width, shared=True)
+            assert max(len(ln) for ln in block.splitlines()) <= width, (width, block)

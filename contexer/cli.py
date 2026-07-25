@@ -520,8 +520,15 @@ def share_cmd(rest: list | None = None) -> None:
     # No id and no --all: don't guess ('most recent') — show a numbered picker so the developer
     # sees the options and multi-selects. Selecting IS the confirm, so we push directly.
     if not share_all and not ids and not bypass:
-        picked = _pick_shareable(repo)
+        picked = _pick_shareable(repo, profile)
         if not picked:
+            print("Cancelled — nothing was pushed.")
+            return
+        # Selecting IS the confirm here, so an unreviewed decision would otherwise go up with
+        # no second look — gate it explicitly before the push.
+        chosen = set(picked)
+        selection = [p for p in store.get_shareable_all(repo) if (p.get("id") or "") in chosen]
+        if not _confirm_unapproved(selection):
             print("Cancelled — nothing was pushed.")
             return
         print(share.share_ids(repo, picked, profile=profile))
@@ -541,34 +548,92 @@ def share_cmd(rest: list | None = None) -> None:
         print(share.share(repo, ids[0] if ids else "", profile=profile))
 
 
-def _pick_shareable(repo: str) -> list:
-    """Interactive numbered multi-select of shareable decisions. Returns the chosen ids ([] to
-    cancel / nothing to share). Pure local read; no network until the caller pushes."""
-    from contexer import store
+def _pick_shareable(repo: str, profile) -> list:
+    """Interactive numbered multi-select of shareable decisions, paged `store._FILTERED_DISPLAY`
+    at a time. `m` loads the next page — numbering stays continuous, so e.g. `26` resolves once
+    page 2 is loaded; `all`'s count in the prompt label (`all (25)`, then `all (50)` after paging)
+    makes explicit that it shares exactly the currently-loaded set, not the whole store — that's
+    what `contexer share --all` is for, and the two used to collide silently. Returns the chosen
+    ids ([] to cancel / nothing to share). Pure local read; no network until the caller pushes.
+
+    DISPLAY ONLY: resorts a local copy so not-yet-shared decisions come first and already-shared
+    ones last (stable within each group), and marks the latter `✓ shared` via
+    `share.shared_map(profile.endpoint)` - endpoint-scoped so a marker from a different endpoint
+    never bleeds through. `store.get_shareable_all`'s oldest-first order (the actual push order)
+    is untouched; a shared decision stays selectable (re-sharing legitimately updates the row)."""
+    from contexer import share, store
 
     items = store.get_shareable_all(repo)
     if not items:
         print("No decisions available to share.")
         return []
-    shown = items[:store._FILTERED_DISPLAY]
-    print(f"\nShareable decisions — pushing sends them to your PERSONAL cloud "
-          f"({store._SHARE_OUTWARD_WARNING}):\n")
-    for i, it in enumerate(shown, 1):
-        print(f"  {i}. " + store._share_item_line(it, maxlen=80).strip())
-    if len(items) > len(shown):
-        print(f"  …and {len(items) - len(shown)} more (share by id)")
+    shared = share.shared_map(profile.endpoint)
+    items = sorted(items, key=lambda it: (it.get("id") or "") in shared)
+    print("\nShareable decisions — pushing sends them to your PERSONAL cloud.")
+    print(f"{store._SHARE_SECRETS_HINT}:\n")
+
+    page = store._FILTERED_DISPLAY
+    shown_from = 0
+    loaded = min(page, len(items))
+    while True:
+        for i in range(shown_from, loaded):
+            print(store._share_item_block(items[i], index=i + 1,
+                                          shared=(items[i].get("id") or "") in shared))
+        remaining = len(items) - loaded
+        if remaining:
+            print(f"  …and {remaining} more (share by id)")
+        shown_from = loaded
+
+        opts = f"e.g. 1,3 | all ({loaded})" + (" | m=more" if remaining else "") + " | q"
+        try:
+            raw = input(f"\nSelect to share [{opts}]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return []
+        if raw == "m" and remaining:
+            loaded = min(loaded + page, len(items))
+            continue
+        if raw == "all":
+            return [it.get("id") or "" for it in items[:loaded]]
+        picked = []
+        for tok in raw.replace(" ", "").split(","):
+            if tok.isdigit() and 1 <= int(tok) <= loaded:
+                picked.append(items[int(tok) - 1].get("id") or "")
+        return picked
+
+
+def _pending_review_warning(projs: list) -> list[str]:
+    """Warning lines when a selection contains `pending_approval` decisions, else [].
+
+    Scoped to `pending_approval` ONLY, matching the store's own trust boundary: auto-injection
+    (`get_context(_active_only=True)`) already serves `approved` AND `suggested`, so a suggested
+    decision is trusted context locally and sharing it promotes nothing new. `pending_approval`
+    is the one state deliberately held back until a human reviews it — and a personal-cloud push
+    AUTO-APPROVES, so pushing one silently ratifies a decision that was never reviewed. The
+    status pill shows every state while picking; this gate fires only for that real hazard."""
+    pending = sum(1 for p in projs if (p.get("status") or "approved") == "pending_approval")
+    if not pending:
+        return []
+    return [
+        f"  Warning: {pending} of {len(projs)} are PENDING REVIEW (not yet approved).",
+        "  Pushing auto-approves them into living context in your personal cloud.",
+    ]
+
+
+def _confirm_unapproved(projs: list) -> bool:
+    """Standalone gate for the picker path, which has no other confirm step (selecting IS the
+    confirm). Returns True when nothing is pending review, or the developer says yes."""
+    warning = _pending_review_warning(projs)
+    if not warning:
+        return True
+    print()
+    for line in warning:
+        print(line)
     try:
-        raw = input("\nSelect to share [e.g. 1,3 | all | q]: ").strip().lower()
+        return input("  Continue? [y/N]: ").strip().lower() in ("y", "yes")
     except (EOFError, KeyboardInterrupt):
         print()
-        return []
-    if raw == "all":
-        return [it.get("id") or "" for it in shown]
-    picked = []
-    for tok in raw.replace(" ", "").split(","):
-        if tok.isdigit() and 1 <= int(tok) <= len(shown):
-            picked.append(shown[int(tok) - 1].get("id") or "")
-    return picked
+        return False
 
 
 def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
@@ -582,19 +647,29 @@ def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
         if not items:
             print("Nothing to share.")
             return None
-        print(f"\nAbout to push {len(items)} decision(s) to your PERSONAL cloud — "
-              f"{store._SHARE_OUTWARD_WARNING}:\n")
+        print(f"\nAbout to push {len(items)} decision(s) to your PERSONAL cloud. "
+              f"{store._SHARE_SECRETS_HINT}:\n")
         for it in items[:10]:
-            print(store._share_item_line(it, maxlen=80))
+            print(store._share_item_block(it))
         if len(items) > 10:
             print(f"  …and {len(items) - 10} more")
+        selection = items
     else:
         proj = store.get_shareable(repo, ids[0] if ids else "")
         if proj is None:
             print("Nothing to share — no matching decision found.")
             return None
-        print(f"\nAbout to push to your PERSONAL cloud — {store._SHARE_OUTWARD_WARNING}:\n")
-        print(store._share_item_line(proj))
+        print(f"\nAbout to push to your PERSONAL cloud. {store._SHARE_SECRETS_HINT}:\n")
+        print(store._share_item_block(proj))
+        selection = [proj]
+    # Surfaced INLINE here rather than as a second prompt: this path already gates on the
+    # y/N below, so one deliberate confirmation is enough (the picker path, which has no
+    # such gate, asks separately via _confirm_unapproved).
+    warning = _pending_review_warning(selection)
+    if warning:
+        print()
+        for line in warning:
+            print(line)
     try:
         return input("\nPush to cloud? [y/N]: ").strip().lower() in ("y", "yes")
     except (EOFError, KeyboardInterrupt):

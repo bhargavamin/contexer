@@ -14,11 +14,19 @@ the queue FIFO. The outbox is drained from two places: at the start of every `sh
 (so queued items go out before the new one) and from `team_context.refresh` (the SessionStart
 seam every adapter already funnels through), so a queued share retries automatically the next
 time the user starts a session - no manual retry required.
+
+Shared-marker sidecar: a second GLOBAL file (`.shared.json`, separate from the outbox) records
+which decisions have already been successfully pushed, namespaced by endpoint so switching
+endpoints (e.g. local -> prod) never shows a stale/false "already shared" marker - the team
+cache had exactly this endpoint-contamination bug once (a prod cursor confusing a local pull);
+this sidecar is scoped from the start to avoid repeating it. Purely cosmetic (the `contexer
+share` picker's `✓ shared` hint) - see `_mark_shared`/`shared_map`.
 """
 from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 
 from contexer import store
 from contexer.config import Profile, load_profile
@@ -93,6 +101,67 @@ def _enqueue(payload: dict) -> None:
     _save_outbox(entries)
 
 
+# ── shared-marker sidecar (separate GLOBAL file from the outbox above) ─────────────
+# Records successful pushes so the picker can show "✓ shared". Namespaced by endpoint:
+# {"endpoints": {"<endpoint>": {"<decision_id>": "<iso8601>"}}}. Same call-time-path /
+# fail-soft-read / atomic-write conventions as the outbox helpers above - a marker is
+# purely cosmetic and must NEVER break or block a push.
+
+def _shared_path():
+    # Computed at call time (not module import time), same convention as _outbox_path -
+    # tests that monkeypatch store.STORE_DIR see the redirected path.
+    return store.STORE_DIR / ".shared.json"
+
+
+def _load_shared() -> dict:
+    """Read the shared-marker sidecar; a missing file, a corrupt file, or an unexpected
+    shape all read as the empty shape - never raises."""
+    path = _shared_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("endpoints"), dict):
+            return data
+    return {"endpoints": {}}
+
+
+def _save_shared(data: dict) -> None:
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store._atomic_write(_shared_path(), json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _mark_shared(ids, endpoint: str | None) -> None:
+    """Record successful pushes of `ids` to `endpoint`, namespaced so switching endpoints
+    never shows a stale/false marker for a decision only ever pushed elsewhere. Fail-soft:
+    a marker is cosmetic (the picker's "✓ shared" hint) and must NEVER break or block a
+    push, so a missing endpoint, an empty `ids`, or any read/write problem is a silent no-op."""
+    clean_ids = [str(i) for i in ids if i]
+    if not endpoint or not clean_ids:
+        return
+    try:
+        data = _load_shared()
+        bucket = data["endpoints"].setdefault(endpoint, {})
+        now = datetime.now(timezone.utc).isoformat()
+        for did in clean_ids:
+            bucket[did] = now
+        _save_shared(data)
+    except Exception:
+        pass  # cosmetic marker - never let a write problem surface to the caller
+
+
+def shared_map(endpoint: str | None) -> dict[str, str]:
+    """decision_id -> iso8601 timestamp of decisions already pushed to `endpoint` (empty
+    dict if never pushed there, endpoint is falsy, or the sidecar can't be read)."""
+    if not endpoint:
+        return {}
+    try:
+        return dict(_load_shared()["endpoints"].get(endpoint, {}))
+    except Exception:
+        return {}
+
+
 def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
     """Re-read the outbox immediately before the final save and fold in anything that
     only exists on disk. Lock-free (this file's existing convention - no file locking
@@ -119,7 +188,7 @@ def _entry_push_kwargs(entry: dict) -> dict:
         type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
         rationale=entry.get("rationale"), confidence=entry.get("confidence"),
         evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
-        decision_id=entry.get("decision_id"))
+        decision_id=entry.get("decision_id"), title=entry.get("title"))
 
 
 def _dec_push_kwargs(dec: dict, key) -> dict:
@@ -128,16 +197,18 @@ def _dec_push_kwargs(dec: dict, key) -> dict:
     return dict(
         type=dec["type"], content=dec["content"], repo=key,
         confidence=dec["confidence"], evidence=dec["evidence"],
-        source=_wire_source(dec["source"]), decision_id=dec["id"])
+        source=_wire_source(dec["source"]), decision_id=dec["id"], title=dec.get("title"))
 
 
-def _finish_share(dec: dict, key, server_id) -> str:
+def _finish_share(dec: dict, key, server_id, endpoint: str | None = None) -> str:
     """Turn one push outcome into the user-facing status (shared by share + share_async).
 
     On failure (server_id is None: cloud unreachable OR auth rejected) enqueue the decision
     so a later drain retries it - either way a queued retry can succeed later, so both
-    degradations queue rather than losing the share. On success, return the honest
-    personal-scope message (teammates don't see it until team promotion ships)."""
+    degradations queue rather than losing the share. On success, mark the decision shared
+    (endpoint-scoped, cosmetic - never lets a marker failure affect the returned status) and
+    return the honest personal-scope message (teammates don't see it until team promotion
+    ships)."""
     if server_id is None:
         try:
             _enqueue(_payload(dec, key))
@@ -147,6 +218,7 @@ def _finish_share(dec: dict, key, server_id) -> str:
             return ("Share failed (see the warning above for why). Your local decision is unchanged.")
         return ("Share failed (see the warning above for why). Queued - it will retry "
                 "automatically at the next session start.")
+    _mark_shared([dec.get("id")], endpoint)
     return (f"Synced decision to your personal cloud context (server id={server_id}) - "
             "teammates won't see this until team promotion ships.")
 
@@ -242,19 +314,32 @@ def _batch_success_status(sent: int, at_capacity: int, invalid: int, lost: int) 
     return msg + " - teammates won't see these until team promotion ships."
 
 
-def _drain_mark(chunk: list[dict], res: tuple[list[str], list[dict]], sent_ids: set) -> int:
+def _drain_mark(chunk: list[dict], res: tuple[list[str], list[dict]], sent_ids: set,
+                endpoint: str | None = None) -> int:
     """Mark a successfully-drained chunk: saved AND permanently-invalid entries -> sent_ids (dropped
     from the outbox on the final reconcile - invalid ones can never sync, so stop retrying them);
-    only TRANSIENT capacity skips stay queued. Returns the count genuinely saved."""
+    only TRANSIENT capacity skips stay queued. Separately records the shared-marker sidecar for
+    only the entries genuinely saved by the server (neither transient-retry NOR permanently-invalid
+    - `skipped` as a whole, not just `retry`). Returns the count genuinely saved."""
     _saved, skipped = res
     retry, _invalid = _split_skips(skipped)
+    skipped_ids = {s.get("decision_id") for s in skipped}
     for e in chunk:
         if e.get("decision_id") not in retry:
             sent_ids.add(e.get("decision_id"))
+    _mark_shared([e.get("decision_id") for e in chunk if e.get("decision_id") not in skipped_ids], endpoint)
     return len(chunk) - len(skipped)
 
 
-def _push_batch(remote: RemoteStore, decs: list[dict], key) -> str:
+def _mark_batch_saved(chunk: list[dict], skipped: list[dict], endpoint: str | None) -> None:
+    """Mark only the chunk rows the server actually SAVED - i.e. NOT present in `skipped` at
+    all (transient capacity skip or permanent invalid alike are excluded; a re-queued capacity
+    skip may still sync later, but it hasn't yet, so it must not show as shared)."""
+    skipped_ids = {s.get("decision_id") for s in skipped}
+    _mark_shared([d["id"] for d in chunk if d["id"] not in skipped_ids], endpoint)
+
+
+def _push_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None = None) -> str:
     """Sync batch push of shareable projections (share_all / share_ids). Stops at the first failed
     chunk (queues it + the rest); re-queues TRANSIENT capacity skips; drops PERMANENT invalid ones."""
     total = len(decs)
@@ -267,6 +352,7 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key) -> str:
         if res is None:
             return _queue_rest_status(decs, start, key, sent, total)
         _saved, skipped = res
+        _mark_batch_saved(chunk, skipped, endpoint)
         sent += len(chunk) - len(skipped)
         retry, inv = _split_skips(skipped)
         invalid += inv
@@ -277,7 +363,7 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key) -> str:
     return _batch_success_status(sent, at_capacity, invalid, lost)
 
 
-async def _apush_batch(remote: RemoteStore, decs: list[dict], key) -> str:
+async def _apush_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None = None) -> str:
     """Async twin of :func:`_push_batch` (awaits apush_decisions so a wedged chunk is cancellable).
     Mirrors it line-for-line except the awaited push; shares every outbox/status helper."""
     total = len(decs)
@@ -290,6 +376,7 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key) -> str:
         if res is None:
             return _queue_rest_status(decs, start, key, sent, total)
         _saved, skipped = res
+        _mark_batch_saved(chunk, skipped, endpoint)
         sent += len(chunk) - len(skipped)
         retry, inv = _split_skips(skipped)
         invalid += inv
@@ -327,7 +414,7 @@ def drain_outbox(profile: Profile | None = None) -> int:
                 entry["attempts"] = entry.get("attempts", 0) + 1
             _save_outbox(_reconcile_with_disk(entries[start:], sent_ids))
             return sent
-        sent += _drain_mark(chunk, res, sent_ids)
+        sent += _drain_mark(chunk, res, sent_ids, profile.endpoint)
     _save_outbox(_reconcile_with_disk([], sent_ids))
     return sent
 
@@ -355,18 +442,20 @@ async def adrain_outbox(profile: Profile | None = None) -> int:
                 entry["attempts"] = entry.get("attempts", 0) + 1
             _save_outbox(_reconcile_with_disk(entries[start:], sent_ids))
             return sent
-        sent += _drain_mark(chunk, res, sent_ids)
+        sent += _drain_mark(chunk, res, sent_ids, profile.endpoint)
     _save_outbox(_reconcile_with_disk([], sent_ids))
     return sent
 
 
 def _payload(dec: dict, key) -> dict:
-    """Outbox entry for one wire-projected decision (same shape share() enqueues)."""
+    """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
+    title so a queued offline share still sends it once drained (_entry_push_kwargs reads
+    it back off this same row)."""
     return {
         "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
         "repo": key, "rationale": None, "confidence": dec["confidence"],
         "evidence": dec["evidence"], "source": _wire_source(dec["source"]),
-        "queued_at": time.time(), "attempts": 0,
+        "title": dec.get("title"), "queued_at": time.time(), "attempts": 0,
     }
 
 
@@ -389,7 +478,7 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    return _push_batch(remote, decs, key)
+    return _push_batch(remote, decs, key, profile.endpoint)
 
 
 def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:
@@ -414,7 +503,7 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
     server_id = with_local_fallback(
         lambda: remote.push_decision(**_dec_push_kwargs(dec, key)),
         default=None, action="share decision")
-    return _finish_share(dec, key, server_id)
+    return _finish_share(dec, key, server_id, profile.endpoint)
 
 
 def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
@@ -437,7 +526,7 @@ def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = N
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    return _prepend_unknown(_push_batch(remote, projs, key), missing)
+    return _prepend_unknown(_push_batch(remote, projs, key, profile.endpoint), missing)
 
 
 # ── async share path (#108) ────────────────────────────────────────────────────────
@@ -466,7 +555,7 @@ async def share_async(repo_path: str, decision_id: str = "", *,
     server_id = await awith_local_fallback(
         lambda: remote.apush_decision(**_dec_push_kwargs(dec, key)),
         default=None, action="share decision")
-    return _finish_share(dec, key, server_id)
+    return _finish_share(dec, key, server_id, profile.endpoint)
 
 
 async def share_ids_async(repo_path: str, decision_ids: list, *,
@@ -488,7 +577,7 @@ async def share_ids_async(repo_path: str, decision_ids: list, *,
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    return _prepend_unknown(await _apush_batch(remote, projs, key), missing)
+    return _prepend_unknown(await _apush_batch(remote, projs, key, profile.endpoint), missing)
 
 
 def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:

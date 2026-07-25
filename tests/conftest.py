@@ -18,7 +18,13 @@ class FakeTeamsServer:
 
     Implements just enough of push_decision + get_context — idempotency on decisionId,
     scope, `updatedSince` filtering, and a monotonic cursor — to drive the full OSS sync
-    path (share/pull/poll) with only the network hop faked."""
+    path (share/pull/poll) with only the network hop faked.
+
+    `title` is echoed through the same way `content`/`rationale` are: stored on push
+    (absent -> None, mirroring the real server's nullable column) and returned by
+    get_context. Title is NEVER required — `add_team_decision` (a row injected directly,
+    simulating one added before Decision Titles v2 or by an older client) defaults it to
+    None, and `get_context`'s projection tolerates a row with no "title" key at all."""
 
     ORIGIN = "git@github.com:acme/widgets.git"
     REPO_KEY = "github.com/acme/widgets"
@@ -36,7 +42,8 @@ class FakeTeamsServer:
         did = args.get("decisionId") or f"srv-{self._tick()}"
         prev = self.rows.get(did, {})
         self.rows[did] = {
-            "id": did, "type": args["type"], "content": args["content"],
+            "id": did, "type": args["type"], "title": args.get("title"),
+            "content": args["content"],
             "rationale": args.get("rationale"), "repo": args.get("repo"),
             "agent": args.get("agent"),
             "scope": prev.get("scope", "personal"),  # push lands in personal; approval promotes
@@ -59,18 +66,24 @@ class FakeTeamsServer:
         self.rows[decision_id]["scope"] = "team"
         self.rows[decision_id]["updated_at"] = self._tick()
 
-    def add_team_decision(self, content: str, type: str = "architecture") -> str:
+    def add_team_decision(self, content: str, type: str = "architecture",
+                          title: str | None = None) -> str:
+        """Inject a row directly as already team-approved (bypasses push_decision). `title`
+        defaults to None — an older client / pre-Titles-v2 row — so callers proving the
+        untitled path don't have to pass anything."""
         did = f"team-{self._tick()}"
-        self.rows[did] = {"id": did, "type": type, "content": content, "rationale": None,
-                          "repo": self.REPO_KEY, "agent": None, "scope": "team",
-                          "updated_at": self._tick()}
+        self.rows[did] = {"id": did, "type": type, "title": title, "content": content,
+                          "rationale": None, "repo": self.REPO_KEY, "agent": None,
+                          "scope": "team", "updated_at": self._tick()}
         return did
 
     def get_context(self, args: dict) -> dict:
         repo, since = args.get("repo"), args.get("updatedSince")
         matched = [r for r in self.rows.values() if repo is None or r["repo"] == repo]
         rows = matched if since is None else [r for r in matched if r["updated_at"] > since]
-        result = [{k: r[k] for k in ("id", "type", "content", "rationale", "repo", "agent", "scope")}
+        # .get(k) (not r[k]) so a row dict with no "title" key at all — e.g. hand-built by a
+        # test predating this field — still projects cleanly as None; title stays optional.
+        result = [{k: r.get(k) for k in ("id", "type", "title", "content", "rationale", "repo", "agent", "scope")}
                   for r in rows]
         cursor = max((r["updated_at"] for r in matched), default=None)
         return {"result": result, "deleted": [], "cursor": cursor}

@@ -117,6 +117,18 @@ def test_push_decision_omits_none_optionals(monkeypatch):
     assert captured["args"] == {"type": "constraint", "content": "c"}
 
 
+def test_push_decision_threads_title_to_wire(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda e, t, n, args, to: captured.update(args=args)
+        or _result(content=[_text("Saved decision x to your personal context.")]),
+    )
+    RemoteStore("https://t/mcp", "tok").push_decision(
+        type="constraint", content="c", repo=None, title="A short heading")
+    assert captured["args"]["title"] == "A short heading"
+
+
 def test_push_decision_returns_empty_when_no_id_in_message(monkeypatch):
     monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(content=[_text("ok")]))
     did = RemoteStore("https://t/mcp", "tok").push_decision(type="convention", content="c", repo=None)
@@ -145,6 +157,20 @@ def test_push_decisions_serializes_batch_and_parses_ids(monkeypatch):
     ]}
     assert saved == ["srv-a", "srv-b"]
     assert skipped == []
+
+
+def test_push_decisions_batch_threads_title_per_row(monkeypatch):
+    # The batch path spreads **kw into _wire_args per row — a "title" key in the kwargs
+    # dict must flow onto the wire like any other optional.
+    captured = {}
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(
+        lambda e, t, n, args, to: captured.update(args=args) or _result(structured={
+            "results": [{"decisionId": "local-1", "id": "srv-a"}], "skipped": [],
+        })))
+    RemoteStore("https://t/mcp", "tok").push_decisions([
+        {"type": "architecture", "content": "a", "decision_id": "local-1", "title": "Row title"},
+    ])
+    assert captured["args"]["decisions"][0]["title"] == "Row title"
 
 
 def test_push_decisions_parses_skipped_capacity_rows(monkeypatch):
@@ -207,9 +233,39 @@ def test_get_context_parses_structured_content(monkeypatch):
     assert ctx.deleted == ["9"]
     assert ctx.cursor == "2026-01-01T00:00:00Z"
     assert ctx.decisions == [
-        RemoteDecision(id="1", type="constraint", content="c", rationale=None,
+        RemoteDecision(id="1", type="constraint", title=None, content="c", rationale=None,
                        repo="r", agent="a", scope="team"),
     ]
+
+
+# ── RemoteDecision.title parsing (Decision Titles v2, Task 5) ───────────────────
+
+def test_get_context_parses_title_from_row(monkeypatch):
+    structured = {
+        "result": [{
+            "id": "1", "type": "constraint", "title": "A short heading", "content": "c",
+            "rationale": None, "repo": "r", "agent": "a", "scope": "team",
+        }],
+        "deleted": [], "cursor": None,
+    }
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(structured=structured))
+    ctx = RemoteStore("https://t/mcp", "tok").get_context()
+    assert ctx.decisions[0].title == "A short heading"
+
+
+def test_get_context_title_none_when_row_lacks_key(monkeypatch):
+    # Older server / pre-title row: no "title" key in the row at all -> RemoteDecision.title
+    # is None (never a KeyError, never "").
+    structured = {
+        "result": [{
+            "id": "1", "type": "constraint", "content": "c",
+            "rationale": None, "repo": "r", "agent": "a", "scope": "team",
+        }],
+        "deleted": [], "cursor": None,
+    }
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(structured=structured))
+    ctx = RemoteStore("https://t/mcp", "tok").get_context()
+    assert ctx.decisions[0].title is None
 
 
 def test_get_context_omits_none_args(monkeypatch):
@@ -713,6 +769,34 @@ def test_wire_args_respects_opt_out(monkeypatch):
 def test_wire_args_no_evidence_key_when_none():
     args = remote._wire_args(type="constraint", content="plain", evidence=None)
     assert "evidence" not in args  # None optional still omitted after redaction wiring
+
+
+# ── title on the wire (Decision Titles v2, Task 4) ─────────────────────────────
+
+def test_wire_args_omits_title_when_none():
+    args = remote._wire_args(type="constraint", content="plain", title=None)
+    assert "title" not in args  # server reads an absent key as NULL
+
+
+def test_wire_args_includes_title_when_given():
+    args = remote._wire_args(type="constraint", content="plain", title="A short heading")
+    assert args["title"] == "A short heading"
+
+
+def test_wire_args_redacts_title_secret():
+    # SECURITY: a title is derived from content and can carry the same secrets — this is
+    # the last-mile chokepoint, independent of any scrubbing already done upstream (e.g.
+    # store._share_projection).
+    args = remote._wire_args(type="architecture", content="plain body",
+                             title=f"Prod key is {_WIRE_AWS}")
+    assert _WIRE_AWS not in args["title"]
+    assert "[REDACTED:aws_key]" in args["title"]
+
+
+def test_wire_args_title_respects_opt_out(monkeypatch):
+    monkeypatch.setattr(remote, "_redaction_enabled", lambda: False)
+    args = remote._wire_args(type="constraint", content="plain", title=f"key {_WIRE_AWS}")
+    assert _WIRE_AWS in args["title"]  # user opted out of redaction entirely
 
 
 def test_wire_args_redact_param_overrides_config():
