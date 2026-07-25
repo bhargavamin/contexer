@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.26.0](https://github.com/bhargavamin/contexer/compare/v0.25.0...v0.26.0) (2026-07-25)
+
+
+### Features
+
+* send decision titles to the cloud + rework the share picker ([b27cada](https://github.com/bhargavamin/contexer/commit/b27cadae3f0be0e35904adcc743b1332a4115d0f))
+* send decision titles to the cloud and rework the share picker ([dbb36e7](https://github.com/bhargavamin/contexer/commit/dbb36e74bd69d8273f7b28078ec8b15616c880d8))
+
+
+### Bug Fixes
+
+* lock the shared-marker write; match queries against the title ([122533e](https://github.com/bhargavamin/contexer/commit/122533e3d0397348b92bb417b1c179138a64991c))
+* **share:** exclude marker appends during shared-log compaction ([719451f](https://github.com/bhargavamin/contexer/commit/719451fc9ad4adc1eb5326c1257ba5b61ccafb0c))
+* **share:** make shared markers append-only so no platform loses updates ([c4c091c](https://github.com/bhargavamin/contexer/commit/c4c091c21e50742e9d6950c45a879479f47f5ae1))
+
 ## [0.25.0](https://github.com/bhargavamin/contexer/compare/v0.24.0...v0.25.0) (2026-07-24)
 
 
