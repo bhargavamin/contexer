@@ -698,7 +698,7 @@ def test_mark_shared_write_failure_does_not_raise_or_block_share(tmp_repo, monke
     def boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(share, "_save_shared", boom)
+    monkeypatch.setattr(share, "_append_shared", boom)
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-9" in msg  # the push itself is unaffected by the marker write failing
 
@@ -1501,3 +1501,42 @@ def test_mark_shared_still_fail_soft_when_locking_unavailable(tmp_path, monkeypa
     monkeypatch.setattr(store, "fcntl", None)
     share._mark_shared(["abc"], "http://localhost:8080/mcp")
     assert "abc" in share.shared_map("http://localhost:8080/mcp")
+
+
+def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypatch):
+    """The append-only log must not lose markers where advisory locking is unavailable.
+
+    `store._store_lock` yields WITHOUT serializing when fcntl is missing (non-POSIX), so a
+    read-modify-write design would still drop a concurrent writer's marker there. Appending
+    self-contained lines has no read to lose, so both writers survive on every platform."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(store, "fcntl", None)  # simulate a runtime with no advisory locks
+    ep = "http://localhost:8080/mcp"
+    barrier = threading.Barrier(4)
+
+    def writer(did):
+        barrier.wait()
+        share._mark_shared([did], ep)
+
+    threads = [threading.Thread(target=writer, args=(f"id{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert set(share.shared_map(ep)) == {"id0", "id1", "id2", "id3"}
+
+
+def test_shared_log_compacts_once_past_the_threshold(tmp_path, monkeypatch):
+    # Append-only would grow without bound on repeated re-shares; compaction folds it back
+    # to one record per (endpoint, id) while preserving every marker.
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
+    ep = "http://localhost:8080/mcp"
+    for _ in range(12):  # re-share the same two ids repeatedly
+        share._mark_shared(["dup1", "dup2"], ep)
+    lines = share._shared_path().read_text(encoding="utf-8").splitlines()
+    # Bounded, not unbounded: compaction fires once the log passes the threshold, so the file
+    # stays near it instead of growing to 24 lines. (It won't be exactly 2 - appends after the
+    # last compaction are still there.)
+    assert len(lines) <= share._SHARED_LOG_MAX_LINES
+    assert set(share.shared_map(ep)) == {"dup1", "dup2"}  # nothing lost

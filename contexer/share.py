@@ -107,29 +107,80 @@ def _enqueue(payload: dict) -> None:
 # fail-soft-read / atomic-write conventions as the outbox helpers above - a marker is
 # purely cosmetic and must NEVER break or block a push.
 
+# The marker sidecar is an APPEND-ONLY log, not a rewritten document. A marker is monotonic
+# (a decision pushed to an endpoint stays pushed), so recording one never needs to read what
+# is already there - which removes the read-modify-write entirely and with it the lost-update
+# race, on EVERY platform rather than only where POSIX advisory locks exist. Each line is one
+# self-contained {"endpoint", "id", "at"} record; a reader folds the log into a map, last
+# write winning per (endpoint, id).
+_SHARED_LOG_MAX_LINES = 2000  # compaction threshold, so the log can't grow without bound
+
+
 def _shared_path():
     # Computed at call time (not module import time), same convention as _outbox_path -
     # tests that monkeypatch store.STORE_DIR see the redirected path.
-    return store.STORE_DIR / ".shared.json"
+    return store.STORE_DIR / ".shared.jsonl"
 
 
 def _load_shared() -> dict:
-    """Read the shared-marker sidecar; a missing file, a corrupt file, or an unexpected
-    shape all read as the empty shape - never raises."""
+    """Fold the append-only log into {endpoint: {decision_id: iso8601}}. A missing file, a
+    corrupt file, or an unparseable line is skipped - never raises."""
     path = _shared_path()
-    if path.exists():
+    out: dict[str, dict[str, str]] = {}
+    if not path.exists():
+        return {"endpoints": out}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {"endpoints": out}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            data = None
-        if isinstance(data, dict) and isinstance(data.get("endpoints"), dict):
-            return data
-    return {"endpoints": {}}
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a torn/garbled line loses one marker, never the whole log
+        if isinstance(rec, dict) and rec.get("endpoint") and rec.get("id"):
+            out.setdefault(str(rec["endpoint"]), {})[str(rec["id"])] = str(rec.get("at") or "")
+    return {"endpoints": out}
 
 
-def _save_shared(data: dict) -> None:
+def _append_shared(records: list[dict]) -> None:
+    """Append records in ONE write call. Concurrent appends interleave by line rather than
+    clobbering each other, so no lock is needed to keep both writers' markers."""
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    store._atomic_write(_shared_path(), json.dumps(data, indent=2, ensure_ascii=False))
+    path = _shared_path()
+    blob = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+    # Heal a missing trailing newline first: appending straight onto a torn/partial last line
+    # (a half-written record, or a hand-edited file) would fuse it with our first record and
+    # lose BOTH. Starting on a fresh line costs one byte and confines the damage to the
+    # pre-existing partial line, which the reader already skips.
+    try:
+        needs_nl = path.exists() and path.stat().st_size > 0 and \
+            path.read_bytes()[-1:] != b"\n"
+    except OSError:
+        needs_nl = False
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(("\n" if needs_nl else "") + blob)
+
+
+def _compact_shared() -> None:
+    """Rewrite the log as one record per (endpoint, id) once it grows past the threshold.
+    Best-effort and rare: taken under the store lock where available, and a marker lost to a
+    concurrent append during compaction is cosmetic (the decision re-shows as unshared)."""
+    path = _shared_path()
+    try:
+        if not path.exists() or len(path.read_text(encoding="utf-8").splitlines()) <= _SHARED_LOG_MAX_LINES:
+            return
+        with store._store_lock(".shared"):
+            folded = _load_shared()["endpoints"]
+            lines = [{"endpoint": ep, "id": did, "at": at}
+                     for ep, bucket in folded.items() for did, at in bucket.items()]
+            store._atomic_write(
+                path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in lines))
+    except Exception:
+        pass  # cosmetic maintenance - never surface to the caller
 
 
 def _mark_shared(ids, endpoint: str | None) -> None:
@@ -141,19 +192,12 @@ def _mark_shared(ids, endpoint: str | None) -> None:
     if not endpoint or not clean_ids:
         return
     try:
-        # Serialize the read-modify-write. An atomic save prevents a TORN file, but two
-        # concurrent shares (or a share racing an outbox drain) would both read, both add
-        # their ids, and the second write would silently drop the first's markers - that
-        # decision then shows as unshared and sorts first again. Same lost-update guard the
-        # store itself uses; on a non-POSIX runtime it degrades to no serialization, which
-        # is acceptable for a cosmetic hint.
-        with store._store_lock(".shared"):
-            data = _load_shared()
-            bucket = data["endpoints"].setdefault(endpoint, {})
-            now = datetime.now(timezone.utc).isoformat()
-            for did in clean_ids:
-                bucket[did] = now
-            _save_shared(data)
+        # Append-only: no read, so two concurrent shares (or a share racing an outbox drain)
+        # can't clobber each other's markers - on every platform, not just where POSIX
+        # advisory locks are available. See the log's design note above.
+        now = datetime.now(timezone.utc).isoformat()
+        _append_shared([{"endpoint": endpoint, "id": did, "at": now} for did in clean_ids])
+        _compact_shared()
     except Exception:
         pass  # cosmetic marker - never let a write problem surface to the caller
 
