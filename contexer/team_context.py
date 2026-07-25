@@ -522,7 +522,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
         rows = [r for r in rows if r.get("type", "") == entry_type]
     if query:
         pat = store._query_pattern(query)
-        rows = [r for r in rows if pat.search(r.get("content", ""))]
+        rows = [r for r in rows if store._matches_query(pat, r)]
     if not rows:
         return ""
 

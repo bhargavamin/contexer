@@ -141,12 +141,19 @@ def _mark_shared(ids, endpoint: str | None) -> None:
     if not endpoint or not clean_ids:
         return
     try:
-        data = _load_shared()
-        bucket = data["endpoints"].setdefault(endpoint, {})
-        now = datetime.now(timezone.utc).isoformat()
-        for did in clean_ids:
-            bucket[did] = now
-        _save_shared(data)
+        # Serialize the read-modify-write. An atomic save prevents a TORN file, but two
+        # concurrent shares (or a share racing an outbox drain) would both read, both add
+        # their ids, and the second write would silently drop the first's markers - that
+        # decision then shows as unshared and sorts first again. Same lost-update guard the
+        # store itself uses; on a non-POSIX runtime it degrades to no serialization, which
+        # is acceptable for a cosmetic hint.
+        with store._store_lock(".shared"):
+            data = _load_shared()
+            bucket = data["endpoints"].setdefault(endpoint, {})
+            now = datetime.now(timezone.utc).isoformat()
+            for did in clean_ids:
+                bucket[did] = now
+            _save_shared(data)
     except Exception:
         pass  # cosmetic marker - never let a write problem surface to the caller
 

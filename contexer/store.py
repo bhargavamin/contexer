@@ -273,7 +273,7 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
         decisions = [d for d in decisions if d.get("subtype") == entry_type]
     if query:
         pat = _query_pattern(query)
-        decisions = [d for d in decisions if pat.search(d.get("content", ""))]
+        decisions = [d for d in decisions if _matches_query(pat, d)]
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
     lines = ["# Global context (applies to all repos)\n"]
@@ -319,6 +319,15 @@ def _query_pattern(query: str) -> "re.Pattern":
     q = query.lower()
     prefix = r"\b" if q[:1].isalnum() else ""
     return re.compile(prefix + re.escape(q), re.IGNORECASE)
+
+
+def _matches_query(pat: "re.Pattern", row: dict) -> bool:
+    """Whether a decision row matches a query, searching the TITLE as well as the content.
+
+    Decisions render title-led, so the heading is often the part a developer remembers - a
+    query that hits only the title must not silently drop the row (an authored title can be
+    wholly different words from the body). Mirrors the web app's search rule."""
+    return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or ""))
 
 
 def _find_match(content: str, existing: list) -> dict | None:
@@ -3425,7 +3434,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
 
     if query:
         pat = _query_pattern(query)
-        matched = [d for d in decisions if pat.search(d.get("content", ""))]
+        matched = [d for d in decisions if _matches_query(pat, d)]
         # Topic-alias retry: a literal miss on a bare topic name (the pointer nudge suggests
         # get_context(query='db')) falls back to any of that topic's alias tokens, so the
         # suggested call actually returns the postgres/alembic decisions instead of nothing.

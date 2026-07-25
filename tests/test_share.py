@@ -4,6 +4,7 @@ RemoteStore is faked (monkeypatched from_profile) so no network is touched. The 
 profile is passed explicitly to share() to avoid reading a real config.toml.
 """
 import asyncio
+import threading
 
 import pytest
 
@@ -1471,3 +1472,32 @@ def test_drain_outbox_invalid_skip_dropped_not_retried(tmp_repo, monkeypatch):
     sent = share.drain_outbox(TEAM)
     assert sent == 1  # d1 saved
     assert share._load_outbox() == []  # d2 invalid -> dropped from outbox (can never sync)
+
+
+def test_mark_shared_serializes_concurrent_writers(tmp_path, monkeypatch):
+    """Two writers marking different ids must both survive (lost-update guard, PR #144).
+
+    Without the lock each writer reads the same base, adds its own id, and the second save
+    clobbers the first - leaving a genuinely-pushed decision looking unshared."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    ep = "http://localhost:8080/mcp"
+    barrier = threading.Barrier(2)
+
+    def writer(did):
+        barrier.wait()          # maximize overlap on the read-modify-write
+        share._mark_shared([did], ep)
+
+    threads = [threading.Thread(target=writer, args=(f"id{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert set(share.shared_map(ep)) == {"id0", "id1"}
+
+
+def test_mark_shared_still_fail_soft_when_locking_unavailable(tmp_path, monkeypatch):
+    # A marker is cosmetic: even with no fcntl (non-POSIX) it must record, never raise.
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(store, "fcntl", None)
+    share._mark_shared(["abc"], "http://localhost:8080/mcp")
+    assert "abc" in share.shared_map("http://localhost:8080/mcp")

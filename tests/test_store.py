@@ -4606,3 +4606,25 @@ class TestShareItemBlock:
         for width in (76, 60, 40):
             block = store._share_item_block(proj, index=1, width=width, shared=True)
             assert max(len(ln) for ln in block.splitlines()) <= width, (width, block)
+
+
+# ── query matching searches the title too (review finding, PR #144) ──────────────
+
+class TestQueryMatchesTitle:
+    def test_matches_query_hits_title_and_content(self):
+        pat = store._query_pattern("outbox")
+        assert store._matches_query(pat, {"title": "Adopt the outbox pattern", "content": "unrelated body"})
+        assert store._matches_query(pat, {"title": "Unrelated heading", "content": "uses an outbox"})
+        assert not store._matches_query(pat, {"title": "Unrelated", "content": "unrelated body"})
+        # a missing/None title must not blow up the filter
+        assert store._matches_query(pat, {"content": "the outbox drains later"})
+        assert not store._matches_query(pat, {"title": None, "content": "nothing here"})
+
+    def test_get_context_finds_a_decision_by_its_authored_title(self, tmp_repo):
+        # An authored title can be entirely different words from the body; searching only the
+        # content would silently drop the row the developer is looking for.
+        store.update_decision(tmp_repo, "Queued pushes drain on the next successful login.", "s1",
+                              subtype="architecture", created_by="human",
+                              title="Adopt the outbox pattern")
+        out = store.get_context(tmp_repo, query="outbox")
+        assert "Adopt the outbox pattern" in out
