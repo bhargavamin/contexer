@@ -43,15 +43,18 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
                rationale: str | None = None, agent: str | None = None,
                confidence: int | None = None, evidence: list[str] | None = None,
                source: str | None = None, decision_id: str | None = None,
+               title: str | None = None,
                redact_on: bool | None = None) -> dict:
     """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
     reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
     wire-serialization, shared by apush_decision (one) and apush_decisions (batch).
 
     This is also the last-mile secret-redaction chokepoint: every push (single, batch, and
-    outbox drain) funnels through here, so scrubbing content/evidence/rationale here is the hard
-    guarantee that no secret egresses — including legacy on-disk secrets that predate capture-time
-    redaction. Idempotent with the capture scrub (the [REDACTED] placeholder never re-matches).
+    outbox drain) funnels through here, so scrubbing content/evidence/rationale/title here is the
+    hard guarantee that no secret egresses — including legacy on-disk secrets that predate
+    capture-time redaction. A title is derived from content, so it can carry the same secrets;
+    it is scrubbed independently, same as content/evidence. Idempotent with the capture scrub
+    (the [REDACTED] placeholder never re-matches).
 
     `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
     config.toml per row); None means resolve it here for a lone call."""
@@ -62,6 +65,8 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
             rationale = redact.scrub_text(rationale)
         if evidence is not None:
             evidence = [redact.scrub_text(e) for e in evidence]
+        if title is not None:
+            title = redact.scrub_text(title)
     args: dict = {"type": type, "content": content}
     if repo is not None:
         args["repo"] = repo
@@ -77,6 +82,8 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
         args["source"] = source
     if decision_id is not None:
         args["decisionId"] = decision_id
+    if title is not None:
+        args["title"] = title
     return args
 
 
@@ -100,10 +107,16 @@ class RemoteUnavailableError(RemoteStoreError):
 
 @dataclass(frozen=True)
 class RemoteDecision:
-    """One row from the Teams merged context. ``scope`` is provenance (personal|team)."""
+    """One row from the Teams merged context. ``scope`` is provenance (personal|team).
+
+    ``title`` is the cloud's stored heading (``None`` for a row synced before Decision
+    Titles v2, or a client that pushed no title) - display-time derivation is the
+    consumer's job (team_context.format_team_section / store._title_and_body), never
+    re-computed here."""
 
     id: str
     type: str
+    title: str | None
     content: str
     rationale: str | None
     repo: str | None
@@ -166,12 +179,13 @@ class RemoteStore:
     async def apush_decision(self, *, type: str, content: str, repo: str | None,
                              rationale: str | None = None, agent: str | None = None,
                              confidence: int | None = None, evidence: list[str] | None = None,
-                             source: str | None = None, decision_id: str | None = None) -> str:
+                             source: str | None = None, decision_id: str | None = None,
+                             title: str | None = None) -> str:
         """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
         result = await self._ainvoke("push_decision", _wire_args(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            redact_on=self._redact_on()))
+            title=title, redact_on=self._redact_on()))
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
@@ -224,6 +238,7 @@ class RemoteStore:
             RemoteDecision(
                 id=str(row.get("id", "")),
                 type=row.get("type", ""),
+                title=row.get("title"),
                 content=row.get("content", ""),
                 rationale=row.get("rationale"),
                 repo=row.get("repo"),
@@ -241,7 +256,8 @@ class RemoteStore:
     def push_decision(self, *, type: str, content: str, repo: str | None,
                       rationale: str | None = None, agent: str | None = None,
                       confidence: int | None = None, evidence: list[str] | None = None,
-                      source: str | None = None, decision_id: str | None = None) -> str:
+                      source: str | None = None, decision_id: str | None = None,
+                      title: str | None = None) -> str:
         """Push one local decision to the caller's personal Teams context (sync shim).
 
         Returns the server decision id (best-effort; ``""`` if the response carries none).
@@ -250,7 +266,8 @@ class RemoteStore:
         (asyncio.run cannot run inside a running event loop)."""
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
-            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id)))
+            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
+            title=title)))
 
     def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
         """Batch-push decisions in ONE call (sync shim over :meth:`apush_decisions`). Off-loop

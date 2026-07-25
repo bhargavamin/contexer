@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import textwrap
 import time
 import tomllib
 import uuid
@@ -272,7 +273,7 @@ def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) ->
         decisions = [d for d in decisions if d.get("subtype") == entry_type]
     if query:
         pat = _query_pattern(query)
-        decisions = [d for d in decisions if pat.search(d.get("content", ""))]
+        decisions = [d for d in decisions if _matches_query(pat, d)]
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
     lines = ["# Global context (applies to all repos)\n"]
@@ -318,6 +319,15 @@ def _query_pattern(query: str) -> "re.Pattern":
     q = query.lower()
     prefix = r"\b" if q[:1].isalnum() else ""
     return re.compile(prefix + re.escape(q), re.IGNORECASE)
+
+
+def _matches_query(pat: "re.Pattern", row: dict) -> bool:
+    """Whether a decision row matches a query, searching the TITLE as well as the content.
+
+    Decisions render title-led, so the heading is often the part a developer remembers - a
+    query that hits only the title must not silently drop the row (an authored title can be
+    wholly different words from the body). Mirrors the web app's search rule."""
+    return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or ""))
 
 
 def _find_match(content: str, existing: list) -> dict | None:
@@ -1768,7 +1778,7 @@ def overlap_report(repo_path: str) -> list[list[dict]]:
 
 
 def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
-    """Project a decision entry onto the push wire shape {id, type, content, confidence,
+    """Project a decision entry onto the push wire shape {id, type, title, content, confidence,
     evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
     the push omits it. `redact_on` lets a batch caller (or a preview with an explicit profile)
     resolve the redaction flag ONCE and pass it in; None means resolve it here."""
@@ -1776,6 +1786,12 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         redact_on = _redaction_enabled()
     rev = _current_revision(entry) or {}
     content = _current_content(entry)
+    # Derive the title from the PRE-scrub content so a fallback-derived title matches the
+    # stored one (entry.get("title") is normally already populated by _sync_decision_cache;
+    # this is the safety net for an entry that predates the title HEAD-cache). A derived
+    # title inherits content's secrets, so it gets scrubbed independently below — same
+    # security requirement as content/evidence, not polish.
+    title = entry.get("title") or _derive_title(content)
     evidence = rev.get("evidence") or None
     # Redact at the projection so the confirm-preview and durable outbox show exactly what
     # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
@@ -1784,6 +1800,8 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     redacted = 0
     if redact_on:
         content, redacted = redact.scrub(content)
+        title, n_title = redact.scrub(title)
+        redacted += n_title
         if evidence:
             scrubbed = []
             for e in evidence:
@@ -1794,11 +1812,16 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     return {
         "id": entry.get("id", ""),
         "type": entry.get("subtype", "") or "convention",
+        "title": title,
         "content": content,
         "confidence": rev.get("confidence_score"),
         "evidence": evidence,
         "source": rev.get("source"),
         "redacted": redacted,
+        # Review state (approved | suggested | pending_approval), surfaced so a share preview
+        # can show it and the developer doesn't push a not-yet-reviewed decision by accident.
+        # Extra key like `redacted`: the wire builders read named fields, so it never egresses.
+        "status": _entry_status(entry),
     }
 
 
@@ -1840,19 +1863,99 @@ def get_shareable_all(repo_path: str, redact_on: bool | None = None) -> list[dic
     return [_share_projection(e, redact_on) for e in decisions]
 
 
-# A personal-cloud push is OUTWARD — the single source of this warning clause, shared by the
-# MCP preview (format_share_preview) and the CLI preview (cli._confirm_share) so the wording
-# can't drift between the two surfaces.
-_SHARE_OUTWARD_WARNING = "this leaves your machine and may be cached/indexed even if later deleted"
+# A personal-cloud push is OUTWARD — the single source of this caution, shared by the MCP
+# preview (format_share_preview) and the CLI previews (cli._pick_shareable/_confirm_share) so
+# the wording can't drift between the surfaces. Egress IS scrubbed by `redact` first, but the
+# scrubber only catches known secret shapes — the developer is the last line of defence.
+_SHARE_SECRETS_HINT = "Don't share credentials, API keys, or other secrets"
 
 
 def _share_item_line(proj: dict, maxlen: int = 0) -> str:
-    """One '<id8> [type] "content"' preview line for a share projection. Content truncated to
-    `maxlen` (0 = full). Shared by the MCP and CLI push previews so both render identically."""
-    content = proj.get("content", "")
+    """One '<id8> [type] title' preview line for a share projection, with the content on an
+    indented quoted line below — skipped when it only repeats the title (same dedup rule as
+    _title_and_body, including its COLLAPSED-whitespace comparison — a title stays a single
+    stripped line while content may carry newlines/runs of spaces, so comparing raw strings
+    would show a spurious body line even when the two are the same text), so the preview
+    matches exactly what the wire will send. Content truncated to `maxlen` (0 = full). Shared
+    by the MCP and CLI push previews so both render identically."""
+    full_content = proj.get("content", "")
+    title = proj.get("title") or ""
+    content = full_content
     if maxlen and len(content) > maxlen:
         content = content[:maxlen] + "…"
-    return f'  {(proj.get("id") or "")[:8]} [{proj.get("type") or "decision"}] "{content}"'
+    head = f'  {(proj.get("id") or "")[:8]} [{proj.get("type") or "decision"}]'
+    if not title:
+        return f'{head} "{content}"'
+    collapsed = " ".join(full_content.split())
+    if title == collapsed:
+        return f'{head} {title}'
+    return f'{head} {title}\n      "{content}"'
+
+
+_SHARE_BLOCK_LABEL_WIDTH = 7  # "title: " / "type:  " / "desc:  " / "id:    " all pad to this
+_SHARE_BLOCK_MIN_TEXT = 24    # floor for the text column, so a narrow `width` still renders
+
+
+def _share_item_block(proj: dict, index: int | None = None, width: int = 76, *,
+                      shared: bool = False) -> str:
+    """Labelled, multi-line preview block for the HUMAN terminal share surfaces (the
+    `contexer share` picker and push-confirm) — one field per line:
+
+        1. id:    c609aa4c
+           type:  architecture
+           title: Stack: all-TypeScript pnpm monorepo
+           desc:  Stack: all-TypeScript pnpm monorepo, Node >=24, Postgres 16 +
+                  Drizzle ORM, Vitest…
+
+    `index` prefixes a `N. ` numbering column (picker); omit it for an unnumbered block
+    (push-confirm). `desc:` wraps via `textwrap.wrap(..., width)`, continuation lines
+    aligned under the first desc line. Same dedup rule as `_share_item_line`: when the
+    title equals the COLLAPSED content (a short decision that IS its own title), `desc:`
+    is omitted entirely rather than repeating the title as a second, near-identical line.
+
+    `shared` appends a short `✓ shared` marker to the `id:` line (picker-only — see
+    `cli._pick_shareable` / `share.shared_map`; the id line is a handful of fixed-width
+    chars, so the marker never threatens the `width` budget the way a wrapped desc could).
+
+    Distinct from `_share_item_line` on purpose: the MCP-facing previews
+    (`format_shareable_list`/`format_share_preview`) stay on the compact single/double-line
+    form — they're injected into an agent's token-capped context, not read by a human on
+    a terminal, so they must not grow this structure."""
+    full_content = proj.get("content", "")
+    title = proj.get("title") or _derive_title(full_content)
+    id8 = (proj.get("id") or "")[:8]
+    type_ = proj.get("type") or "decision"
+
+    prefix = f"{index:>3}. " if index is not None else "  "
+    pad = " " * len(prefix)
+    # `width` is the total column budget for the rendered line, so the indent and the
+    # `title: `/`desc:  ` label have to come out of it - wrapping/truncating on the bare
+    # `width` would overflow the terminal by exactly that much on every line.
+    avail = max(_SHARE_BLOCK_MIN_TEXT, width - len(pad) - _SHARE_BLOCK_LABEL_WIDTH)
+    # A title is a single line by construction, so it is TRUNCATED (never wrapped) - a
+    # derived title can be a full 100 chars, which would otherwise run past the block.
+    title_line = title if len(title) <= avail else title[:avail - 1].rstrip() + "…"
+    # Pills on the id line: review state first (so a not-yet-approved decision is obvious at a
+    # glance before selecting it), then the already-shared marker. `status` is absent on
+    # hand-built projections in older callers/tests, so it degrades to no pill.
+    id_line = f"{prefix}id:    {id8}"
+    status = proj.get("status") or ""
+    if status:
+        id_line += f"  [{status}]"
+    if shared:
+        id_line += "  ✓ shared"
+    lines = [
+        id_line,
+        f"{pad}type:  {type_}",
+        f"{pad}title: {title_line}",
+    ]
+    collapsed = " ".join(full_content.split())
+    if collapsed and collapsed != title:
+        wrapped = textwrap.wrap(collapsed, avail) or [""]
+        lines.append(f"{pad}desc:  {wrapped[0]}")
+        cont_indent = pad + " " * _SHARE_BLOCK_LABEL_WIDTH
+        lines.extend(f"{cont_indent}{cont}" for cont in wrapped[1:])
+    return "\n".join(lines)
 
 
 def format_shareable_list(repo_path: str) -> str:
@@ -1899,8 +2002,8 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         return "Nothing to share — no matching decision found."
     endpoint = prof.endpoint or default_endpoint()
     ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
-    lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}) — "
-             f"{_SHARE_OUTWARD_WARNING}:\n"]
+    lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}). "
+             f"{_SHARE_SECRETS_HINT}:\n"]
     lines += [_share_item_line(p) for p in projs]
     redacted = sum(p.get("redacted", 0) for p in projs)
     if redacted:
@@ -3331,7 +3434,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
 
     if query:
         pat = _query_pattern(query)
-        matched = [d for d in decisions if pat.search(d.get("content", ""))]
+        matched = [d for d in decisions if _matches_query(pat, d)]
         # Topic-alias retry: a literal miss on a bare topic name (the pointer nudge suggests
         # get_context(query='db')) falls back to any of that topic's alias tokens, so the
         # suggested call actually returns the postgres/alembic decisions instead of nothing.

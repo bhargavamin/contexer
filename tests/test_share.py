@@ -4,6 +4,8 @@ RemoteStore is faked (monkeypatched from_profile) so no network is touched. The 
 profile is passed explicitly to share() to avoid reading a real config.toml.
 """
 import asyncio
+import threading
+import time
 
 import pytest
 
@@ -125,6 +127,18 @@ def test_get_shareable_all_returns_all_non_ignored(tmp_repo):
     assert decs[1]["type"] == "constraint"
 
 
+def test_get_shareable_all_order_unaffected_by_shared_marker(tmp_repo):
+    # Guard against a future refactor sorting get_shareable_all by shared-status: it controls
+    # the actual PUSH order (server's updatedSince consumers see decisions chronologically),
+    # which is independent of - and must never be reordered by - the picker's display sort.
+    _, id1 = store.update_decision(tmp_repo, "first decision here", "s1", subtype="architecture")
+    _, id2 = store.update_decision(tmp_repo, "second newer decision", "s1", subtype="constraint")
+    _, id3 = store.update_decision(tmp_repo, "third newest decision", "s1", subtype="convention")
+    share._mark_shared([id1, id3], "https://t/mcp")  # mark the OLDEST and NEWEST as shared
+    decs = store.get_shareable_all(tmp_repo)
+    assert [d["id"] for d in decs] == [id1, id2, id3]  # still strictly oldest-first, unsorted
+
+
 # ── share.share ──────────────────────────────────────────────────────────────────
 
 def test_share_nothing_to_share(tmp_repo):
@@ -152,6 +166,15 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     assert kw["repo"] == "github.com/a/b"
     assert kw["decision_id"] == did  # local id -> idempotent re-share
     assert kw["source"] == "ai"
+
+
+def test_share_happy_path_includes_title(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "use postgres for storage", "s1",
+                          subtype="architecture", title="Storage: Postgres")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _fake(monkeypatch, ret="srv-9")
+    share.share(tmp_repo, profile=TEAM)
+    assert fake.calls[0]["title"] == "Storage: Postgres"
 
 
 def test_share_no_git_origin_pushes_repo_none(tmp_repo, monkeypatch):
@@ -213,6 +236,15 @@ def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
     assert [c["decision_id"] for c in fake.batches[0]] == [id1, id2, id3]  # oldest first
     assert all(c["repo"] == "github.com/a/b" for c in fake.batches[0])
     assert share._load_outbox() == []
+
+
+def test_share_all_happy_path_includes_title(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "use postgres for storage", "s1",
+                          subtype="architecture", title="Storage: Postgres")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    fake = _fake(monkeypatch, ret="srv-9")
+    share.share_all(tmp_repo, profile=TEAM)
+    assert fake.batches[0][0]["title"] == "Storage: Postgres"
 
 
 def test_share_all_excludes_ignored(tmp_repo, monkeypatch):
@@ -306,6 +338,18 @@ def test_share_degraded_enqueues_payload(tmp_repo, monkeypatch):
     assert entry["source"] == "ai"
     assert entry["attempts"] == 0
     assert isinstance(entry["queued_at"], float)
+
+
+def test_share_degraded_enqueue_preserves_title(tmp_repo, monkeypatch):
+    # A queued offline share must carry the decision's title into the outbox row so a
+    # later drain can still send it (round-trip guarantee, Decision Titles v2 Task 4).
+    store.update_decision(tmp_repo, "decision that fails to sync", "s1",
+                          subtype="architecture", title="Sync failure heading")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    share.share(tmp_repo, profile=TEAM)
+    entry = share._load_outbox()[0]
+    assert entry["title"] == "Sync failure heading"
 
 
 def test_share_degraded_auth_also_enqueues(tmp_repo, monkeypatch):
@@ -466,6 +510,24 @@ def test_drain_outbox_concurrent_enqueue_survives_final_save(tmp_repo, monkeypat
     assert "d1" not in ids  # successfully sent, not re-queued
 
 
+def test_drain_outbox_sends_title_on_retry(tmp_repo, monkeypatch):
+    # A queued offline share (carrying its title in the outbox row) must send that title
+    # when a later drain succeeds — the round-trip this task guarantees. An entry queued
+    # before this feature (no "title" key) must still drain fine (backward compatible).
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
+                    "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                    "source": "ai", "title": "Queued heading", "queued_at": 1.0, "attempts": 0})
+    share._enqueue({"decision_id": "d2", "type": "constraint", "content": "second",
+                    "repo": "r", "rationale": None, "confidence": 90, "evidence": None,
+                    "source": "ai", "queued_at": 2.0, "attempts": 0})  # no "title" key at all
+    fake = _fake(monkeypatch, ret="srv-ok")
+    sent = share.drain_outbox(TEAM)
+    assert sent == 2
+    by_id = {kw["decision_id"]: kw for kw in fake.batches[0]}
+    assert by_id["d1"]["title"] == "Queued heading"
+    assert by_id["d2"]["title"] is None  # legacy row without a title -> omitted, never fabricated
+
+
 def test_load_outbox_corrupt_file_reads_empty(tmp_repo):
     path = share._outbox_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -520,6 +582,140 @@ def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
     assert "fail" in msg.lower()
     assert "queued" not in msg.lower()  # honest: nothing was recorded for retry
     assert "unchanged" in msg.lower()
+
+
+# ── shared-marker sidecar (.shared.json, endpoint-scoped, cosmetic) ───────────────
+
+def test_share_success_marks_shared(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, ret="srv-9")
+    share.share(tmp_repo, profile=TEAM)
+    marked = share.shared_map(TEAM.endpoint)
+    assert did in marked
+    assert isinstance(marked[did], str) and marked[did]  # iso8601 timestamp recorded
+
+
+def test_share_failure_does_not_mark_shared(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    share.share(tmp_repo, profile=TEAM)
+    assert did not in share.shared_map(TEAM.endpoint)
+
+
+def test_share_all_capacity_skip_not_marked_shared(tmp_repo, monkeypatch):
+    # A batch push marks only the ids the server actually SAVED - an at-capacity skip (still
+    # re-queued for later) must not show as shared until it genuinely drains.
+    projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
+              "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
+    remote.reset_degradation_warnings()
+    share.share_all(tmp_repo, profile=TEAM)
+    marked = share.shared_map(TEAM.endpoint)
+    assert "id0" in marked  # the one row the fake server actually stored
+    assert "id1" not in marked and "id2" not in marked  # at-capacity skips, not (yet) shared
+
+
+def test_share_all_invalid_skip_not_marked_shared(tmp_repo, monkeypatch):
+    # A PERMANENTLY invalid row (server rejected type/content) is dropped, never queued, and
+    # must never show as shared either - it was never actually stored.
+    projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
+              "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
+    remote.reset_degradation_warnings()
+    share.share_all(tmp_repo, profile=TEAM)
+    marked = share.shared_map(TEAM.endpoint)
+    assert "id0" in marked
+    assert "id1" not in marked and "id2" not in marked  # permanently invalid, never saved
+
+
+def test_drain_outbox_marks_genuinely_saved_only(tmp_repo, monkeypatch):
+    for did in ("d1", "d2"):
+        share._enqueue({"decision_id": did, "type": "architecture", "content": did,
+                        "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                        "source": "ai", "queued_at": 1.0, "attempts": 0})
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
+    remote.reset_degradation_warnings()
+    share.drain_outbox(TEAM)
+    marked = share.shared_map(TEAM.endpoint)
+    assert "d1" in marked  # saved
+    assert "d2" not in marked  # at-capacity, kept queued - not genuinely drained yet
+
+
+def test_drain_outbox_invalid_dropped_not_marked_shared(tmp_repo, monkeypatch):
+    for did in ("d1", "d2"):
+        share._enqueue({"decision_id": did, "type": "architecture", "content": did,
+                        "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                        "source": "ai", "queued_at": 1.0, "attempts": 0})
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
+    remote.reset_degradation_warnings()
+    share.drain_outbox(TEAM)
+    marked = share.shared_map(TEAM.endpoint)
+    assert "d1" in marked
+    assert "d2" not in marked  # permanently invalid: dropped from outbox but NEVER marked shared
+
+
+def test_shared_map_endpoint_scoped(tmp_repo, monkeypatch):
+    # Pushed while pointed at endpoint A; a profile resolved to a DIFFERENT endpoint must show
+    # NO marker - switching endpoints must never leak a stale/false "already shared" hint.
+    _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, ret="srv-9")
+    share.share(tmp_repo, profile=TEAM)
+    assert did in share.shared_map(TEAM.endpoint)
+    other = config.Profile(mode="team", endpoint="https://other-host/mcp", token="tok2")
+    assert did not in share.shared_map(other.endpoint)
+    assert share.shared_map(other.endpoint) == {}
+
+
+def test_shared_map_missing_file_reads_empty(tmp_repo):
+    assert share.shared_map(TEAM.endpoint) == {}
+
+
+def test_shared_map_corrupt_file_reads_empty_and_does_not_raise(tmp_repo):
+    path = share._shared_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ not json")
+    assert share.shared_map(TEAM.endpoint) == {}
+
+
+def test_shared_map_no_endpoint_reads_empty(tmp_repo):
+    share._mark_shared(["d1"], TEAM.endpoint)  # something IS marked for a real endpoint...
+    assert share.shared_map(None) == {}  # ...but no endpoint given -> empty, never guesses
+
+
+def test_mark_shared_write_failure_does_not_raise_or_block_share(tmp_repo, monkeypatch):
+    # A marker is purely cosmetic: a write failure to .shared.json must not surface, and must
+    # not block or alter the (successful) share's own return value.
+    store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, ret="srv-9")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(share, "_append_shared", boom)
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "srv-9" in msg  # the push itself is unaffected by the marker write failing
+
+
+def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
+    # A corrupt sidecar degrades to the empty shape on read, so a fresh mark just starts a new
+    # file - it never raises, and never blocks the push it's recording.
+    path = share._shared_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json at all")
+    _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    _fake(monkeypatch, ret="srv-9")
+    msg = share.share(tmp_repo, profile=TEAM)
+    assert "srv-9" in msg
+    assert did in share.shared_map(TEAM.endpoint)  # recovered - the fresh mark succeeded
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────
@@ -619,6 +815,165 @@ def test_cli_share_no_args_picker_multi_select(monkeypatch, capsys):
     assert "pushed 2" in out
 
 
+def _mixed_status_shareable(monkeypatch):
+    """Two not-yet-approved decisions + one approved, for the unapproved-share guard."""
+    from contexer import config
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: [
+        {"id": "aaa11111", "type": "constraint", "content": "never X", "status": "suggested"},
+        {"id": "bbb22222", "type": "architecture", "content": "use Y", "status": "approved"},
+        {"id": "ccc33333", "type": "convention", "content": "do Z", "status": "pending_approval"},
+    ])
+
+
+def test_pending_review_warning_counts_only_pending_approval():
+    from contexer import cli
+    projs = [{"status": "suggested"}, {"status": "suggested"},
+             {"status": "pending_approval"}, {"status": "approved"}]
+    lines = cli._pending_review_warning(projs)
+    assert "1 of 4 are PENDING REVIEW" in lines[0]
+    # `suggested` must NOT trigger the gate: auto-injection already serves approved+suggested,
+    # so sharing one promotes nothing that isn't already trusted context locally.
+    assert cli._pending_review_warning([{"status": "suggested"}, {"status": "suggested"}]) == []
+    # all-approved (and status-less legacy projections) produce no warning at all
+    assert cli._pending_review_warning([{"status": "approved"}, {}]) == []
+
+
+def test_cli_share_picker_guards_unapproved_and_cancels(monkeypatch, capsys):
+    # Picker path has no other confirm step, so an unreviewed decision must be gated here.
+    from contexer import cli
+    _mixed_status_shareable(monkeypatch)
+    answers = iter(["3", "n"])  # item 3 is the pending_approval one; decline the guard
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    called = {}
+    monkeypatch.setattr(share, "share_ids", lambda *a, **k: called.setdefault("hit", True))
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert "PENDING REVIEW" in out and "auto-approves" in out
+    assert "Cancelled" in out
+    assert "hit" not in called  # nothing pushed
+
+
+def test_cli_share_picker_guard_proceeds_on_yes(monkeypatch, capsys):
+    from contexer import cli
+    _mixed_status_shareable(monkeypatch)
+    answers = iter(["3", "y"])  # pending_approval item, accept the guard
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    got = {}
+
+    def fake_ids(repo, ids, **k):
+        got["ids"] = ids
+        return "pushed 1"
+
+    monkeypatch.setattr(share, "share_ids", fake_ids)
+    cli.share_cmd([])
+    assert got["ids"] == ["ccc33333"]
+    assert "pushed 1" in capsys.readouterr().out
+
+
+def test_cli_share_picker_no_guard_for_suggested_or_approved(monkeypatch, capsys):
+    # Neither `approved` nor `suggested` gates: both are already served by auto-injection, so
+    # sharing them promotes nothing unreviewed. Only ONE input is consumed (no second prompt).
+    from contexer import cli
+    _mixed_status_shareable(monkeypatch)
+    answers = iter(["1,2"])  # aaa11111 (suggested) + bbb22222 (approved)
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    got = {}
+
+    def fake_ids(repo, ids, **k):
+        got["ids"] = ids
+        return "pushed 1"
+
+    monkeypatch.setattr(share, "share_ids", fake_ids)
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert got["ids"] == ["aaa11111", "bbb22222"]
+    assert "PENDING REVIEW" not in out  # guard stayed silent
+
+
+def test_cli_share_confirm_path_warns_inline_before_single_prompt(monkeypatch, capsys):
+    # `share <id>` already gates on y/N, so the warning is inline there - not a second prompt.
+    from contexer import cli
+    _mixed_status_shareable(monkeypatch)
+    monkeypatch.setattr(store, "get_shareable", lambda repo, i="": {
+        "id": "ccc33333", "type": "convention", "content": "do Z", "status": "pending_approval"})
+    answers = iter(["n"])  # the ONE prompt this path has
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(share, "share", lambda *a, **k: "pushed")
+    cli.share_cmd(["aaa11111"])
+    out = capsys.readouterr().out
+    assert "PENDING REVIEW" in out
+    assert "Cancelled" in out
+
+
+def test_cli_share_picker_shows_marker_and_orders_shared_last(monkeypatch, capsys):
+    # bbb22222 (the MIDDLE item in get_shareable_all's oldest-first order) is already shared:
+    # it must render "✓ shared" and move to the END of the picker; aaa11111/ccc33333 (unshared)
+    # come first, in their original relative order.
+    from contexer import cli
+    _three_shareable(monkeypatch)
+    monkeypatch.setattr(share, "shared_map", lambda endpoint: {"bbb22222": "2026-01-01T00:00:00+00:00"})
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert out.index("aaa11111") < out.index("ccc33333") < out.index("bbb22222")
+    assert out.count("✓ shared") == 1
+    bbb_at = out.index("bbb22222")
+    assert "✓ shared" in out[bbb_at:bbb_at + 40]  # marker sits on bbb22222's own id line
+    aaa_at = out.index("aaa11111")
+    assert "✓ shared" not in out[aaa_at:aaa_at + 40]  # unshared entries carry no marker
+
+
+def test_cli_share_picker_stable_order_within_each_group(monkeypatch, capsys):
+    from contexer import cli, config
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    # ids are exactly 8 chars (_share_item_block truncates to id[:8]) so the printed text
+    # matches these literally, with no truncation ambiguity.
+    items = [
+        {"id": "id1shar1", "type": "constraint", "content": "one"},
+        {"id": "id2plan1", "type": "constraint", "content": "two"},
+        {"id": "id3shar2", "type": "constraint", "content": "three"},
+        {"id": "id4plan2", "type": "constraint", "content": "four"},
+    ]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: items)
+    monkeypatch.setattr(share, "shared_map",
+                        lambda endpoint: {"id1shar1": "t", "id3shar2": "t"})
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    # Unshared first (id2plan1 before id4plan2 - original relative order kept), shared last
+    # (id1shar1 before id3shar2 - original relative order kept within that group too).
+    order = ("id2plan1", "id4plan2", "id1shar1", "id3shar2")
+    positions = [out.index(x) for x in order]
+    assert positions == sorted(positions)
+
+
+def test_cli_share_picker_shared_entry_still_selectable(monkeypatch, capsys):
+    # Re-sharing is legitimate (it updates the row server-side) - a shared entry must remain
+    # selectable, and its display-index (post-reorder) must resolve to the right id.
+    from contexer import cli
+    _three_shareable(monkeypatch)
+    monkeypatch.setattr(share, "shared_map", lambda endpoint: {"bbb22222": "t"})
+    monkeypatch.setattr("builtins.input", lambda *a: "3")  # 3rd item shown = bbb22222 (moved last)
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    assert got["ids"] == ["bbb22222"]
+
+
+def test_cli_share_picker_no_shared_marker_when_shared_map_empty(monkeypatch, capsys):
+    # Sanity: local mode (no endpoint) -> shared_map is naturally empty -> no markers, no
+    # reordering (matches the pre-feature picker output exactly).
+    from contexer import cli
+    _three_shareable(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert "✓ shared" not in out
+
+
 def test_cli_share_picker_cancel(monkeypatch, capsys):
     from contexer import cli
     _three_shareable(monkeypatch)
@@ -629,6 +984,91 @@ def test_cli_share_picker_cancel(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Cancelled" in out
     assert pushed["n"] == 0
+
+
+def test_cli_share_picker_cancel_on_keyboard_interrupt(monkeypatch, capsys):
+    from contexer import cli
+    _three_shareable(monkeypatch)
+
+    def boom(*a):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", boom)
+    pushed = {"n": 0}
+    monkeypatch.setattr(share, "share_ids", lambda *a, **k: pushed.__setitem__("n", 1))
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert "Cancelled" in out
+    assert pushed["n"] == 0
+
+
+def test_cli_share_picker_all_on_single_page_returns_shown_ids(monkeypatch, capsys):
+    # `all` with <= _FILTERED_DISPLAY shareable decisions shares exactly the shown set.
+    from contexer import cli
+    _three_shareable(monkeypatch)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), "all")[1])
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    assert got["ids"] == ["aaa11111", "bbb22222", "ccc33333"]
+    assert "all (3)" in prompts[0]  # label carries the exact loaded count
+
+
+def _many_shareable(monkeypatch, n):
+    from contexer import config
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    items = [{"id": f"id{i:06d}", "type": "convention", "title": f"Decision {i}",
+              "content": f"Decision {i} body."} for i in range(1, n + 1)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: items)
+    return items
+
+
+def test_cli_share_picker_pages_and_selects_from_second_page(monkeypatch, capsys):
+    # >25 shareable decisions: 'm' reveals the next page, numbering stays continuous, and
+    # a page-2 number (26) resolves to the right decision.
+    from contexer import cli
+    items = _many_shareable(monkeypatch, 30)
+    prompts = []
+    inputs = iter(["m", "26"])
+    monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), next(inputs))[1])
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    assert "all (25)" in prompts[0] and "m=more" in prompts[0]  # first prompt: page 1 only
+    assert "all (30)" in prompts[1] and "m=more" not in prompts[1]  # after 'm': fully loaded
+    assert got["ids"] == [items[25]["id"]]  # 26th item (0-indexed 25)
+
+
+def test_cli_share_picker_all_after_paging_returns_loaded_set(monkeypatch, capsys):
+    # 'all' after paging shares exactly the currently-loaded set (not the whole store, and
+    # not just the first page) - the count in the prompt label makes that unambiguous.
+    from contexer import cli
+    items = _many_shareable(monkeypatch, 30)
+    inputs = iter(["m", "all"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    assert got["ids"] == [it["id"] for it in items]  # all 30, loaded across both pages
+    assert len(got["ids"]) == 30
+
+
+def test_cli_share_picker_first_page_hides_m_and_unloaded_count(monkeypatch, capsys):
+    # Before paging, only page 1's count is offered and unpicked items aren't selectable yet.
+    from contexer import cli
+    _many_shareable(monkeypatch, 30)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), "26")[1])  # unloaded
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert "all (25)" in prompts[0]
+    assert "m=more" in prompts[0]
+    assert "…and 5 more" in out
+    assert "Cancelled" in out  # 26 wasn't a valid selection on page 1 -> nothing picked
 
 
 def test_cli_share_nothing_to_share_no_false_cancel(monkeypatch, capsys):
@@ -1033,3 +1473,111 @@ def test_drain_outbox_invalid_skip_dropped_not_retried(tmp_repo, monkeypatch):
     sent = share.drain_outbox(TEAM)
     assert sent == 1  # d1 saved
     assert share._load_outbox() == []  # d2 invalid -> dropped from outbox (can never sync)
+
+
+def test_mark_shared_serializes_concurrent_writers(tmp_path, monkeypatch):
+    """Two writers marking different ids must both survive (lost-update guard, PR #144).
+
+    Without the lock each writer reads the same base, adds its own id, and the second save
+    clobbers the first - leaving a genuinely-pushed decision looking unshared."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    ep = "http://localhost:8080/mcp"
+    barrier = threading.Barrier(2)
+
+    def writer(did):
+        barrier.wait()          # maximize overlap on the read-modify-write
+        share._mark_shared([did], ep)
+
+    threads = [threading.Thread(target=writer, args=(f"id{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert set(share.shared_map(ep)) == {"id0", "id1"}
+
+
+def test_mark_shared_still_fail_soft_when_locking_unavailable(tmp_path, monkeypatch):
+    # A marker is cosmetic: even with no fcntl (non-POSIX) it must record, never raise.
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(store, "fcntl", None)
+    share._mark_shared(["abc"], "http://localhost:8080/mcp")
+    assert "abc" in share.shared_map("http://localhost:8080/mcp")
+
+
+def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypatch):
+    """The append-only log must not lose markers where advisory locking is unavailable.
+
+    `store._store_lock` yields WITHOUT serializing when fcntl is missing (non-POSIX), so a
+    read-modify-write design would still drop a concurrent writer's marker there. Appending
+    self-contained lines has no read to lose, so both writers survive on every platform."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(store, "fcntl", None)  # simulate a runtime with no advisory locks
+    ep = "http://localhost:8080/mcp"
+    barrier = threading.Barrier(4)
+
+    def writer(did):
+        barrier.wait()
+        share._mark_shared([did], ep)
+
+    threads = [threading.Thread(target=writer, args=(f"id{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert set(share.shared_map(ep)) == {"id0", "id1", "id2", "id3"}
+
+
+def test_shared_log_compacts_once_past_the_threshold(tmp_path, monkeypatch):
+    # Append-only would grow without bound on repeated re-shares; compaction folds it back
+    # to one record per (endpoint, id) while preserving every marker.
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
+    ep = "http://localhost:8080/mcp"
+    for _ in range(12):  # re-share the same two ids repeatedly
+        share._mark_shared(["dup1", "dup2"], ep)
+    lines = share._shared_path().read_text(encoding="utf-8").splitlines()
+    # Bounded, not unbounded: compaction fires once the log passes the threshold, so the file
+    # stays near it instead of growing to 24 lines. (It won't be exactly 2 - appends after the
+    # last compaction are still there.)
+    assert len(lines) <= share._SHARED_LOG_MAX_LINES
+    assert set(share.shared_map(ep)) == {"dup1", "dup2"}  # nothing lost
+
+
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_shared_log_append_is_excluded_during_compaction(tmp_path, monkeypatch):
+    """Compaction replaces the log wholesale, so it must exclude concurrent appends.
+
+    Appending is atomic against other appends, but NOT against the rewrite: a marker landing
+    between compaction's fold and its atomic replace goes to an inode the rename is about to
+    discard. Both sides take the same lock, so the append waits instead of vanishing. The
+    replace is stalled here to hold that window wide open - without the lock the fresh marker
+    lands on the doomed inode and is lost."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
+    ep = "http://localhost:8080/mcp"
+    # Seed past the threshold via _append_shared (which never compacts), so compaction is
+    # armed but has not run yet.
+    share._append_shared([{"endpoint": ep, "id": f"old{i}", "at": "t"} for i in range(11)])
+
+    folded = threading.Event()
+    real_atomic = store._atomic_write
+
+    def stalled_atomic(path, text):
+        folded.set()        # compaction has read the log; the replace is now pending
+        time.sleep(0.2)     # widen the fold->replace window the appender must not slip into
+        real_atomic(path, text)
+
+    monkeypatch.setattr(store, "_atomic_write", stalled_atomic)
+
+    def appender():
+        folded.wait(5)
+        share._append_shared([{"endpoint": ep, "id": "fresh", "at": "t"}])
+
+    t = threading.Thread(target=appender)
+    t.start()
+    share._compact_shared()
+    t.join(10)
+
+    markers = share.shared_map(ep)
+    assert "fresh" in markers                                 # survived the rewrite
+    assert {f"old{i}" for i in range(11)} <= set(markers)      # and nothing pre-existing lost

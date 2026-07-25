@@ -104,3 +104,46 @@ def test_local_capture_survives_cloud_outage(team_stack, monkeypatch):
     assert ok
     assert "Share failed" in share.share(CLONE_A, profile=TEAM)  # degrades, no crash
     assert "decision while cloud is down" in store.get_context(CLONE_A)  # still readable (normalized)
+
+
+def test_shared_title_round_trips_to_other_clones_team_context(team_stack):
+    """Decision Titles v2, full path: a title captured in clone A survives share ->
+    push_decision -> server -> get_context -> pull -> team cache -> render, arriving in
+    clone B's team-context section title-led, exactly like a local decision."""
+    server = team_stack
+    content = "use blue/green deploys for zero-downtime releases across every service"
+    title = "Adopt blue/green deploys"
+    _, did = store.update_decision(CLONE_A, content, "sA", subtype="architecture", title=title)
+    assert "Synced" in share.share(CLONE_A, profile=TEAM)
+    assert server.rows[did]["title"] == title  # wire carried the title, not just content
+
+    server.approve_as_team(did)
+
+    upserted, removed = team_context.pull(CLONE_B, profile=TEAM)
+    assert (upserted, removed) == (1, 0)
+
+    cache = team_context._load_cache(CLONE_B)
+    assert cache["decisions"][0]["title"] == title  # cached title-led, not re-derived
+
+    out = store.get_context(CLONE_B)
+    assert "## Team context" in out
+    assert title in out  # title-led heading rendered
+    # Distinct body still shown on its own indented line beneath the title (content is
+    # capitalized by store._normalize_content on capture, so match that normalized form).
+    assert "Use blue/green deploys for zero-downtime releases across every service" in out
+
+
+def test_shared_decision_without_title_still_renders_via_derived_fallback(team_stack):
+    """Older-server / untitled path: a row with NO title (e.g. added before Decision Titles
+    v2 existed) must still pull and render cleanly — title is never mandatory in the fake,
+    and the team-context renderer derives a heading from content, same as a local decision."""
+    server = team_stack
+    server.add_team_decision("always squash-merge feature branches")  # title=None, the default
+
+    upserted, _ = team_context.pull(CLONE_B, profile=TEAM)
+    assert upserted == 1
+    assert team_context._load_cache(CLONE_B)["decisions"][0]["title"] is None  # cached as-is, no fabrication
+
+    out = store.get_context(CLONE_B)
+    assert "## Team context" in out
+    assert "always squash-merge feature branches" in out  # short content -> its own derived title, single line

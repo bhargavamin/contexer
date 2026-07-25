@@ -39,7 +39,7 @@ _POLL_MAX_INTERVAL = 900
 _SYNC_LOG_CAP = 50
 
 # Fields persisted per cached team decision (the get_context wire projection).
-_ROW_FIELDS = ("id", "type", "content", "rationale", "repo", "agent", "scope")
+_ROW_FIELDS = ("id", "type", "title", "content", "rationale", "repo", "agent", "scope")
 
 # How stale last_ok_at must be before format_team_section tags the header as possibly
 # stale (the "quietly dead refresher" failure mode: rows keep rendering with no signal).
@@ -75,6 +75,7 @@ def _row_to_dict(rd: RemoteDecision) -> dict:
     return {
         "id": rd.id,
         "type": rd.type,
+        "title": rd.title,
         "content": rd.content,
         "rationale": rd.rationale,
         "repo": rd.repo,
@@ -491,6 +492,11 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     Filtered like `store.get_context` (by `entry_type` and a `query` substring). Each row is
     tagged `[scope=team]` so the reading agent treats it as provenance, not tool routing.
 
+    Each row renders title-led, same rule as a local decision (`store._title_and_body`): the
+    row's own `title` when the cloud sent one, else one derived from `content` here (display
+    time only - never written back into the cache), with the content line skipped entirely
+    when it would merely repeat the title.
+
     Rows that duplicate a LOCAL decision are deduped so the same rule is not injected twice
     (once local, once team). Token overlap against the local store decides - reusing the very
     metric the novelty filter thresholds at 0.7: >= 0.7 collapses to a one-line "ratifies local
@@ -516,7 +522,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
         rows = [r for r in rows if r.get("type", "") == entry_type]
     if query:
         pat = store._query_pattern(query)
-        rows = [r for r in rows if pat.search(r.get("content", ""))]
+        rows = [r for r in rows if store._matches_query(pat, r)]
     if not rows:
         return ""
 
@@ -537,6 +543,11 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
         rid = (r.get("id") or "")[:8]
         id_tag = f" (id={rid})" if rid else ""
         type_tag = f" [{r['type']}]" if r.get("type") else ""
+        # Title-led rendering, same rule a local decision uses (store._title_and_body): the
+        # cloud's own title when it sent one, else derived from content HERE at display time
+        # (never stored back into the cache) - and the content line is skipped entirely when
+        # it would merely repeat the title (collapsed-whitespace comparison).
+        title, body = store._title_and_body({"title": r.get("title")}, content=content)
         lid, overlap = _best_local_overlap(content, local_tokens)
         if lid and overlap >= 0.7:
             # Same rule already stored locally - collapse to a ratification pointer instead of
@@ -546,10 +557,14 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
             # Heavy but partial overlap: keep the full row (may be a genuine divergence, e.g. a
             # different directive on the same topic) but tag the related local id for the reader.
             scope = r.get("scope", "team")
-            lines.append(f"- [scope={scope}, overlaps local {lid[:8]}]{type_tag} {content}{id_tag}")
+            lines.append(f"- [scope={scope}, overlaps local {lid[:8]}]{type_tag} {title}{id_tag}")
+            if body is not None:
+                lines.append(f"    {body}")
         else:
             scope = r.get("scope", "team")
-            lines.append(f"- [scope={scope}]{type_tag} {content}{id_tag}")
+            lines.append(f"- [scope={scope}]{type_tag} {title}{id_tag}")
+            if body is not None:
+                lines.append(f"    {body}")
     result = "\n".join(lines)
     _record_render(repo_path, cache, rows=len(rendered), chars=len(result))
     return result

@@ -16,8 +16,8 @@ from contexer.remote import RemoteAuthError, RemoteContext, RemoteDecision, Remo
 TEAM_PROFILE = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
 
 
-def _rd(id, content, scope="team", type="architecture"):
-    return RemoteDecision(id=id, type=type, content=content, rationale=None,
+def _rd(id, content, scope="team", type="architecture", title=None):
+    return RemoteDecision(id=id, type=type, title=title, content=content, rationale=None,
                           repo="github.com/a/b", agent=None, scope=scope)
 
 
@@ -45,6 +45,31 @@ def _fake_rs(monkeypatch, *, ctx=None, exc=None):
     fake = _FakeRS(ctx=ctx, exc=exc)
     monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(lambda p, **kw: fake))
     return fake
+
+
+# ── title round-trips through _ROW_FIELDS / _row_to_dict (Decision Titles v2, Task 5) ──
+
+def test_row_to_dict_carries_title():
+    rd = _rd("t1", "Use Postgres for the queue.", title="Queue backend: Postgres")
+    row = team_context._row_to_dict(rd)
+    assert row["title"] == "Queue backend: Postgres"
+    assert set(team_context._ROW_FIELDS) == set(row.keys())
+
+
+def test_row_to_dict_title_none_when_rd_has_none():
+    rd = _rd("t1", "no authored title here")
+    row = team_context._row_to_dict(rd)
+    assert row["title"] is None
+
+
+def test_pull_cache_round_trips_title(team_env, monkeypatch):
+    ctx = RemoteContext(
+        decisions=[_rd("t1", "team rule", "team", title="Team rule heading")],
+        deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["decisions"][0]["title"] == "Team rule heading"
 
 
 # ── pull ─────────────────────────────────────────────────────────────────────────
@@ -287,6 +312,55 @@ def test_format_team_section_filters_by_type_and_query(tmp_repo):
     assert "secrets" in q and "Postgres" not in q
 
 
+# ── title-led rendering (Decision Titles v2, Task 5) ─────────────────────────────
+# format_team_section renders title-led exactly like a local decision (store._title_and_body):
+# title on the bullet line, content on an indented line below - skipped when it would merely
+# repeat the title - and derives a title when the cloud sent none.
+
+def test_format_team_section_renders_title_heading_and_indented_content(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1aaaaaa", "type": "architecture", "title": "Queue backend: Postgres",
+         "content": "Use Postgres for the queue, not MySQL.", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = team_context.format_team_section(tmp_repo)
+    lines = out.splitlines()
+    assert lines[1] == "- [scope=team] [architecture] Queue backend: Postgres (id=t1aaaaaa)"
+    assert lines[2] == "    Use Postgres for the queue, not MySQL."
+
+
+def test_format_team_section_dedups_when_title_equals_content(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1aaaaaa", "type": "architecture", "title": "Use Postgres",
+         "content": "Use Postgres", "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})
+    out = team_context.format_team_section(tmp_repo)
+    lines = out.splitlines()
+    assert len(lines) == 2  # header + one bullet line only, no repeated indented content
+    assert out.count("Use Postgres") == 1
+
+
+def test_format_team_section_derives_title_when_cloud_sent_none(tmp_repo):
+    long_content = "Adopt the outbox pattern for share retries. " + "detail " * 30
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1aaaaaa", "type": "architecture", "content": long_content, "rationale": None,
+         "repo": None, "agent": None, "scope": "team"}]})  # no "title" key at all
+    out = team_context.format_team_section(tmp_repo)
+    derived = store._derive_title(long_content)
+    lines = out.splitlines()
+    assert lines[1] == f"- [scope=team] [architecture] {derived} (id=t1aaaaaa)"
+    assert lines[2] == f"    {long_content}"
+
+
+def test_format_team_section_derives_title_when_row_title_is_none(tmp_repo):
+    # A row with an explicit "title": None (a pre-title-v2 row echoed through get_context)
+    # behaves identically to a row missing the key entirely.
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "t1aaaaaa", "type": "architecture", "title": None, "content": "Use Postgres",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}]})
+    out = team_context.format_team_section(tmp_repo)
+    assert "- [scope=team] [architecture] Use Postgres (id=t1aaaaaa)" in out
+
+
 # ── local-dedup (provenance-preserving) ──────────────────────────────────────────
 #
 # When a team row says essentially the same thing as a LOCAL decision, injecting both wastes
@@ -305,9 +379,9 @@ def _seed_local(repo, content, session="s1", subtype=""):
     return did
 
 
-def _one_team_row(repo, content, rid="teamaaaa", rtype="architecture", scope="team"):
+def _one_team_row(repo, content, rid="teamaaaa", rtype="architecture", scope="team", title=None):
     team_context._save_cache(repo, {"repo_key": "k", "cursor": None, "decisions": [
-        {"id": rid, "type": rtype, "content": content, "rationale": None,
+        {"id": rid, "type": rtype, "title": title, "content": content, "rationale": None,
          "repo": None, "agent": None, "scope": scope}]})
 
 
@@ -348,6 +422,30 @@ def test_dedup_unrelated_row_renders_unchanged(tmp_repo):
     assert "- [scope=team] [architecture] completely different rule about logging (id=teamcccc)" in out
     assert "ratifies" not in out
     assert "overlaps local" not in out
+
+
+def test_dedup_ratifies_variant_ignores_row_title(tmp_repo):
+    # The "ratifies" pointer never surfaces content OR title - only the local id - so a
+    # title on the collapsed row must not leak into it.
+    lid = _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _LOCAL8, rid="teamaaaa", title="A distinct given title")
+    out = team_context.format_team_section(tmp_repo)
+    assert f"ratifies local decision {lid[:8]}" in out
+    assert "A distinct given title" not in out
+
+
+def test_dedup_overlap_variant_renders_title_led(tmp_repo):
+    # The 0.5-0.7 partial-overlap branch gets the same title-led treatment as the plain
+    # branch: title (or the row's own) on the bullet line, full content indented below.
+    lid = _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _TEAM_PARTIAL_OVERLAP, rid="teambbbb", title="Partial overlap heading")
+    out = team_context.format_team_section(tmp_repo)
+    lines = out.splitlines()
+    title_line = next(ln for ln in lines if "overlaps local" in ln)
+    assert title_line == (
+        f"- [scope=team, overlaps local {lid[:8]}] [architecture] "
+        f"Partial overlap heading (id=teambbbb)")
+    assert f"    {_TEAM_PARTIAL_OVERLAP}" in out
 
 
 def test_dedup_ignores_ignored_local_decisions(tmp_repo):
