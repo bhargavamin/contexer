@@ -15,7 +15,7 @@ the queue FIFO. The outbox is drained from two places: at the start of every `sh
 seam every adapter already funnels through), so a queued share retries automatically the next
 time the user starts a session - no manual retry required.
 
-Shared-marker sidecar: a second GLOBAL file (`.shared.json`, separate from the outbox) records
+Shared-marker sidecar: a second GLOBAL file (`.shared.jsonl`, separate from the outbox) records
 which decisions have already been successfully pushed, namespaced by endpoint so switching
 endpoints (e.g. local -> prod) never shows a stale/false "already shared" marker - the team
 cache had exactly this endpoint-contamination bug once (a prod cursor confusing a local pull);
@@ -114,6 +114,10 @@ def _enqueue(payload: dict) -> None:
 # self-contained {"endpoint", "id", "at"} record; a reader folds the log into a map, last
 # write winning per (endpoint, id).
 _SHARED_LOG_MAX_LINES = 2000  # compaction threshold, so the log can't grow without bound
+# Lock slug shared by _append_shared and _compact_shared - the two must never overlap.
+# `_store_lock` is NOT reentrant (a second acquire in the same process blocks on its own
+# lock), so these two must stay strictly sequential, never nested. See _mark_shared.
+_SHARED_LOCK_SLUG = ".shared"
 
 
 def _shared_path():
@@ -148,32 +152,42 @@ def _load_shared() -> dict:
 
 def _append_shared(records: list[dict]) -> None:
     """Append records in ONE write call. Concurrent appends interleave by line rather than
-    clobbering each other, so no lock is needed to keep both writers' markers."""
+    clobbering each other, so the append itself needs no lock to keep both writers' markers.
+
+    The lock is taken anyway, for ONE case the append-only shape can't cover: compaction
+    replaces the file wholesale, so an append landing between compaction's fold and its
+    atomic rename would write to an inode about to be discarded. Holding the same lock as
+    `_compact_shared` makes append and compaction mutually exclusive. Where locks are
+    unavailable (non-POSIX) `_store_lock` is a no-op and the append still can't clobber a
+    peer append - only the rare compaction overlap stays exposed, which is cosmetic."""
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     path = _shared_path()
     blob = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
-    # Heal a missing trailing newline first: appending straight onto a torn/partial last line
-    # (a half-written record, or a hand-edited file) would fuse it with our first record and
-    # lose BOTH. Starting on a fresh line costs one byte and confines the damage to the
-    # pre-existing partial line, which the reader already skips.
-    try:
-        needs_nl = path.exists() and path.stat().st_size > 0 and \
-            path.read_bytes()[-1:] != b"\n"
-    except OSError:
-        needs_nl = False
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(("\n" if needs_nl else "") + blob)
+    with store._store_lock(_SHARED_LOCK_SLUG):
+        # Heal a missing trailing newline first: appending straight onto a torn/partial last
+        # line (a half-written record, or a hand-edited file) would fuse it with our first
+        # record and lose BOTH. Starting on a fresh line costs one byte and confines the
+        # damage to the pre-existing partial line, which the reader already skips.
+        try:
+            needs_nl = path.exists() and path.stat().st_size > 0 and \
+                path.read_bytes()[-1:] != b"\n"
+        except OSError:
+            needs_nl = False
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(("\n" if needs_nl else "") + blob)
 
 
 def _compact_shared() -> None:
     """Rewrite the log as one record per (endpoint, id) once it grows past the threshold.
-    Best-effort and rare: taken under the store lock where available, and a marker lost to a
-    concurrent append during compaction is cosmetic (the decision re-shows as unshared)."""
+    Rare, and mutually exclusive with `_append_shared` via the shared lock, so no marker is
+    lost to an append racing the rewrite. Best-effort: if locks are unavailable the rewrite
+    still can't corrupt the log (it is an atomic replace), only drop a marker written inside
+    the window - cosmetic, since the decision merely re-shows as unshared."""
     path = _shared_path()
     try:
         if not path.exists() or len(path.read_text(encoding="utf-8").splitlines()) <= _SHARED_LOG_MAX_LINES:
             return
-        with store._store_lock(".shared"):
+        with store._store_lock(_SHARED_LOCK_SLUG):
             folded = _load_shared()["endpoints"]
             lines = [{"endpoint": ep, "id": did, "at": at}
                      for ep, bucket in folded.items() for did, at in bucket.items()]
@@ -195,6 +209,8 @@ def _mark_shared(ids, endpoint: str | None) -> None:
         # Append-only: no read, so two concurrent shares (or a share racing an outbox drain)
         # can't clobber each other's markers - on every platform, not just where POSIX
         # advisory locks are available. See the log's design note above.
+        # The two calls below are SEQUENTIAL, never nested: both take _SHARED_LOCK_SLUG and
+        # the lock is not reentrant, so wrapping one in the other would self-deadlock.
         now = datetime.now(timezone.utc).isoformat()
         _append_shared([{"endpoint": endpoint, "id": did, "at": now} for did in clean_ids])
         _compact_shared()

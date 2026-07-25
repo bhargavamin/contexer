@@ -5,6 +5,7 @@ profile is passed explicitly to share() to avoid reading a real config.toml.
 """
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -1540,3 +1541,43 @@ def test_shared_log_compacts_once_past_the_threshold(tmp_path, monkeypatch):
     # last compaction are still there.)
     assert len(lines) <= share._SHARED_LOG_MAX_LINES
     assert set(share.shared_map(ep)) == {"dup1", "dup2"}  # nothing lost
+
+
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_shared_log_append_is_excluded_during_compaction(tmp_path, monkeypatch):
+    """Compaction replaces the log wholesale, so it must exclude concurrent appends.
+
+    Appending is atomic against other appends, but NOT against the rewrite: a marker landing
+    between compaction's fold and its atomic replace goes to an inode the rename is about to
+    discard. Both sides take the same lock, so the append waits instead of vanishing. The
+    replace is stalled here to hold that window wide open - without the lock the fresh marker
+    lands on the doomed inode and is lost."""
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
+    ep = "http://localhost:8080/mcp"
+    # Seed past the threshold via _append_shared (which never compacts), so compaction is
+    # armed but has not run yet.
+    share._append_shared([{"endpoint": ep, "id": f"old{i}", "at": "t"} for i in range(11)])
+
+    folded = threading.Event()
+    real_atomic = store._atomic_write
+
+    def stalled_atomic(path, text):
+        folded.set()        # compaction has read the log; the replace is now pending
+        time.sleep(0.2)     # widen the fold->replace window the appender must not slip into
+        real_atomic(path, text)
+
+    monkeypatch.setattr(store, "_atomic_write", stalled_atomic)
+
+    def appender():
+        folded.wait(5)
+        share._append_shared([{"endpoint": ep, "id": "fresh", "at": "t"}])
+
+    t = threading.Thread(target=appender)
+    t.start()
+    share._compact_shared()
+    t.join(10)
+
+    markers = share.shared_map(ep)
+    assert "fresh" in markers                                 # survived the rewrite
+    assert {f"old{i}" for i in range(11)} <= set(markers)      # and nothing pre-existing lost
