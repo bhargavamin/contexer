@@ -2459,11 +2459,14 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     unchanged beyond the existing team-section join. The suffix is cap-aware: `format_team_
     section` renders at most `_team_display_cap()` rows, so when the cache holds more than
     that the suffix adds `(M shown)` rather than claiming a count the model never actually
-    received. It is also defer-aware (`_team_deferred_count`): rows this call's own
-    `defer_architecture=True` hid behind the count-only architecture pointer (see
-    `team_context.count_deferred_architecture`) are subtracted from the `(M shown)` figure
-    too, so "N synced" alone never implies more full/ratified content reached the model
-    than actually did.
+    received. It is also defer-aware: rows this call's own `defer_architecture=True` hid
+    behind the count-only architecture pointer (see `team_context.count_deferred_architecture`)
+    are subtracted from the `(M shown)` figure too, so "N synced" alone never implies more
+    full/ratified content reached the model than actually did. `text`/`count`/`deferred` all
+    come from ONE team_context snapshot (`_team_section_with_counts` ->
+    `team_context.session_team_section`), not three independent reloads, so a concurrent
+    background refresh or local decision update landing mid-computation can't desync the
+    counts from what `team` actually rendered (nor drive `shown` negative).
 
     session_id (Retrieval V1 Part B): optional, "" preserves every existing caller. Threaded
     through to `_local_session_start_payload` for compact-source working-set rehydration."""
@@ -2479,10 +2482,11 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
             pass
     repo_path = resolved
     payload = _local_session_start_payload(repo_path, source, session_id)
-    team = _team_section(repo_path, "", "", defer_architecture=True)
+    # text/count/deferred come from ONE team_context snapshot (see _team_section_with_counts)
+    # so the status-suffix arithmetic below can never describe a different moment than `team`.
+    team, count, deferred = _team_section_with_counts(repo_path)
     if not team or (source == "resume" and not payload.get("context")):
         return payload
-    count = _team_count(repo_path)
     status = payload.get("status", "")
     if count:
         cap = _team_display_cap()
@@ -2494,7 +2498,7 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         # deferred rows understates (or even goes negative on) the real shown count. Only
         # note it in the suffix when it's actually less than the raw synced count -
         # otherwise keep the plain "N synced" the suffix has always shown.
-        shown = min(count - _team_deferred_count(repo_path), cap)
+        shown = min(count - deferred, cap)
         status = (f"{status} | team: {count} synced" if shown >= count
                  else f"{status} | team: {count} synced ({shown} shown)")
     return {
@@ -3394,43 +3398,44 @@ def get_context_for_prompt_with_meta(repo_path: str, prompt: str, session_id: st
 
 
 def _team_section(repo_path: str, query: str, entry_type: str, *,
-                  defer_architecture: bool = False) -> str:
+                  defer_architecture: bool = False, limit: int = 0) -> str:
     """Formatted team-context block from the C5 cache. Function-level import avoids a
     store <-> team_context cycle. '' when there is no team context (local mode / no cache).
 
     `defer_architecture`: passed through to `team_context.format_team_section` — only
     `session_start_payload` sets this True, mirroring the local bulk-injection deferral of
     architecture decisions. `get_context`'s JIT fetch never sets it, so an explicit
-    `entry_type="architecture"` call always returns full content."""
+    `entry_type="architecture"` call always returns full content.
+
+    `limit`: passed through as the team-section render cap override, so `get_context`'s
+    caller-supplied `limit` can actually raise the ceiling on a targeted `entry_type` fetch
+    (the same fetch the deferred-count pointer tells the model to make) past the default
+    `_TEAM_DISPLAY` - otherwise a cache holding more deferred rows than that would still
+    truncate on the "for full content" follow-up call."""
     from contexer import team_context
     return team_context.format_team_section(repo_path, query, entry_type,
-                                             defer_architecture=defer_architecture)
+                                             defer_architecture=defer_architecture, limit=limit)
 
 
-def _team_count(repo_path: str) -> int:
-    """Count of cached team decisions for the session-start status suffix. Same
-    function-level import as `_team_section`, for the same reason (avoids a store <->
-    team_context cycle)."""
+def _team_section_with_counts(repo_path: str) -> tuple[str, int, int]:
+    """(text, raw_count, deferred_count) for `session_start_payload`'s status suffix - all
+    three derived from ONE team_context snapshot (`team_context.session_team_section`), so a
+    concurrent background refresh or local decision update between separate reads can no
+    longer desync the rendered `text` from the counts describing it (previously `_team_
+    section`, `_team_count`, and `_team_deferred_count` each reloaded state independently).
+    Same function-level import as the other `_team_*` helpers, for the same reason (avoids a
+    store <-> team_context cycle)."""
     from contexer import team_context
-    return len(team_context._load_cache(repo_path).get("decisions", []))
+    return team_context.session_team_section(repo_path, defer_architecture=True)
 
 
 def _team_display_cap() -> int:
     """The row cap `format_team_section` renders (`team_context._TEAM_DISPLAY`), so the
     status suffix can stay honest about what actually landed in context. Same
-    function-level import as `_team_count`, for the same reason (avoids a store <->
-    team_context cycle)."""
+    function-level import as `_team_section_with_counts`, for the same reason (avoids a
+    store <-> team_context cycle)."""
     from contexer import team_context
     return team_context._TEAM_DISPLAY
-
-
-def _team_deferred_count(repo_path: str) -> int:
-    """Count of synced team rows `session_start_payload` deferred to a count-only pointer
-    (architecture-typed, not already collapsed by local ratification) - so the status
-    suffix can subtract them from what it claims actually landed in context. Same
-    function-level import as `_team_count`/`_team_display_cap`, for the same reason."""
-    from contexer import team_context
-    return team_context.count_deferred_architecture(repo_path)
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
@@ -3445,7 +3450,11 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     """
     data = _load(repo_path)
     entries = data.get("entries", [])
-    team_section = _team_section(repo_path, query, entry_type)
+    # Only forward `limit` to the team section on a targeted entry_type fetch (the same
+    # "explicit type = JIT fetch, not a bulk render" rule _team_section's defer bypass
+    # already follows) - an unfiltered get_context() must keep the plain _TEAM_DISPLAY cap.
+    team_section = _team_section(repo_path, query, entry_type,
+                                 limit=(limit if entry_type else 0))
     if not entries and not team_section:
         return "No context stored for this repository."
 

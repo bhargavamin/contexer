@@ -128,6 +128,27 @@ def test_sync_keeps_row_with_no_repo_tag(team_env, monkeypatch):
     assert [d["id"] for d in cache["decisions"]] == ["t1"]
 
 
+def test_sync_purges_stale_cache_on_later_mismatched_repo(team_env, monkeypatch):
+    # A row cached correctly for this repo on one sync later comes back under the SAME id
+    # but tagged with a different repo (e.g. re-scoped/corrected server-side). The stale
+    # cached copy must be dropped outright, not merely left untouched - otherwise it keeps
+    # rendering forever since no explicit deletion tombstone will ever arrive for it.
+    good = _rd("t1", "team rule for this repo")
+    _fake_rs(monkeypatch, ctx=RemoteContext(decisions=[good], deleted=[], cursor="c1"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]
+
+    mismatched = RemoteDecision(id="t1", type="architecture", title=None,
+                                content="reassigned elsewhere", rationale=None,
+                                repo="github.com/other/repo", agent=None, scope="team")
+    _fake_rs(monkeypatch, ctx=RemoteContext(decisions=[mismatched], deleted=[], cursor="c2"))
+    up, rm = team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert (up, rm) == (0, 1)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["decisions"] == []
+
+
 def test_pull_incremental_upserts_and_deletes(team_env, monkeypatch):
     team_context._save_cache(team_env, {
         "repo_key": "github.com/a/b", "cursor": "c0",
@@ -901,6 +922,35 @@ def test_session_start_payload_status_suffix_shown_never_negative(tmp_repo):
     assert payload["status"].endswith(" | team: 30 synced (0 shown)")
 
 
+def test_session_start_payload_status_suffix_reads_one_cache_snapshot(tmp_repo, monkeypatch):
+    # Before session_team_section existed, the text/count/deferred-count each reloaded the
+    # team cache independently (format_team_section, the raw count, and
+    # count_deferred_architecture) - a concurrent refresh landing between those reads could
+    # desync the status suffix from what `context` actually rendered. Assert the cache is
+    # only ever loaded twice for the whole call: once for the shared snapshot
+    # (session_team_section) and once more inside _record_render's own documented fresh
+    # reload-before-write (which must stay independent - see its docstring) - never once per
+    # metric.
+    decisions = [
+        {"id": f"arch{i}", "type": "architecture", "content": f"architecture rule {i}",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}
+        for i in range(5)
+    ]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+
+    calls = []
+    real_load_cache = team_context._load_cache
+
+    def counting_load_cache(repo_path):
+        calls.append(repo_path)
+        return real_load_cache(repo_path)
+
+    monkeypatch.setattr(team_context, "_load_cache", counting_load_cache)
+    payload = store.session_start_payload(tmp_repo)
+    assert "| team: 5 synced" in payload["status"]
+    assert len(calls) == 2
+
+
 def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
     # No local decisions, but a team cache exists — a fresh clone should still see team.
     # Non-architecture type: architecture is deferred at SessionStart (see below).
@@ -962,6 +1012,27 @@ def test_get_context_entry_type_architecture_bypasses_team_deferral(tmp_repo):
     ]})
     result = store.get_context(tmp_repo, entry_type="architecture")
     assert "Team picked Postgres over MySQL" in result
+
+
+def test_get_context_entry_type_architecture_limit_overrides_team_cap(tmp_repo):
+    # 30 non-ratifying architecture rows > _TEAM_DISPLAY (25). This is the exact call the
+    # SessionStart deferred-count pointer tells the model to make ("Call
+    # get_context(entry_type=\"architecture\") for full content") - it must be able to
+    # actually reach every row via limit=, not silently truncate at the generic team cap.
+    decisions = [{"id": f"arch{i:05d}", "type": "architecture",
+                  "content": f"distinct decision number {i}", "rationale": None,
+                  "repo": None, "agent": None, "scope": "team"} for i in range(30)]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+
+    default = store.get_context(tmp_repo, entry_type="architecture")
+    default_rows = [ln for ln in default.splitlines() if ln.startswith("- [scope=team]")]
+    assert len(default_rows) == team_context._TEAM_DISPLAY
+    assert "showing 25 of 30 team rows" in default
+
+    full = store.get_context(tmp_repo, entry_type="architecture", limit=30)
+    full_rows = [ln for ln in full.splitlines() if ln.startswith("- [scope=team]")]
+    assert len(full_rows) == 30
+    assert "showing" not in full
 
 
 # ── Option A seam: neutral refresh / poll_for_injection ──────────────────────────
