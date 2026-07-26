@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.26.1](https://github.com/bhargavamin/contexer/compare/v0.26.0...v0.26.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* **team-context:** address Greptile review — cap bypass, stale cache, snapshot race ([20924af](https://github.com/bhargavamin/contexer/commit/20924afe57738b8f8f2d2c0788739f3614ce0b99))
+* **team-context:** preserve ratification signal under architecture deferral ([25f413f](https://github.com/bhargavamin/contexer/commit/25f413fb8632218adbb11d7a81db4e1ee0ee76d3))
+* **team-context:** preserve ratification signal under architecture deferral ([0b3d816](https://github.com/bhargavamin/contexer/commit/0b3d816798920c06c9acd1bbf19cd0134a60a6c5))
+
 ## [0.26.0](https://github.com/bhargavamin/contexer/compare/v0.25.0...v0.26.0) (2026-07-25)
 
 
