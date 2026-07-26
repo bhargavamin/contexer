@@ -276,10 +276,24 @@ def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
         new = team_context.poll_for_injection(store._hook_cwd_repo(repo_path), consumer)
         if not new:
             return "{}"
-        lines = ["Team decisions just approved (now in effect):"]
-        for d in new:
-            type_tag = f" ({d.get('type')})" if d.get("type") else ""
-            lines.append(f"- {d.get('content', '')}{type_tag}")
+        # Architecture-typed rows are deferred to a count-only pointer here too, mirroring
+        # the SessionStart team section (store.session_start_payload) — a freshly-approved
+        # architecture decision shouldn't flood the prompt any more than a bulk-loaded one.
+        visible = [d for d in new if d.get("type") != "architecture"]
+        deferred = [d for d in new if d.get("type") == "architecture"]
+        lines = []
+        if visible:
+            lines.append("Team decisions just approved (now in effect):")
+            for d in visible:
+                type_tag = f" ({d.get('type')})" if d.get("type") else ""
+                lines.append(f"- {d.get('content', '')}{type_tag}")
+        if deferred:
+            lines.append(
+                f"{len(deferred)} team architecture decision(s) just approved but deferred. "
+                'Call get_context(entry_type="architecture") for full content.'
+            )
+        # No `if not lines: return "{}"` guard here: `new` is non-empty (checked above) and
+        # every row lands in `visible` or `deferred`, so `lines` is always populated.
         return json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(lines)}})
     except Exception:

@@ -140,6 +140,10 @@ def _sync(repo_path: str, profile: config.Profile,
     for rd in ctx.decisions:
         if rd.scope != "team":
             continue  # local store already holds personal; cache team rows only
+        if rd.repo and rd.repo != key:
+            continue  # defense-in-depth: never trust a row's own repo tag over the key we
+                      # queried for; only reject when repo is present AND mismatched (a
+                      # valid row can legitimately carry repo=None)
         row = _row_to_dict(rd)
         if by_id.get(rd.id) == row:
             # Unchanged re-send: the live server's updatedSince filter is INCLUSIVE, so
@@ -454,6 +458,32 @@ def _best_local_overlap(content: str, local_tokens: list[tuple[str, set]]) -> tu
     return best_id, best
 
 
+def count_deferred_architecture(repo_path: str) -> int:
+    """Count of cached architecture-typed team rows that `format_team_section(...,
+    defer_architecture=True)` would actually defer to the count-only pointer - i.e.
+    excluding rows that collapse to the cheap local-ratification line regardless
+    (>= 0.7 overlap with a local decision) and so render unaffected by deferral.
+
+    Mirrors the defer-eligibility check inside `format_team_section` exactly, so
+    `store.session_start_payload`'s status suffix can report how many synced rows
+    actually landed as full/ratified content vs. how many are hidden behind the
+    pointer - instead of the raw cache size, which overstates it once deferral
+    hides a chunk of the cache behind one summary line. Fail-soft: any load error
+    yields 0 (status suffix degrades to the pre-deferral raw count)."""
+    try:
+        cache = _load_cache(repo_path)
+        arch_rows = [r for r in cache.get("decisions", []) if r.get("type") == "architecture"]
+        if not arch_rows:
+            return 0
+        local_tokens = [(lid, store._tokenize(c)) for lid, c in _local_decisions(repo_path)]
+        return sum(
+            1 for r in arch_rows
+            if _best_local_overlap(r.get("content", ""), local_tokens)[1] < 0.7
+        )
+    except Exception:
+        return 0
+
+
 def _format_staleness(age_seconds: float) -> str:
     """Human staleness suffix for the team-context header: whole hours, switching to whole
     days once the gap reaches 48h (e.g. '30 hours ago', '2 days ago')."""
@@ -486,11 +516,20 @@ def _record_render(repo_path: str, cache: dict, *, rows: int, chars: int) -> Non
         pass  # telemetry must never break the render it's measuring
 
 
-def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -> str:
+def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
+                        *, defer_architecture: bool = False) -> str:
     """Render the cached team context as a '## Team context (synced)' markdown block, or ''.
 
     Filtered like `store.get_context` (by `entry_type` and a `query` substring). Each row is
     tagged `[scope=team]` so the reading agent treats it as provenance, not tool routing.
+
+    `defer_architecture` (keyword-only, default False): when True AND no explicit `entry_type`
+    was requested, architecture-typed rows are pulled out of the render set (before the
+    `_TEAM_DISPLAY` cap is applied) and replaced with a single deferred-count line pointing at
+    `get_context(entry_type="architecture")` — mirroring the local store's SessionStart
+    deferral of architecture decisions to a count-only pointer. An explicit `entry_type`
+    always bypasses deferral: naming a type is a targeted JIT fetch, not a bulk render, so it
+    must return full content regardless of `defer_architecture`.
 
     Each row renders title-led, same rule as a local decision (`store._title_and_body`): the
     row's own `title` when the cloud sent one, else one derived from `content` here (display
@@ -529,6 +568,24 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
     # Local decision token sets to dedup team rows against ([] on any load failure).
     local_tokens = [(lid, store._tokenize(c)) for lid, c in _local_decisions(repo_path)]
 
+    deferred_count = 0
+    if defer_architecture and not entry_type:
+        # A row that would collapse to the cheap one-line "ratifies local decision <id>"
+        # pointer (>= 0.7 overlap) is already as light as the deferred-count line itself,
+        # so deferring it would only throw away the more specific ratification signal for
+        # no token savings — only defer architecture rows that would otherwise render in
+        # full (i.e. don't already collapse).
+        keep, deferred_rows = [], []
+        for r in rows:
+            if r.get("type") == "architecture":
+                _, overlap = _best_local_overlap(r.get("content", ""), local_tokens)
+                (deferred_rows if overlap < 0.7 else keep).append(r)
+            else:
+                keep.append(r)
+        if deferred_rows:
+            rows = keep
+            deferred_count = len(deferred_rows)
+
     header = "## Team context (synced)"
     last_ok_at = cache.get("last_ok_at")
     if isinstance(last_ok_at, (int, float)):
@@ -565,6 +622,11 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "") -
             lines.append(f"- [scope={scope}]{type_tag} {title}{id_tag}")
             if body is not None:
                 lines.append(f"    {body}")
+    if deferred_count:
+        lines.append(
+            f"- {deferred_count} team architecture decision(s) synced but deferred. "
+            'Call get_context(entry_type="architecture") for full content.'
+        )
     result = "\n".join(lines)
     _record_render(repo_path, cache, rows=len(rendered), chars=len(result))
     return result

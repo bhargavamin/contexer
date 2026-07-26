@@ -92,8 +92,10 @@ def test_pull_contract_intact_after_refactor(team_env, monkeypatch):
 def test_team_poll_injects_new_decisions(monkeypatch):
     from contexer.adapters import claude
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    # Non-architecture type: architecture rows are deferred to a count-only pointer
+    # (see test_team_context.py::test_team_poll_defers_architecture_shows_rest).
     monkeypatch.setattr(team_context, "poll_nonblocking",
-                        lambda repo, consumer="claude": [{"content": "Use Postgres", "type": "architecture"}])
+                        lambda repo, consumer="claude": [{"content": "Use Postgres", "type": "constraint"}])
     data = json.loads(claude.team_poll("/repo", ""))
     assert "Use Postgres" in data["hookSpecificOutput"]["additionalContext"]
     assert data["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
