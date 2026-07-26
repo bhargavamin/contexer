@@ -100,6 +100,55 @@ def test_pull_caches_team_rows_only(team_env, monkeypatch):
     assert fake.calls == [("github.com/a/b", None)]  # first pull: no cursor
 
 
+def test_sync_drops_row_with_mismatched_repo(team_env, monkeypatch):
+    # Defense-in-depth: even though we queried repo="github.com/a/b", a server-side
+    # scoping bug could return a row tagged with a different repo. The client must
+    # never trust that over the key it asked for.
+    good = _rd("t1", "team rule for this repo")  # repo="github.com/a/b" (matches key)
+    bad = RemoteDecision(id="t2", type="architecture", title=None,
+                         content="leaked from another repo", rationale=None,
+                         repo="github.com/other/repo", agent=None, scope="team")
+    ctx = RemoteContext(decisions=[good, bad], deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    up, rm = team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert up == 1
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]
+
+
+def test_sync_keeps_row_with_no_repo_tag(team_env, monkeypatch):
+    # A legitimate row can carry repo=None — must not be rejected as a mismatch.
+    rd = RemoteDecision(id="t1", type="architecture", title=None, content="no repo tag",
+                        rationale=None, repo=None, agent=None, scope="team")
+    ctx = RemoteContext(decisions=[rd], deleted=[], cursor="c1")
+    _fake_rs(monkeypatch, ctx=ctx)
+    up, rm = team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert up == 1
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]
+
+
+def test_sync_purges_stale_cache_on_later_mismatched_repo(team_env, monkeypatch):
+    # A row cached correctly for this repo on one sync later comes back under the SAME id
+    # but tagged with a different repo (e.g. re-scoped/corrected server-side). The stale
+    # cached copy must be dropped outright, not merely left untouched - otherwise it keeps
+    # rendering forever since no explicit deletion tombstone will ever arrive for it.
+    good = _rd("t1", "team rule for this repo")
+    _fake_rs(monkeypatch, ctx=RemoteContext(decisions=[good], deleted=[], cursor="c1"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert [d["id"] for d in cache["decisions"]] == ["t1"]
+
+    mismatched = RemoteDecision(id="t1", type="architecture", title=None,
+                                content="reassigned elsewhere", rationale=None,
+                                repo="github.com/other/repo", agent=None, scope="team")
+    _fake_rs(monkeypatch, ctx=RemoteContext(decisions=[mismatched], deleted=[], cursor="c2"))
+    up, rm = team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert (up, rm) == (0, 1)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["decisions"] == []
+
+
 def test_pull_incremental_upserts_and_deletes(team_env, monkeypatch):
     team_context._save_cache(team_env, {
         "repo_key": "github.com/a/b", "cursor": "c0",
@@ -424,6 +473,28 @@ def test_dedup_unrelated_row_renders_unchanged(tmp_repo):
     assert "overlaps local" not in out
 
 
+def test_defer_architecture_still_collapses_ratifying_row(tmp_repo):
+    # A ratifying architecture row (>= 0.7 overlap) already collapses to a cheap one-liner
+    # naming the local decision it ratifies - deferring it would throw away that specific
+    # signal for zero token savings, so it must render as usual even with defer_architecture.
+    lid = _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _LOCAL8, rid="teamaaaa")
+    out = team_context.format_team_section(tmp_repo, defer_architecture=True)
+    assert f"ratifies local decision {lid[:8]}" in out
+    assert "synced but deferred" not in out
+
+
+def test_defer_architecture_defers_non_ratifying_rows(tmp_repo):
+    # Partial overlap (0.5-0.7) and no overlap both still render full content today - with
+    # defer_architecture these DO get deferred since they aren't already a cheap collapse.
+    _seed_local(tmp_repo, _LOCAL8)
+    _one_team_row(tmp_repo, _TEAM_PARTIAL_OVERLAP, rid="teambbbb")
+    out = team_context.format_team_section(tmp_repo, defer_architecture=True)
+    assert "overlaps local" not in out
+    assert "iota kappa lambda" not in out
+    assert "1 team architecture decision" in out
+
+
 def test_dedup_ratifies_variant_ignores_row_title(tmp_repo):
     # The "ratifies" pointer never surfaces content OR title - only the local id - so a
     # title on the collapsed row must not leak into it.
@@ -728,7 +799,9 @@ def _seed_team(repo, content="Team rule X", rid="t1aaaaaa", rtype="architecture"
 
 def test_session_start_payload_appends_team_section(tmp_repo):
     store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
-    _seed_team(tmp_repo, "Team deploy via CI only")
+    # Non-architecture type: architecture-typed team rows are deferred at SessionStart
+    # (see test_session_start_payload_defers_team_architecture_shows_rest below).
+    _seed_team(tmp_repo, "Team deploy via CI only", rtype="constraint")
     ctx = store.session_start_payload(tmp_repo)["context"]
     assert "## Team context" in ctx
     assert "Team deploy via CI only" in ctx
@@ -742,7 +815,10 @@ def test_session_start_payload_no_team_when_cache_absent(tmp_repo):
 
 def test_session_start_payload_status_suffix_when_team_synced(tmp_repo):
     store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
-    _seed_team(tmp_repo, "Team deploy via CI only")
+    # Non-architecture type: architecture rows are deferred at SessionStart and excluded
+    # from the "shown" count (see test_session_start_payload_status_suffix_notes_deferred
+    # below) - this test is about the plain cap-only suffix wording.
+    _seed_team(tmp_repo, "Team deploy via CI only", rtype="constraint")
     payload = store.session_start_payload(tmp_repo)
     assert payload["status"].endswith(" | team: 1 synced")
 
@@ -756,8 +832,10 @@ def test_session_start_payload_no_status_suffix_without_team(tmp_repo):
 def test_session_start_payload_status_suffix_caps_at_display_limit(tmp_repo):
     # format_team_section only ever renders _TEAM_DISPLAY (25) rows, so a cache holding
     # more than that must not claim a synced count the model never actually received.
+    # Non-architecture type: this test is about the display cap, not deferral (see
+    # test_session_start_payload_status_suffix_notes_deferred_architecture below).
     store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
-    decisions = [{"id": f"t{i}", "type": "architecture", "content": f"rule {i}",
+    decisions = [{"id": f"t{i}", "type": "constraint", "content": f"rule {i}",
                   "rationale": None, "repo": None, "agent": None, "scope": "team"}
                  for i in range(30)]
     team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
@@ -766,8 +844,10 @@ def test_session_start_payload_status_suffix_caps_at_display_limit(tmp_repo):
 
 
 def test_session_start_payload_status_suffix_exact_cap_no_shown_note(tmp_repo):
+    # Non-architecture type: this test is about the display cap, not deferral (see
+    # test_session_start_payload_status_suffix_notes_deferred_architecture below).
     store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
-    decisions = [{"id": f"t{i}", "type": "architecture", "content": f"rule {i}",
+    decisions = [{"id": f"t{i}", "type": "constraint", "content": f"rule {i}",
                   "rationale": None, "repo": None, "agent": None, "scope": "team"}
                  for i in range(25)]
     team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
@@ -776,9 +856,105 @@ def test_session_start_payload_status_suffix_exact_cap_no_shown_note(tmp_repo):
     assert "shown" not in payload["status"]
 
 
+def test_session_start_payload_status_suffix_notes_deferred_architecture(tmp_repo):
+    # An architecture row deferred to the count-only pointer contributes zero rows of
+    # actual content to `context`, so the status suffix's "N synced" alone would overstate
+    # what the model received - it must also subtract deferred rows via `(M shown)`,
+    # exactly like it already does for rows truncated by the display cap.
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    decisions = [
+        {"id": "arch1", "type": "architecture", "content": "Team picked Postgres over MySQL",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+        {"id": "cons1", "type": "constraint", "content": "Team requires 2 reviewers",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+    ]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 2 synced (1 shown)")
+
+
+def test_session_start_payload_status_suffix_ignores_ratified_architecture(tmp_repo):
+    # An architecture row that collapses to a local-ratification pointer (>= 0.7 overlap)
+    # is NOT deferred by format_team_section, so it must still count toward "shown".
+    local8 = "alpha beta gamma delta epsilon zeta eta theta"
+    store.update_decision(tmp_repo, local8, "s1", subtype="architecture")
+    decisions = [{"id": "teamaaaa", "type": "architecture", "content": local8,
+                  "rationale": None, "repo": None, "agent": None, "scope": "team"}]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 1 synced")
+    assert "shown" not in payload["status"]
+
+
+def test_session_start_payload_status_suffix_combines_cap_and_deferral(tmp_repo):
+    # Deferral removes rows BEFORE the display cap is applied (format_team_section splits
+    # deferred rows out, then slices [:_TEAM_DISPLAY] on what remains) - the status suffix's
+    # "shown" math must subtract deferred rows before capping too, not after, or it
+    # under/over-counts whenever both the cap and deferral bind on the same cache.
+    store.update_decision(tmp_repo, "local constraint never log secrets", "s1", subtype="constraint")
+    decisions = [
+        {"id": "arch1", "type": "architecture", "content": "Team picked Postgres over MySQL",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+        {"id": "arch2", "type": "architecture", "content": "Team picked gRPC over REST",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+    ] + [
+        {"id": f"cons{i}", "type": "constraint", "content": f"rule {i}",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}
+        for i in range(28)
+    ]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    # 30 synced, 2 deferred (architecture, no overlap) -> 28 eligible, capped at 25 shown.
+    # The naive (wrong) order -- min(30, 25) - 2 = 23 -- must NOT be what's reported.
+    assert payload["status"].endswith(" | team: 30 synced (25 shown)")
+
+
+def test_session_start_payload_status_suffix_shown_never_negative(tmp_repo):
+    # All 30 rows are non-ratifying architecture (deferred=30, cap=25). The naive order
+    # -- min(30, 25) - 30 = -5 -- would surface a nonsensical negative count.
+    decisions = [
+        {"id": f"arch{i}", "type": "architecture", "content": f"architecture rule {i}",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}
+        for i in range(30)
+    ]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    payload = store.session_start_payload(tmp_repo)
+    assert payload["status"].endswith(" | team: 30 synced (0 shown)")
+
+
+def test_session_start_payload_status_suffix_reads_one_cache_snapshot(tmp_repo, monkeypatch):
+    # Before session_team_section existed, the text/count/deferred-count each reloaded the
+    # team cache independently (format_team_section, the raw count, and
+    # count_deferred_architecture) - a concurrent refresh landing between those reads could
+    # desync the status suffix from what `context` actually rendered. Assert the cache is
+    # only ever loaded twice for the whole call: once for the shared snapshot
+    # (session_team_section) and once more inside _record_render's own documented fresh
+    # reload-before-write (which must stay independent - see its docstring) - never once per
+    # metric.
+    decisions = [
+        {"id": f"arch{i}", "type": "architecture", "content": f"architecture rule {i}",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"}
+        for i in range(5)
+    ]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+
+    calls = []
+    real_load_cache = team_context._load_cache
+
+    def counting_load_cache(repo_path):
+        calls.append(repo_path)
+        return real_load_cache(repo_path)
+
+    monkeypatch.setattr(team_context, "_load_cache", counting_load_cache)
+    payload = store.session_start_payload(tmp_repo)
+    assert "| team: 5 synced" in payload["status"]
+    assert len(calls) == 2
+
+
 def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
     # No local decisions, but a team cache exists — a fresh clone should still see team.
-    _seed_team(tmp_repo, "Team rule survives fresh clone")
+    # Non-architecture type: architecture is deferred at SessionStart (see below).
+    _seed_team(tmp_repo, "Team rule survives fresh clone", rtype="constraint")
     ctx = store.session_start_payload(tmp_repo)["context"]
     assert "## Team context" in ctx
     assert "Team rule survives fresh clone" in ctx
@@ -786,7 +962,8 @@ def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
 
 def test_get_session_start_context_envelope_includes_team(tmp_repo):
     # Every adapter renders team at session start through this ONE builder.
-    _seed_team(tmp_repo, "Team via Claude envelope")
+    # Non-architecture type: architecture is deferred at SessionStart (see below).
+    _seed_team(tmp_repo, "Team via Claude envelope", rtype="constraint")
     blob = json.dumps(store.get_session_start_context(tmp_repo))
     assert "Team via Claude envelope" in blob
 
@@ -805,10 +982,57 @@ def test_session_start_payload_resume_with_decisions_suppresses_team(tmp_repo):
 def test_session_start_payload_resume_fresh_clone_shows_team(tmp_repo):
     # Resume with NO local decisions (fresh clone): local mining context is non-empty, so
     # team still surfaces — the resume-suppression only applies to the empty-context path.
-    _seed_team(tmp_repo, "Team rule on fresh resume")
+    # Non-architecture type: architecture is deferred at SessionStart (see below).
+    _seed_team(tmp_repo, "Team rule on fresh resume", rtype="constraint")
     ctx = store.session_start_payload(tmp_repo, source="resume")["context"]
     assert "## Team context" in ctx
     assert "Team rule on fresh resume" in ctx
+
+
+def test_session_start_payload_defers_team_architecture_shows_rest(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "arch0001", "type": "architecture", "content": "Team picked Postgres over MySQL",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+        {"id": "cons0001", "type": "constraint", "content": "Team requires 2 reviewers",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+    ]})
+    ctx = store.session_start_payload(tmp_repo)["context"]
+    assert "Team requires 2 reviewers" in ctx
+    assert "Team picked Postgres over MySQL" not in ctx
+    assert "1 team architecture decision" in ctx
+    assert 'get_context(entry_type="architecture")' in ctx
+
+
+def test_get_context_entry_type_architecture_bypasses_team_deferral(tmp_repo):
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
+        {"id": "arch0002", "type": "architecture", "content": "Team picked Postgres over MySQL",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+        {"id": "cons0002", "type": "constraint", "content": "Team requires 2 reviewers",
+         "rationale": None, "repo": None, "agent": None, "scope": "team"},
+    ]})
+    result = store.get_context(tmp_repo, entry_type="architecture")
+    assert "Team picked Postgres over MySQL" in result
+
+
+def test_get_context_entry_type_architecture_limit_overrides_team_cap(tmp_repo):
+    # 30 non-ratifying architecture rows > _TEAM_DISPLAY (25). This is the exact call the
+    # SessionStart deferred-count pointer tells the model to make ("Call
+    # get_context(entry_type=\"architecture\") for full content") - it must be able to
+    # actually reach every row via limit=, not silently truncate at the generic team cap.
+    decisions = [{"id": f"arch{i:05d}", "type": "architecture",
+                  "content": f"distinct decision number {i}", "rationale": None,
+                  "repo": None, "agent": None, "scope": "team"} for i in range(30)]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+
+    default = store.get_context(tmp_repo, entry_type="architecture")
+    default_rows = [ln for ln in default.splitlines() if ln.startswith("- [scope=team]")]
+    assert len(default_rows) == team_context._TEAM_DISPLAY
+    assert "showing 25 of 30 team rows" in default
+
+    full = store.get_context(tmp_repo, entry_type="architecture", limit=30)
+    full_rows = [ln for ln in full.splitlines() if ln.startswith("- [scope=team]")]
+    assert len(full_rows) == 30
+    assert "showing" not in full
 
 
 # ── Option A seam: neutral refresh / poll_for_injection ──────────────────────────
@@ -954,3 +1178,27 @@ def test_team_poll_threads_consumer(monkeypatch):
                         lambda rp, consumer="claude": seen.setdefault("consumer", consumer) or [])
     claude.team_poll("/repo", "{}", "codex")
     assert seen["consumer"] == "codex"
+
+
+def test_team_poll_defers_architecture_shows_rest(monkeypatch):
+    from contexer.adapters import claude
+    monkeypatch.setattr(team_context, "poll_for_injection", lambda rp, consumer="claude": [
+        {"id": "a1", "content": "Team picked Postgres over MySQL", "type": "architecture"},
+        {"id": "c1", "content": "New team rule", "type": "constraint"},
+    ])
+    out = claude.team_poll("/repo", "{}")
+    assert "New team rule" in out
+    assert "Team picked Postgres over MySQL" not in out
+    assert "1 team architecture decision" in out
+    assert "get_context(entry_type=" in out and "architecture" in out
+
+
+def test_team_poll_all_architecture_still_injects_deferred_line(monkeypatch):
+    from contexer.adapters import claude
+    monkeypatch.setattr(team_context, "poll_for_injection", lambda rp, consumer="claude": [
+        {"id": "a1", "content": "Team picked Postgres over MySQL", "type": "architecture"},
+    ])
+    out = claude.team_poll("/repo", "{}")
+    assert out != "{}"
+    assert "Team picked Postgres over MySQL" not in out
+    assert "1 team architecture decision" in out

@@ -4285,6 +4285,14 @@ class TestTitleDisplay:
         assert long_body not in lines[idx]          # bullet line has the truncated title, not the full body
         assert lines[idx + 1] == f"    {long_body}"  # full body on the next, indented line
 
+    def test_get_context_tags_local_decisions_scope_personal(self, tmp_repo):
+        # Symmetric with team rows' "[scope=team]" tag, so provenance is unambiguous when
+        # a personal and a team decision on the same topic both appear in one get_context call.
+        store.update_decision(tmp_repo, "Use postgres for storage", "s1", subtype="architecture")
+        out = store.get_context(tmp_repo)
+        head = next(l for l in out.splitlines() if "Use postgres for storage" in l)
+        assert head.lstrip().startswith("- [scope=personal] [")
+
 
 # ── secret redaction on the EGRESS path only (share projection + preview) ─────
 # Capture is deliberately NOT redacted — the local store stays a faithful record; redaction
