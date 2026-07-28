@@ -1003,7 +1003,7 @@ def test_cli_share_picker_cancel_on_keyboard_interrupt(monkeypatch, capsys):
 
 
 def test_cli_share_picker_all_on_single_page_returns_shown_ids(monkeypatch, capsys):
-    # `all` with <= _FILTERED_DISPLAY shareable decisions shares exactly the shown set.
+    # `all` with <= _SHARE_PAGE shareable decisions shares exactly the shown set.
     from contexer import cli
     _three_shareable(monkeypatch)
     prompts = []
@@ -1026,19 +1026,19 @@ def _many_shareable(monkeypatch, n):
 
 
 def test_cli_share_picker_pages_and_selects_from_second_page(monkeypatch, capsys):
-    # >25 shareable decisions: 'm' reveals the next page, numbering stays continuous, and
-    # a page-2 number (26) resolves to the right decision.
+    # >_SHARE_PAGE shareable decisions: 'm' reveals the next page, numbering stays continuous,
+    # and a page-2 number (11) resolves to the right decision.
     from contexer import cli
     items = _many_shareable(monkeypatch, 30)
     prompts = []
-    inputs = iter(["m", "26"])
+    inputs = iter(["m", "11"])
     monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), next(inputs))[1])
     got = {}
     monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
     cli.share_cmd([])
-    assert "all (25)" in prompts[0] and "m=more" in prompts[0]  # first prompt: page 1 only
-    assert "all (30)" in prompts[1] and "m=more" not in prompts[1]  # after 'm': fully loaded
-    assert got["ids"] == [items[25]["id"]]  # 26th item (0-indexed 25)
+    assert "all (10)" in prompts[0] and "m=more" in prompts[0]   # first prompt: page 1 only
+    assert "all (20)" in prompts[1] and "m=more" in prompts[1]   # after 'm': two pages loaded
+    assert got["ids"] == [items[10]["id"]]  # 11th item (0-indexed 10)
 
 
 def test_cli_share_picker_all_after_paging_returns_loaded_set(monkeypatch, capsys):
@@ -1051,8 +1051,8 @@ def test_cli_share_picker_all_after_paging_returns_loaded_set(monkeypatch, capsy
     got = {}
     monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
     cli.share_cmd([])
-    assert got["ids"] == [it["id"] for it in items]  # all 30, loaded across both pages
-    assert len(got["ids"]) == 30
+    assert got["ids"] == [it["id"] for it in items[:20]]  # two pages loaded, not all 30
+    assert len(got["ids"]) == 20
 
 
 def test_cli_share_picker_first_page_hides_m_and_unloaded_count(monkeypatch, capsys):
@@ -1065,10 +1065,101 @@ def test_cli_share_picker_first_page_hides_m_and_unloaded_count(monkeypatch, cap
     monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
     cli.share_cmd([])
     out = capsys.readouterr().out
-    assert "all (25)" in prompts[0]
+    assert "all (10)" in prompts[0]
     assert "m=more" in prompts[0]
-    assert "…and 5 more" in out
+    assert "…and 20 more" in out
     assert "Cancelled" in out  # 26 wasn't a valid selection on page 1 -> nothing picked
+
+
+def test_cli_share_picker_page_size_is_ten(monkeypatch, capsys):
+    # The picker pages at _SHARE_PAGE (10), NOT _FILTERED_DISPLAY (the agent-context token
+    # budget) - the two are independent knobs that merely started at the same number.
+    from contexer import cli
+    _many_shareable(monkeypatch, 30)
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert store._SHARE_PAGE == 10
+    assert out.count("id:    ") == 10  # exactly one page of blocks rendered
+
+
+class TestParseSelection:
+    """`_parse_selection` — single numbers and inclusive ranges, order preserved, deduped."""
+
+    def test_single_numbers(self):
+        from contexer import cli
+        assert cli._parse_selection("1,3", 10) == ([1, 3], [])
+
+    def test_range_expands_inclusive(self):
+        from contexer import cli
+        assert cli._parse_selection("1-4", 10) == ([1, 2, 3, 4], [])
+
+    def test_mixed_numbers_and_ranges_keep_typed_order(self):
+        from contexer import cli
+        assert cli._parse_selection("5,1-3,9", 10) == ([5, 1, 2, 3, 9], [])
+
+    def test_descending_range_reads_the_same(self):
+        from contexer import cli
+        assert cli._parse_selection("4-1", 10) == ([1, 2, 3, 4], [])
+
+    def test_overlapping_selections_dedupe(self):
+        from contexer import cli
+        assert cli._parse_selection("1-3,2,3-4", 10) == ([1, 2, 3, 4], [])
+
+    def test_range_past_the_end_is_clamped_and_reported(self):
+        from contexer import cli
+        rows, ignored = cli._parse_selection("1-20", 10)
+        assert rows == list(range(1, 11))
+        assert ignored == ["1-20 (clamped to 1-10)"]
+
+    def test_range_wholly_outside_window_is_ignored(self):
+        from contexer import cli
+        assert cli._parse_selection("15-20", 10) == ([], ["15-20"])
+
+    def test_junk_and_negatives_are_ignored_not_selected(self):
+        from contexer import cli
+        # "-3" must not read as row 3: a leading dash is a malformed range, not a number.
+        assert cli._parse_selection("xyz,-3,0,99", 10) == ([], ["xyz", "-3", "0", "99"])
+
+    def test_whitespace_tolerated(self):
+        from contexer import cli
+        assert cli._parse_selection(" 1 - 3 , 5 ", 10) == ([1, 2, 3, 5], [])
+
+
+def test_cli_share_picker_accepts_a_range(monkeypatch, capsys):
+    # End-to-end: "1-4" in the picker pushes exactly the first four decisions.
+    from contexer import cli
+    items = _many_shareable(monkeypatch, 12)
+    monkeypatch.setattr("builtins.input", lambda *a: "1-4")
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    assert got["ids"] == [it["id"] for it in items[:4]]
+
+
+def test_cli_share_picker_reports_clamped_range_before_pushing(monkeypatch, capsys):
+    # A range past the loaded page still pushes what it can, but says what it dropped -
+    # the push is outward, so the developer must not learn the real count only afterwards.
+    from contexer import cli
+    items = _many_shareable(monkeypatch, 30)
+    monkeypatch.setattr("builtins.input", lambda *a: "1-25")
+    got = {}
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert got["ids"] == [it["id"] for it in items[:10]]
+    assert "Ignored: 1-25 (clamped to 1-10)" in out
+
+
+def test_cli_share_picker_quit_is_not_reported_as_ignored(monkeypatch, capsys):
+    # 'q' is a documented key, not a malformed token - quitting must stay silent.
+    from contexer import cli
+    _many_shareable(monkeypatch, 12)
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+    cli.share_cmd([])
+    out = capsys.readouterr().out
+    assert "Ignored" not in out
+    assert "Cancelled" in out
 
 
 def test_cli_share_nothing_to_share_no_false_cancel(monkeypatch, capsys):

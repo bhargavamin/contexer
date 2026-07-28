@@ -548,12 +548,49 @@ def share_cmd(rest: list | None = None) -> None:
         print(share.share(repo, ids[0] if ids else "", profile=profile))
 
 
+def _parse_selection(raw: str, loaded: int) -> tuple[list[int], list[str]]:
+    """Parse a picker answer into 1-based row numbers, in the order typed, deduped.
+
+    Accepts single numbers and inclusive ranges, mixed freely: `1,3,5-8`. A descending range
+    (`8-5`) reads the same as `5-8` — either way the developer meant those four rows. A range
+    that runs past the last loaded row is CLAMPED to it rather than thrown away, since with
+    paging `1-20` on a 10-row page is a natural way to say "everything I can see"; the clamped
+    part comes back as a note so the caller can say what it didn't take. Returns
+    (row_numbers, ignored_tokens) — a token contributing nothing (a stray word, `-3`, a number
+    past the end) lands in `ignored_tokens` and never silently changes the selection."""
+    picked: list[int] = []
+    ignored: list[str] = []
+    for tok in raw.replace(" ", "").split(","):
+        if not tok:
+            continue
+        if "-" in tok:
+            lo_s, _, hi_s = tok.partition("-")
+            if not (lo_s.isdigit() and hi_s.isdigit()):
+                ignored.append(tok)
+                continue
+            lo, hi = sorted((int(lo_s), int(hi_s)))
+            lo, hi = max(lo, 1), min(hi, loaded)
+            if lo > hi:                      # wholly outside the loaded window
+                ignored.append(tok)
+                continue
+            if hi < max(int(lo_s), int(hi_s)):
+                ignored.append(f"{tok} (clamped to {lo}-{hi})")
+            picked.extend(range(lo, hi + 1))
+        elif tok.isdigit() and 1 <= int(tok) <= loaded:
+            picked.append(int(tok))
+        else:
+            ignored.append(tok)
+    seen: set[int] = set()
+    return [n for n in picked if not (n in seen or seen.add(n))], ignored
+
+
 def _pick_shareable(repo: str, profile) -> list:
-    """Interactive numbered multi-select of shareable decisions, paged `store._FILTERED_DISPLAY`
-    at a time. `m` loads the next page — numbering stays continuous, so e.g. `26` resolves once
-    page 2 is loaded; `all`'s count in the prompt label (`all (25)`, then `all (50)` after paging)
+    """Interactive numbered multi-select of shareable decisions, paged `store._SHARE_PAGE`
+    at a time. `m` loads the next page — numbering stays continuous, so e.g. `11` resolves once
+    page 2 is loaded; `all`'s count in the prompt label (`all (10)`, then `all (20)` after paging)
     makes explicit that it shares exactly the currently-loaded set, not the whole store — that's
-    what `contexer share --all` is for, and the two used to collide silently. Returns the chosen
+    what `contexer share --all` is for, and the two used to collide silently. Selections accept
+    ranges as well as single numbers (`1,3,5-8`) via `_parse_selection`. Returns the chosen
     ids ([] to cancel / nothing to share). Pure local read; no network until the caller pushes.
 
     DISPLAY ONLY: resorts a local copy so not-yet-shared decisions come first and already-shared
@@ -572,7 +609,7 @@ def _pick_shareable(repo: str, profile) -> list:
     print("\nShareable decisions — pushing sends them to your PERSONAL cloud.")
     print(f"{store._SHARE_SECRETS_HINT}:\n")
 
-    page = store._FILTERED_DISPLAY
+    page = store._SHARE_PAGE
     shown_from = 0
     loaded = min(page, len(items))
     while True:
@@ -581,10 +618,10 @@ def _pick_shareable(repo: str, profile) -> list:
                                           shared=(items[i].get("id") or "") in shared))
         remaining = len(items) - loaded
         if remaining:
-            print(f"  …and {remaining} more (share by id)")
+            print(f"  …and {remaining} more (m to load, or share by id)")
         shown_from = loaded
 
-        opts = f"e.g. 1,3 | all ({loaded})" + (" | m=more" if remaining else "") + " | q"
+        opts = f"e.g. 1,3,5-8 | all ({loaded})" + (" | m=more" if remaining else "") + " | q"
         try:
             raw = input(f"\nSelect to share [{opts}]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -595,11 +632,14 @@ def _pick_shareable(repo: str, profile) -> list:
             continue
         if raw == "all":
             return [it.get("id") or "" for it in items[:loaded]]
-        picked = []
-        for tok in raw.replace(" ", "").split(","):
-            if tok.isdigit() and 1 <= int(tok) <= loaded:
-                picked.append(items[int(tok) - 1].get("id") or "")
-        return picked
+        if raw in ("q", "quit", ""):
+            return []  # documented quit key - must not be reported as an ignored token
+        rows, ignored = _parse_selection(raw, loaded)
+        if ignored:
+            # Say what was dropped BEFORE returning: a clamped range still pushes, and a push
+            # is outward, so the developer must not learn about it only from the result count.
+            print(f"  Ignored: {', '.join(ignored)}")
+        return [items[n - 1].get("id") or "" for n in rows]
 
 
 def _pending_review_warning(projs: list) -> list[str]:

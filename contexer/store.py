@@ -1894,6 +1894,12 @@ def _share_item_line(proj: dict, maxlen: int = 0) -> str:
 
 _SHARE_BLOCK_LABEL_WIDTH = 7  # "title: " / "type:  " / "desc:  " / "id:    " all pad to this
 _SHARE_BLOCK_MIN_TEXT = 24    # floor for the text column, so a narrow `width` still renders
+# Rows per page in the interactive `contexer share` picker. Deliberately its own constant, NOT
+# _FILTERED_DISPLAY: that one is a TOKEN BUDGET for agent-facing context (get_context /
+# review_pending), while this is how much a human wants to read before choosing. They happened
+# to share the value 25; tying them together would let a context-budget tune silently resize
+# the picker. Each item renders as a multi-line block, so 10 keeps a page inside one screen.
+_SHARE_PAGE = 10
 
 
 def _share_item_block(proj: dict, index: int | None = None, width: int = 76, *,
