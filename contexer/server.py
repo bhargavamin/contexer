@@ -268,9 +268,13 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return json.dumps({"error": "repo path not detected"})
-    if apply:
-        return json.dumps(store.bootstrap_apply(resolved, SESSION_ID, insight), indent=2)
-    return json.dumps(store.bootstrap_scan(resolved, insight), indent=2)
+    result = (store.bootstrap_apply(resolved, SESSION_ID, insight) if apply
+              else store.bootstrap_scan(resolved, insight))
+    # Ask-shape rides the result, not the session-start injection: it is only usable when
+    # there are gaps to ask, and this is the one place the model reads them.
+    if result.get("gaps"):
+        result = {**result, "how_to_ask": store.GAP_ASK_GUIDE}
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()

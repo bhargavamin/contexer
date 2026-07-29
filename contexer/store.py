@@ -1392,6 +1392,36 @@ def _pending_review_flag(repo_path: str) -> Path:
     return STORE_DIR / f".pending_review_{_slug(repo_path)}"
 
 
+def _offer_flag(repo_path: str) -> Path:
+    return STORE_DIR / f".bootstrap_offered_{_slug(repo_path)}"
+
+
+def _arm_offer(repo_path: str) -> None:
+    """Record that the setup offer has gone out for this repo in this session. Fail-soft:
+    a flag-write error must degrade to the old always-offer behaviour, never raise."""
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        _offer_flag(repo_path).touch()
+    except OSError:
+        pass
+
+
+def _offer_already_made(repo_path: str) -> bool:
+    """True once the offer has been emitted for this repo in this session.
+
+    The offer instructs the model to treat a dismissed picker as skip and never re-ask, but
+    that promise could not hold: skipping stores no decision, so `if decisions` never trips
+    and the whole block was rebuilt on the next UserPromptSubmit and after every /compact —
+    re-summoning, since the picker landed, a blocking modal instead of a re-printed menu.
+    A non-resume, non-compact session start clears the flag, so a genuinely new session
+    still offers exactly once; `compact` deliberately does NOT clear it, because compaction
+    continues the same session in which the developer already answered."""
+    try:
+        return _offer_flag(repo_path).exists()
+    except OSError:
+        return False
+
+
 def _touch_pending_review(repo_path: str) -> None:
     """Drop the per-repo .pending_review flag — the next-prompt consumer (pending_review_nudge)
     reads it to nudge the developer to review pending decisions mid-session. Fail-soft: a
@@ -2282,50 +2312,119 @@ def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
     ]
 
 
+# The gap-question ask shape. Charged ONCE, on the bootstrap_context result, and only when
+# that result actually carries gaps (server.bootstrap_context attaches it as `how_to_ask`) —
+# never in _build_bootstrap_context, which is injected at every context-less session start,
+# again at the first UserPromptSubmit, and on post-compact, including the skip and STEP 0
+# paths where no gap is ever asked. Single source: `/bootstrap` (bootstrap_command.md) and the
+# docs point at this field rather than restating it, so the rule cannot drift between copies.
+GAP_ASK_GUIDE = (
+    "Ask these gaps ONE question at a time, never batched — each answer can remove later gaps"
+    " (a docs-only purpose answer drops the tests/CI/deploy ones). With an interactive"
+    " multiple-choice tool (Claude Code: AskUserQuestion), render each gap as one question:"
+    " the gap's own `question` is the question text; header = a short topic word (Purpose,"
+    " Tests, CI, Deploy, Cloud), max 12 characters; last option = \"Skip this one\"."
+    " Offer a \"Correct\" option (label \"Correct\", description = the gap's `assumption`) ONLY"
+    " when that assumption actually answers the gap's question — most scan observations do"
+    " ('No CI/CD config found in this repo' answers 'Is there a build or deploy pipeline?')."
+    " When it does not — the goal gap's assumption is the repo's inferred PURPOSE, which says"
+    " nothing about what this user plans to do here — drop that option and ask the question"
+    " openly; never present an unrelated statement as the confirming answer."
+    " In between, add at most two options ONLY if the gap's `hint` names distinct candidate"
+    " answers; a hint that restates the question, or that lists one answer's parts"
+    " ('e.g. GDPR, PCI-DSS, SOC2, HIPAA' is a single answer), yields none and the question"
+    " stands complete without them. Split candidates on ';' or ',' after dropping the leading"
+    " 'e.g.', a few words each. Never more than 4 options — free text arrives through the"
+    " tool's own \"Other\" choice. Without such a tool, print those same options numbered and"
+    " accept the number or a typed answer."
+    " Store each answer with update_context using the gap's `subtype`, as a sentence that"
+    " ANSWERS THE QUESTION, never the assumption's own wording — \"Correct\" on 'Is automated"
+    " testing in scope?' stores 'No automated testing in scope.', not the observation."
+    " A candidate or free-text answer stores that answer; \"Skip this one\" stores nothing and"
+    " moves to the next gap. Plain sentences, max 15 words, no em dashes."
+)
+
+
 def _build_bootstrap_context(repo_path: str) -> list[str]:
     level, decisive = _cached_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
 
+    # Every variant is NUMBERED and capped at FOUR options. The cap is the interactive
+    # picker's: Claude Code's AskUserQuestion takes at most 4 options (plus its own free-text
+    # "Other"), so a 5-row menu could not be rendered as a picker at all. Numbers are purely
+    # additive — the keywords stay valid, since a text-mode reply and the picker's "Other"
+    # both arrive as words. 'some' is the row that gave way (see the ambiguous variant).
     if decisive and level == "high":
         # commits by this user found — don't ask how well they know their own repo
         offer = [
-            f"  \"Contexer: no project context stored for {label}."
+            f"  Contexer: no project context stored for {label}."
             " How should I set up context for future sessions?",
-            "   · quick — 1 question (what does this repo do?)",
-            "   · full — guided setup, a few questions",
-            "   · skip — not now",
-            "   (reply scan if you're actually new to this repo)\"",
+            "   1. quick — 1 question (what does this repo do?)",
+            "   2. full — guided setup, a few questions",
+            "   3. skip — not now",
+            "   4. scan — I'm actually new to this repo (scan code and docs, 1 short question)",
         ]
-        replies = "quick / full / skip (or scan)"
+        replies = "1-4, or quick / full / skip / scan"
     elif decisive and level == "low":
         # state the evidence, never the conclusion — detection can be wrong
         offer = [
-            f"  \"Contexer: no project context stored for {label}."
+            f"  Contexer: no project context stored for {label}."
             " No commits from your git email found here, so I'd scan the code and docs"
             " instead of asking questions you may not be able to answer.",
-            "   · scan — go ahead (no questions)",
-            "   · quick / full — I actually know this repo (quick: 1 question, full: guided setup)",
-            "   · skip — not now\"",
+            "   1. scan — go ahead (scan code and docs, 1 short question)",
+            "   2. quick — I actually know this repo (1 question)",
+            "   3. full — I actually know this repo (guided setup)",
+            "   4. skip — not now",
         ]
-        replies = "scan / quick / full / skip"
+        replies = "1-4, or scan / quick / full / skip"
     else:
-        # ambiguous signals — ask familiarity directly
+        # ambiguous signals — ask familiarity directly. 'some' has no row here: five options
+        # exceed the picker cap, and scan covers "didn't build it" without a wrong answer
+        # (it asks nothing the user can't answer). Typed, 'some' still maps to medium.
         suggestion = (
-            ["   (a few commits from your git email found — 'some' is likely right)"]
+            ["   (a few commits from your git email found — if you work with this repo but"
+             " didn't build it, reply 'some')"]
             if level == "medium" else []
         )
         offer = [
-            f"  \"Contexer: no project context stored for {label}."
+            f"  Contexer: no project context stored for {label}."
             " How well do you know this repo?",
-            "   · quick — I wrote or maintain it (1 question: what does this repo do?)",
-            "   · full — I wrote or maintain it (guided setup, a few questions)",
-            "   · some — I work with it but didn't build it",
-            "   · scan — first time seeing it: scan code and docs, no questions",
-            "   · skip — not now\"",
+            "   1. quick — I wrote or maintain it (1 question: what does this repo do?)",
+            "   2. full — I wrote or maintain it (guided setup, a few questions)",
+            "   3. scan — I didn't build it, or it's my first time: scan code and docs,"
+            " then up to 2 short questions",
+            "   4. skip — not now",
             *suggestion,
         ]
-        replies = "quick / full / some / scan / skip"
+        replies = ("1-4, or quick / full / scan / skip"
+                   " (or 'some' if you work with it but didn't build it)")
+
+    # Option 1 differs per variant, so a bare "yes" / "go ahead" cannot mean a fixed keyword:
+    # in the low variant the proposal on the table is scan, and routing that affirmative to
+    # quick (insight='high') would start the author interview the low variant exists to avoid.
+    first_option = offer[1].split(".", 1)[1].split("—")[0].strip()
+    # ...and in the ambiguous variant it cannot mean option 1 either. There the question is
+    # "How well do you know this repo?", whose option 1 asserts "I wrote or maintain it" —
+    # an authorship claim a bare "yes" never makes, in the one variant that exists precisely
+    # because the git signal could not establish authorship. Resolving it to quick would
+    # route a newcomer to insight='high', which drops the goal gap they CAN answer and asks
+    # only the purpose question they cannot. So: don't guess, ask which one.
+    affirmative = (
+        f"A bare 'yes' or 'go ahead' means option 1 — here that is {first_option},"
+        " not any other mode."
+        if decisive else
+        "A bare 'yes' or 'go ahead' is NOT an answer here — this question asks how well they"
+        " know the repo, and option 1 claims they wrote or maintain it. Never infer authorship"
+        " from an affirmative: ask which of the four they mean. If they only say they're new"
+        " to the repo, take scan."
+    )
+    # Who reaches scan differs too. In the low variant the evidence says the user has no
+    # commits here, so scan means "don't quiz me" (insight='low', one goal question). In the
+    # ambiguous variant scan is also the row a developer picks for "I work with it but didn't
+    # build it" — 'some' has no row of its own — and insight='low' would silently drop the
+    # purpose gap (min_insight='medium'), losing exactly the answer that user CAN give.
+    scan_is_medium = not (decisive and level in {"high", "low"})
 
     # A question about the repo asked as the first prompt ("what is this repo doing?",
     # "summarize this repo") must be ANSWERED, not met with a menu that mirrors the question
@@ -2348,21 +2447,35 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         f"No project context stored for {repo_path}.",
         "CRITICAL INSTRUCTION — read before writing a single word:",
         *newbie_exception,
-        "Your ENTIRE response must be ONLY the offer block below. No task work. No file reads."
-        " No acknowledgment of any prior request. No explanation. Just the offer, then stop.",
+        "Ask the offer as an interactive multiple-choice question if you have a tool for that"
+        " (Claude Code: AskUserQuestion) — ONE question, header \"Setup\", one choice per"
+        " numbered option below in the same order (label = the keyword, description = the text"
+        " after the dash), and no options of your own. Make no other tool call and do no other"
+        " work in that turn. The answer comes back to you within the SAME turn, so do not end"
+        " the turn on the question — run the matching handler below as soon as it arrives."
+        " Without such a tool, print the numbered list verbatim as plain text, end your turn"
+        " there, and run the handler when the user's next message answers it.",
+        "Your ENTIRE response must be ONLY the offer block below — as one multiple-choice"
+        " question, or as the text list. No task work. No file reads. No acknowledgment of any"
+        " prior request. No explanation. Just the offer, then stop.",
         *offer,
-        "Output the offer. Then stop completely. Do NOT call bootstrap_context yet."
-        f" Do NOT start the user's task. Wait for them to reply {replies}.",
+        "Output the offer and nothing else. Do NOT call bootstrap_context before you have their"
+        " answer, and do NOT start the user's task. Their reply is one of — "
+        f"{replies}. In the picker that answer lands in this same turn: act on it immediately."
+        " In plain text your turn ends with the list and their next message is the answer.",
+        "A numeric reply means the option at that position in the offer above; the keyword"
+        f" itself means the same thing, typed or picked as free text. {affirmative}"
+        " If the user dismisses or cancels the question, treat that as skip and never re-ask.",
         "Once the user replies:",
-        "If quick (or yes) → call bootstrap_context with insight='high'. It scans the codebase and stores"
+        "If quick → call bootstrap_context with insight='high'. It scans the codebase and stores"
         " detected facts and measured conventions automatically — do NOT re-store them. Report the"
         " stored/pending counts in one line, e.g. 'Contexer: stored 6, 2 pending review.' Ask ONLY the"
         " first gap question (purpose); store the answer with update_context using the gap's subtype."
         " Stop — do not ask more.",
         "If full (guided) → call bootstrap_context with insight='high'. Detected facts and measured"
         " conventions are stored automatically — do NOT re-store them. Report the stored/pending counts"
-        " in one line. Then ask each remaining gap question one at a time: lead with the gap's"
-        " assumption and ask \"Correct?\". After each answer, re-evaluate remaining gaps — if the"
+        " in one line. Then ask each remaining gap question one at a time, in the shape described"
+        " below. After each answer, re-evaluate remaining gaps — if the"
         " purpose answer reveals a docs-only, portfolio, personal, or learning repo, skip"
         " tests/CI/deploy/compliance/exclusion gaps. Store each answer as a separate update_context"
         " call using the gap's subtype. Write each stored entry as a single plain sentence, max 15"
@@ -2373,12 +2486,19 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " re-store them. Report the stored/pending counts in one line. Ask the returned gap questions"
         " one at a time (purpose and the user's goal) and store each answer. Same sentence style:"
         " plain, max 15 words.",
-        "If scan (first time seeing this repo) → call bootstrap_context with insight='low'."
-        " The user cannot answer questions about this repo's history or conventions — do NOT quiz them."
-        " Detected facts and measured conventions are stored automatically — do NOT re-store them."
-        " Report the stored/pending counts in one line. Ask only the single gap question returned"
-        " (what the user plans to do here) and store the answer. Same sentence style: plain, max 15"
-        " words.",
+        ("If scan (didn't build it, or first time here) → call bootstrap_context with"
+         " insight='medium'. That row covers BOTH a developer who works with this repo without"
+         " having built it and a genuine first-timer, so use 'medium', not 'low': it returns only"
+         " the two gaps either of them can attempt (what they plan to do here, and what the repo"
+         " does). If they say they don't know what the repo does, drop that gap instead of"
+         " pressing. Do NOT quiz them on this repo's history or conventions."
+         if scan_is_medium else
+         "If scan (first time seeing this repo) → call bootstrap_context with insight='low'."
+         " The user cannot answer questions about this repo's history or conventions — do NOT"
+         " quiz them. Ask only the single gap question returned (what the user plans to do here).")
+        + " Detected facts and measured conventions are stored automatically — do NOT re-store"
+          " them. Report the stored/pending counts in one line. Store each answer. Same sentence"
+          " style: plain, max 15 words.",
         "If no or skip → proceed with their original request directly, do not mention bootstrap again.",
         "After any handler's tool call: if the result shows pending > 0, mention once that"
         " measured-but-unratified conventions await review — say 'run `contexer review` when"
@@ -2388,7 +2508,11 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " answer their question with your own summary, then ask 'Did I get that right —"
         " anything to correct?' and store the confirmed summary as the purpose.",
         "For every gap question, lead with its assumption and ask the user to confirm or"
-        " correct it — never ask open-ended questions the scan can already half-answer.",
+        " correct it — never ask open-ended questions the scan can already half-answer."
+        " bootstrap_context's result carries a `how_to_ask` field with the exact question shape"
+        " whenever it returns gaps; follow it then. It is deliberately NOT repeated here: this"
+        " block is injected on every context-less session start, including the skip path, where"
+        " gap-asking rules can never be used.",
         "After any path completes, answer the user's original message — never leave it hanging.",
     ]
 
@@ -2554,9 +2678,16 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         }
 
     resume_flag.unlink(missing_ok=True)
+    if source != "compact":
+        # A new session re-arms the offer; compaction continues the session in which the
+        # developer already answered it, so it must not resurrect a dismissed picker.
+        _offer_flag(repo_path).unlink(missing_ok=True)
     _gc_stale_session_files()
 
     if not decisions:
+        if source == "compact" and _offer_already_made(repo_path):
+            return {"status": "", "context": ""}
+        _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
         sys_parts = []
         if global_rules:
@@ -2763,11 +2894,17 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     if _is_newcomer_question(prompt):
         # Answer-first at EVERY insight level (deterministic match): a repo question is
         # answered, never met with a menu. The commit signal only tunes the phrasing.
+        # Not gated on the offer flag: this path shows no menu, it answers the question.
         lines = [
             "Contexer OVERRIDE — ignore any earlier bootstrap menu instructions for this turn.",
             *_newcomer_answer_block(label, level, decisive),
         ]
     else:
+        if _offer_already_made(repo_path):
+            # SessionStart (or an earlier prompt) already offered this session. Re-injecting
+            # would re-open the picker the developer just dismissed, one modal per prompt.
+            return {"status": "", "context": ""}
+        _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
     return {"status": "", "context": "\n".join(lines)}
 
@@ -2789,6 +2926,9 @@ def post_compact_payload(repo_path: str, session_id: str = "") -> dict:
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if not decisions:
+        if _offer_already_made(repo_path):
+            return {"status": "", "context": ""}
+        _arm_offer(repo_path)
         return {"status": "", "context": "\n".join(_build_bootstrap_context(repo_path))}
     context = get_context(repo_path)
     if session_id:
@@ -3152,7 +3292,9 @@ def _gc_stale_session_files() -> None:
     a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2)."""
     try:
         cutoff = time.time() - _WS_GC_AGE_SECONDS
-        for pattern in (".ws_*.json", ".retrieval_*.jsonl"):
+        # .bootstrap_offered_* is normally cleared by its own repo's next session start;
+        # this catches flags for repos that are never opened again, so they don't accumulate.
+        for pattern in (".ws_*.json", ".retrieval_*.jsonl", ".bootstrap_offered_*"):
             for p in STORE_DIR.glob(pattern):
                 try:
                     if p.stat().st_mtime < cutoff:
