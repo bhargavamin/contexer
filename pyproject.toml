@@ -20,7 +20,13 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.9.4",
+    # Upper bound is load-bearing, not caution: mcp 2.0.0 removed `mcp.server.fastmcp`
+    # (FastMCP moved to its own `fastmcp` distribution and mcp 2.x pulls `mcp-types`),
+    # so server.py's import dies at startup. Unbounded, a fresh `uv tool install` /
+    # `pip install contexer` resolves 2.x and ships a server that cannot start, while
+    # this repo's uv.lock (mcp 1.27.2) keeps every dev command green — the break is
+    # invisible from source. Lift only together with the FastMCP 2.x migration.
+    "mcp>=1.9.4,<2",
 ]
 
 [project.scripts]
