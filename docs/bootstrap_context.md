@@ -1,6 +1,6 @@
 # Bootstrap
 
-Bootstrap initialises context for a repo that has no stored decisions. It scans the repo, surfaces detected facts and assumptions, and guides you through confirming each one — so future sessions start with a rich baseline instead of nothing.
+Bootstrap initialises context for a repo that has no stored decisions. It scans the repo, stores the facts and conventions it can measure, and asks you only about the gaps it cannot infer from code — so future sessions start with a rich baseline instead of nothing.
 
 ---
 
@@ -8,17 +8,17 @@ Bootstrap initialises context for a repo that has no stored decisions. It scans 
 
 Bootstrap runs automatically the first time you open Claude Code in a repo where no context exists. Claude will pause your original request, run bootstrap, and then answer your question once it is done.
 
-If you want to skip it and come back later, type `skip` when Claude presents the first item.
+If you want to skip it and come back later, choose `skip` when Claude presents the setup question.
 
 ---
 
 ## What happens during bootstrap
 
 1. Claude scans your repo — package files, config files, CI, Dockerfile, etc.
-2. For each detected fact (e.g. `Framework: Next.js`, `Package manager: pnpm`), Claude states it and asks: `Correct? yes / no / [your correction]`
-3. You reply. Claude stores the confirmed or corrected fact and moves to the next item.
-4. After facts, Claude asks a small set of questions about things it cannot infer from code — purpose, team conventions, deployment, constraints.
-5. Once all items are done, Claude answers your original question.
+2. Detected facts (e.g. `Framework: Next.js`, `Package manager: pnpm`) and measured conventions are stored automatically — there is no per-fact confirmation. Claude reports how many were stored in one line.
+3. Claude then asks the residual gap questions — the things it cannot infer from code: purpose, team conventions, deployment, constraints.
+4. Each gap is one interactive multiple-choice question (Claude Code: `AskUserQuestion`), asked one at a time: option 1 is `Correct`, with the scan's assumption as its description; at most two middle options offer concrete candidate answers, and only when the gap's hint actually names distinct candidates; the last option is `Skip this one`. Free text is always accepted through the tool's own `Other` choice. Assistants without such a tool print the same options numbered and accept the number or a typed answer.
+5. Once the gaps are done, Claude answers your original question.
 
 Bootstrap typically takes 2–5 minutes. The questions are conditional — you will only be asked things relevant to your stack.
 

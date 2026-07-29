@@ -47,11 +47,13 @@ Examples:
 
 Developers confirm or refine the answers. These approved decisions become the initial engineering knowledge for the repository.
 
-The offer adapts to how well you know the repo, judged from its git history:
+The offer is a numbered list of at most four options, asked as an interactive multiple-choice question where the host has one (Claude Code's `AskUserQuestion`) and as plain numbered text elsewhere. Answer with the number or with the keyword. Which options lead adapts to how well you know the repo, judged from its git history:
 
-- The repo has commits from you → pick **quick** (one question) or **full** (guided setup).
-- No commits from your git email (e.g. a freshly cloned project) → Contexer suggests **scan**: it reads the code and docs to propose decisions instead of asking questions you can't answer.
-- Can't tell → it simply asks how well you know the repo.
+- The repo has commits from you → **quick** (one question) and **full** (guided setup) lead, with **scan** kept for "I'm actually new to this repo" (scan plus one short question).
+- No commits from your git email (e.g. a freshly cloned project) → **scan** leads: it reads the code and docs to propose decisions, and asks one short question — what you plan to do here — instead of quizzing you on a repo you may not know.
+- Can't tell → it simply asks how well you know the repo, and its **scan** row ("I didn't build it, or it's my first time") asks up to two short questions: what you plan to do here, and what the repo does.
+
+The questions in guided setup are asked the same way: one at a time, each ending in an option to skip that one. A question leads with the scan's assumption to confirm only where that assumption actually answers it, and offers alternatives only where there are distinct ones to offer — otherwise it is simply asked openly.
 
 **Resumed sessions** (Claude Code's `--resume` / `--continue`) don't repeat any of this. The context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes the agent mine that conversation for decisions already made and store them, no questions asked.
 

@@ -100,13 +100,16 @@ Open Claude Code in any git repo. On your first message, Claude will ask:
 
 > "Contexer: no project context stored for this repo. How should I set up context for future sessions?"
 
-The offer adapts to how well you know the repo, judged from its git history — if you have commits there it leads with quick/full; if not, it suggests scanning instead of quizzing you; if it can't tell, it asks. Asking a newcomer question as your first message ("what is this repo doing?") skips the menu entirely: Contexer confirms it should scan, stores what it finds, and answers you. All options stay available either way:
+The offer is a numbered list of at most four options — asked as an interactive multiple-choice question when your assistant has one (Claude Code's `AskUserQuestion`), and as plain numbered text everywhere else. In the picker you select an option — or type the keyword through its `Other` field; in plain-text mode you reply with the number or the keyword.
+
+Which options lead adapts to how well you know the repo, judged from its git history — if you have commits there it leads with quick/full; if not, it leads with scan instead of quizzing you; if it can't tell, it asks. Asking a newcomer question as your first message ("what is this repo doing?") skips the menu entirely: Contexer confirms it should scan, stores what it finds, and answers you. All options stay available either way:
 
 - **Quick** — one question (what does this repo do?), answer stored, then Claude answers your original question.
-- **Full** — guided setup: Claude scans your stack, presents inferred facts one at a time (`Correct? yes / no / [correction]`), asks a few questions about intent and constraints, and stores the answers. Best if you develop or maintain the repo.
-- **Some** — you work with the repo but didn't build it: facts are stored from the scan, and you're only asked what the repo does and what you're working on.
-- **Scan** — you're seeing this repo for the first time: no quiz. Contexer scans the code and docs, stores what it finds, and asks only what you're planning to do here.
+- **Full** — guided setup: Claude scans your stack, then asks a few questions about intent and constraints one at a time. Each is its own multiple-choice question ending in `Skip this one`; `Correct` plus the scan's assumption appears only where that assumption actually answers the question, and likely alternatives only where there are distinct ones to offer — otherwise the question is simply asked openly. Free text is always accepted. Best if you develop or maintain the repo.
+- **Scan** — you didn't build this repo, or you're seeing it for the first time: nothing you can't answer. Contexer scans the code and docs, stores what it finds, and asks one short question — what you're planning to do here. In the "can't tell" variant that row also stands in for `some`, so it asks up to two: that, plus what the repo does.
 - **Skip** — Claude answers your original question immediately. Bootstrap is skipped.
+
+**Some** — you work with the repo but didn't build it — no longer has a numbered row of its own (four options is the picker's limit). Typing `some` still works, but in the variant where it would have appeared it is now identical to **scan**: the same scan, and the same two short questions (what the repo does, and what you're working on).
 
 To trigger bootstrap manually at any time:
 
