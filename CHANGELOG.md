@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.27.0](https://github.com/bhargavamin/contexer/compare/v0.26.1...v0.27.0) (2026-07-30)
+
+
+### Features
+
+* **bootstrap:** interactive picker setup offer, once per session ([539c7f7](https://github.com/bhargavamin/contexer/commit/539c7f7c6a1002b69e8f31c76251be3221af5086))
+* **bootstrap:** offer setup as an interactive picker, once per session ([87f1cc1](https://github.com/bhargavamin/contexer/commit/87f1cc1f3e0cd594acfefa81758e322c72c4369a))
+* **share:** page picker at 10, accept ranges like 1-4 ([ab52745](https://github.com/bhargavamin/contexer/commit/ab527459d6405fcbf3f300a9b4943e00a3fd65ed))
+* **share:** page picker at 10, accept ranges like 1-4 ([3ed18ab](https://github.com/bhargavamin/contexer/commit/3ed18abbec6b9f9b9a64214af1e8a1a70657c12d))
+
+
+### Bug Fixes
+
+* **deps:** cap mcp&lt;2 — 2.0.0 removed mcp.server.fastmcp ([f4e5b58](https://github.com/bhargavamin/contexer/commit/f4e5b585e19e2206c903d34ec2491c94a8046223))
+* **hooks:** never abort a hook on an unwritable ~/.contexer ([0d95fb0](https://github.com/bhargavamin/contexer/commit/0d95fb078d029c729b634078d51ad813f21893ec))
+* **hooks:** never abort a hook on an unwritable ~/.contexer ([8d30104](https://github.com/bhargavamin/contexer/commit/8d3010405f75ce0ab36e27d50a1de421cbf1edbc))
+
+
+### Documentation
+
+* **bootstrap:** describe the picker, scan's real question count ([66e3e64](https://github.com/bhargavamin/contexer/commit/66e3e64b3d7223aa3a17be86fb4b4cc52136babb))
+
 ## [0.26.1](https://github.com/bhargavamin/contexer/compare/v0.26.0...v0.26.1) (2026-07-26)
 
 
