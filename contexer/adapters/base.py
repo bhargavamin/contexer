@@ -78,7 +78,31 @@ def _hooks_of(grp) -> list:
 
 
 def _in_groups(groups: list, marker: str) -> bool:
+    """True when any hook in `groups` carries `marker`.
+
+    Matches against `str(hook_dict)` — the dict's *repr* — so it sees every field
+    (command, statusMessage, matcher, type) in one shot. The catch: a repr can escape
+    quotes. Precisely, repr delimits with `'` unless the string contains `'` and no `"`,
+    and escapes only the delimiter. So a `"`-bearing marker is always safe, while a
+    `'`-bearing marker breaks exactly when the command ALSO contains `"` — which every
+    real hook command does, being `py -c "..."`. That is the trap: `'codex'` matches
+    fine in a toy string and never matches in production, so a migration gate keyed on
+    it silently re-fires on every install forever. Don't reason it through per marker —
+    use `_in_commands` for any marker containing a quote."""
     return any(marker in str(h) for grp in groups for h in _hooks_of(grp))
+
+
+def _in_commands(groups: list, marker: str) -> bool:
+    """True when any hook's `command` string carries `marker`, matched against the raw
+    value rather than a repr. Quote-safe, unlike `_in_groups` — use it whenever the
+    marker contains `'` or `"` (e.g. a quoted argument that identifies one call site).
+
+    `str(… or "")` rather than a plain `.get("command", "")`: the default only applies
+    when the key is ABSENT, so a hand-edited config with `"command": null` (or a list, or
+    a number) would raise TypeError mid-install. `_hooks_of` is explicitly documented as
+    tolerating hand-edited shapes; this must not be the one place that isn't."""
+    return any(marker in str(h.get("command") or "")
+               for grp in groups for h in _hooks_of(grp) if isinstance(h, dict))
 
 
 def _filter_groups(groups: list, markers: list) -> list:

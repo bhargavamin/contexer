@@ -82,11 +82,51 @@ def set_session_repo(path: str) -> None:
     _SESSION_REPO = path if _is_sane_repo(path) else ""
 
 
+def anchor_repo(repo_path: str) -> bool:
+    """Best-effort write of the shared ~/.contexer/.current_repo pointer. Never raises.
+
+    Every adapter's session-start / per-prompt hook anchors the pointer here. It is
+    pure bookkeeping: `_resolve_repo` consults it only as a LAST resort (an explicit
+    repo_path and the per-process session binding both outrank it), so failing to
+    write it must never abort a hook. Under a sandboxed host the workspace can be
+    writable while `~/.contexer` is not (Codex's managed sandbox) — the write then
+    raises PermissionError, and before #152 that aborted SessionStart entirely, so
+    Contexer injected no rules or decisions at all over a file it did not need.
+    Sanity-checked first (never poison the pointer with a home/config dir).
+    Returns True only when the pointer was actually written."""
+    try:
+        if not _is_sane_repo(repo_path):
+            return False
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        # encoding pinned (never the locale default) so the pointer round-trips
+        # identically to _current_repo_path's read, on any host locale.
+        (STORE_DIR / ".current_repo").write_text(repo_path, encoding="utf-8")
+        return True
+    except Exception:
+        # Deliberately broad, and the sanity check is inside it: this runs on every
+        # adapter's hook path, where "never crash the host" outranks precision. OSError
+        # is the expected failure, but _is_sane_repo consults Path.home(), which raises
+        # RuntimeError with no HOME (the contract cursor._anchor_current_repo already
+        # had), and a repo path carrying non-UTF-8 filesystem bytes — surfaced as a
+        # surrogate escape, routine on Linux — makes write_text raise UnicodeEncodeError,
+        # a ValueError. Narrowing to OSError would reproduce #152 on those triggers.
+        return False
+
+
 def _current_repo_path() -> str:
     path = STORE_DIR / ".current_repo"
-    if path.exists():
-        val = path.read_text().strip()
-        return val if _is_sane_repo(val) else ""
+    try:
+        if path.exists():
+            val = path.read_text(encoding="utf-8").strip()
+            return val if _is_sane_repo(val) else ""
+    except Exception:
+        # Broad for the same reasons as anchor_repo, its write-side twin: OSError is the
+        # expected failure (unreadable pointer under a sandbox), but the shell hooks write
+        # this file with `printf` — raw bytes, no encoding contract — so a non-UTF-8
+        # pointer raises UnicodeDecodeError (a ValueError), and _is_sane_repo can raise
+        # RuntimeError via Path.home(). This sits in _resolve_repo, on EVERY store call:
+        # anything escaping here crashes the host far from the file that caused it.
+        pass
     return ""
 
 
@@ -116,7 +156,13 @@ def _slug(repo_path: str) -> str:
 
 
 def _store_path(repo_path: str) -> Path:
-    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    # Best-effort create: a reader only needs the path, and on a host where ~/.contexer
+    # can be neither created nor written (#152) raising here would crash the hook that
+    # merely wanted to LOAD context. Writers still surface the failure at their own write.
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    except OSError:
+        pass
     path = STORE_DIR / f"{_slug(repo_path)}.json"
     # Back-compat: migrate a pre-hash store file to the new name on first access so an
     # upgrade never silently orphans existing context. os.replace is atomic; if a
@@ -203,7 +249,13 @@ def _store_lock(slug: str):
 # ── Global store ───────────────────────────────────────────────────────────────
 
 def _global_path() -> Path:
-    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    # Best-effort create, exactly as _store_path: readers only need the path, and on a
+    # host where ~/.contexer can be neither created nor written (#152) raising here would
+    # crash a hook that merely wanted to load global rules. Writers still surface it.
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    except OSError:
+        pass
     return STORE_DIR / f"{GLOBAL_SLUG}.json"
 
 
@@ -2605,11 +2657,7 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         # The cwd fallback engaged (non-git project dir): anchor the shared pointer
         # here, exactly as the installed SessionStart hook does for git repos, so
         # bare MCP calls (no repo_path) in this session resolve to the same store.
-        try:
-            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-            (STORE_DIR / ".current_repo").write_text(resolved)
-        except OSError:
-            pass
+        anchor_repo(resolved)
     repo_path = resolved
     payload = _local_session_start_payload(repo_path, source, session_id)
     # text/count/deferred come from ONE team_context snapshot (see _team_section_with_counts)
@@ -2660,8 +2708,14 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                 "status": f"Contexer: session resumed — {_pl(len(decisions), 'decision')} already loaded in conversation",
                 "context": "",
             }
-        STORE_DIR.mkdir(exist_ok=True)
-        resume_flag.write_text(repo_path)
+        # Best-effort: the flag only silences a duplicate bootstrap offer on the first
+        # prompt. An unwritable ~/.contexer (sandboxed host, #152) must not cost the
+        # session its resume-mining instructions — the whole point of this branch.
+        try:
+            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            resume_flag.write_text(repo_path)
+        except OSError:
+            pass
         sys_parts = []
         if global_rules:
             sys_parts.append("## Global rules (apply to ALL repos):")
@@ -2677,11 +2731,18 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             "context": "\n".join(sys_parts),
         }
 
-    resume_flag.unlink(missing_ok=True)
-    if source != "compact":
-        # A new session re-arms the offer; compaction continues the session in which the
-        # developer already answered it, so it must not resurrect a dismissed picker.
-        _offer_flag(repo_path).unlink(missing_ok=True)
+    # Best-effort (#152): these are bookkeeping flags, so an unwritable ~/.contexer must
+    # not abort session start before it renders any context. Both unlinks share one guard
+    # because they fail together or not at all — unlink(missing_ok=True) only raises on a
+    # directory-permission problem, which applies equally to each.
+    try:
+        resume_flag.unlink(missing_ok=True)
+        if source != "compact":
+            # A new session re-arms the offer; compaction continues the session in which the
+            # developer already answered it, so it must not resurrect a dismissed picker.
+            _offer_flag(repo_path).unlink(missing_ok=True)
+    except OSError:
+        pass
     _gc_stale_session_files()
 
     if not decisions:

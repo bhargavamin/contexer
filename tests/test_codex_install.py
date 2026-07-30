@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer.adapters import codex
+from contexer.adapters import base, codex
 
 
 @pytest.fixture
@@ -295,6 +295,157 @@ class TestCodexInstall:
         log = codex.install(home)
         assert cfg.read_text() == "this is = = not valid toml [[["  # untouched
         assert any("not valid TOML" in line for line in log)
+
+
+class TestCodexBookkeepingWritesAreFailSoft:
+    """#152 was reported against Codex specifically: its managed sandbox leaves the
+    workspace writable while ~/.contexer may not be, so the SessionStart hook's
+    best-effort `.current_repo` write raised PermissionError and aborted the whole hook —
+    Contexer looked broken over a pointer file it did not need to read context."""
+
+    def _cmds(self, home: Path, event: str) -> list[str]:
+        return [h.get("command", "") for grp in _hooks(home)["hooks"][event]
+                for h in grp.get("hooks", [])]
+
+    def test_session_start_anchors_via_fail_soft_helper(self, home):
+        codex.install(home)
+        cmds = self._cmds(home, "SessionStart")
+        assert any("store.anchor_repo(repo)" in c for c in cmds)
+        assert not any(".current_repo').write_text" in c for c in cmds)
+
+    def test_post_tool_use_emits_its_json_even_if_touch_fails(self, home):
+        codex.install(home)
+        touch = next(c for c in self._cmds(home, "PostToolUse") if "touch" in c)
+        assert "touch ~/.contexer/.pending_capture 2>/dev/null; echo" in touch
+        assert "&&" not in touch
+
+    def test_anchor_hook_guards_the_pointer_write_and_the_flag_removal(self, home):
+        codex.install(home)
+        anchor = next(c for c in self._cmds(home, "UserPromptSubmit") if ".current_repo" in c)
+        assert "{ printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } 2>/dev/null || true" in anchor
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchor
+
+    def test_reinstall_replaces_the_unguarded_session_start_hook(self, home):
+        # Verbatim shape of the hook that failed in the report.
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('py -c "from contexer import store; from contexer.adapters import claude as _c; '
+               'import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); '
+               "store.STORE_DIR.mkdir(exist_ok=True); "
+               "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+               '_c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, '
+               'store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw))))" "$REPO"')
+        hooks_path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        cmds = self._cmds(home, "SessionStart")
+        assert not any(".current_repo').write_text" in c for c in cmds)
+        assert any("store.anchor_repo(repo)" in c for c in cmds)
+
+    def test_reinstall_replaces_the_unguarded_post_tool_use_hook(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit", "hooks": [{"type": "command",
+             "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]}]}}))
+        codex.install(home)
+        cmds = self._cmds(home, "PostToolUse")
+        assert not any("&&" in c for c in cmds if "touch" in c)
+        assert sum("touch ~/.contexer" in c for c in cmds) == 1, "must replace, not duplicate"
+
+    def test_reinstall_replaces_the_unguarded_anchor_hook(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); '
+               'if [ -n "$REPO" ]; then printf \'%s\' "$REPO" > ~/.contexer/.current_repo; fi; '
+               'FLAG="$HOME/.contexer/.pending_capture"; if [ -f "$FLAG" ]; then rm -f "$FLAG"; '
+               'echo \'{"x": "last turn settled"}\'; else echo \'{}\'; fi')
+        hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        anchors = [c for c in self._cmds(home, "UserPromptSubmit") if ".current_repo" in c]
+        assert len(anchors) == 1, "must replace, not duplicate"
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchors[0]
+
+    def test_reinstall_is_idempotent(self, home):
+        # Every migration gate must recognize its own output — otherwise install strips
+        # and re-adds hooks forever. This is the property that catches a gate keyed on a
+        # marker it can never match (see TestCodexQuotedMarkerGate).
+        codex.install(home)
+        before = _hooks(home)
+        codex.install(home)
+        assert _hooks(home) == before
+
+
+class TestCodexQuotedMarkerGate:
+    """The team-poll migration gate is keyed on the QUOTED marker `'codex'`. It used
+    `_in_groups`, which matches a dict *repr* — where the quotes come back escaped as
+    \\'codex\\' — so the gate never recognized the very hook it had just installed and
+    re-fired on every install, stripping and re-appending the group. Functionally
+    harmless (the tagged hook was always what ended up installed) but it meant no Codex
+    install was ever idempotent, and the same trap waits for any future quoted marker."""
+
+    def _ups_cmds(self, home: Path) -> list[str]:
+        return [h.get("command", "") for grp in _hooks(home)["hooks"]["UserPromptSubmit"]
+                for h in grp.get("hooks", [])]
+
+    def test_in_groups_cannot_match_a_quoted_marker(self):
+        # The root cause, pinned directly: this is why the gate needs _in_commands.
+        # Note the `"` in the command — that is what makes the bug bite. Python's repr
+        # only escapes `'` when it cannot use `"` as the delimiter, so a command with
+        # single quotes ALONE reprs them untouched and _in_groups appears to work. Every
+        # real hook command is `py -c "..."`, i.e. holds both quote kinds, which flips
+        # repr to `'`-delimited and escapes the marker out of existence.
+        def _grp(cmd):
+            return [{"hooks": [{"type": "command", "command": cmd}]}]
+
+        real = """py -c "print(team_poll(x, 'codex'))" "$REPO\""""
+        assert not base._in_groups(_grp(real), "'codex'"), "repr escaping — the bug"
+        assert base._in_commands(_grp(real), "'codex'"), "raw command match — the fix"
+        # Same marker, no double quote in the command: _in_groups happens to work, which
+        # is exactly why this went unnoticed. _in_commands is correct in both cases.
+        naive = "print(team_poll(x, 'codex'))"
+        assert base._in_groups(_grp(naive), "'codex'")
+        assert base._in_commands(_grp(naive), "'codex'")
+
+    def test_in_commands_tolerates_hand_edited_hook_shapes(self):
+        # _hooks_of is documented as tolerating hand-edited configs, and _in_groups did
+        # via str(h). _in_commands must not be the one place a foreign or hand-written
+        # group with a null/list command turns `contexer install` into a TypeError.
+        for bad in (None, [], 42, {"a": 1}):
+            groups = [{"hooks": [{"type": "command", "command": bad}]}]
+            assert base._in_commands(groups, "'codex'") is False
+        assert base._in_commands([{"hooks": [{"type": "command"}]}], "x") is False
+        assert base._in_commands([{"hooks": ["not-a-dict"]}], "x") is False
+
+    def test_in_commands_still_distinguishes_the_untagged_call(self):
+        # The quoting is load-bearing: a bare "codex" check would false-positive on any
+        # command merely mentioning codex (a path like /opt/codex-tools/bin), suppressing
+        # a migration that should run.
+        untagged = [{"hooks": [{"type": "command",
+                                "command": "/opt/codex-tools/py -c print(team_poll(x))"}]}]
+        assert not base._in_commands(untagged, "'codex'")
+
+    def test_team_poll_hook_is_stable_across_reinstalls(self, home):
+        codex.install(home)
+        before = self._ups_cmds(home)
+        codex.install(home)
+        assert self._ups_cmds(home) == before, "the gate must not reorder its own hook"
+
+    def test_untagged_team_poll_is_still_migrated(self, home):
+        # The gate must keep doing its actual job: a pre-consumer install called
+        # claude.team_poll with no consumer tag, so Claude and Codex sessions on one repo
+        # raced for a single delivery. That hook must still be replaced.
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('py -c "from contexer.adapters import claude; import sys; '
+               'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO"')
+        hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        polls = [c for c in self._ups_cmds(home) if "claude.team_poll" in c]
+        assert len(polls) == 1, "must replace, not duplicate"
+        assert "'codex'" in polls[0], "the replacement must carry the consumer tag"
 
 
 class TestCodexUninstall:

@@ -12,6 +12,7 @@ from contexer.adapters.base import (
     _bootstrap_command_text,
     _filter_groups,
     _hooks_of,
+    _in_commands,
     _in_groups,
     _load,
     _load_safe,
@@ -25,6 +26,18 @@ NAME = "claude"
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall
 # recognize and replace stale hooks (e.g. a dead from-source `uv run --directory`).
 _HOOK_SENTINEL = "contexer-managed-hook"
+
+# The `.pending_capture` touch, with its stderr silenced (#152). Doubles as the migration
+# fingerprint for that hook: the pre-#152 command used a bare `.pending_capture`, so an
+# installed hook lacking this exact substring is the old, sandbox-fragile form. Kept as one
+# constant so the generated command and the gate that replaces it can never drift apart.
+# Shared verbatim with the Codex adapter, which generates the same hook.
+_TOUCH_GUARD = ".pending_capture 2>/dev/null"
+
+# Likewise for the UserPromptSubmit anchor: the flag-clearing `rm` with stderr silenced is
+# unique to that hook's command and absent from the pre-#152 form, so it identifies an
+# anchor hook that still writes ~/.contexer unguarded. Also shared with the Codex adapter.
+_ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
 
 # Fingerprints of hooks the pre-CLI from-source installer (scripts/install.sh, June 2026)
 # wrote into a REPO's .claude/settings.json — before hooks went global (be12ecd). Modern
@@ -377,9 +390,11 @@ def install(home: Path) -> list[str]:
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; raw=sys.stdin.read(); store.STORE_DIR.mkdir(exist_ok=True); "
-        # Only record a sane repo — never poison the pointer with a config/home dir.
-        "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+        "repo=sys.argv[1]; raw=sys.stdin.read(); "
+        # Only record a sane repo — never poison the pointer with a config/home dir —
+        # and never let an unwritable ~/.contexer abort the hook (store.anchor_repo is
+        # sanity-checked AND fail-soft; see #152).
+        "store.anchor_repo(repo); "
         # Import any memory-tool facts before building context (crash-recovery net:
         # catches facts whose session ended without a clean SessionEnd flush).
         "_c.sync_memory(repo); "
@@ -418,12 +433,17 @@ def install(home: Path) -> list[str]:
     # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
     # a git work tree — the old `|| pwd` fallback could write a non-repo dir (e.g. ~/.claude),
     # poisoning the shared pointer so decisions landed in the wrong store file.
+    # Every ~/.contexer write here is best-effort (#152): on a host where the store dir is
+    # not writable the redirect/rm would otherwise fail mid-hook and swallow the reminder
+    # echo. The braces matter — `cmd > f 2>/dev/null` opens the redirect BEFORE stderr is
+    # silenced, so a failed open still leaks its error; `{ cmd > f; } 2>/dev/null` doesn't.
     anchor_cmd = (
         "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
-        "if [ -n \"$REPO\" ]; then printf '%s' \"$REPO\" > ~/.contexer/.current_repo; fi; "
+        "if [ -n \"$REPO\" ]; then { printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } "
+        "2>/dev/null || true; fi; "
         "FLAG=\"$HOME/.contexer/.pending_capture\"; "
         "if [ -f \"$FLAG\" ]; then "
-        "rm -f \"$FLAG\"; "
+        "rm -f \"$FLAG\" 2>/dev/null || true; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
         "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing. "
         "(1) NEW decisions that STUCK: call update_context with the full reasoning. "
@@ -495,12 +515,15 @@ def install(home: Path) -> list[str]:
     hooks = settings.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: old SessionStart hook didn't read the session source from stdin,
-    # predates memory-tool sync, or predates session-id threading (compact-source
-    # working-set rehydration); replace it so the current ss_code is installed.
+    # Migrate: old SessionStart hook didn't read the session source from stdin, predates
+    # memory-tool sync, predates session-id threading (compact-source working-set
+    # rehydration), or predates the fail-soft repo anchor (#152 — an unwritable
+    # ~/.contexer aborted the hook, injecting nothing); replace it so the current
+    # ss_code is installed.
     if _in_groups(ss, "get_session_start_context") and not (
             _in_groups(ss, "source_from_hook_stdin") and _in_groups(ss, "sync_memory")
-            and _in_groups(ss, "session_from_hook_stdin")):
+            and _in_groups(ss, "session_from_hook_stdin")
+            and _in_groups(ss, "anchor_repo")):
         ss = _filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):
@@ -521,9 +544,15 @@ def install(home: Path) -> list[str]:
     # latency + tokens and depended on model behavior for no functional gain (the anchor
     # already delivers the same reminder deterministically).
     put = hooks.setdefault("PostToolUse", [])
+    # Migrate: the pre-#152 form was `touch ... && echo '{}'` — an unwritable ~/.contexer
+    # made touch fail, so the `&&` swallowed the hook's required JSON output and the hook
+    # exited non-zero. `;` + silenced stderr: the flag is best-effort, the echo is not.
+    if _in_groups(put, ".pending_capture") and not _in_groups(put, _TOUCH_GUARD):
+        put = _filter_groups(put, [".pending_capture"])
+        hooks["PostToolUse"] = put
     if not _in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": f"touch ~/.contexer/.pending_capture && echo '{{}}' # {_HOOK_SENTINEL}"}]})
+            "command": f"touch ~/.contexer/{_TOUCH_GUARD}; echo '{{}}' # {_HOOK_SENTINEL}"}]})
     # Plan-approval capture: separate matcher on ExitPlanMode, injects the reminder directly.
     if not _in_groups(put, "plan approved"):
         put.append({"matcher": "ExitPlanMode", "hooks": [{"type": "command",
@@ -580,6 +609,15 @@ def install(home: Path) -> list[str]:
     # Migrate: replace the old capture-only anchor text with the reconciliation-framed one
     # (settle checkpoint: promote / revise / drop provisional decisions).
     if _in_groups(ups, "you wrote or edited files") and not _in_groups(ups, "last turn settled"):
+        ups = _filter_groups(ups, [".pending_capture"])
+        hooks["UserPromptSubmit"] = ups
+
+    # Migrate: an anchor hook predating #152 writes ~/.contexer unguarded, so on a host
+    # where that dir is not writable the redirect fails noisily and the flag is never
+    # cleared. Replace it with the fail-soft form.
+    # _in_commands for the guard: _ANCHOR_GUARD contains a quote, and the rule is
+    # "quoted marker -> match the raw command", not "reason about repr per marker".
+    if _in_groups(ups, ".pending_capture") and not _in_commands(ups, _ANCHOR_GUARD):
         ups = _filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
 

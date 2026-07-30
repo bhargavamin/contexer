@@ -400,6 +400,87 @@ class TestRepoPointerNotPoisoned:
         assert all("|| true" in c for c in git_cmds)
 
 
+class TestBookkeepingWritesAreFailSoft:
+    """#152: no generated hook may let a failed ~/.contexer write abort it. Under a
+    sandboxed host the workspace can be writable while ~/.contexer is not, and the old
+    unguarded writes turned that into "Contexer injected nothing at all"."""
+
+    def _cmds(self, home, event):
+        settings = json.loads((home / ".claude" / "settings.json").read_text())
+        return [h.get("command", "") for grp in settings["hooks"][event]
+                for h in grp.get("hooks", [])]
+
+    def test_session_start_anchors_via_fail_soft_helper(self, installed_home):
+        cmds = self._cmds(installed_home, "SessionStart")
+        assert any("store.anchor_repo(repo)" in c for c in cmds)
+        # The raw write is what raised PermissionError and killed the hook.
+        assert not any(".current_repo').write_text" in c for c in cmds)
+
+    def test_post_tool_use_emits_its_json_even_if_touch_fails(self, installed_home):
+        cmds = self._cmds(installed_home, "PostToolUse")
+        touch = next(c for c in cmds if "touch" in c)
+        # `;` not `&&`: the flag is best-effort, the JSON output is mandatory.
+        assert "touch ~/.contexer/.pending_capture 2>/dev/null; echo" in touch
+        assert "&&" not in touch
+
+    def test_anchor_hook_guards_the_pointer_write_and_the_flag_removal(self, installed_home):
+        anchor = next(c for c in self._cmds(installed_home, "UserPromptSubmit")
+                      if ".current_repo" in c)
+        # Braces, not a trailing `2>/dev/null`: the redirect is opened before stderr
+        # would be silenced, so a bare suffix still leaks the "Permission denied" error.
+        assert "{ printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } 2>/dev/null || true" in anchor
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchor
+
+    def test_reinstall_replaces_an_unguarded_session_start_hook(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        old = ('py -c "from contexer import store; from contexer.adapters import claude as _c; '
+               'import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); '
+               "store.STORE_DIR.mkdir(exist_ok=True); "
+               "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+               '_c.sync_memory(repo); _c.pull_team(repo); '
+               'print(json.dumps(store.get_session_start_context(repo, '
+               'store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw))))" "$REPO"')
+        settings_path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        install()
+        cmds = self._cmds(clean_home, "SessionStart")
+        assert not any(".current_repo').write_text" in c for c in cmds), \
+            "the sandbox-fragile SessionStart hook must not survive a reinstall"
+        assert any("store.anchor_repo(repo)" in c for c in cmds)
+
+    def test_reinstall_replaces_an_unguarded_post_tool_use_hook(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit", "hooks": [{"type": "command",
+             "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]}]}}))
+        install()
+        cmds = self._cmds(clean_home, "PostToolUse")
+        assert not any("&&" in c for c in cmds if "touch" in c)
+        assert sum("touch ~/.contexer" in c for c in cmds) == 1, "must replace, not duplicate"
+
+    def test_reinstall_replaces_an_unguarded_anchor_hook(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        old = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); '
+               'if [ -n "$REPO" ]; then printf \'%s\' "$REPO" > ~/.contexer/.current_repo; fi; '
+               'FLAG="$HOME/.contexer/.pending_capture"; if [ -f "$FLAG" ]; then rm -f "$FLAG"; '
+               'echo \'{"x": "last turn settled"}\'; else echo \'{}\'; fi')
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        install()
+        anchors = [c for c in self._cmds(clean_home, "UserPromptSubmit") if ".current_repo" in c]
+        assert len(anchors) == 1, "must replace, not duplicate"
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchors[0]
+
+    def test_reinstall_is_idempotent_for_the_guarded_hooks(self, installed_home):
+        before = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        install()
+        after = json.loads((installed_home / ".claude" / "settings.json").read_text())
+        assert after == before
+
+
 class TestTeamsRegistration:
     # The native contexer-teams remote-MCP entry is retired: team sync is the Python client
     # path (`contexer login` + pull/share/poll). Install never writes the entry and strips
