@@ -18,6 +18,7 @@ import tomllib
 from pathlib import Path
 
 from contexer.adapters import base
+from contexer.adapters import claude
 from contexer.store import _atomic_write
 
 NAME = "codex"
@@ -134,8 +135,11 @@ def install(home: Path) -> list[str]:
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; raw=sys.stdin.read(); store.STORE_DIR.mkdir(exist_ok=True); "
-        "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+        "repo=sys.argv[1]; raw=sys.stdin.read(); "
+        # Sanity-checked AND fail-soft (#152): under Codex's managed sandbox the workspace
+        # is writable but ~/.contexer may not be, and the old unguarded write raised
+        # PermissionError — aborting SessionStart over a pointer file it did not need.
+        "store.anchor_repo(repo); "
         # Refresh team context (Path B seam) before building context — fail-soft, so a sync
         # hiccup never breaks session start. session_start_payload then renders it (T1).
         "_c.pull_team(repo); "
@@ -154,12 +158,15 @@ def install(home: Path) -> list[str]:
         "raw=sys.stdin.read(); "
         "print(json.dumps(store.get_post_compact_context(sys.argv[1], store.session_from_hook_stdin(raw))))"
     )
+    # Every ~/.contexer write here is best-effort (#152) — see claude.py's anchor_cmd for
+    # why the redirect is wrapped in braces rather than trailing a bare `2>/dev/null`.
     anchor_cmd = (
         "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
-        "if [ -n \"$REPO\" ]; then printf '%s' \"$REPO\" > ~/.contexer/.current_repo; fi; "
+        "if [ -n \"$REPO\" ]; then { printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } "
+        "2>/dev/null || true; fi; "
         "FLAG=\"$HOME/.contexer/.pending_capture\"; "
         "if [ -f \"$FLAG\" ]; then "
-        "rm -f \"$FLAG\"; "
+        "rm -f \"$FLAG\" 2>/dev/null || true; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
         "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing. "
         "(1) NEW decisions that STUCK: call update_context with the full reasoning. "
@@ -213,11 +220,14 @@ def install(home: Path) -> list[str]:
     hooks = cfg.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: an older SessionStart group predates the team-context pull (T2) or predates
-    # session-id threading (compact-source working-set rehydration) — replace it so the
-    # current ss_code is installed. Mirrors claude.py's SessionStart migration gate.
+    # Migrate: an older SessionStart group predates the team-context pull (T2), predates
+    # session-id threading (compact-source working-set rehydration), or predates the
+    # fail-soft repo anchor (#152 — the unguarded `.current_repo` write that aborted the
+    # whole hook under Codex's sandbox) — replace it so the current ss_code is installed.
+    # Mirrors claude.py's SessionStart migration gate.
     if base._in_groups(ss, "get_session_start_context") and not (
-            base._in_groups(ss, "pull_team") and base._in_groups(ss, "session_from_hook_stdin")):
+            base._in_groups(ss, "pull_team") and base._in_groups(ss, "session_from_hook_stdin")
+            and base._in_groups(ss, "anchor_repo")):
         ss = base._filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not base._in_groups(ss, "get_session_start_context"):
@@ -228,9 +238,14 @@ def install(home: Path) -> list[str]:
     # (anchor_cmd) consumes it and injects the capture reminder. No Stop hook - end-of-turn
     # prompting added latency/tokens with no functional gain over the next-prompt anchor.
     put = hooks.setdefault("PostToolUse", [])
+    # Migrate (#152): the old `touch ... && echo '{}'` lost the hook's required JSON output
+    # whenever the touch failed on an unwritable ~/.contexer. Same gate as claude.py.
+    if base._in_groups(put, ".pending_capture") and not base._in_groups(put, claude._TOUCH_GUARD):
+        put = base._filter_groups(put, [".pending_capture"])
+        hooks["PostToolUse"] = put
     if not base._in_groups(put, ".pending_capture"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]})
+            "command": f"touch ~/.contexer/{claude._TOUCH_GUARD}; echo '{{}}'"}]})
 
     # Retire any previously-installed Stop hook. The Stop entry stays in _EVENT_MARKERS so
     # uninstall/reinstall strips an old Stop hook from hooks.json.
@@ -264,6 +279,11 @@ def install(home: Path) -> list[str]:
     if base._in_groups(ups, "you wrote or edited files") and not base._in_groups(ups, "last turn settled"):
         ups = base._filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
+    # Migrate (#152): an anchor hook that writes ~/.contexer unguarded. Same gate as
+    # claude.py — _in_commands because _ANCHOR_GUARD contains a quote.
+    if base._in_groups(ups, ".pending_capture") and not base._in_commands(ups, claude._ANCHOR_GUARD):
+        ups = base._filter_groups(ups, [".pending_capture"])
+        hooks["UserPromptSubmit"] = ups
     if not base._in_groups(ups, ".pending_capture"):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...", "command": anchor_cmd}]})
@@ -290,7 +310,11 @@ def install(home: Path) -> list[str]:
     # unrelated hook whose command merely mentions "codex" (e.g. a path containing
     # "codex-tools"), silently suppressing the migration. Only the tagged call this codebase
     # generates contains 'codex' as a quoted argument.
-    if base._in_groups(ups, "claude.team_poll") and not base._in_groups(ups, "'codex'"):
+    # _in_commands, NOT _in_groups: the latter matches a dict repr, which escapes the
+    # quotes to \'codex\' — so this gate never recognized its own output and re-fired on
+    # every single install, stripping and re-appending the hook (harmless but endless
+    # churn: it reordered UserPromptSubmit, so no install was ever idempotent).
+    if base._in_groups(ups, "claude.team_poll") and not base._in_commands(ups, "'codex'"):
         ups = base._filter_groups(ups, ["claude.team_poll"])
         hooks["UserPromptSubmit"] = ups
     if not base._in_groups(ups, "claude.team_poll"):

@@ -139,9 +139,10 @@ def session_start(repo_path: str, raw: str) -> str:
     try:
         repo = _repo_from(raw, repo_path)
         if repo and store._is_sane_repo(repo):
-            store.STORE_DIR.mkdir(exist_ok=True)
-            # Never poison the shared pointer with a config/home dir (see store._is_sane_repo).
-            (store.STORE_DIR / ".current_repo").write_text(repo)
+            # Sanity-checked AND fail-soft (#152): never poison the shared pointer with a
+            # config/home dir, and never let an unwritable ~/.contexer drop us into the
+            # except below, which would inject the bare nudge instead of the real rules.
+            store.anchor_repo(repo)
             _ensure_rule_file(repo)
             payload = store.session_start_payload(repo)
         else:
@@ -160,12 +161,7 @@ def _anchor_current_repo(repo: str) -> None:
     or got clobbered. Refreshing it on every prompt from workspace_roots (a base field on
     all Cursor hooks) mirrors Claude's per-prompt anchor and is what keeps get_context({})
     working. Guarded by _is_sane_repo + best-effort (hooks must never crash the host)."""
-    try:
-        if repo and store._is_sane_repo(repo):
-            store.STORE_DIR.mkdir(exist_ok=True)
-            (store.STORE_DIR / ".current_repo").write_text(repo)
-    except Exception:
-        pass
+    store.anchor_repo(repo)
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:

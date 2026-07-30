@@ -53,9 +53,35 @@ def _session_marker(raw: str) -> Path | None:
 
 
 def _anchor(repo: str) -> None:
-    if repo and store._is_sane_repo(repo):
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        (store.STORE_DIR / ".current_repo").write_text(repo)
+    # Sanity-checked AND fail-soft (#152): an unwritable ~/.contexer must not cost the
+    # session its stored rules — session_start's blanket except would swallow them.
+    store.anchor_repo(repo)
+
+
+# Flag files are bookkeeping, and session_start/before_agent wrap their whole body in a
+# blanket `except Exception` that degrades to an EMPTY injection. So an unguarded flag
+# write under an unwritable ~/.contexer (#152) does not just skip the flag — it silently
+# costs the prompt its entire context: bootstrap, constraint ack, review nudge, the
+# post-compaction reload, everything. These two helpers keep that failure local.
+
+def _flag_drop(path: Path) -> None:
+    """Best-effort consume of a flag file. A flag that cannot be cleared simply re-fires
+    next turn — the same degradation the Claude/Codex shell hooks accept via `rm -f … ||
+    true` — which is strictly better than losing the turn's injection."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _flag_set(path: Path) -> None:
+    """Best-effort raise of a flag file. A flag that cannot be set just means the
+    guarded work re-runs next turn; every caller here is idempotent."""
+    try:
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        path.touch()
+    except OSError:
+        pass
 
 
 def session_start(repo_path: str, raw: str) -> str:
@@ -72,7 +98,7 @@ def session_start(repo_path: str, raw: str) -> str:
         if source not in ("resume", "clear"):
             marker = _session_marker(raw)
             if marker is not None:
-                marker.unlink(missing_ok=True)
+                _flag_drop(marker)
         payload = store.session_start_payload(repo, source)
         return _output("SessionStart", [payload.get("context", "")])
     except Exception:
@@ -97,14 +123,14 @@ def before_agent(repo_path: str, raw: str) -> str:
         reload_flag = store.STORE_DIR / _PENDING_RELOAD
         pending = store.STORE_DIR / _PENDING_CAPTURE
         if reload_flag.exists():
-            reload_flag.unlink(missing_ok=True)
-            pending.unlink(missing_ok=True)
+            _flag_drop(reload_flag)
+            _flag_drop(pending)
             # session_id (Retrieval V1 compact-reload parity): rehydrates this session's
             # pre-compaction working set, mirroring Claude's SessionStart(compact) path.
             payload = store.post_compact_payload(repo, session_id)
             contexts.extend(part for part in (payload.get("status"), payload.get("context")) if part)
         elif pending.exists():
-            pending.unlink(missing_ok=True)
+            _flag_drop(pending)
             contexts.append(_REMINDER)
 
         # A decision awaiting the developer's review — independent of the reload/edit reminders
@@ -122,8 +148,7 @@ def before_agent(repo_path: str, raw: str) -> str:
             payload = store.bootstrap_prompt_payload(repo, prompt)
             contexts.append(payload.get("context", ""))
             if marker is not None:
-                marker.parent.mkdir(mode=0o700, exist_ok=True)
-                marker.touch()
+                _flag_set(marker)
 
         near: list = []
         entry_id, content, status = store.capture_user_constraint(repo, prompt, session_id, near)
@@ -140,11 +165,7 @@ def before_agent(repo_path: str, raw: str) -> str:
 
 def after_write(repo_path: str, raw: str) -> str:
     """AfterTool(write_file|replace): immediately remind the AI to surface and store any decision."""
-    try:
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        (store.STORE_DIR / _PENDING_CAPTURE).touch()
-    except Exception:
-        pass
+    _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
     return json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "AfterTool",
@@ -163,11 +184,7 @@ def pre_compress(repo_path: str, raw: str) -> str:
     # Fix 3: only set the reload flag here. Compression is not a file write, so
     # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
     # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
-    try:
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        (store.STORE_DIR / _PENDING_RELOAD).touch()
-    except Exception:
-        pass
+    _flag_set(store.STORE_DIR / _PENDING_RELOAD)
     return json.dumps({"suppressOutput": True})
 
 
