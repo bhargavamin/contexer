@@ -298,7 +298,7 @@ class TestRationaleHitRate:
                 kw = [w for w in p.lower().split() if len(w) > 3 and w not in store._QUERY_STOP_WORDS and w.isalpha()]
                 print(f"    \"{p}\" → keyword '{kw}' substring-matched an unrelated decision")
 
-        assert len(hits) >= 7, f"Hit rate too low: {len(hits)}/10. Missed: {misses}"
+        assert len(hits) >= 10, f"Hit rate too low: {len(hits)}/13. Missed: {misses}"
         assert len(unexpected_fps) == 0, f"Unexpected false positives: {unexpected_fps}"
 
     def test_question_prompts_inject_strong_content(self, populated_store, monkeypatch_module):
@@ -316,8 +316,12 @@ class TestRationaleHitRate:
         assert store.get_context_for_prompt(DEMO_REPO, "what must never happen?") == ""
 
     def test_miss_prompts_are_zero_cost(self, populated_store, monkeypatch_module):
-        """Confirm non-rationale prompts add 0 tokens (pure no-op)."""
-        for prompt in MISS_PROMPTS[:5]:  # sample 5
+        """Confirm non-rationale prompts add 0 tokens (pure no-op). Skips documented
+        KNOWN_FALSE_POSITIVES — those are an accepted substring-match limitation, not a
+        zero-cost regression, and test_hit_rate already tracks them separately."""
+        for prompt in MISS_PROMPTS:
+            if prompt in KNOWN_FALSE_POSITIVES:
+                continue
             result = store.get_context_for_prompt(DEMO_REPO, prompt)
             assert result == "", f"Expected silent no-op for: {prompt!r}"
 

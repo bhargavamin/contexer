@@ -1509,10 +1509,14 @@ _GIT_FAST_TIMEOUT = 2      # injection/capture paths must never stall on a slow 
 
 
 def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
-    """Anchor a NEW entry to the files it describes plus the repo's current HEAD, so a later
-    injection can flag it as possibly stale (see _staleness_note). No-op when no usable file
-    is given. Fail-soft: an unresolvable HEAD stores an empty anchor, never blocks capture."""
-    files = [f for f in (source_files or []) if isinstance(f, str) and f.strip()][:_MAX_SOURCE_FILES]
+    """Anchor an entry (a new one, or a `replace_id` correction) to the files it describes
+    plus the repo's current HEAD, so a later injection can flag it as possibly stale (see
+    _staleness_note). No-op when no usable file is given. Fail-soft: an unresolvable HEAD
+    stores an empty anchor, never blocks capture. `source_files` must be a list/tuple — a
+    bare string is rejected rather than iterated character-by-character."""
+    if not isinstance(source_files, (list, tuple)):
+        source_files = []
+    files = [f for f in source_files if isinstance(f, str) and f.strip()][:_MAX_SOURCE_FILES]
     if not files:
         return
     entry["source_files"] = files
@@ -1526,18 +1530,22 @@ def _staleness_note(repo_path: str, entry: dict) -> str:
 
     One-dot `git diff <anchor> -- <files>` (anchor vs the WORKING TREE), not `<anchor>..HEAD`:
     the dominant staleness case is a file the session is editing right now, which a
-    commit-to-commit diff would not see at all."""
-    files = [f for f in (entry.get("source_files") or []) if isinstance(f, str)]
-    anchor = entry.get("anchor_commit") or ""
-    if not files or not anchor:
+    commit-to-commit diff would not see at all. The try/except below enforces "never
+    raises" locally rather than relying solely on `_git`'s own fail-soft contract."""
+    try:
+        files = [f for f in (entry.get("source_files") or []) if isinstance(f, str)]
+        anchor = entry.get("anchor_commit") or ""
+        if not files or not anchor:
+            return ""
+        out = _git(repo_path, "diff", "--name-only", anchor, "--", *files,
+                   timeout=_GIT_FAST_TIMEOUT)
+        changed = out.splitlines() if out else []
+        if not changed:
+            return ""
+        extra = f", +{len(changed) - 1} more" if len(changed) > 1 else ""
+        return f" [may be stale: {changed[0]} changed since capture{extra}]"
+    except Exception:
         return ""
-    out = _git(repo_path, "diff", "--name-only", anchor, "--", *files,
-               timeout=_GIT_FAST_TIMEOUT)
-    changed = out.splitlines() if out else []
-    if not changed:
-        return ""
-    extra = f", +{len(changed) - 1} more" if len(changed) > 1 else ""
-    return f" [may be stale: {changed[0]} changed since capture{extra}]"
 
 
 def _staleness_notes(repo_path: str, entries: list) -> dict:
@@ -1565,8 +1573,10 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     source_files: list | None = None) -> tuple[bool, str | None]:
     """Store (or route) one decision. `source_files` anchors a NEWLY CREATED entry to the
     repo-relative files it describes plus the current git HEAD, so later injections can flag
-    it as possibly stale; capped at _MAX_SOURCE_FILES. Recurrences, containment routes and
-    `replace_id` corrections never gain or overwrite an anchor — only entry creation anchors."""
+    it as possibly stale; capped at _MAX_SOURCE_FILES. Recurrences and containment routes
+    never gain or overwrite an anchor. A `replace_id` correction that passes non-empty
+    `source_files` re-anchors to those files + current HEAD (clearing any stale flag);
+    omitting `source_files` on a correction leaves the existing anchor untouched."""
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -1622,6 +1632,12 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         _sync_decision_cache(target)
                         _save(repo_path, data)
                     return True, target["id"]
+                # Content is genuinely changing: a corrected summary re-verified against the
+                # current code should clear any stale flag, not keep pointing at the anchor
+                # of the text it's replacing. Re-anchor only when the caller actually passed
+                # source_files — an omitted source_files leaves the existing anchor as-is.
+                if source_files:
+                    _anchor_sources(repo_path, target, source_files)
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")
                 old_subtype = target.get("subtype", "")

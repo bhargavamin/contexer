@@ -153,6 +153,43 @@ def test_check_budget_caps_git_calls(repo, monkeypatch):
     assert len(calls) == store._STALENESS_MAX_CHECKS == 3
 
 
+def test_replace_id_with_source_files_reanchors_and_clears_note(repo):
+    """A corrected summary re-captured via replace_id with fresh source_files clears the
+    stale flag. Without source_files, the old anchor (and the note) is left untouched."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "convention",
+                                   source_files=["auth.py"])
+    old_anchor = _entry(repo)["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    stored, _ = store.update_decision(
+        repo, "auth flow: login() now returns a JWT instead of a session cookie",
+        "s2", "convention", replace_id=eid, source_files=["auth.py"])
+    assert stored
+    entry = _entry(repo)
+    assert entry["anchor_commit"] != old_anchor
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+    # A second correction WITHOUT source_files keeps the anchor from the prior correction.
+    reanchored = entry["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten again'\n")
+    stored, _ = store.update_decision(
+        repo, "auth flow: login() now returns a JWT and logs the attempt",
+        "s3", "convention", replace_id=eid)
+    assert stored
+    assert _entry(repo)["anchor_commit"] == reanchored
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+
+def test_session_start_payload_never_shows_staleness_note(repo):
+    """session_start_payload is never one of the two render sites _staleness_notes runs
+    at — a changed source file must not surface a note there."""
+    store.update_decision(repo, SUMMARY, "s1", "convention", source_files=["auth.py"])
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    payload = store.session_start_payload(repo)
+    assert " [may be stale" not in payload["context"]
+
+
 def test_legacy_entry_without_fields_round_trips(repo):
     store.update_decision(repo, SUMMARY, "s1", "architecture")
     before = store._load(repo)["entries"]
