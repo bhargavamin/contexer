@@ -61,11 +61,16 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 comprehension summary, pass the files it describes so future injections can
                 flag it as possibly stale once that code changes. Anchors a newly stored
                 decision, and also re-anchors a replace_id correction (fresh files + current
-                HEAD) — but never a recurrence. When an injection shows a decision with
-                "[may be stale: ...]", re-read the named file(s), re-capture the corrected
-                summary via replace_id, and pass source_files again so the anchor refreshes
-                and the note clears; omitting source_files on that correction leaves the old
-                anchor in place and the note keeps firing.
+                HEAD) as soon as the corrected text becomes the live, rendered content — for
+                a trivial correction or a re-capture of still-accurate content, that's
+                immediate; for a significant correction (architecture/constraint) it happens
+                only once a developer approves the resulting Suggested Update, since until
+                then the OLD content is still what's shown. Never a recurrence. When an
+                injection shows a decision with "[may be stale: ...]", re-read the named
+                file(s) and re-capture via replace_id, passing source_files again so the
+                anchor refreshes (immediately, or on approval) and the note clears; omitting
+                source_files on that correction leaves the old anchor in place and the note
+                keeps firing.
     title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the decision,
            shown when it's listed/injected — e.g. 'Use Postgres for decision store'. Only omit it
            when you can't summarize better than the content itself; the store then derives one

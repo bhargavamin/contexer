@@ -1380,10 +1380,15 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 
 
 def _build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
-                    source: str = "ai", title: str = "") -> dict:
+                    source: str = "ai", title: str = "", source_files=None) -> dict:
     """A Suggested Update (pending revision) attached to a live decision: the detected new
     value, its confidence/evidence, and provenance. The live decision is NOT modified - this
-    proposal waits for developer approval, at which point it is promoted to a new revision."""
+    proposal waits for developer approval, at which point it is promoted to a new revision.
+
+    source_files: stashed on the proposal, not applied yet — the live entry's anchor must
+    keep describing the CURRENTLY RENDERED content until the proposal is actually promoted
+    (see _promote_proposal); re-anchoring here would clear the stale note while the old,
+    still-live text keeps rendering."""
     sessions = sorted({s for s in (*(target.get("session_ids") or []), session_id) if s})
     score, factors = _compute_confidence({
         "created_by": "ai",
@@ -1402,16 +1407,20 @@ def _build_proposal(target: dict, content: str, subtype: str, session_id: str, n
         "confidence_factors": factors,
     }
     proposal["title"] = _normalize_title(title) or _derive_title(normalized_content)
+    if source_files:
+        proposal["source_files"] = source_files
     return proposal
 
 
-def _promote_proposal(entry: dict, content: str | None = None) -> None:
+def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -> None:
     """Approve a pending proposed_revision: append it as a new immutable revision and move
     current_revision_id forward. Prior revisions are preserved (never overwritten). `content`
     (an edited value) overrides the proposal's content when given. The proposal's title carries
     forward only when the promoted content matches the proposal's content unchanged; if an
     edit at approval time changed the content, the title is dropped so _append_revision
-    re-derives it from the final content instead of carrying a stale one."""
+    re-derives it from the final content instead of carrying a stale one. A source_files stashed
+    on the proposal (see _build_proposal) is applied NOW, since the corrected content is only
+    now becoming the live, rendered revision."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1429,6 +1438,8 @@ def _promote_proposal(entry: dict, content: str | None = None) -> None:
     carried_title = prop.get("title", "") if new_content == prop_content else ""
     _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now,
                      title=carried_title)
+    if prop.get("source_files"):
+        _anchor_sources(repo_path, entry, prop["source_files"])
     entry.pop("proposed_revision", None)
 
 
@@ -1575,8 +1586,14 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
     repo-relative files it describes plus the current git HEAD, so later injections can flag
     it as possibly stale; capped at _MAX_SOURCE_FILES. Recurrences and containment routes
     never gain or overwrite an anchor. A `replace_id` correction that passes non-empty
-    `source_files` re-anchors to those files + current HEAD (clearing any stale flag);
-    omitting `source_files` on a correction leaves the existing anchor untouched."""
+    `source_files` re-anchors — but ONLY once its content is actually the live, rendered
+    revision: a trivial (pattern/convention, or human/scan/bootstrap) correction re-anchors
+    immediately, a re-capture of identical (still-accurate) content re-anchors immediately,
+    but a significant (architecture/constraint, AI-inferred) correction stashes source_files
+    on the Suggested Update instead and only re-anchors when a developer approves it (see
+    _promote_proposal) — the live entry keeps rendering its OLD content until then, so its
+    anchor must keep describing that old content, not the pending correction. Omitting
+    `source_files` on any correction leaves the existing anchor untouched."""
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -1602,6 +1619,12 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 if content == target.get("content", ""):
                     new_title = _normalize_title(title)
                     if not new_title or new_title == target.get("title", ""):
+                        # The summary was re-verified against the current code and still
+                        # holds — this is the recovery loop for a stale note, so refresh the
+                        # anchor even though there's no content/title to change.
+                        if source_files:
+                            _anchor_sources(repo_path, target, source_files)
+                            _save(repo_path, data)
                         return True, target["id"]  # nothing meaningful changed
                     now = datetime.now(timezone.utc).isoformat()
                     st = target.get("subtype", "")
@@ -1632,12 +1655,6 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         _sync_decision_cache(target)
                         _save(repo_path, data)
                     return True, target["id"]
-                # Content is genuinely changing: a corrected summary re-verified against the
-                # current code should clear any stale flag, not keep pointing at the anchor
-                # of the text it's replacing. Re-anchor only when the caller actually passed
-                # source_files — an omitted source_files leaves the existing anchor as-is.
-                if source_files:
-                    _anchor_sources(repo_path, target, source_files)
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")
                 old_subtype = target.get("subtype", "")
@@ -1661,17 +1678,25 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title):
                         return True, target["id"]
+                    # source_files is stashed on the proposal, NOT applied to the live entry —
+                    # the current revision (the old, genuinely stale text) keeps rendering until
+                    # a developer approves, so the anchor must not refresh yet (_promote_proposal
+                    # applies it at approval time).
                     target["proposed_revision"] = _build_proposal(
-                        target, content, subtype, session_id, now, title=title)
+                        target, content, subtype, session_id, now, title=title,
+                        source_files=source_files)
                     _save(repo_path, data)
                     _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"]
                 # Trivial change (pattern/convention, or any human/scan/bootstrap change) →
                 # apply immediately as a new approved revision. History is preserved: the
-                # prior revision stays in revisions[]; current_revision_id moves forward.
+                # prior revision stays in revisions[]; current_revision_id moves forward. This IS
+                # the live, rendered content now, so re-anchor here (not before the split above).
                 if subtype:
                     target["subtype"] = subtype
                 _append_revision(target, content, source=created_by, approved_at=now, title=title)
+                if source_files:
+                    _anchor_sources(repo_path, target, source_files)
                 _save(repo_path, data)
                 return True, target["id"]
             # replace_id not found — fall through to normal storage
@@ -1721,14 +1746,14 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
         ok, msg, changed = _apply_approval(
-            data, entry_id, action, content, datetime.now(timezone.utc).isoformat())
+            data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path)
         if changed:
             _save(repo_path, data)
         return ok, msg
 
 
 def _apply_approval(data: dict, entry_id: str, action: str, content: str,
-                    now: str) -> tuple[bool, str, bool]:
+                    now: str, repo_path: str = "") -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory — no lock, no load, no save. Returns
     (success, message, changed); `changed` lets the caller save only when something mutated, and
     lets `approve_decisions` batch many actions into a single load+save. Resolves an exact id
@@ -1753,7 +1778,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         entry["status"] = "approved"
         entry["approved_at"] = now
         entry["approved_by"] = "human"
-        _promote_proposal(entry, content if action == "edit" else None)
+        _promote_proposal(repo_path, entry, content if action == "edit" else None)
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -1821,7 +1846,7 @@ def approve_decisions(repo_path: str, entry_ids: list, action: str,
         now = datetime.now(timezone.utc).isoformat()
         changed_any = False
         for eid in entry_ids:
-            ok, msg, changed = _apply_approval(data, eid, action, content, now)
+            ok, msg, changed = _apply_approval(data, eid, action, content, now, repo_path)
             changed_any = changed_any or changed
             results.append((eid, ok, msg))
         if changed_any:

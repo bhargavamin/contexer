@@ -316,14 +316,12 @@ class TestRationaleHitRate:
         assert store.get_context_for_prompt(DEMO_REPO, "what must never happen?") == ""
 
     def test_miss_prompts_are_zero_cost(self, populated_store, monkeypatch_module):
-        """Confirm non-rationale prompts add 0 tokens (pure no-op). Skips documented
-        KNOWN_FALSE_POSITIVES — those are an accepted substring-match limitation, not a
-        zero-cost regression, and test_hit_rate already tracks them separately."""
-        for prompt in MISS_PROMPTS:
-            if prompt in KNOWN_FALSE_POSITIVES:
-                continue
-            result = store.get_context_for_prompt(DEMO_REPO, prompt)
-            assert result == "", f"Expected silent no-op for: {prompt!r}"
+        """Confirm non-rationale prompts add 0 tokens (pure no-op) — except the one
+        documented substring-match false positive. Asserts the exact set of non-silent
+        prompts (not just "skip whatever's in KNOWN_FALSE_POSITIVES") so a NEW false
+        positive silently added to that list still fails this test until reviewed here too."""
+        non_silent = {p for p in MISS_PROMPTS if store.get_context_for_prompt(DEMO_REPO, p)}
+        assert non_silent == {"is this variable in scope?"}, non_silent
 
 
 # ── Benchmark 3: On-demand get_context timing ────────────────────────────────

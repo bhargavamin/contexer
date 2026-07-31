@@ -181,6 +181,58 @@ def test_replace_id_with_source_files_reanchors_and_clears_note(repo):
     assert " [may be stale" in store.get_context(repo, query="auth")
 
 
+def test_identical_content_recapture_reanchors_and_clears_note(repo):
+    """The no-op path: the model re-reads the changed file, confirms the summary still
+    holds, and re-captures the SAME text via replace_id+source_files. The anchor must
+    still refresh (there's nothing else to correct), or the note would fire forever."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                   source_files=["auth.py"])
+    old_anchor = _entry(repo)["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    stored, returned_id = store.update_decision(
+        repo, SUMMARY, "s2", replace_id=eid, source_files=["auth.py"])
+    assert stored and returned_id == eid
+    entry = _entry(repo)
+    assert entry["anchor_commit"] != old_anchor
+    # no revision was created — truly a no-op on content
+    assert entry["content"] == store._normalize_content(SUMMARY)
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+
+def test_gated_correction_defers_reanchor_until_approved(repo):
+    """A significant (architecture, AI-inferred) correction attaches a Suggested Update —
+    the live entry keeps rendering its OLD content until a developer approves, so its
+    anchor must keep describing that old content. Only approval re-anchors."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                   source_files=["auth.py"])
+    assert store._entry_status(_entry(repo)) in ("approved", "suggested")  # trusted, renders
+    old_anchor = _entry(repo)["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    new_content = "auth flow: login() now returns a JWT instead of a session cookie"
+    stored, returned_id = store.update_decision(
+        repo, new_content, "s2", "architecture", replace_id=eid, source_files=["auth.py"])
+    assert stored and returned_id == eid
+    entry = _entry(repo)
+    assert entry.get("proposed_revision", {}).get("content") == store._normalize_content(new_content)
+    # The OLD content is still what's live/rendered, and its anchor — and note — are untouched.
+    assert entry["anchor_commit"] == old_anchor
+    assert entry["content"] == store._normalize_content(SUMMARY)
+    out = store.get_context(repo, query="auth")
+    assert " [may be stale" in out
+    assert "JWT" not in out  # proposed content is not yet what's rendered
+
+    ok, _ = store.approve_decision(repo, eid, "approve")
+    assert ok
+    entry = _entry(repo)
+    assert entry["content"] == store._normalize_content(new_content)
+    assert entry["anchor_commit"] != old_anchor
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+
 def test_session_start_payload_never_shows_staleness_note(repo):
     """session_start_payload is never one of the two render sites _staleness_notes runs
     at — a changed source file must not surface a note there."""
