@@ -85,6 +85,11 @@ HIT_PROMPTS = [
     ("what was the reasoning behind the Result type pattern?",     "result"),
     ("why do we use Kong as our API gateway?",                     "gateway"),
     ("why were migrations automated instead of manual?",           "migrations"),
+    # Question-shaped comprehension prompts — no rationale word, but they name rare
+    # store terms, so the discriminative-term guard lets them through.
+    ("what does our event sourcing implementation do?",             "event"),
+    ("how does cursor pagination work here?",                       "pagination"),
+    ("how are refresh tokens stored?",                              "cookies"),
 ]
 
 # Prompts that should NOT trigger rationale injection (no rationale keyword or no match)
@@ -102,6 +107,11 @@ MISS_PROMPTS = [
     "is this variable in scope?",                        # "scope" trigger but domain keyword present
     "give me an overview of Docker networking",          # "overview" trigger but domain keywords present
     "add a NOT NULL constraint to the users table",      # "constraint" trigger but SQL-specific
+    # Question-shaped but generic: the router opens for questions, the discriminative-term
+    # guard keeps these silent (no rare store term matched, no topic overlap).
+    "what should I call this variable?",                 # only generic tokens match
+    "how do I exit vim?",                                # nothing in the store at all
+    "what time is the standup?",                         # "time" matches the SLA rule — 1 hit, not an answer
 ]
 
 # Known edge-case false positives — short keywords that substring-match unrelated decisions.

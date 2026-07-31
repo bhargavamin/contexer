@@ -3071,6 +3071,11 @@ _RATIONALE_WORDS = frozenset({
     "approach", "architecture", "tradeoff", "tradeoffs", "constraint", "convention",
 })
 
+# Question-shaped prompts: "what does the miner do?", "how does the router pick topics?".
+# Deliberately lead-word-only (not a trailing "?") and deliberately without can/does/is —
+# "can you add X?" is a task request and must stay silent.
+_QUESTION_LEADS = frozenset({"what", "how", "where", "which", "when", "who"})
+
 # Project-context questions: "what is the purpose?", "what is planned?", "what's the goal?"
 # "plan" excluded — too ambiguous ("premium plan", "payment plan")
 _PROJECT_CONTEXT_WORDS = frozenset({
@@ -3230,10 +3235,12 @@ def _read_retrieval_index(repo_path: str) -> dict | None:
     return data
 
 
-def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]:
+def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, int]]:
     """BM25-score every indexed doc against `keywords` (which may repeat — repeats raise
-    that term's query weight). Returns (decision_id, score, distinct_term_hits) sorted by
-    score desc. Terms absent from the corpus contribute nothing."""
+    that term's query weight). Returns (decision_id, score, distinct_term_hits,
+    discriminative_hits) sorted by score desc. Terms absent from the corpus contribute
+    nothing. A hit is *discriminative* when the matched term is rare in this corpus
+    (df <= max(2, n_docs // 20)) — the router's junk guard for question-only prompts."""
     import math
     docs = index.get("docs", {})
     df = index.get("df", {})
@@ -3257,12 +3264,14 @@ def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]
         pref = [t for t in df if t.startswith(term)]
         if pref:
             resolved[term] = (pref, min(sum(df[t] for t in pref), n_docs))
-    ranked: list[tuple[str, float, int]] = []
+    disc_cap = max(2, n_docs // 20)
+    ranked: list[tuple[str, float, int, int]] = []
     for did, doc in docs.items():
         tf = doc.get("tf", {})
         dl = doc.get("len", 0) or 0
         score = 0.0
         hits = 0
+        dhits = 0
         for term, w in qweight.items():
             r = resolved.get(term)
             if not r:
@@ -3272,11 +3281,13 @@ def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]
             if not f:
                 continue
             hits += 1
+            if n_t <= disc_cap:
+                dhits += 1
             idf = math.log(1 + (n_docs - n_t + 0.5) / (n_t + 0.5))
             denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * (dl / avgdl if avgdl else 1))
             score += w * idf * (f * (_BM25_K1 + 1) / denom)
         if hits:
-            ranked.append((did, score, hits))
+            ranked.append((did, score, hits, dhits))
     ranked.sort(key=lambda r: r[1], reverse=True)
     return ranked
 
@@ -3557,6 +3568,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
 
     is_rationale = bool(word_set & _RATIONALE_WORDS)
     is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
+    is_question = bool(words_raw) and words_raw[0] in _QUESTION_LEADS
 
     # Extract content keywords: alpha-only, length >= 3, not stop words.
     # >= 3 (not > 3) captures short tech terms: jwt, api, sdk, k8s, sql, gcp, aws.
@@ -3574,11 +3586,15 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
             return "", dict(_EMPTY_META)
         return _legacy_prompt_context(repo_path, ordered_kws, is_project)
 
-    # BM25 path. The router fires on rationale/project questions AND on artifact-bearing
-    # prompts (a stack-trace paste is signal-rich even when the prose names no topic);
-    # a prose-only, non-rationale prompt stays silent, exactly like today.
+    # BM25 path. The router fires on rationale/project questions, on artifact-bearing
+    # prompts (a stack-trace paste is signal-rich even when the prose names no topic),
+    # and on question-shaped prompts ("what does the miner do?" — comprehension questions
+    # carry no rationale word yet are exactly what stored context answers). A non-question
+    # task prompt with no artifact stays silent, exactly like today. Question-only prompts
+    # (no rationale/project word) additionally clear a discriminative-term guard below, so
+    # a generic-token question can't drag in whatever decision happens to share a word.
     artifacts = _extract_artifacts(prompt)
-    if not is_rationale and not is_project and not artifacts:
+    if not is_rationale and not is_project and not artifacts and not is_question:
         return "", dict(_EMPTY_META)
 
     # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
@@ -3593,14 +3609,24 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
 
     if ranked:
         top_score = ranked[0][1]
+        # Junk guard: a bare question (no rationale/project word) only earns a content
+        # injection when the top-ranked doc matched a DISCRIMINATIVE term — one rare in
+        # this corpus. Otherwise "what time is the standup?" would inject the p99-latency
+        # constraint on the word "time".
+        question_only = is_question and not is_rationale and not is_project
+        allow_strong = not question_only or ranked[0][3] >= 1
         strong: list[str] = []
-        for did, score, hits in ranked[:_STRONG_CANDIDATES]:
-            if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
-                strong.append(did)
+        if allow_strong:
+            for did, score, hits, _dh in ranked[:_STRONG_CANDIDATES]:
+                if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
+                    strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
         # yields one doc with one hit — relax to hits>=1 on the top candidate so legacy's
-        # full-content recall for both prompt classes is preserved.
-        if not strong and (is_rationale or is_project) and ranked[0][2] >= 1:
+        # full-content recall for both prompt classes is preserved. A bare question gets the
+        # same relaxation only when it *is* single-keyword (and hence discriminative per the
+        # guard above) — with more keywords, one lone hit is noise, not an answer.
+        relax = is_rationale or is_project or (question_only and len(set(query_terms)) == 1)
+        if not strong and allow_strong and relax and ranked[0][2] >= 1:
             strong = [ranked[0][0]]
         strong = strong[:_STRONG_CAP]
         if strong:
