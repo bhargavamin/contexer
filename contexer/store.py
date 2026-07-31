@@ -1617,13 +1617,16 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # retitling a trusted architecture/constraint decision could reframe it as trusted
                 # context - that goes through review, never applied in place.
                 if content == target.get("content", ""):
+                    # The content is re-verified and still holds — this is the recovery loop
+                    # for a stale note. The live rendered content IS the re-validated text
+                    # right here (only the title, if any, is what's still under review below),
+                    # so anchor immediately regardless of which title sub-path runs next.
+                    # Every exit from this block below must persist this via _save.
+                    if source_files:
+                        _anchor_sources(repo_path, target, source_files)
                     new_title = _normalize_title(title)
                     if not new_title or new_title == target.get("title", ""):
-                        # The summary was re-verified against the current code and still
-                        # holds — this is the recovery loop for a stale note, so refresh the
-                        # anchor even though there's no content/title to change.
                         if source_files:
-                            _anchor_sources(repo_path, target, source_files)
                             _save(repo_path, data)
                         return True, target["id"]  # nothing meaningful changed
                     now = datetime.now(timezone.utc).isoformat()
@@ -1640,6 +1643,8 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         existing_prop = target.get("proposed_revision")
                         if (existing_prop and existing_prop.get("content", "") == content
                                 and existing_prop.get("title", "") == new_title):
+                            if source_files:
+                                _save(repo_path, data)
                             return True, target["id"]  # identical title proposal already pending
                         target["proposed_revision"] = _build_proposal(
                             target, content, subtype, session_id, now, title=title)
@@ -1654,6 +1659,8 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         target["updated_at"] = now
                         _sync_decision_cache(target)
                         _save(repo_path, data)
+                    elif source_files:
+                        _save(repo_path, data)  # no revision to retitle, but the anchor still moved
                     return True, target["id"]
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")
@@ -1753,7 +1760,7 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
 
 def _apply_approval(data: dict, entry_id: str, action: str, content: str,
-                    now: str, repo_path: str = "") -> tuple[bool, str, bool]:
+                    now: str, repo_path: str) -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory — no lock, no load, no save. Returns
     (success, message, changed); `changed` lets the caller save only when something mutated, and
     lets `approve_decisions` batch many actions into a single load+save. Resolves an exact id

@@ -233,6 +233,52 @@ def test_gated_correction_defers_reanchor_until_approved(repo):
     assert " [may be stale" not in store.get_context(repo, query="auth")
 
 
+def test_identical_content_new_title_recapture_reanchors_nongated(repo):
+    """The common real shape of the recovery loop: the model re-reads the changed file,
+    confirms the summary still holds, and re-captures it with the same content but a
+    REGENERATED title (the MCP instructions always ask for a title, and it rarely matches
+    byte-for-byte). For a non-gated subtype the title updates in place — the anchor must
+    still refresh, since the live content IS the re-validated text here."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "convention",
+                                   source_files=["auth.py"])
+    old_anchor = _entry(repo)["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    stored, returned_id = store.update_decision(
+        repo, SUMMARY, "s2", replace_id=eid, source_files=["auth.py"],
+        title="Login issues a session cookie after verifying the token")
+    assert stored and returned_id == eid
+    entry = _entry(repo)
+    assert entry["anchor_commit"] != old_anchor
+    assert entry["title"] == "Login issues a session cookie after verifying the token"
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+    assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
+
+
+def test_identical_content_new_title_recapture_reanchors_gated(repo):
+    """Same recovery-loop shape as above, but on a gated (architecture, AI-inferred)
+    decision: the title change is deferred to a proposal, but the content itself is
+    unchanged and re-validated right now, so the anchor must refresh immediately —
+    not wait for the title proposal to be approved."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                   source_files=["auth.py"])
+    old_anchor = _entry(repo)["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    stored, returned_id = store.update_decision(
+        repo, SUMMARY, "s2", "architecture", replace_id=eid, source_files=["auth.py"],
+        title="Login issues a session cookie after verifying the token")
+    assert stored and returned_id == eid
+    entry = _entry(repo)
+    assert entry.get("proposed_revision", {}).get("title") == \
+        "Login issues a session cookie after verifying the token"
+    assert entry["anchor_commit"] != old_anchor  # content is unchanged, so this applies now
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+    assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
+
+
 def test_session_start_payload_never_shows_staleness_note(repo):
     """session_start_payload is never one of the two render sites _staleness_notes runs
     at — a changed source file must not surface a note there."""
