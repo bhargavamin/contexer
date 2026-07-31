@@ -1503,8 +1503,66 @@ def pending_review_nudge(repo_path: str) -> str | None:
         return None
 
 
+_MAX_SOURCE_FILES = 10
+_STALENESS_MAX_CHECKS = 3  # git calls per render; anchored entries beyond this render bare
+_GIT_FAST_TIMEOUT = 2      # injection/capture paths must never stall on a slow git
+
+
+def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
+    """Anchor a NEW entry to the files it describes plus the repo's current HEAD, so a later
+    injection can flag it as possibly stale (see _staleness_note). No-op when no usable file
+    is given. Fail-soft: an unresolvable HEAD stores an empty anchor, never blocks capture."""
+    files = [f for f in (source_files or []) if isinstance(f, str) and f.strip()][:_MAX_SOURCE_FILES]
+    if not files:
+        return
+    entry["source_files"] = files
+    entry["anchor_commit"] = _git(repo_path, "rev-parse", "HEAD", timeout=_GIT_FAST_TIMEOUT) or ""
+
+
+def _staleness_note(repo_path: str, entry: dict) -> str:
+    """`""` unless the entry is anchored (source_files + anchor_commit) AND git reports at
+    least one of those files changed between the anchor and HEAD. Fail-soft: an unknown
+    commit, a non-git repo, or a timeout all render no note (see _git). Never raises."""
+    files = [f for f in (entry.get("source_files") or []) if isinstance(f, str)]
+    anchor = entry.get("anchor_commit") or ""
+    if not files or not anchor:
+        return ""
+    out = _git(repo_path, "diff", "--name-only", f"{anchor}..HEAD", "--", *files,
+               timeout=_GIT_FAST_TIMEOUT)
+    changed = out.splitlines() if out else []
+    if not changed:
+        return ""
+    extra = f", +{len(changed) - 1} more" if len(changed) > 1 else ""
+    return f" [may be stale: {changed[0]} changed since capture{extra}]"
+
+
+def _staleness_notes(repo_path: str, entries: list) -> dict:
+    """id -> staleness note for the given rendered entries. Perf guard: at most
+    _STALENESS_MAX_CHECKS git checks per render call — anchored entries past that budget
+    render without a note rather than adding subprocess latency to an injection.
+
+    `repo_path` is used as given — the same already-resolved path the caller loaded the
+    entries from, so the git check can never target a different repo than the store read."""
+    notes, checked = {}, 0
+    for e in entries:
+        if checked >= _STALENESS_MAX_CHECKS:
+            break
+        if not (e.get("source_files") and e.get("anchor_commit")):
+            continue
+        checked += 1
+        note = _staleness_note(repo_path, e)
+        if note:
+            notes[e.get("id")] = note
+    return notes
+
+
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
-                    created_by: str = "ai", replace_id: str = "", title: str = "") -> tuple[bool, str | None]:
+                    created_by: str = "ai", replace_id: str = "", title: str = "", *,
+                    source_files: list | None = None) -> tuple[bool, str | None]:
+    """Store (or route) one decision. `source_files` anchors a NEWLY CREATED entry to the
+    repo-relative files it describes plus the current git HEAD, so later injections can flag
+    it as possibly stale; capped at _MAX_SOURCE_FILES. Recurrences, containment routes and
+    `replace_id` corrections never gain or overwrite an anchor — only entry creation anchors."""
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -1606,6 +1664,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             _save(repo_path, data)
             return False, None
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
+        _anchor_sources(repo_path, entry, source_files)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -2248,11 +2307,11 @@ _INSIGHT_ORDER = {"low": 0, "medium": 1, "high": 2}
 _FRESH_CLONE_DAYS = 7
 
 
-def _git(repo_path: str, *args: str) -> str | None:
+def _git(repo_path: str, *args: str, timeout: int = 5) -> str | None:
     try:
         out = subprocess.run(
             ["git", "-C", repo_path, *args],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=timeout,
         )
     except Exception:
         return None
@@ -3418,6 +3477,8 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     ignored / missing entries; empty string when nothing renders."""
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    stale = _staleness_notes(repo_path, [by_id[d] for d in ids
+                                         if d in by_id and _entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
     for did in ids:
         e = by_id.get(did)
@@ -3429,7 +3490,8 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
         title, body = _title_and_body(e)
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {title}{id_tag}")
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
+                     f"{title}{id_tag}{stale.get(did, '')}")
         if body is not None:
             lines.append(f"    {body}")
     return "\n".join(lines)
@@ -3709,6 +3771,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         if total > display_limit:
             filter_note += f" — showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
+        stale = _staleness_notes(repo_path, shown)
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             st = _entry_status(d)
@@ -3717,7 +3780,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
             title, body = _title_and_body(d)
-            lines.append(f"- [scope=personal] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
+            lines.append(f"- [scope=personal] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
+                         f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
                 lines.append(f"    {body}")
         lines.append(

@@ -36,7 +36,8 @@ mcp = FastMCP("contexer", instructions=_INSTRUCTIONS)
 
 @mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
-                   created_by: str = "ai", replace_id: str = "", title: str = "") -> str:
+                   created_by: str = "ai", replace_id: str = "", title: str = "",
+                   source_files: list[str] | None = None) -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     A synthesized understanding of how a subsystem works — produced by exploring or reading the
@@ -56,6 +57,10 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 - a significant change (architecture/constraint) becomes a Suggested Update
                   attached to the live decision and returns an approval prompt - the current
                   revision stays trusted until the developer approves.
+    source_files: repo-relative paths this content describes (max 10). When capturing a
+                comprehension summary, pass the files it describes so future injections can
+                flag it as possibly stale once that code changes. Anchors only a newly
+                stored decision, not a recurrence or a replace_id correction.
     title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the decision,
            shown when it's listed/injected — e.g. 'Use Postgres for decision store'. Only omit it
            when you can't summarize better than the content itself; the store then derives one
@@ -71,7 +76,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
         return "Skipped — repo path not detected."
     stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
                                              created_by=created_by, replace_id=replace_id,
-                                             title=title)
+                                             title=title, source_files=source_files)
     if not stored:
         return "Filtered — did not meet storage criteria."
     prompt = store.get_pending_approval_prompt(resolved, entry_id)

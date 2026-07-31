@@ -4229,7 +4229,7 @@ class TestServerTitleParam:
     def test_update_context_forwards_title(self, tmp_repo, monkeypatch):
         from contexer import server
         seen = {}
-        def fake_update(repo, content, sid, subtype="", created_by="ai", replace_id="", title=""):
+        def fake_update(repo, content, sid, subtype="", created_by="ai", replace_id="", title="", **kw):
             seen.update(title=title, content=content); return True, "id123"
         monkeypatch.setattr(server.store, "update_decision", fake_update)
         monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
