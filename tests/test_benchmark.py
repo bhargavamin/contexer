@@ -85,12 +85,19 @@ HIT_PROMPTS = [
     ("what was the reasoning behind the Result type pattern?",     "result"),
     ("why do we use Kong as our API gateway?",                     "gateway"),
     ("why were migrations automated instead of manual?",           "migrations"),
-    # Question-shaped comprehension prompts — no rationale word, but they name rare
-    # store terms, so the discriminative-term guard lets them through.
-    ("what does our event sourcing implementation do?",             "event"),
-    ("how does cursor pagination work here?",                       "pagination"),
-    ("how are refresh tokens stored?",                              "cookies"),
 ]
+
+# Question-shaped comprehension prompts — no rationale word, but they name rare store
+# terms, so the discriminative-term guard lets them through. Pinned separately as well as
+# in HIT_PROMPTS because the hit-rate benchmark only asserts a floor over all prompts:
+# test_question_prompts_inject_strong_content pins these to full content, not a pointer.
+QUESTION_HIT_PROMPTS = [
+    ("what does our event sourcing implementation do?",            "event"),
+    ("how does cursor pagination work here?",                      "pagination"),
+    ("how are refresh tokens stored?",                             "cookies"),
+]
+
+HIT_PROMPTS += QUESTION_HIT_PROMPTS
 
 # Prompts that should NOT trigger rationale injection (no rationale keyword or no match)
 MISS_PROMPTS = [
@@ -112,6 +119,12 @@ MISS_PROMPTS = [
     "what should I call this variable?",                 # only generic tokens match
     "how do I exit vim?",                                # nothing in the store at all
     "what time is the standup?",                         # "time" matches the SLA rule — 1 hit, not an answer
+    # These two are silent ONLY because of the discriminative guard — delete it and both
+    # inject. "must"/"never" are corpus-common (df 4 each) yet co-occur in the PII rule,
+    # so the pair clears _STRONG_MIN_HITS; "api" (df 4) is a lone common term that would
+    # otherwise take the single-keyword relaxation.
+    "what must never happen?",                           # 2 hits, 0 discriminative
+    "what about the api?",                               # 1 hit, 0 discriminative
 ]
 
 # Known edge-case false positives — short keywords that substring-match unrelated decisions.
@@ -287,6 +300,20 @@ class TestRationaleHitRate:
 
         assert len(hits) >= 7, f"Hit rate too low: {len(hits)}/10. Missed: {misses}"
         assert len(unexpected_fps) == 0, f"Unexpected false positives: {unexpected_fps}"
+
+    def test_question_prompts_inject_strong_content(self, populated_store, monkeypatch_module):
+        """The hit-rate benchmark only asserts a floor over all prompts, so a question pin
+        could silently decay into a ~15-token pointer and stay green. Pin the kind."""
+        for prompt, expected_kw in QUESTION_HIT_PROMPTS:
+            text, meta = store.get_context_for_prompt_with_meta(DEMO_REPO, prompt)
+            assert meta["kind"] == "strong", f"{prompt!r} degraded to {meta['kind']!r}"
+            assert expected_kw in text.lower(), f"{prompt!r} injected the wrong decision"
+
+    def test_discriminative_guard_is_load_bearing(self, populated_store, monkeypatch_module):
+        """Same question shape, opposite outcomes: a rare term answers, a common one is
+        noise. Without the guard the second prompt injects the PII rule on 'must never'."""
+        assert store.get_context_for_prompt(DEMO_REPO, "what must be parameterized?")
+        assert store.get_context_for_prompt(DEMO_REPO, "what must never happen?") == ""
 
     def test_miss_prompts_are_zero_cost(self, populated_store, monkeypatch_module):
         """Confirm non-rationale prompts add 0 tokens (pure no-op)."""
