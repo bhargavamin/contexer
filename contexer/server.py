@@ -17,11 +17,13 @@ _INSTRUCTIONS = (
     "CAPTURE - call update_context whenever you make, or the user states, a significant decision: a "
     "technology or approach chosen over alternatives (subtype=architecture), a naming/structure "
     "convention (pattern/convention), a rule like 'always X'/'never Y' (constraint), or anything that "
-    "would surprise a future session. Pass the full reasoning, not just the conclusion, and always "
-    "pass a concise, one-line, imperative title (<= 100 chars) summarizing the decision — e.g. 'Use "
-    "Postgres for decision store' — omit it only if you truly can't summarize better than the store's "
-    "own derivation from content. The server silently filters duplicates, so err on the side of "
-    "calling it.\n"
+    "would surprise a future session. A synthesized understanding of how a subsystem works, reached "
+    "by exploring the codebase to answer a question, is capture-worthy too (subtype=architecture) — "
+    "store it the same turn, since the session may end with the answer. Pass the full reasoning, not "
+    "just the conclusion, and always pass a concise, one-line, imperative title (<= 100 chars) "
+    "summarizing the decision — e.g. 'Use Postgres for decision store' — omit it only if you truly "
+    "can't summarize better than the store's own derivation from content. The server silently filters "
+    "duplicates, so err on the side of calling it.\n"
     "MATURITY - store observations and settled or user-ratified decisions freely, but keep your OWN "
     "not-yet-approved proposals provisional (created_by=ai records them as 'suggested', not "
     "authoritative) instead of writing them as fact. A decision from an approved-but-unimplemented "
@@ -36,6 +38,12 @@ mcp = FastMCP("contexer", instructions=_INSTRUCTIONS)
 def update_context(content: str, repo_path: str = "", subtype: str = "",
                    created_by: str = "ai", replace_id: str = "", title: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
+
+    A synthesized understanding of how a subsystem works — produced by exploring or reading the
+    codebase to answer a question — is also capture-worthy (subtype='architecture' for subsystem
+    behaviour/structure, 'pattern' for recurring code organization); store it in the SAME turn as
+    the exploration, since sessions often end right after the answer and there may be no next
+    prompt to catch it.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
     created_by: 'ai' (default) | 'plan' (a decision from a just-approved plan - stored PROVISIONAL/

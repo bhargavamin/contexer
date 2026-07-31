@@ -95,6 +95,7 @@ Call `update_context` for any of these:
 - A rule stated by the user or inferred from their preferences: "always X", "never Y" (subtype: `constraint` or `convention`)
 - A build, deploy, or tooling convention established (subtype: `convention`)
 - Any decision that would surprise a future Claude session if it wasn't stored
+- A synthesized understanding of how a subsystem works, produced while scanning the codebase to answer a question (subtype: `architecture`) — capture it in the same turn; the session may end with the answer.
 
 Pass the full reasoning, not just the conclusion. Pass `subtype` so decisions are retrievable by type. The server's novelty filter discards duplicates silently, so err on the side of calling it.
 
