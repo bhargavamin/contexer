@@ -1,6 +1,7 @@
 """Tests for staleness anchoring — source_files + anchor_commit, checked at injection."""
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +32,6 @@ def _commit(repo, message: str) -> None:
 
 
 def _touch(repo: str, name: str, body: str) -> None:
-    from pathlib import Path
     Path(repo, name).write_text(body, encoding="utf-8")
     _commit(repo, f"change {name}")
 
@@ -62,6 +62,16 @@ def test_changed_file_renders_note_in_both_sites(repo):
 
     rendered = store._render_prompt_decisions(repo, [eid])
     assert "[may be stale: auth.py changed since capture]" in rendered
+
+
+def test_uncommitted_edit_renders_note(repo):
+    """The dominant case: the session is editing the file right now, nothing committed yet."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                   source_files=["auth.py"])
+    Path(repo, "auth.py").write_text("def login(): return 'edited, uncommitted'\n",
+                                     encoding="utf-8")
+    assert "[may be stale: auth.py changed since capture]" in store.get_context(repo, query="auth")
+    assert "[may be stale: auth.py changed since capture]" in store._render_prompt_decisions(repo, [eid])
 
 
 def test_note_counts_extra_changed_files(repo):

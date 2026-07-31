@@ -1521,13 +1521,17 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
 
 def _staleness_note(repo_path: str, entry: dict) -> str:
     """`""` unless the entry is anchored (source_files + anchor_commit) AND git reports at
-    least one of those files changed between the anchor and HEAD. Fail-soft: an unknown
-    commit, a non-git repo, or a timeout all render no note (see _git). Never raises."""
+    least one of those files changed since the anchor. Fail-soft: an unknown commit, a
+    non-git repo, or a timeout all render no note (see _git). Never raises.
+
+    One-dot `git diff <anchor> -- <files>` (anchor vs the WORKING TREE), not `<anchor>..HEAD`:
+    the dominant staleness case is a file the session is editing right now, which a
+    commit-to-commit diff would not see at all."""
     files = [f for f in (entry.get("source_files") or []) if isinstance(f, str)]
     anchor = entry.get("anchor_commit") or ""
     if not files or not anchor:
         return ""
-    out = _git(repo_path, "diff", "--name-only", f"{anchor}..HEAD", "--", *files,
+    out = _git(repo_path, "diff", "--name-only", anchor, "--", *files,
                timeout=_GIT_FAST_TIMEOUT)
     changed = out.splitlines() if out else []
     if not changed:
