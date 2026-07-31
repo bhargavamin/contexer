@@ -3152,23 +3152,27 @@ _OVERVIEW_GENERIC_WORDS = frozenset({
 #
 # Topic → alias words. A decision (or prompt) is tagged with a topic when its lowercase
 # tokens hit >=1 alias. Derived only — never stored on the entry (the index sidecar owns
-# topics). Aliases are the listed words only; the bare topic name is NOT auto-added.
+# topics). Each topic's own bare name IS a member of its alias set (a question naming the
+# topic word directly — "what is the auth feature doing?" — must still tag as that topic),
+# but pruned words like bare "session" stay deliberately excluded — see below.
 _TOPIC_ALIASES: dict[str, frozenset] = {
-    "db": frozenset({"postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
+    "db": frozenset({"db", "postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
                      "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
-    "api": frozenset({"endpoint", "endpoints", "rest", "route", "routes", "request",
+    "api": frozenset({"api", "endpoint", "endpoints", "rest", "route", "routes", "request",
                       "response", "http", "graphql"}),
     # Bare "session"/"sessions" deliberately absent: in agent-tooling repos those
     # words overwhelmingly mean agent sessions, not auth sessions — they mis-tagged
     # documentation questions as auth (observed live 2026-07-15). Genuine auth-session
     # phrasing is caught by _AUTH_SESSION_RE below instead.
-    "auth": frozenset({"jwt", "oauth", "login", "token", "tokens"}),
-    "frontend": frozenset({"react", "component", "components", "css", "ui", "dom"}),
-    "deploy": frozenset({"docker", "kubernetes", "k8s", "ci", "terraform", "helm", "release"}),
-    "testing": frozenset({"pytest", "test", "tests", "fixture", "fixtures", "mock", "coverage"}),
-    "config": frozenset({"toml", "yaml", "env", "settings"}),
-    "perf": frozenset({"cache", "latency", "optimize"}),
-    "security": frozenset({"secret", "vulnerability", "sanitize", "injection"}),
+    "auth": frozenset({"auth", "jwt", "oauth", "login", "token", "tokens"}),
+    "frontend": frozenset({"frontend", "react", "component", "components", "css", "ui", "dom"}),
+    "deploy": frozenset({"deploy", "docker", "kubernetes", "k8s", "ci", "terraform", "helm",
+                         "release"}),
+    "testing": frozenset({"testing", "pytest", "test", "tests", "fixture", "fixtures", "mock",
+                          "coverage"}),
+    "config": frozenset({"config", "toml", "yaml", "env", "settings"}),
+    "perf": frozenset({"perf", "cache", "latency", "optimize"}),
+    "security": frozenset({"security", "secret", "vulnerability", "sanitize", "injection"}),
 }
 
 # BM25 tuning (Robertson/Sparck-Jones defaults — corpus is <=500 short jargon sentences).

@@ -46,7 +46,7 @@ CONVENTIONS = [
     "Use TypeScript strict mode for all new files — tsconfig.json has strict:true enabled globally",
     "All API endpoints return JSON with { data, error, meta } envelope structure — never return bare values",
     "Environment variables must be validated at startup using Zod schema — no direct process.env access in business logic",
-    "Database migrations run automatically on deploy via Prisma migrate deploy — never run migrations manually in production",
+    "Database migrations run automatically before the app boots via Prisma — never run migrations manually in production",
 ]
 
 CONSTRAINTS = [
@@ -99,6 +99,23 @@ QUESTION_HIT_PROMPTS = [
 
 HIT_PROMPTS += QUESTION_HIT_PROMPTS
 
+# Pointer-expected prompts (Task 4): a bare topic word gives the WEAK lane a topic to
+# overlap on, even though the STRONG lane's discriminative guard still blocks full content.
+# Pinned separately (not in HIT_PROMPTS, which only asserts truthiness) because
+# test_pointer_prompts_stay_weak below pins the exact kind — "pointer", never "strong".
+POINTER_HIT_PROMPTS = [
+    # "api" (df 4) is a lone common term with 0 discriminative hits — the guard blocks
+    # STRONG, but "api" is now a member of its own topic's alias set (Task 4), so the WEAK
+    # pointer fires instead of total silence.
+    ("what about the api?",              "api"),
+    # The motivating case: a question naming a bare topic word whose only BM25 match
+    # (the JWT/refresh-token decision) is single-term ("auth" isn't literally in that
+    # decision's text, only "authentication" — a different token) — pre-Task-4 this
+    # derived no topic at all and stayed silent. Now "auth" is a member of its own alias
+    # set, so the WEAK pointer surfaces it instead of nothing.
+    ("what is the auth feature doing?",  "auth"),
+]
+
 # Prompts that should NOT trigger rationale injection (no rationale keyword or no match)
 MISS_PROMPTS = [
     "add a new endpoint to create products",
@@ -119,12 +136,15 @@ MISS_PROMPTS = [
     "what should I call this variable?",                 # only generic tokens match
     "how do I exit vim?",                                # nothing in the store at all
     "what time is the standup?",                         # "time" matches the SLA rule — 1 hit, not an answer
-    # These two are silent ONLY because of the discriminative guard — delete it and both
-    # inject. "must"/"never" are corpus-common (df 4 each) yet co-occur in the PII rule,
-    # so the pair clears _STRONG_MIN_HITS; "api" (df 4) is a lone common term that would
-    # otherwise take the single-keyword relaxation.
+    # Silent ONLY because of the discriminative guard — delete it and this injects. "must"/
+    # "never" are corpus-common (df 4 each) yet co-occur in the PII rule, so the pair clears
+    # _STRONG_MIN_HITS. None of its words are topic names, so it stays a pure guard pin even
+    # after Task 4 (contrast with "what about the api?", moved to POINTER_HIT_PROMPTS above).
     "what must never happen?",                           # 2 hits, 0 discriminative
-    "what about the api?",                               # 1 hit, 0 discriminative
+    # Task 4 proof: a bare topic word ("api") alone does NOT leak through the gate on a
+    # plain task prompt — no rationale/project/question-lead and no artifact, so the router
+    # never even reaches topic derivation.
+    "add rate limiting to the api gateway",
 ]
 
 # Known edge-case false positives — short keywords that substring-match unrelated decisions.
@@ -314,6 +334,17 @@ class TestRationaleHitRate:
         noise. Without the guard the second prompt injects the PII rule on 'must never'."""
         assert store.get_context_for_prompt(DEMO_REPO, "what must be parameterized?")
         assert store.get_context_for_prompt(DEMO_REPO, "what must never happen?") == ""
+
+    def test_pointer_prompts_stay_weak(self, populated_store, monkeypatch_module):
+        """Task 4: a bare topic word (now a member of its own alias set) feeds ONLY the
+        WEAK pointer lane — the discriminative guard still blocks these from ever reaching
+        STRONG content, so the kind must be "pointer", never "strong" or "" (total silence,
+        the pre-Task-4 behavior)."""
+        for prompt, expected_topic in POINTER_HIT_PROMPTS:
+            text, meta = store.get_context_for_prompt_with_meta(DEMO_REPO, prompt)
+            assert meta["kind"] == "pointer", f"{prompt!r} yielded {meta['kind']!r}, not a pointer"
+            assert expected_topic in meta["topics"], f"{prompt!r} pointer omitted topic {expected_topic!r}"
+            assert expected_topic in text.lower()
 
     def test_miss_prompts_are_zero_cost(self, populated_store, monkeypatch_module):
         """Confirm non-rationale prompts add 0 tokens (pure no-op) — except the one
