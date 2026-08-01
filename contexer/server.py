@@ -17,11 +17,13 @@ _INSTRUCTIONS = (
     "CAPTURE - call update_context whenever you make, or the user states, a significant decision: a "
     "technology or approach chosen over alternatives (subtype=architecture), a naming/structure "
     "convention (pattern/convention), a rule like 'always X'/'never Y' (constraint), or anything that "
-    "would surprise a future session. Pass the full reasoning, not just the conclusion, and always "
-    "pass a concise, one-line, imperative title (<= 100 chars) summarizing the decision — e.g. 'Use "
-    "Postgres for decision store' — omit it only if you truly can't summarize better than the store's "
-    "own derivation from content. The server silently filters duplicates, so err on the side of "
-    "calling it.\n"
+    "would surprise a future session. A synthesized understanding of how a subsystem works, reached "
+    "by exploring the codebase to answer a question, is capture-worthy too (subtype=architecture) — "
+    "store it the same turn, since the session may end with the answer. Pass the full reasoning, not "
+    "just the conclusion, and always pass a concise, one-line, imperative title (<= 100 chars) "
+    "summarizing the decision — e.g. 'Use Postgres for decision store' — omit it only if you truly "
+    "can't summarize better than the store's own derivation from content. The server silently filters "
+    "duplicates, so err on the side of calling it.\n"
     "MATURITY - store observations and settled or user-ratified decisions freely, but keep your OWN "
     "not-yet-approved proposals provisional (created_by=ai records them as 'suggested', not "
     "authoritative) instead of writing them as fact. A decision from an approved-but-unimplemented "
@@ -34,8 +36,15 @@ mcp = FastMCP("contexer", instructions=_INSTRUCTIONS)
 
 @mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
-                   created_by: str = "ai", replace_id: str = "", title: str = "") -> str:
+                   created_by: str = "ai", replace_id: str = "", title: str = "",
+                   source_files: list[str] | None = None) -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
+
+    A synthesized understanding of how a subsystem works — produced by exploring or reading the
+    codebase to answer a question — is also capture-worthy (subtype='architecture' for subsystem
+    behaviour/structure, 'pattern' for recurring code organization); store it in the SAME turn as
+    the exploration, since sessions often end right after the answer and there may be no next
+    prompt to catch it.
 
     subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
     created_by: 'ai' (default) | 'plan' (a decision from a just-approved plan - stored PROVISIONAL/
@@ -48,6 +57,20 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 - a significant change (architecture/constraint) becomes a Suggested Update
                   attached to the live decision and returns an approval prompt - the current
                   revision stays trusted until the developer approves.
+    source_files: repo-relative paths this content describes (max 10). When capturing a
+                comprehension summary, pass the files it describes so future injections can
+                flag it as possibly stale once that code changes. Anchors a newly stored
+                decision, and also re-anchors a replace_id correction (fresh files + current
+                HEAD) as soon as the corrected text becomes the live, rendered content — for
+                a trivial correction or a re-capture of still-accurate content, that's
+                immediate; for a significant correction (architecture/constraint) it happens
+                only once a developer approves the resulting Suggested Update, since until
+                then the OLD content is still what's shown. Never a recurrence. When an
+                injection shows a decision with "[may be stale: ...]", re-read the named
+                file(s) and re-capture via replace_id, passing source_files again so the
+                anchor refreshes (immediately, or on approval) and the note clears; omitting
+                source_files on that correction leaves the old anchor in place and the note
+                keeps firing.
     title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the decision,
            shown when it's listed/injected — e.g. 'Use Postgres for decision store'. Only omit it
            when you can't summarize better than the content itself; the store then derives one
@@ -63,7 +86,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
         return "Skipped — repo path not detected."
     stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
                                              created_by=created_by, replace_id=replace_id,
-                                             title=title)
+                                             title=title, source_files=source_files)
     if not stored:
         return "Filtered — did not meet storage criteria."
     prompt = store.get_pending_approval_prompt(resolved, entry_id)

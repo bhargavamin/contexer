@@ -1380,10 +1380,15 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 
 
 def _build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
-                    source: str = "ai", title: str = "") -> dict:
+                    source: str = "ai", title: str = "", source_files=None) -> dict:
     """A Suggested Update (pending revision) attached to a live decision: the detected new
     value, its confidence/evidence, and provenance. The live decision is NOT modified - this
-    proposal waits for developer approval, at which point it is promoted to a new revision."""
+    proposal waits for developer approval, at which point it is promoted to a new revision.
+
+    source_files: stashed on the proposal, not applied yet — the live entry's anchor must
+    keep describing the CURRENTLY RENDERED content until the proposal is actually promoted
+    (see _promote_proposal); re-anchoring here would clear the stale note while the old,
+    still-live text keeps rendering."""
     sessions = sorted({s for s in (*(target.get("session_ids") or []), session_id) if s})
     score, factors = _compute_confidence({
         "created_by": "ai",
@@ -1402,16 +1407,20 @@ def _build_proposal(target: dict, content: str, subtype: str, session_id: str, n
         "confidence_factors": factors,
     }
     proposal["title"] = _normalize_title(title) or _derive_title(normalized_content)
+    if source_files:
+        proposal["source_files"] = source_files
     return proposal
 
 
-def _promote_proposal(entry: dict, content: str | None = None) -> None:
+def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -> None:
     """Approve a pending proposed_revision: append it as a new immutable revision and move
     current_revision_id forward. Prior revisions are preserved (never overwritten). `content`
     (an edited value) overrides the proposal's content when given. The proposal's title carries
     forward only when the promoted content matches the proposal's content unchanged; if an
     edit at approval time changed the content, the title is dropped so _append_revision
-    re-derives it from the final content instead of carrying a stale one."""
+    re-derives it from the final content instead of carrying a stale one. A source_files stashed
+    on the proposal (see _build_proposal) is applied NOW, since the corrected content is only
+    now becoming the live, rendered revision."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1429,6 +1438,8 @@ def _promote_proposal(entry: dict, content: str | None = None) -> None:
     carried_title = prop.get("title", "") if new_content == prop_content else ""
     _append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now,
                      title=carried_title)
+    if prop.get("source_files"):
+        _anchor_sources(repo_path, entry, prop["source_files"])
     entry.pop("proposed_revision", None)
 
 
@@ -1503,8 +1514,86 @@ def pending_review_nudge(repo_path: str) -> str | None:
         return None
 
 
+_MAX_SOURCE_FILES = 10
+_STALENESS_MAX_CHECKS = 3  # git calls per render; anchored entries beyond this render bare
+_GIT_FAST_TIMEOUT = 2      # injection/capture paths must never stall on a slow git
+
+
+def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
+    """Anchor an entry (a new one, or a `replace_id` correction) to the files it describes
+    plus the repo's current HEAD, so a later injection can flag it as possibly stale (see
+    _staleness_note). No-op when no usable file is given. Fail-soft: an unresolvable HEAD
+    stores an empty anchor, never blocks capture. `source_files` must be a list/tuple — a
+    bare string is rejected rather than iterated character-by-character."""
+    if not isinstance(source_files, (list, tuple)):
+        source_files = []
+    files = [f for f in source_files if isinstance(f, str) and f.strip()][:_MAX_SOURCE_FILES]
+    if not files:
+        return
+    entry["source_files"] = files
+    entry["anchor_commit"] = _git(repo_path, "rev-parse", "HEAD", timeout=_GIT_FAST_TIMEOUT) or ""
+
+
+def _staleness_note(repo_path: str, entry: dict) -> str:
+    """`""` unless the entry is anchored (source_files + anchor_commit) AND git reports at
+    least one of those files changed since the anchor. Fail-soft: an unknown commit, a
+    non-git repo, or a timeout all render no note (see _git). Never raises.
+
+    One-dot `git diff <anchor> -- <files>` (anchor vs the WORKING TREE), not `<anchor>..HEAD`:
+    the dominant staleness case is a file the session is editing right now, which a
+    commit-to-commit diff would not see at all. The try/except below enforces "never
+    raises" locally rather than relying solely on `_git`'s own fail-soft contract."""
+    try:
+        files = [f for f in (entry.get("source_files") or []) if isinstance(f, str)]
+        anchor = entry.get("anchor_commit") or ""
+        if not files or not anchor:
+            return ""
+        out = _git(repo_path, "diff", "--name-only", anchor, "--", *files,
+                   timeout=_GIT_FAST_TIMEOUT)
+        changed = out.splitlines() if out else []
+        if not changed:
+            return ""
+        extra = f", +{len(changed) - 1} more" if len(changed) > 1 else ""
+        return f" [may be stale: {changed[0]} changed since capture{extra}]"
+    except Exception:
+        return ""
+
+
+def _staleness_notes(repo_path: str, entries: list) -> dict:
+    """id -> staleness note for the given rendered entries. Perf guard: at most
+    _STALENESS_MAX_CHECKS git checks per render call — anchored entries past that budget
+    render without a note rather than adding subprocess latency to an injection.
+
+    `repo_path` is used as given — the same already-resolved path the caller loaded the
+    entries from, so the git check can never target a different repo than the store read."""
+    notes, checked = {}, 0
+    for e in entries:
+        if checked >= _STALENESS_MAX_CHECKS:
+            break
+        if not (e.get("source_files") and e.get("anchor_commit")):
+            continue
+        checked += 1
+        note = _staleness_note(repo_path, e)
+        if note:
+            notes[e.get("id")] = note
+    return notes
+
+
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
-                    created_by: str = "ai", replace_id: str = "", title: str = "") -> tuple[bool, str | None]:
+                    created_by: str = "ai", replace_id: str = "", title: str = "", *,
+                    source_files: list | None = None) -> tuple[bool, str | None]:
+    """Store (or route) one decision. `source_files` anchors a NEWLY CREATED entry to the
+    repo-relative files it describes plus the current git HEAD, so later injections can flag
+    it as possibly stale; capped at _MAX_SOURCE_FILES. Recurrences and containment routes
+    never gain or overwrite an anchor. A `replace_id` correction that passes non-empty
+    `source_files` re-anchors — but ONLY once its content is actually the live, rendered
+    revision: a trivial (pattern/convention, or human/scan/bootstrap) correction re-anchors
+    immediately, a re-capture of identical (still-accurate) content re-anchors immediately,
+    but a significant (architecture/constraint, AI-inferred) correction stashes source_files
+    on the Suggested Update instead and only re-anchors when a developer approves it (see
+    _promote_proposal) — the live entry keeps rendering its OLD content until then, so its
+    anchor must keep describing that old content, not the pending correction. Omitting
+    `source_files` on any correction leaves the existing anchor untouched."""
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -1528,8 +1617,17 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # retitling a trusted architecture/constraint decision could reframe it as trusted
                 # context - that goes through review, never applied in place.
                 if content == target.get("content", ""):
+                    # The content is re-verified and still holds — this is the recovery loop
+                    # for a stale note. The live rendered content IS the re-validated text
+                    # right here (only the title, if any, is what's still under review below),
+                    # so anchor immediately regardless of which title sub-path runs next.
+                    # Every exit from this block below must persist this via _save.
+                    if source_files:
+                        _anchor_sources(repo_path, target, source_files)
                     new_title = _normalize_title(title)
                     if not new_title or new_title == target.get("title", ""):
+                        if source_files:
+                            _save(repo_path, data)
                         return True, target["id"]  # nothing meaningful changed
                     now = datetime.now(timezone.utc).isoformat()
                     st = target.get("subtype", "")
@@ -1545,6 +1643,8 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         existing_prop = target.get("proposed_revision")
                         if (existing_prop and existing_prop.get("content", "") == content
                                 and existing_prop.get("title", "") == new_title):
+                            if source_files:
+                                _save(repo_path, data)
                             return True, target["id"]  # identical title proposal already pending
                         target["proposed_revision"] = _build_proposal(
                             target, content, subtype, session_id, now, title=title)
@@ -1559,6 +1659,8 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         target["updated_at"] = now
                         _sync_decision_cache(target)
                         _save(repo_path, data)
+                    elif source_files:
+                        _save(repo_path, data)  # no revision to retitle, but the anchor still moved
                     return True, target["id"]
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")
@@ -1583,17 +1685,25 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title):
                         return True, target["id"]
+                    # source_files is stashed on the proposal, NOT applied to the live entry —
+                    # the current revision (the old, genuinely stale text) keeps rendering until
+                    # a developer approves, so the anchor must not refresh yet (_promote_proposal
+                    # applies it at approval time).
                     target["proposed_revision"] = _build_proposal(
-                        target, content, subtype, session_id, now, title=title)
+                        target, content, subtype, session_id, now, title=title,
+                        source_files=source_files)
                     _save(repo_path, data)
                     _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"]
                 # Trivial change (pattern/convention, or any human/scan/bootstrap change) →
                 # apply immediately as a new approved revision. History is preserved: the
-                # prior revision stays in revisions[]; current_revision_id moves forward.
+                # prior revision stays in revisions[]; current_revision_id moves forward. This IS
+                # the live, rendered content now, so re-anchor here (not before the split above).
                 if subtype:
                     target["subtype"] = subtype
                 _append_revision(target, content, source=created_by, approved_at=now, title=title)
+                if source_files:
+                    _anchor_sources(repo_path, target, source_files)
                 _save(repo_path, data)
                 return True, target["id"]
             # replace_id not found — fall through to normal storage
@@ -1606,6 +1716,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             _save(repo_path, data)
             return False, None
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
+        _anchor_sources(repo_path, entry, source_files)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -1642,14 +1753,14 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
         ok, msg, changed = _apply_approval(
-            data, entry_id, action, content, datetime.now(timezone.utc).isoformat())
+            data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path)
         if changed:
             _save(repo_path, data)
         return ok, msg
 
 
 def _apply_approval(data: dict, entry_id: str, action: str, content: str,
-                    now: str) -> tuple[bool, str, bool]:
+                    now: str, repo_path: str) -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory — no lock, no load, no save. Returns
     (success, message, changed); `changed` lets the caller save only when something mutated, and
     lets `approve_decisions` batch many actions into a single load+save. Resolves an exact id
@@ -1674,7 +1785,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         entry["status"] = "approved"
         entry["approved_at"] = now
         entry["approved_by"] = "human"
-        _promote_proposal(entry, content if action == "edit" else None)
+        _promote_proposal(repo_path, entry, content if action == "edit" else None)
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -1742,7 +1853,7 @@ def approve_decisions(repo_path: str, entry_ids: list, action: str,
         now = datetime.now(timezone.utc).isoformat()
         changed_any = False
         for eid in entry_ids:
-            ok, msg, changed = _apply_approval(data, eid, action, content, now)
+            ok, msg, changed = _apply_approval(data, eid, action, content, now, repo_path)
             changed_any = changed_any or changed
             results.append((eid, ok, msg))
         if changed_any:
@@ -2248,11 +2359,11 @@ _INSIGHT_ORDER = {"low": 0, "medium": 1, "high": 2}
 _FRESH_CLONE_DAYS = 7
 
 
-def _git(repo_path: str, *args: str) -> str | None:
+def _git(repo_path: str, *args: str, timeout: int = 5) -> str | None:
     try:
         out = subprocess.run(
             ["git", "-C", repo_path, *args],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=timeout,
         )
     except Exception:
         return None
@@ -3012,6 +3123,11 @@ _RATIONALE_WORDS = frozenset({
     "approach", "architecture", "tradeoff", "tradeoffs", "constraint", "convention",
 })
 
+# Question-shaped prompts: "what does the miner do?", "how does the router pick topics?".
+# Deliberately lead-word-only (not a trailing "?") and deliberately without can/does/is —
+# "can you add X?" is a task request and must stay silent.
+_QUESTION_LEADS = frozenset({"what", "how", "where", "which", "when", "who"})
+
 # Project-context questions: "what is the purpose?", "what is planned?", "what's the goal?"
 # "plan" excluded — too ambiguous ("premium plan", "payment plan")
 _PROJECT_CONTEXT_WORDS = frozenset({
@@ -3043,23 +3159,27 @@ _OVERVIEW_GENERIC_WORDS = frozenset({
 #
 # Topic → alias words. A decision (or prompt) is tagged with a topic when its lowercase
 # tokens hit >=1 alias. Derived only — never stored on the entry (the index sidecar owns
-# topics). Aliases are the listed words only; the bare topic name is NOT auto-added.
+# topics). Each topic's own bare name IS a member of its alias set (a question naming the
+# topic word directly — "what is the auth feature doing?" — must still tag as that topic),
+# but pruned words like bare "session" stay deliberately excluded — see below.
 _TOPIC_ALIASES: dict[str, frozenset] = {
-    "db": frozenset({"postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
+    "db": frozenset({"db", "postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
                      "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
-    "api": frozenset({"endpoint", "endpoints", "rest", "route", "routes", "request",
+    "api": frozenset({"api", "endpoint", "endpoints", "rest", "route", "routes", "request",
                       "response", "http", "graphql"}),
     # Bare "session"/"sessions" deliberately absent: in agent-tooling repos those
     # words overwhelmingly mean agent sessions, not auth sessions — they mis-tagged
     # documentation questions as auth (observed live 2026-07-15). Genuine auth-session
     # phrasing is caught by _AUTH_SESSION_RE below instead.
-    "auth": frozenset({"jwt", "oauth", "login", "token", "tokens"}),
-    "frontend": frozenset({"react", "component", "components", "css", "ui", "dom"}),
-    "deploy": frozenset({"docker", "kubernetes", "k8s", "ci", "terraform", "helm", "release"}),
-    "testing": frozenset({"pytest", "test", "tests", "fixture", "fixtures", "mock", "coverage"}),
-    "config": frozenset({"toml", "yaml", "env", "settings"}),
-    "perf": frozenset({"cache", "latency", "optimize"}),
-    "security": frozenset({"secret", "vulnerability", "sanitize", "injection"}),
+    "auth": frozenset({"auth", "jwt", "oauth", "login", "token", "tokens"}),
+    "frontend": frozenset({"frontend", "react", "component", "components", "css", "ui", "dom"}),
+    "deploy": frozenset({"deploy", "docker", "kubernetes", "k8s", "ci", "terraform", "helm",
+                         "release"}),
+    "testing": frozenset({"testing", "pytest", "test", "tests", "fixture", "fixtures", "mock",
+                          "coverage"}),
+    "config": frozenset({"config", "toml", "yaml", "env", "settings"}),
+    "perf": frozenset({"perf", "cache", "latency", "optimize"}),
+    "security": frozenset({"security", "secret", "vulnerability", "sanitize", "injection"}),
 }
 
 # BM25 tuning (Robertson/Sparck-Jones defaults — corpus is <=500 short jargon sentences).
@@ -3171,10 +3291,12 @@ def _read_retrieval_index(repo_path: str) -> dict | None:
     return data
 
 
-def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]:
+def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, int]]:
     """BM25-score every indexed doc against `keywords` (which may repeat — repeats raise
-    that term's query weight). Returns (decision_id, score, distinct_term_hits) sorted by
-    score desc. Terms absent from the corpus contribute nothing."""
+    that term's query weight). Returns (decision_id, score, distinct_term_hits,
+    discriminative_hits) sorted by score desc. Terms absent from the corpus contribute
+    nothing. A hit is *discriminative* when the matched term is rare in this corpus
+    (df <= max(2, n_docs // 20)) — the router's junk guard for question-only prompts."""
     import math
     docs = index.get("docs", {})
     df = index.get("df", {})
@@ -3198,12 +3320,14 @@ def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]
         pref = [t for t in df if t.startswith(term)]
         if pref:
             resolved[term] = (pref, min(sum(df[t] for t in pref), n_docs))
-    ranked: list[tuple[str, float, int]] = []
+    disc_cap = max(2, n_docs // 20)
+    ranked: list[tuple[str, float, int, int]] = []
     for did, doc in docs.items():
         tf = doc.get("tf", {})
         dl = doc.get("len", 0) or 0
         score = 0.0
         hits = 0
+        dhits = 0
         for term, w in qweight.items():
             r = resolved.get(term)
             if not r:
@@ -3213,11 +3337,13 @@ def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int]]
             if not f:
                 continue
             hits += 1
+            if n_t <= disc_cap:
+                dhits += 1
             idf = math.log(1 + (n_docs - n_t + 0.5) / (n_t + 0.5))
             denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * (dl / avgdl if avgdl else 1))
             score += w * idf * (f * (_BM25_K1 + 1) / denom)
         if hits:
-            ranked.append((did, score, hits))
+            ranked.append((did, score, hits, dhits))
     ranked.sort(key=lambda r: r[1], reverse=True)
     return ranked
 
@@ -3418,6 +3544,8 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     ignored / missing entries; empty string when nothing renders."""
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    stale = _staleness_notes(repo_path, [by_id[d] for d in ids
+                                         if d in by_id and _entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
     for did in ids:
         e = by_id.get(did)
@@ -3429,7 +3557,8 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
         title, body = _title_and_body(e)
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} {title}{id_tag}")
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
+                     f"{title}{id_tag}{stale.get(did, '')}")
         if body is not None:
             lines.append(f"    {body}")
     return "\n".join(lines)
@@ -3495,6 +3624,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
 
     is_rationale = bool(word_set & _RATIONALE_WORDS)
     is_project = bool(word_set & _PROJECT_CONTEXT_WORDS)
+    is_question = bool(words_raw) and words_raw[0] in _QUESTION_LEADS
 
     # Extract content keywords: alpha-only, length >= 3, not stop words.
     # >= 3 (not > 3) captures short tech terms: jwt, api, sdk, k8s, sql, gcp, aws.
@@ -3512,11 +3642,15 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
             return "", dict(_EMPTY_META)
         return _legacy_prompt_context(repo_path, ordered_kws, is_project)
 
-    # BM25 path. The router fires on rationale/project questions AND on artifact-bearing
-    # prompts (a stack-trace paste is signal-rich even when the prose names no topic);
-    # a prose-only, non-rationale prompt stays silent, exactly like today.
+    # BM25 path. The router fires on rationale/project questions, on artifact-bearing
+    # prompts (a stack-trace paste is signal-rich even when the prose names no topic),
+    # and on question-shaped prompts ("what does the miner do?" — comprehension questions
+    # carry no rationale word yet are exactly what stored context answers). A non-question
+    # task prompt with no artifact stays silent, exactly like today. Question-only prompts
+    # (no rationale/project word) additionally clear a discriminative-term guard below, so
+    # a generic-token question can't drag in whatever decision happens to share a word.
     artifacts = _extract_artifacts(prompt)
-    if not is_rationale and not is_project and not artifacts:
+    if not is_rationale and not is_project and not artifacts and not is_question:
         return "", dict(_EMPTY_META)
 
     # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
@@ -3531,14 +3665,24 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
 
     if ranked:
         top_score = ranked[0][1]
+        # Junk guard: a bare question (no rationale/project word) only earns a content
+        # injection when the top-ranked doc matched a DISCRIMINATIVE term — one rare in
+        # this corpus. Otherwise "what time is the standup?" would inject the p99-latency
+        # constraint on the word "time".
+        question_only = is_question and not is_rationale and not is_project
+        allow_strong = not question_only or ranked[0][3] >= 1
         strong: list[str] = []
-        for did, score, hits in ranked[:_STRONG_CANDIDATES]:
-            if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
-                strong.append(did)
+        if allow_strong:
+            for did, score, hits, _dh in ranked[:_STRONG_CANDIDATES]:
+                if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
+                    strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
         # yields one doc with one hit — relax to hits>=1 on the top candidate so legacy's
-        # full-content recall for both prompt classes is preserved.
-        if not strong and (is_rationale or is_project) and ranked[0][2] >= 1:
+        # full-content recall for both prompt classes is preserved. A bare question gets the
+        # same relaxation only when it *is* single-keyword (and hence discriminative per the
+        # guard above) — with more keywords, one lone hit is noise, not an answer.
+        relax = is_rationale or is_project or (question_only and len(set(query_terms)) == 1)
+        if not strong and allow_strong and relax and ranked[0][2] >= 1:
             strong = [ranked[0][0]]
         strong = strong[:_STRONG_CAP]
         if strong:
@@ -3709,6 +3853,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         if total > display_limit:
             filter_note += f" — showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
+        stale = _staleness_notes(repo_path, shown)
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             st = _entry_status(d)
@@ -3717,7 +3862,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
             title, body = _title_and_body(d)
-            lines.append(f"- [scope=personal] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
+            lines.append(f"- [scope=personal] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
+                         f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
                 lines.append(f"    {body}")
         lines.append(

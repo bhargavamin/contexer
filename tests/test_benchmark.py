@@ -87,6 +87,44 @@ HIT_PROMPTS = [
     ("why were migrations automated instead of manual?",           "migrations"),
 ]
 
+# Question-shaped comprehension prompts — no rationale word, but they name rare store
+# terms, so the discriminative-term guard lets them through. Pinned separately as well as
+# in HIT_PROMPTS because the hit-rate benchmark only asserts a floor over all prompts:
+# test_question_prompts_inject_strong_content pins these to full content, not a pointer.
+QUESTION_HIT_PROMPTS = [
+    ("what does our event sourcing implementation do?",            "event"),
+    ("how does cursor pagination work here?",                      "pagination"),
+    ("how are refresh tokens stored?",                             "cookies"),
+]
+
+HIT_PROMPTS += QUESTION_HIT_PROMPTS
+
+# Pointer-expected prompts (Task 4): a bare topic word gives the WEAK lane a topic to
+# overlap on, even though the STRONG lane's discriminative guard still blocks full content.
+# Pinned separately (not in HIT_PROMPTS, which only asserts truthiness) because
+# test_pointer_prompts_stay_weak below pins the exact kind — "pointer", never "strong".
+POINTER_HIT_PROMPTS = [
+    # "api" (df 4) is a lone common term with 0 discriminative hits — the guard blocks
+    # STRONG, but "api" is now a member of its own topic's alias set (Task 4), so the WEAK
+    # pointer fires instead of total silence.
+    ("what about the api?",              "api"),
+    # The motivating case: a question naming a bare topic word whose only BM25 match
+    # (the JWT/refresh-token decision) is single-term ("auth" isn't literally in that
+    # decision's text, only "authentication" — a different token) — pre-Task-4 this
+    # derived no topic at all and stayed silent. Now "auth" is a member of its own alias
+    # set, so the WEAK pointer surfaces it instead of nothing.
+    ("what is the auth feature doing?",  "auth"),
+    # PRE-EXISTING behavior, not new in this task: "overview" already passed the
+    # is_project gate and "docker" was already a `deploy` alias before this branch — any
+    # store holding a deploy-tagged decision (the migrations-on-deploy convention below
+    # genuinely IS one; `prisma migrate deploy` is a real deploy-pipeline fact) already
+    # produced this pointer. The documented limitation is prompt-side (a general-knowledge
+    # "Docker networking" question happens to share the `docker` token with the `deploy`
+    # topic), not a false tag — and the payload is a ~15-token "if relevant" pointer, not
+    # a content injection.
+    ("give me an overview of Docker networking", "deploy"),
+]
+
 # Prompts that should NOT trigger rationale injection (no rationale keyword or no match)
 MISS_PROMPTS = [
     "add a new endpoint to create products",
@@ -100,8 +138,21 @@ MISS_PROMPTS = [
     "why do plants grow upward?",                        # rationale word, no domain keyword
     "what is the reason for rain?",                      # rationale word, no domain keyword
     "is this variable in scope?",                        # "scope" trigger but domain keyword present
-    "give me an overview of Docker networking",          # "overview" trigger but domain keywords present
     "add a NOT NULL constraint to the users table",      # "constraint" trigger but SQL-specific
+    # Question-shaped but generic: the router opens for questions, the discriminative-term
+    # guard keeps these silent (no rare store term matched, no topic overlap).
+    "what should I call this variable?",                 # only generic tokens match
+    "how do I exit vim?",                                # nothing in the store at all
+    "what time is the standup?",                         # "time" matches the SLA rule — 1 hit, not an answer
+    # Silent ONLY because of the discriminative guard — delete it and this injects. "must"/
+    # "never" are corpus-common (df 4 each) yet co-occur in the PII rule, so the pair clears
+    # _STRONG_MIN_HITS. None of its words are topic names, so it stays a pure guard pin even
+    # after Task 4 (contrast with "what about the api?", moved to POINTER_HIT_PROMPTS above).
+    "what must never happen?",                           # 2 hits, 0 discriminative
+    # Task 4 proof: a bare topic word ("api") alone does NOT leak through the gate on a
+    # plain task prompt — no rationale/project/question-lead and no artifact, so the router
+    # never even reaches topic derivation.
+    "add rate limiting to the api gateway",
 ]
 
 # Known edge-case false positives — short keywords that substring-match unrelated decisions.
@@ -275,14 +326,41 @@ class TestRationaleHitRate:
                 kw = [w for w in p.lower().split() if len(w) > 3 and w not in store._QUERY_STOP_WORDS and w.isalpha()]
                 print(f"    \"{p}\" → keyword '{kw}' substring-matched an unrelated decision")
 
-        assert len(hits) >= 7, f"Hit rate too low: {len(hits)}/10. Missed: {misses}"
+        assert len(hits) >= 10, f"Hit rate too low: {len(hits)}/13. Missed: {misses}"
         assert len(unexpected_fps) == 0, f"Unexpected false positives: {unexpected_fps}"
 
+    def test_question_prompts_inject_strong_content(self, populated_store, monkeypatch_module):
+        """The hit-rate benchmark only asserts a floor over all prompts, so a question pin
+        could silently decay into a ~15-token pointer and stay green. Pin the kind."""
+        for prompt, expected_kw in QUESTION_HIT_PROMPTS:
+            text, meta = store.get_context_for_prompt_with_meta(DEMO_REPO, prompt)
+            assert meta["kind"] == "strong", f"{prompt!r} degraded to {meta['kind']!r}"
+            assert expected_kw in text.lower(), f"{prompt!r} injected the wrong decision"
+
+    def test_discriminative_guard_is_load_bearing(self, populated_store, monkeypatch_module):
+        """Same question shape, opposite outcomes: a rare term answers, a common one is
+        noise. Without the guard the second prompt injects the PII rule on 'must never'."""
+        assert store.get_context_for_prompt(DEMO_REPO, "what must be parameterized?")
+        assert store.get_context_for_prompt(DEMO_REPO, "what must never happen?") == ""
+
+    def test_pointer_prompts_stay_weak(self, populated_store, monkeypatch_module):
+        """Task 4: a bare topic word (now a member of its own alias set) feeds ONLY the
+        WEAK pointer lane — the discriminative guard still blocks these from ever reaching
+        STRONG content, so the kind must be "pointer", never "strong" or "" (total silence,
+        the pre-Task-4 behavior)."""
+        for prompt, expected_topic in POINTER_HIT_PROMPTS:
+            text, meta = store.get_context_for_prompt_with_meta(DEMO_REPO, prompt)
+            assert meta["kind"] == "pointer", f"{prompt!r} yielded {meta['kind']!r}, not a pointer"
+            assert expected_topic in meta["topics"], f"{prompt!r} pointer omitted topic {expected_topic!r}"
+            assert expected_topic in text.lower()
+
     def test_miss_prompts_are_zero_cost(self, populated_store, monkeypatch_module):
-        """Confirm non-rationale prompts add 0 tokens (pure no-op)."""
-        for prompt in MISS_PROMPTS[:5]:  # sample 5
-            result = store.get_context_for_prompt(DEMO_REPO, prompt)
-            assert result == "", f"Expected silent no-op for: {prompt!r}"
+        """Confirm non-rationale prompts add 0 tokens (pure no-op) — except the one
+        documented substring-match false positive. Asserts the exact set of non-silent
+        prompts (not just "skip whatever's in KNOWN_FALSE_POSITIVES") so a NEW false
+        positive silently added to that list still fails this test until reviewed here too."""
+        non_silent = {p for p in MISS_PROMPTS if store.get_context_for_prompt(DEMO_REPO, p)}
+        assert non_silent == {"is this variable in scope?"}, non_silent
 
 
 # ── Benchmark 3: On-demand get_context timing ────────────────────────────────
