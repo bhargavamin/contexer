@@ -6,6 +6,20 @@ import pytest
 from contexer import remote, store
 
 
+def pytest_collection_modifyitems(items):
+    """Classify each test into one selectable verification tier."""
+    for item in items:
+        filename = item.path.name
+        if filename in {"test_benchmark.py", "test_benchmark_extended.py"}:
+            item.add_marker(pytest.mark.accuracy)
+        elif filename.startswith("test_bench_"):
+            item.add_marker(pytest.mark.harness)
+        elif filename.startswith(("test_e2e", "test_team_")):
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.fast)
+
+
 @pytest.fixture
 def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""

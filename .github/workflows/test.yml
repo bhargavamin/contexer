@@ -15,10 +15,13 @@ on:
       - "LICENSE"
       - "docs/**"
       - "assets/**"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 jobs:
-  test:
-    name: Python ${{ matrix.python-version }}
+  correctness:
+    name: Correctness (fast + integration) / Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,5 +45,50 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run tests
-        run: uv run pytest tests/ -v --tb=short
+      - name: Report selected tier
+        run: echo "Selected tier: fast + integration (default PR gate)"
+
+      - name: Run hermetic correctness tests with coverage
+        run: uv run pytest tests/ -m "fast or integration" -v --tb=short
+
+  accuracy:
+    name: Accuracy / Python 3.13
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Report selected tier
+        run: echo "Selected tier: accuracy"
+
+      - name: Run retrieval and novelty accuracy tests
+        run: uv run pytest tests/ -m accuracy -v --tb=short --no-cov
+
+  harness:
+    name: Benchmark harness / Python 3.13
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Report selected tier
+        run: echo "Selected tier: harness"
+
+      - name: Run stubbed benchmark harness tests
+        run: uv run pytest tests/ -m harness -v --tb=short --no-cov

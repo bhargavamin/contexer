@@ -1,13 +1,30 @@
 # Tests
 
+## Test tiers
+
+```bash
+# Default pull-request gate: hermetic correctness tests with the 85% coverage gate.
+uv run pytest tests/ -m "fast or integration"
+
+# Focused verification tiers (no coverage gate for targeted runs).
+uv run pytest tests/ -m accuracy --no-cov
+uv run pytest tests/ -m harness --no-cov
+```
+
+`fast` covers hermetic unit tests, while `integration` covers hermetic multi-component
+flows. `accuracy` covers retrieval and novelty-filter benchmarks. `harness` covers the
+benchmark runner, report/validation, and stubbed OTel receiver tests. The `accuracy` and
+`harness` jobs run on the weekly schedule and manual workflow dispatch; run the matching
+command locally whenever the changed area requires it.
+
+Live/API campaigns and checks against a real Contexer Teams stack are intentional manual
+verification only; they are not part of any pytest tier or scheduled job.
+
 ## Running locally
 
 ```bash
 # Install dev dependencies
 uv sync
-
-# Run all tests (includes coverage gate — must stay ≥85%)
-uv run pytest tests/
 
 # Run a single file
 uv run pytest tests/test_store.py
@@ -22,6 +39,16 @@ uv run pytest tests/ --no-cov
 # Show which lines are not covered
 uv run pytest tests/ --cov=contexer --cov-report=term-missing
 ```
+
+## Changed-area verification matrix
+
+| Changed area | Required tier |
+|---|---|
+| General correctness, adapters, storage, hooks, CLI | `fast or integration` |
+| Multi-component or team-sync flows | `integration` |
+| Retrieval routing, prompt context, novelty filtering | `accuracy` |
+| `benchmarks/run.py`, benchmark reports, validation, or OTel receiver | `harness` |
+| Live model/API campaign or real Teams deployment | Explicit manual check |
 
 ## File guide and recommended order
 

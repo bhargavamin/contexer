@@ -180,7 +180,7 @@ def _telemetry_check(row: dict, snap: dict):
 def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = "claude",
                  seed: int = 0, model: str = "",
                  conditions: tuple = ("without", "claudemd", "with"),
-                 contexer_sources: dict = None) -> Path:
+                 contexer_sources: dict = None, wait_for_otel: bool = True) -> Path:
     """`contexer_sources` maps condition name -> contexer checkout path (see
     `_condition_b_setup`), for A/B comparisons across contexer versions. A
     condition present in the map installs contexer from that path even if it
@@ -214,7 +214,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                     for condition in conditions:
                         work, home = _fresh(td, golden, f"{task['id']}-{condition}-{rep}")
                         row = _one_run(task, condition, rep, work, home, baseline,
-                                       claude_cmd, seed, model, rx, contexer_sources)
+                                       claude_cmd, seed, model, rx, contexer_sources, wait_for_otel)
                         _append(out, row)
                 for chain_tasks in chains.values():
                     # A chain's steps must stay sequential within one condition
@@ -224,7 +224,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                         work, home = _fresh(td, golden, f"{chain_tasks[0]['chain']}-{condition}-{rep}")
                         for task in chain_tasks:  # steps share repo + HOME: accumulation
                             row = _one_run(task, condition, rep, work, home, baseline,
-                                           claude_cmd, seed, model, rx, contexer_sources)
+                                           claude_cmd, seed, model, rx, contexer_sources, wait_for_otel)
                             _append(out, row)
     finally:
         rx.stop()
@@ -255,7 +255,8 @@ def _mine_baseline(repo: str) -> list[dict]:
 
 
 def _one_run(task, condition, rep, work: Path, home: Path, baseline,
-             claude_cmd, seed, model, rx: OtelReceiver, contexer_sources: dict = None) -> dict:
+             claude_cmd, seed, model, rx: OtelReceiver, contexer_sources: dict = None,
+             wait_for_otel: bool = True) -> dict:
     prompt = task["prompt"].replace("{seed}", str(seed))
     check_cmd = task["check_cmd"].replace("{seed}", str(seed))
     row = {"task_id": task["id"], "kind": task["kind"], "chain": task["chain"],
@@ -302,7 +303,8 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
                    duration_ms=res.get("duration_ms", 0), tool_calls=_tool_calls(home))
         row["tokens_total"] = (row["tokens_in"] + row["tokens_out"] +
                                row["tokens_cache_read"] + row["tokens_cache_write"])
-        time.sleep(1.5 if rx.port else 0)  # let the final OTel export flush
+        if wait_for_otel and rx.port:
+            time.sleep(1.5)  # let the final OTel export flush
         _telemetry_check(row, rx.snapshot())
         row["violations"] = score.count_violations(
             score.changed_files(str(work), base_sha), baseline)

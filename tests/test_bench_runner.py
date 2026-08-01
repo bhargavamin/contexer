@@ -42,6 +42,11 @@ def _make_stub(tmp_path, content):
     return str(p)
 
 
+def _run_stubbed_campaign(*args, **kwargs):
+    """Run the benchmark harness against a local test stub."""
+    return run_campaign(*args, **kwargs, wait_for_otel=False)
+
+
 @pytest.fixture
 def stub_claude(tmp_path):
     return _make_stub(tmp_path, STUB)
@@ -81,9 +86,31 @@ class TestSessionEnv:
 
 
 class TestRunCampaign:
+    def test_stubbed_runs_skip_otel_flush_wait(self, tmp_path, stub_claude, monkeypatch):
+        import benchmarks.run as run_mod
+
+        sleeps = []
+        monkeypatch.setattr(run_mod.time, "sleep", sleeps.append)
+
+        _run_stubbed_campaign(tmp_path / "stub", reps=1, task_ids=["rat-storage"],
+                              claude_cmd=stub_claude, seed=5, conditions=("without",))
+
+        assert sleeps == []
+
+    def test_live_runs_wait_for_otel_flush(self, tmp_path, stub_claude, monkeypatch):
+        import benchmarks.run as run_mod
+
+        sleeps = []
+        monkeypatch.setattr(run_mod.time, "sleep", sleeps.append)
+
+        run_campaign(tmp_path / "live", reps=1, task_ids=["rat-storage"],
+                     claude_cmd=stub_claude, seed=5, conditions=("without",))
+
+        assert sleeps == [1.5]
+
     def test_rows_cache_fields_and_totals(self, tmp_path, stub_claude):
-        out = run_campaign(tmp_path / "a", reps=1, task_ids=["rat-storage", "conv-endpoint"],
-                           claude_cmd=stub_claude, seed=5, model="stub-model")
+        out = _run_stubbed_campaign(tmp_path / "a", reps=1, task_ids=["rat-storage", "conv-endpoint"],
+                                    claude_cmd=stub_claude, seed=5, model="stub-model")
         rows = [json.loads(l) for l in out.read_text().splitlines()]
         assert len(rows) == 6  # 2 tasks x 3 conditions x 1 rep
         for r in rows:
@@ -100,10 +127,10 @@ class TestRunCampaign:
     def test_conditions_interleaved_with_ts(self, tmp_path, stub_claude):
         # Rep outermost, condition innermost: conditions alternate in time rather
         # than running as one block per condition (red-team #2).
-        out = run_campaign(tmp_path / "i", reps=2,
-                           task_ids=["rat-storage", "conv-endpoint"],
-                           claude_cmd=stub_claude, seed=5,
-                           conditions=("without", "claudemd"))
+        out = _run_stubbed_campaign(tmp_path / "i", reps=2,
+                                    task_ids=["rat-storage", "conv-endpoint"],
+                                    claude_cmd=stub_claude, seed=5,
+                                    conditions=("without", "claudemd"))
         rows = [json.loads(l) for l in out.read_text().splitlines()]
         assert [r["condition"] for r in rows] == ["without", "claudemd"] * 4
         # per rep: task1 both conditions, then task2 both conditions
@@ -114,8 +141,9 @@ class TestRunCampaign:
         assert ts == sorted(ts) and len(set(ts)) == len(ts)
 
     def test_chain_steps_share_repo_and_home(self, tmp_path, stub_claude):
-        out = run_campaign(tmp_path / "b", reps=1, task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
-                           claude_cmd=stub_claude, seed=5)
+        out = _run_stubbed_campaign(
+            tmp_path / "b", reps=1, task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
+            claude_cmd=stub_claude, seed=5)
         rows = [json.loads(l) for l in out.read_text().splitlines()]
         chain_rows = [r for r in rows if r["chain"] == "orders"]
         assert sorted({r["step"] for r in chain_rows}) == [1, 2, 3]
@@ -127,9 +155,10 @@ class TestRunCampaign:
 
     def test_claudemd_condition_writes_claude_md_without_contexer(
             self, tmp_path, stub_claude_probe):
-        out = run_campaign(tmp_path / "p", reps=1, task_ids=["rat-storage"],
-                           claude_cmd=stub_claude_probe, seed=5,
-                           conditions=("without", "claudemd", "with", "claudemd_with"))
+        out = _run_stubbed_campaign(
+            tmp_path / "p", reps=1, task_ids=["rat-storage"],
+            claude_cmd=stub_claude_probe, seed=5,
+            conditions=("without", "claudemd", "with", "claudemd_with"))
         rows = {r["condition"]: r for r in
                 (json.loads(l) for l in out.read_text().splitlines())}
         assert "settings:no claudemd:no" in rows["without"]["result_snippet"]
@@ -141,9 +170,10 @@ class TestRunCampaign:
 
     def test_agentsmd_conditions_write_right_files(self, tmp_path, stub_claude_probe):
         # agentsmd: only AGENTS.md; claudemd_agentsmd: both files, no contexer.
-        out = run_campaign(tmp_path / "am", reps=1, task_ids=["rat-storage"],
-                           claude_cmd=stub_claude_probe, seed=5,
-                           conditions=("agentsmd", "claudemd_agentsmd"))
+        out = _run_stubbed_campaign(
+            tmp_path / "am", reps=1, task_ids=["rat-storage"],
+            claude_cmd=stub_claude_probe, seed=5,
+            conditions=("agentsmd", "claudemd_agentsmd"))
         rows = {r["condition"]: r for r in
                 (json.loads(l) for l in out.read_text().splitlines())}
         assert "settings:no claudemd:no agents:yes" in rows["agentsmd"]["result_snippet"]
@@ -152,9 +182,10 @@ class TestRunCampaign:
     def test_claudemd_with_condition_gets_both(self, tmp_path, stub_claude_probe):
         # Condition D: contexer layered on a pre-existing CLAUDE.md — the adoption
         # question for repos that already maintain one.
-        out = run_campaign(tmp_path / "d", reps=1, task_ids=["rat-storage"],
-                           claude_cmd=stub_claude_probe, seed=5,
-                           conditions=("claudemd_with",))
+        out = _run_stubbed_campaign(
+            tmp_path / "d", reps=1, task_ids=["rat-storage"],
+            claude_cmd=stub_claude_probe, seed=5,
+            conditions=("claudemd_with",))
         row = json.loads(out.read_text().splitlines()[0])
         assert "settings:yes claudemd:yes" in row["result_snippet"]
 
@@ -196,8 +227,9 @@ class TestRunCampaign:
         assert "Postgres" not in (work3 / "AGENTS.md").read_text()
 
     def test_campaign_metadata_written(self, tmp_path, stub_claude):
-        out = run_campaign(tmp_path / "c", reps=1, task_ids=["rat-storage"],
-                           claude_cmd=stub_claude, seed=5, model="stub-model")
+        out = _run_stubbed_campaign(
+            tmp_path / "c", reps=1, task_ids=["rat-storage"],
+            claude_cmd=stub_claude, seed=5, model="stub-model")
         meta = json.loads((out.parent / "campaign.json").read_text())
         assert meta["model"] == "stub-model"
         assert isinstance(meta["managed_settings_present"], bool)
@@ -205,8 +237,9 @@ class TestRunCampaign:
     def test_failed_session_recorded_as_errored_row(self, tmp_path, stub_claude_fail):
         # An auth/API failure returns well-formed JSON with is_error — it must land
         # as an errored row (excluded from medians), never a clean zero-token row.
-        out = run_campaign(tmp_path / "e", reps=1, task_ids=["rat-storage"],
-                           claude_cmd=stub_claude_fail, seed=5)
+        out = _run_stubbed_campaign(
+            tmp_path / "e", reps=1, task_ids=["rat-storage"],
+            claude_cmd=stub_claude_fail, seed=5)
         rows = [json.loads(l) for l in out.read_text().splitlines()]
         assert rows and all(r["error"].startswith("session error (api_error)") for r in rows)
         assert all("Please run /login" in r["error"] for r in rows)
@@ -228,7 +261,8 @@ class TestRunCampaign:
 
     def test_home_not_leaked(self, tmp_path, stub_claude):
         real_home = os.environ.get("HOME")
-        run_campaign(tmp_path / "d", reps=1, task_ids=["rat-storage"], claude_cmd=stub_claude, seed=5)
+        _run_stubbed_campaign(
+            tmp_path / "d", reps=1, task_ids=["rat-storage"], claude_cmd=stub_claude, seed=5)
         assert os.environ.get("HOME") == real_home
 
 
@@ -244,8 +278,9 @@ class TestCheckIsolation:
         tf = tmp_path / "tasks.json"
         tf.write_text(json.dumps(tasks))
         monkeypatch.setattr(run_mod, "TASKS_FILE", tf)
-        out = run_campaign(tmp_path / "o", reps=1, task_ids=["env-probe"],
-                           claude_cmd=stub_claude, seed=5, conditions=("without",))
+        out = _run_stubbed_campaign(
+            tmp_path / "o", reps=1, task_ids=["env-probe"],
+            claude_cmd=stub_claude, seed=5, conditions=("without",))
         row = json.loads(out.read_text().splitlines()[0])
         assert row["error"] == ""
         assert row["success"] is True  # HOME inside the check is the throwaway one
@@ -267,9 +302,10 @@ class TestChainScoringIsolation:
         p = tmp_path / "claude"
         p.write_text(STUB_VIOLATE_ONCE)
         p.chmod(p.stat().st_mode | 0o111)
-        out = run_campaign(tmp_path / "c", reps=1,
-                           task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
-                           claude_cmd=str(p), seed=5, conditions=("without",))
+        out = _run_stubbed_campaign(
+            tmp_path / "c", reps=1,
+            task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
+            claude_cmd=str(p), seed=5, conditions=("without",))
         rows = [json.loads(l) for l in out.read_text().splitlines()]
         by_step = {r["step"]: r for r in rows}
         assert by_step[1]["violations"] >= 1   # the bad file is step 1's work
