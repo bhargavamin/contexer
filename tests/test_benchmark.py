@@ -677,6 +677,7 @@ class TestLargeScaleBenchmark:
         assert tokens < 2000, f"Session start context unexpectedly large: {tokens} tokens"
         assert "pending" in msg.lower(), "Expected pending decisions mention in status"
 
+    @pytest.mark.perf
     def test_retrieval_timing_at_scale(self, large_store, monkeypatch_module):
         times_ms = []
 
