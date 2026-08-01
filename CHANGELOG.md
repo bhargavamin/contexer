@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.28.0](https://github.com/bhargavamin/contexer/compare/v0.27.0...v0.28.0) (2026-08-01)
+
+
+### Features
+
+* make Contexer effective for comprehension questions (capture, staleness, question-lane retrieval) ([6fc8f59](https://github.com/bhargavamin/contexer/commit/6fc8f59fea48d9bd32ca08d35eea570aa775e523))
+* **store:** add bare topic names to their own alias sets for WEAK-pointer coverage ([f9df2d2](https://github.com/bhargavamin/contexer/commit/f9df2d2a8e10b3d02ef2659d56b59c51f3757537))
+* **store:** flag stored summaries as stale when their source files change ([99d1b97](https://github.com/bhargavamin/contexer/commit/99d1b9726a06bfe3c1f9a3e1ce7b6f7dfda551cb))
+* **store:** route question-shaped prompts, guarded by term rarity ([5c11da0](https://github.com/bhargavamin/contexer/commit/5c11da06a0d17021d851610952bf9899b4c6deb6))
+
+
+### Bug Fixes
+
+* **store:** defer replace_id re-anchoring until content is actually live ([0e7ba3b](https://github.com/bhargavamin/contexer/commit/0e7ba3bda2f0572dccdd5f58b16980ed089ee1db))
+* **store:** diff staleness anchors against the working tree, not HEAD ([a3878dd](https://github.com/bhargavamin/contexer/commit/a3878dd357939ed69bb66e28dcc666658d8ace18))
+* **store:** re-anchor identical-content title-only replace_id corrections ([e575f1f](https://github.com/bhargavamin/contexer/commit/e575f1f444977bdc185baff1355760914d40a412))
+* **store:** re-anchor replace_id corrections and tighten benchmark/docs ([0d6a03a](https://github.com/bhargavamin/contexer/commit/0d6a03ac419dc3ef867b5b8c7b00617a2e6863ee))
+* **test:** restore deploy-migrations fixture and pin its pointer honestly ([eb3cc02](https://github.com/bhargavamin/contexer/commit/eb3cc02e3c6a17ef1dd067063d1b8326b809868f))
+
+
+### Documentation
+
+* **server:** capture synthesized subsystem understanding, same-turn ([a1c2411](https://github.com/bhargavamin/contexer/commit/a1c2411d0898ba89da517fc26463c16f81afda35))
+
 ## [0.27.0](https://github.com/bhargavamin/contexer/compare/v0.26.1...v0.27.0) (2026-07-30)
 
 
