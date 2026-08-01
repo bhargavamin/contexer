@@ -60,10 +60,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
 markers = [
-    "fast: hermetic unit tests that run in the default pull-request gate",
-    "integration: hermetic multi-component correctness tests",
-    "accuracy: retrieval and novelty-filter accuracy benchmarks",
-    "harness: benchmark-runner and telemetry harness tests with stubbed sessions",
+    "slow: benchmark-harness tests (tests/test_bench_*.py), deselected in the PR gate",
 ]
 
 [tool.coverage.run]
