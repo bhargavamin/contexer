@@ -1,21 +1,40 @@
 # Tests
 
-## The `slow` marker
+## Markers
 
-`tests/test_bench_*.py` (the stubbed benchmark harness) is marked `slow` — ~45s, against
-`benchmarks/`, which isn't in the coverage target. Everything else runs in ~30s.
+Two, both deselected in CI for different reasons:
+
+- **`slow`** — `tests/test_bench_*.py`, the stubbed benchmark harness. ~45s, exercises
+  `benchmarks/`, which isn't in the coverage target. Runs in its own CI job.
+- **`perf`** — wall-clock latency assertions (`p99 < 5ms`, `mean < 1ms`, …) in
+  `test_benchmark.py` / `test_benchmark_extended.py`. These calibrate against fixed
+  hardware and **cannot** hold on shared runners; they never run in CI.
 
 ```bash
-# What CI's per-Python-version job runs — everything but the harness, coverage gate on.
-uv run pytest tests/ -m "not slow"
+# What CI's per-Python-version job runs — coverage gate on.
+uv run pytest tests/ -m "not slow and not perf"
 
 # The harness alone; CI runs this once, on 3.13 only, in a parallel job.
 uv run pytest tests/ -m slow --no-cov
+
+# The latency benchmarks. Run on a quiet machine; -s prints the full distribution.
+uv run pytest tests/ -m perf --no-cov -s
 ```
 
-Both jobs gate every push. The split exists so the harness runs once instead of once per
-Python version, **not** to defer it — `uv run pytest tests/` locally still runs everything
-and is the right command before pushing.
+Everything else in the accuracy benchmarks — retrieval hit/miss, novelty filtering,
+display caps — stays in the gate, because those assert behaviour, not nanoseconds.
+
+`uv run pytest tests/` locally still runs everything and is the right command before
+pushing, on a machine quiet enough for the `perf` numbers to mean something.
+
+### Why `perf` is not just a bigger threshold
+
+`test_novelty_filter_write_latency_at_capacity` asserts `p99 < 200.0`, a bound whose own
+comment says it "keeps a wide margin for noisy shared CI runners" after an earlier 3x
+widening. It still failed at **343ms** on a GitHub runner. p99 over 20 samples on shared
+infrastructure measures the scheduler, not the code — no threshold stabilizes it, and each
+widening buys less signal. Assert timing where timing is measurable; assert behaviour
+everywhere else.
 
 Live/API campaigns and checks against a real Contexer Teams stack are manual verification
 only; they are not part of any pytest run or CI job.
