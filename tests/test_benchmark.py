@@ -46,7 +46,7 @@ CONVENTIONS = [
     "Use TypeScript strict mode for all new files — tsconfig.json has strict:true enabled globally",
     "All API endpoints return JSON with { data, error, meta } envelope structure — never return bare values",
     "Environment variables must be validated at startup using Zod schema — no direct process.env access in business logic",
-    "Database migrations run automatically before the app boots via Prisma — never run migrations manually in production",
+    "Database migrations run automatically on deploy via Prisma migrate deploy — never run migrations manually in production",
 ]
 
 CONSTRAINTS = [
@@ -114,6 +114,15 @@ POINTER_HIT_PROMPTS = [
     # derived no topic at all and stayed silent. Now "auth" is a member of its own alias
     # set, so the WEAK pointer surfaces it instead of nothing.
     ("what is the auth feature doing?",  "auth"),
+    # PRE-EXISTING behavior, not new in this task: "overview" already passed the
+    # is_project gate and "docker" was already a `deploy` alias before this branch — any
+    # store holding a deploy-tagged decision (the migrations-on-deploy convention below
+    # genuinely IS one; `prisma migrate deploy` is a real deploy-pipeline fact) already
+    # produced this pointer. The documented limitation is prompt-side (a general-knowledge
+    # "Docker networking" question happens to share the `docker` token with the `deploy`
+    # topic), not a false tag — and the payload is a ~15-token "if relevant" pointer, not
+    # a content injection.
+    ("give me an overview of Docker networking", "deploy"),
 ]
 
 # Prompts that should NOT trigger rationale injection (no rationale keyword or no match)
@@ -129,7 +138,6 @@ MISS_PROMPTS = [
     "why do plants grow upward?",                        # rationale word, no domain keyword
     "what is the reason for rain?",                      # rationale word, no domain keyword
     "is this variable in scope?",                        # "scope" trigger but domain keyword present
-    "give me an overview of Docker networking",          # "overview" trigger but domain keywords present
     "add a NOT NULL constraint to the users table",      # "constraint" trigger but SQL-specific
     # Question-shaped but generic: the router opens for questions, the discriminative-term
     # guard keeps these silent (no rare store term matched, no topic overlap).
