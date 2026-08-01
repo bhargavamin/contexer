@@ -56,4 +56,4 @@ jobs:
           # Needed for the sticky PR comment; the runner sets the other GITHUB_* vars the CLI reads.
           GITHUB_TOKEN: ${{ github.token }}
           # CONTEXER_FAIL_BELOW: "70"   # uncomment to block merges below a score of 70
-        run: npx --yes --package="@contexer-ai/contexer-check@0.3.0" -c "contexer-check"
+        run: npx --yes --package="@contexer-ai/contexer-check@0.4.0" -c "contexer-check"
