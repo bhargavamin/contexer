@@ -15,10 +15,12 @@ on:
       - "LICENSE"
       - "docs/**"
       - "assets/**"
+  workflow_dispatch:
 
 jobs:
-  test:
-    name: Python ${{ matrix.python-version }}
+  # Everything except tests/test_bench_*.py (~45s of stubbed benchmark harness).
+  correctness:
+    name: Tests / Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,5 +44,26 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run tests
-        run: uv run pytest tests/ -v --tb=short
+      - name: Run tests with coverage
+        run: uv run pytest tests/ -m "not slow" -v --tb=short
+
+  # Split out so the 45s harness runs ONCE, not once per Python version — not to
+  # defer it. It still gates every push; `pull_request` would only duplicate the
+  # push run on the same commit.
+  harness:
+    name: Benchmark harness / Python 3.13
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run stubbed benchmark harness tests
+        run: uv run pytest tests/ -m slow -v --tb=short --no-cov

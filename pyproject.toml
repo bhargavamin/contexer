@@ -59,6 +59,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
+markers = [
+    "slow: benchmark-harness tests (tests/test_bench_*.py), deselected in the PR gate",
+]
 
 [tool.coverage.run]
 omit = [

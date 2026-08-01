@@ -1,12 +1,32 @@
 # Tests
 
+## The `slow` marker
+
+`tests/test_bench_*.py` (the stubbed benchmark harness) is marked `slow` — ~45s, against
+`benchmarks/`, which isn't in the coverage target. Everything else runs in ~30s.
+
+```bash
+# What CI's per-Python-version job runs — everything but the harness, coverage gate on.
+uv run pytest tests/ -m "not slow"
+
+# The harness alone; CI runs this once, on 3.13 only, in a parallel job.
+uv run pytest tests/ -m slow --no-cov
+```
+
+Both jobs gate every push. The split exists so the harness runs once instead of once per
+Python version, **not** to defer it — `uv run pytest tests/` locally still runs everything
+and is the right command before pushing.
+
+Live/API campaigns and checks against a real Contexer Teams stack are manual verification
+only; they are not part of any pytest run or CI job.
+
 ## Running locally
 
 ```bash
 # Install dev dependencies
 uv sync
 
-# Run all tests (includes coverage gate — must stay ≥85%)
+# Everything, with the ≥85% coverage gate
 uv run pytest tests/
 
 # Run a single file

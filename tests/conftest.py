@@ -6,6 +6,18 @@ import pytest
 from contexer import remote, store
 
 
+def pytest_collection_modifyitems(items):
+    """Mark the benchmark-harness tests so CI can deselect them (`-m "not slow"`).
+
+    ponytail: one marker, not a tier taxonomy — the harness files are the only
+    slow ones (~45s vs ~30s for everything else combined). Split further only if
+    a second slow area appears.
+    """
+    for item in items:
+        if item.path.name.startswith("test_bench_"):
+            item.add_marker(pytest.mark.slow)
+
+
 @pytest.fixture
 def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
