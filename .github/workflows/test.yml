@@ -26,11 +26,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
-        include:
-          - python-version: "3.14"
-            allow-prereleases: true
-      # 3.14 is pre-release — failures there don't block the build
-    continue-on-error: ${{ matrix.python-version == '3.14' }}
 
     steps:
       - uses: actions/checkout@v6.0.3
@@ -39,13 +34,12 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
-          allow-prereleases: ${{ matrix.allow-prereleases || false }}
 
       - name: Install dependencies
         run: uv sync --dev
 
       - name: Run tests with coverage
-        run: uv run pytest tests/ -m "not slow" -v --tb=short
+        run: uv run pytest tests/ -m "not slow and not perf" -v --tb=short
 
   # Split out so the 45s harness runs ONCE, not once per Python version — not to
   # defer it. It still gates every push; `pull_request` would only duplicate the

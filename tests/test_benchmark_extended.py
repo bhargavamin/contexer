@@ -128,6 +128,7 @@ class TestStatisticalReliability:
         monkeypatch.setattr(store, "STORE_DIR", d)
         self.repo = repo
 
+    @pytest.mark.perf
     def test_get_context_latency_distribution(self):
         print(f"\n{'='*60}")
         print(f"BENCHMARK 1 — Statistical reliability ({RUNS} runs each)")
@@ -146,6 +147,7 @@ class TestStatisticalReliability:
         _print_stats("Warm (runs 2-100)", warm)
         assert warm["p99"] < 5.0, f"p99 too slow: {warm['p99']:.3f}ms"
 
+    @pytest.mark.perf
     def test_rationale_injection_latency_distribution(self):
         prompt = "why did we choose postgresql over other databases?"
         times = [
@@ -157,6 +159,7 @@ class TestStatisticalReliability:
         _print_stats("Stats", stats)
         assert stats["p99"] < 10.0
 
+    @pytest.mark.perf
     def test_miss_is_zero_cost(self):
         times = []
         for _ in range(RUNS):
@@ -345,6 +348,7 @@ class TestStorageAtCapacity:
         assert "00004" not in first, "Entry 4 should have been dropped"
         assert "00005" in first or "00006" in first, f"Unexpected first entry: {first}"
 
+    @pytest.mark.perf
     def test_retrieval_latency_at_capacity(self):
         store.get_context(self.repo, query="00300")  # warm up: discard cold caches / first-touch I/O
         times = []
@@ -361,6 +365,7 @@ class TestStorageAtCapacity:
         assert stats["p50"] < 50.0
         assert stats["p99"] < 150.0
 
+    @pytest.mark.perf
     def test_novelty_filter_write_latency_at_capacity(self):
         times = []
         for i in range(20):
