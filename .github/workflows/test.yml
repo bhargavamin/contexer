@@ -42,11 +42,12 @@ jobs:
         run: uv run pytest tests/ -m "not slow and not perf" -v --tb=short
 
   # Split out so the 45s harness runs ONCE, not once per Python version — not to
-  # defer it. It still gates every push; `pull_request` would only duplicate the
-  # push run on the same commit.
+  # defer it. Deliberately unconditional: an `if: github.event_name != 'pull_request'`
+  # here silently skipped the harness entirely on any branch outside the `push`
+  # allowlist above (e.g. `ci/**`), so it ran on neither event. Same push+PR overlap
+  # the correctness job already has.
   harness:
     name: Benchmark harness / Python 3.13
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
