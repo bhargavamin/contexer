@@ -1,6 +1,6 @@
 # Contributing to Contexer
 
-Thanks for your interest. Contexer is a small, focused tool — three core modules, no framework — and contributions should keep it that way.
+Thanks for your interest. Contexer is a small, focused tool — no framework, one store, thin layers over it — and contributions should keep it that way.
 
 ---
 
@@ -31,15 +31,34 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## Project structure
 
-Three core modules, intentionally. Do not add a fourth without discussion.
+**One write path: every read and write of a decision goes through `store.py`.** That is the rule
+to protect. Everything else is a thin layer over it — a protocol surface, a host integration, a
+transport, a presentation — and none of them may open a store file or reimplement store logic. A
+new module is fine when it is genuinely a new *layer*; a new module that knows the entry schema is
+not.
 
-| File | Role |
+| Module | Role |
 |---|---|
-| `contexer/server.py` | MCP server entry point — defines tools, delegates to `store.py` |
-| `contexer/store.py` | All read/write and filtering logic |
-| `contexer/cli.py` | The `contexer` console script — runs the server bare; `install` / `uninstall [--purge]` / `reinstall` / `status` / `version` subcommands |
+| `contexer/store.py` | The store: all decision read/write, dedup/novelty filtering, revisions, tombstones, session-start and bootstrap payloads. Every logic change belongs here |
+| `contexer/server.py` | MCP server entry point — maps MCP tool calls to store functions and nothing else |
+| `contexer/cli.py` | The `contexer` console script — `install` / `uninstall [--purge]` / `reinstall` / `review` / `ui` / `share` / `login` / `logout` / `status` / `version`, and the bare MCP server with no args |
+| `contexer/config.py` | Loader and writer for `~/.contexer/config.toml` (`Profile` + the `[ui]` table). At the bottom of the import graph — it imports nothing of ours |
+| `contexer/adapters/` | One module per host (`claude`, `cursor`, `codex`, `gemini`) behind the duck-typed contract in `base.py`: install/uninstall wiring plus the hook entrypoints. Host-specific JSON shapes stop here |
+| `contexer/ui/` | The local console: `daemon.py` (processes and sockets only), `server.py` (HTTP only), `api.py` (the one module that knows both HTTP and the store), `assets/` (hand-written HTML/CSS/JS, no build step) |
+| `contexer/auth.py` | Contexer Teams OAuth (`contexer login` / `logout`) and credential storage |
+| `contexer/remote.py` | MCP client to the Teams endpoint — the sync transport for push and pull |
+| `contexer/share.py` | Explicit push of local decisions upward |
+| `contexer/team_context.py` | Team-context cache: refresh, staleness, merge at read time. Team rows are never written into the local store |
+| `contexer/memory_sync.py` | Imports Claude Code memory-tool facts into the store |
+| `contexer/miner.py` | Deterministic convention mining over a repo (no model in the loop). A leaf — imports nothing of ours |
+| `contexer/redact.py` | Secret scrubbing at capture and at egress. A leaf |
+| `contexer/repo_key.py` | Canonical repo-key derivation, kept byte-compatible with the TypeScript sibling |
 
-Any logic change belongs in `store.py`. `server.py` is thin by design — it maps MCP calls to store functions and nothing else.
+Dependency direction is worth preserving: `adapters`, `server`, `cli` and `ui` all sit above
+`store`, and `store` sits above the leaves (`miner`, `redact`, `repo_key`, `config`). There is one
+deliberate upward edge — `store` calls `ui.daemon` from inside a function to append the console URL
+at session start. It cannot cycle, because `daemon` imports nothing of ours at module scope, and
+that import budget is enforced by a test.
 
 ---
 
