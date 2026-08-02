@@ -5,7 +5,12 @@ OAuth mechanics (PKCE, DCR, code/refresh exchange, token resolution) are fully c
 """
 import base64
 import hashlib
+import io
+import json
+import subprocess
+import threading
 import time
+import urllib.error
 
 import pytest
 
@@ -360,6 +365,429 @@ def test_locked_refresh_issuer_mismatch_falls_back(creds_env, monkeypatch):
     assert auth.refresh_now(prof) == "static"
 
 
+# ── auth_state (telling an expired session from a bad token) ─────────────────────
+
+def _stored(**overrides) -> dict:
+    """Stored creds for the TEAM profile's issuer, valid unless overridden."""
+    creds = {"issuer": "http://localhost:8080", "client_id": "c",
+             "token_endpoint": "http://localhost:8080/token", "access_token": "SECRET-ACCESS",
+             "refresh_token": "SECRET-REFRESH", "expires_at": time.time() + 3600,
+             "scope": "sync"}
+    creds.update(overrides)
+    return creds
+
+
+def test_auth_state_reports_a_live_session(creds_env):
+    auth._save_creds(_stored())
+    state = auth.auth_state(TEAM)
+    assert state["state"] == "logged_in"
+    assert state["issuer"] == "http://localhost:8080"
+    assert state["scope"] == "sync"
+    assert state["expires_at"].endswith("Z")  # ISO, not an epoch float
+    assert state["message"]
+
+
+def _raises(exc):
+    def fail(*a):
+        raise exc
+
+    return fail
+
+
+def _http_error(code: int, body: bytes = b'{"error": "invalid_grant"}'):
+    """What `_refresh` raises when the token endpoint ANSWERS with an error status."""
+    return urllib.error.HTTPError("http://localhost:8080/token", code, "Bad Request", {},
+                                  io.BytesIO(body))
+
+
+def test_auth_state_does_not_read_a_missing_outcome_as_a_rejection(creds_env):
+    """A creds file written before the marker existed carries no outcome, and a missing
+    outcome means UNKNOWN — never "the refresh was rejected"."""
+    auth._save_creds(_stored(expires_at=time.time() - 10))
+    assert auth._REFRESH_FAILED_AT not in auth._load_creds()
+    state = auth.auth_state(TEAM)
+    assert state["state"] == "renewable"
+
+
+def test_auth_state_reports_refresh_failed_after_a_rejected_grant(creds_env, monkeypatch):
+    """The live bug: creds match, they are expired, and the rotated refresh token is dead.
+    An HTTP 4xx from the token endpoint is the AS answering "that grant is invalid" — the one
+    thing that proves only a new login can fix this."""
+    auth._save_creds(_stored(expires_at=time.time() - 10))
+    monkeypatch.setattr(auth, "_refresh", _raises(_http_error(400)))
+    assert auth.resolve_token(TEAM) is None  # fell back to the static token: there is none
+    assert auth._load_creds()[auth._REFRESH_FAILED_AT]
+    state = auth.auth_state(TEAM)
+    assert state["state"] == "refresh_failed"
+    assert "log in again" in state["message"]
+
+
+@pytest.mark.parametrize("exc, why", [
+    (urllib.error.URLError(OSError("Network is unreachable")), "offline / VPN down / DNS"),
+    (_http_error(502, b"bad gateway"), "the AS itself is broken"),
+    (TimeoutError("timed out"), "no answer at all"),
+])
+def test_an_unreachable_token_endpoint_is_not_recorded_as_a_rejection(creds_env, monkeypatch,
+                                                                     exc, why):
+    """A transport failure says NOTHING about the refresh token, and the marker is persistent:
+    recording one here makes a five-minute outage tell the user for days that their session was
+    rejected — `contexer status`, `contexer pull` and the console's red badge all at once."""
+    auth._save_creds(_stored(expires_at=time.time() - 10))
+    monkeypatch.setattr(auth, "_refresh", _raises(exc))
+    assert auth.resolve_token(TEAM) is None
+    assert auth._REFRESH_FAILED_AT not in auth._load_creds(), why
+    state = auth.auth_state(TEAM)
+    assert state["state"] == "renewable"
+    assert "log in again" not in state["message"]
+
+
+def test_auth_state_reports_a_renewable_session_rather_than_expired(creds_env, monkeypatch):
+    """Access tokens are minted with expires_in 3600 and `resolve_token` spends the refresh
+    token transparently on the next call, so "expired — log in again" fired every hour on a
+    session with nothing wrong with it."""
+    auth._save_creds(_stored(expires_at=time.time() - 10))
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("auth_state must not refresh"))
+    state = auth.auth_state(TEAM)
+    assert state["state"] == "renewable"
+    assert "log in again" not in state["message"]
+
+
+def test_auth_state_reports_expired_without_a_refresh_token(creds_env):
+    """Nothing left to renew with — this session really does need the user to act."""
+    auth._save_creds(_stored(expires_at=time.time() - 10, refresh_token=None))
+    state = auth.auth_state(TEAM)
+    assert state["state"] == "expired"
+    assert "log in again" in state["message"]
+
+
+def test_a_recorded_rejection_outranks_a_present_refresh_token(creds_env):
+    """The token is still on disk but the AS refused it: renewable would be a lie."""
+    auth._save_creds(_stored(expires_at=time.time() - 10, refresh_failed_at=time.time()))
+    assert auth.auth_state(TEAM)["state"] == "refresh_failed"
+
+
+def test_a_successful_refresh_clears_the_recorded_failure(creds_env, monkeypatch):
+    auth._save_creds(_stored(expires_at=time.time() - 10, refresh_failed_at=time.time()))
+    monkeypatch.setattr(auth, "_refresh",
+                        lambda te, cid, rt: {"access_token": "new", "expires_in": 3600})
+    assert auth.refresh_now(TEAM) == "new"
+    assert auth._REFRESH_FAILED_AT not in auth._load_creds()
+    assert auth.auth_state(TEAM)["state"] == "logged_in"
+
+
+def test_auth_state_never_spends_a_refresh_token(creds_env, monkeypatch):
+    """A read is a read: being ASKED about the session must not consume the single-use token
+    that renewing it would need."""
+    auth._save_creds(_stored(expires_at=time.time() - 10))
+    monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("auth_state must not refresh"))
+    assert auth.auth_state(TEAM)["state"] == "renewable"
+    assert auth._load_creds()["refresh_token"] == "SECRET-REFRESH"
+
+
+def test_auth_state_reports_static_only_for_a_foreign_issuer(creds_env):
+    auth._save_creds(_stored(issuer="http://other"))
+    prof = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token="static")
+    state = auth.auth_state(prof)
+    assert state["state"] == "static_only"
+    assert state["issuer"] is None and state["expires_at"] is None
+
+
+def test_auth_state_reports_none_without_any_credential(creds_env):
+    assert auth.auth_state(TEAM)["state"] == "none"
+
+
+def test_auth_state_never_returns_a_secret(creds_env):
+    auth._save_creds(_stored())
+    static = config.Profile(mode="team", endpoint="http://elsewhere/mcp", token="STATIC-BEARER")
+    for profile in (TEAM, static):
+        blob = json.dumps(auth.auth_state(profile))
+        assert "SECRET-ACCESS" not in blob and "SECRET-REFRESH" not in blob
+        assert "STATIC-BEARER" not in blob
+        assert set(json.loads(blob)) == {"state", "issuer", "expires_at", "scope", "message"}
+
+
+def test_auth_state_never_raises(creds_env):
+    """It answers a browser and a CLI status line, so a broken endpoint (urlsplit raises on
+    a torn IPv6 literal) has to cost the detail, not the response."""
+    auth._save_creds(_stored())
+    prof = config.Profile(mode="team", endpoint="http://[::1", token=None)
+    assert auth.auth_state(prof)["state"] == "none"
+
+
+# ── tracked login job ────────────────────────────────────────────────────────────
+
+AUTH_URL = ("http://localhost:8080/authorize?response_type=code&client_id=CID9"
+            "&redirect_uri=http%3A%2F%2F127.0.0.1%3A5555%2Fcallback&code_challenge=CHALLENGE"
+            "&code_challenge_method=S256&state=STATEVALUE&scope=")
+# What `login()` prints before it opens (or fails to open) a browser.
+URL_OUTPUT = f"Opening your browser to sign in. If it doesn't open, visit:\n  {AUTH_URL}\n"
+
+
+class FakeProc:
+    """Stand-in for the login subprocess. No test may spawn a real login: it opens a browser,
+    binds a loopback port and blocks with no timeout.
+
+    `stdout` streams `output` line by line and then blocks until the process finishes or is
+    killed — like the real child, which prints the authorize URL within a second and then
+    lives on for minutes waiting for the callback."""
+
+    def __init__(self, *, returncode=0, output="", block=False, timeout=False):
+        self.returncode = returncode
+        self.killed = False
+        self.waited = []
+        self._timeout = timeout
+        self._release = threading.Event()
+        if not (block or timeout):
+            self._release.set()
+        self.stdout = self._stream(output)
+
+    def _stream(self, output):
+        for line in output.splitlines(keepends=True):
+            yield line
+        assert self._release.wait(5), "the fake login was never released"
+
+    def wait(self, timeout=None):
+        self.waited.append(timeout)
+        if self._timeout and not self.killed:
+            raise subprocess.TimeoutExpired("contexer login", timeout or 0)
+        assert self._release.wait(5), "the fake login was never released"
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self._release.set()
+
+    def finish(self, returncode=0):
+        self.returncode = returncode
+        self._release.set()
+
+
+@pytest.fixture
+def login_job(monkeypatch):
+    """Isolate the module-global job slot and make a real spawn impossible."""
+    monkeypatch.setattr(auth, "_login_job", None)
+    monkeypatch.setattr(auth, "_spawn_login",
+                        lambda endpoint: pytest.fail("must never spawn a real login"))
+
+    def use(proc, capture=None):
+        def spawn(endpoint):
+            if capture is not None:
+                capture.append(endpoint)
+            return proc
+
+        monkeypatch.setattr(auth, "_spawn_login", spawn)
+        return proc
+
+    return use
+
+
+def _settled(job_id: str, timeout: float = 3.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = auth.login_job_status(job_id)
+        if status["state"] != "pending":
+            return status
+        time.sleep(0.005)
+    raise AssertionError(f"login job never settled: {auth.login_job_status(job_id)}")
+
+
+def _published(job_id: str, timeout: float = 3.0) -> str:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        url = auth.login_job_status(job_id)["auth_url"]
+        if url:
+            return url
+        time.sleep(0.005)
+    raise AssertionError("the authorize URL was never published")
+
+
+def test_a_clean_login_job_reports_ok(creds_env, login_job):
+    login_job(FakeProc(returncode=0))
+    assert _settled(auth.start_login_job()) == {"state": "ok", "auth_url": None,
+                                               "message": "Signed in to Contexer Teams."}
+
+
+def test_a_failed_login_job_reports_the_scrubbed_tail_of_its_output(creds_env, login_job):
+    """The message is rendered in the console, so scrubbing is load-bearing: `contexer login`
+    prints the authorize URL, and an unscrubbed tail can put an OAuth code on screen."""
+    login_job(FakeProc(returncode=1, output=(
+        "Opening your browser to sign in. If it doesn't open, visit:\n"
+        "  http://localhost:8080/authorize?response_type=code&client_id=CID9&"
+        "code_challenge=CHALLENGE&code_challenge_method=S256&state=STATEVALUE&scope=\n"
+        "contexer login: authorization failed — access_denied: bad code=AUTHCODE9\n")))
+    status = _settled(auth.start_login_job())
+    assert status["state"] == "failed"
+    assert "access_denied" in status["message"]
+    for secret in ("CID9", "CHALLENGE", "STATEVALUE", "AUTHCODE9"):
+        assert secret not in status["message"]
+    assert "REDACTED" in status["message"]
+
+
+def test_a_login_failure_message_is_bounded(creds_env, login_job):
+    """The tail lands in a UI and a bug report; a child that prints a megabyte must not."""
+    login_job(FakeProc(returncode=1, output="x" * 5000 + "\n" + "y" * 5000 + "\n"))
+    message = _settled(auth.start_login_job())["message"]
+    assert len(message) < 2 * auth._MESSAGE_LINE_LIMIT + 40
+
+
+def test_a_login_job_that_prints_nothing_still_reports_a_failure(creds_env, login_job):
+    login_job(FakeProc(returncode=1, output=""))
+    status = _settled(auth.start_login_job())
+    assert status["message"] == "Login failed."
+    assert status["auth_url"] is None
+
+
+# ── the authorize URL (logging in where no browser can open) ─────────────────────
+
+def test_a_pending_login_publishes_the_authorize_url(creds_env, login_job):
+    """On a headless box `webbrowser.open` no-ops and this URL is the only way to finish the
+    login, so it has to reach the caller WHILE the child is still waiting for the callback —
+    not in the post-mortem of a flow that already timed out."""
+    proc = login_job(FakeProc(block=True, output=URL_OUTPUT))
+    job = auth.start_login_job()
+    assert _published(job) == AUTH_URL
+    assert auth.login_job_status(job)["state"] == "pending"  # published mid-flight, not at exit
+    proc.finish()
+    assert _settled(job)["state"] == "ok"
+
+
+def test_the_authorize_url_outlives_a_timeout(creds_env, login_job):
+    """The timeout branch used to throw the child's output away wholesale, taking the one
+    affordance that would have explained how to finish the login with it."""
+    login_job(FakeProc(timeout=True, output=URL_OUTPUT))
+    status = _settled(auth.start_login_job())
+    assert status["state"] == "failed" and "timed out" in status["message"]
+    assert status["auth_url"] == AUTH_URL
+
+
+def test_the_published_authorize_url_keeps_the_parameters_that_make_it_work(creds_env,
+                                                                            login_job):
+    """`_failure_message` redacts client_id/state/code_challenge — correctly, it is a rendered
+    error string. A URL with those redacted is not a link, so the affordance travels in its
+    own field instead of being reconstructed from a scrubbed message."""
+    proc = login_job(FakeProc(block=True, output=URL_OUTPUT))
+    url = _published(auth.start_login_job())
+    assert "client_id=CID9" in url and "state=STATEVALUE" in url
+    assert "code_challenge=CHALLENGE" in url and "REDACTED" not in url
+    proc.finish()
+
+
+@pytest.mark.parametrize("line", [
+    "callback: http://127.0.0.1:5555/callback?code=AUTHCODE9&state=STATEVALUE",  # a credential
+    "posting to http://localhost:8080/token",
+    "http://localhost:8080/authorize?response_type=token&code_challenge=X",  # not our flow
+    "Opening your browser to sign in. If it doesn't open, visit:",
+])
+def test_only_an_authorize_request_is_ever_published(line):
+    """An authorize URL is the address of a consent page; an authorization code is a secret.
+    Nothing that is not the former may be handed to a UI as a login link."""
+    assert auth._authorize_url(line) is None
+
+
+def test_the_authorize_url_is_lifted_out_of_its_line(creds_env):
+    assert auth._authorize_url(f"  {AUTH_URL}") == AUTH_URL
+
+
+def test_only_one_login_job_runs_at_a_time(creds_env, login_job):
+    proc = login_job(FakeProc(block=True))
+    job = auth.start_login_job()
+    assert auth.login_job_status(job)["state"] == "pending"
+    with pytest.raises(auth.LoginJobBusy, match="already running") as busy:
+        auth.start_login_job()
+    # The refusal names the job in flight, so the caller can follow ITS outcome rather than
+    # inferring one from the session going live.
+    assert busy.value.job_id == job
+    assert auth.stop_login_job() is True
+    assert proc.killed is True
+
+
+def test_a_login_job_over_the_cap_is_killed_and_reported_failed(creds_env, login_job):
+    proc = login_job(FakeProc(timeout=True))
+    status = _settled(auth.start_login_job())
+    assert status["state"] == "failed" and "timed out" in status["message"]
+    assert proc.killed is True
+    assert proc.waited[0] == auth.LOGIN_TIMEOUT == 300.0  # ~5 min, and it is really passed
+
+
+def test_stopping_a_login_job_wins_over_the_waiter(creds_env, login_job):
+    """The kill resolves the job; the waiter thread must not then relabel it "the process
+    died" and lose the reason the user is being shown."""
+    login_job(FakeProc(block=True))
+    job = auth.start_login_job()
+    assert auth.stop_login_job() is True
+    status = _settled(job)
+    assert status["state"] == "failed" and "console stopped" in status["message"]
+    assert auth.stop_login_job() is False  # nothing left to kill
+
+
+def test_stopping_a_login_job_records_the_callers_reason(creds_env, login_job):
+    """A logout kills an in-flight login too — for a completely different reason, and the tab
+    attached to that job is told the message verbatim."""
+    login_job(FakeProc(block=True))
+    job = auth.start_login_job()
+    assert auth.stop_login_job("Signed out — the login in progress was cancelled.") is True
+    assert _settled(job)["message"] == "Signed out — the login in progress was cancelled."
+
+
+def test_login_job_status_is_none_for_an_unknown_id(creds_env, login_job):
+    assert auth.login_job_status("nope") is None
+    login_job(FakeProc(returncode=0))
+    job = auth.start_login_job()
+    _settled(job)
+    assert auth.login_job_status(job + "x") is None
+
+
+def test_a_login_job_takes_no_endpoint_from_its_caller(creds_env, login_job):
+    """A caller-supplied endpoint would aim the OAuth flow at an attacker's IdP and persist a
+    token for it, so the endpoint is read from config and the signature accepts nothing."""
+    import inspect
+
+    assert inspect.signature(auth.start_login_job).parameters == {}
+    config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "http://localhost:8080/mcp"\n')
+    endpoints = []
+    login_job(FakeProc(returncode=0), capture=endpoints)
+    _settled(auth.start_login_job())
+    assert endpoints == ["http://localhost:8080/mcp"]
+
+
+def test_a_login_job_uses_the_default_endpoint_when_config_is_unusable(creds_env, login_job):
+    config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text("mode = [unparseable\n")
+    endpoints = []
+    login_job(FakeProc(returncode=0), capture=endpoints)
+    _settled(auth.start_login_job())
+    assert endpoints == [config.default_endpoint()]
+
+
+def test_the_login_job_spawns_the_cli_through_the_module_form(creds_env, monkeypatch):
+    """`python -m contexer login` is the contract with cli.py — verified by hand against
+    contexer/__main__.py, pinned here so a rename cannot silently break the button."""
+    monkeypatch.setattr(auth, "_login_job", None)
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            self.returncode = 0
+            self.stdout = io.StringIO("")
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(auth.subprocess, "Popen", FakePopen)
+    _settled(auth.start_login_job())
+    argv = captured["argv"]
+    # `-u`: stdout is a pipe, so without it the authorize URL sits in the child's block buffer
+    # until the flow ends — which is minutes after the only moment it is useful.
+    assert argv[:5] == [auth.sys.executable, "-u", "-m", "contexer", "login"]
+    assert argv[5] == "--endpoint" and argv[6]
+    assert captured["kwargs"]["stdin"] is subprocess.DEVNULL  # never prompts on our stdin
+    assert captured["kwargs"]["stderr"] is subprocess.STDOUT  # the tail carries the reason
+
+
 # ── login / logout ───────────────────────────────────────────────────────────────
 
 def _stub_oauth(monkeypatch, *, discover=None):
@@ -388,6 +816,19 @@ def test_login_saves_creds_and_writes_config(creds_env, monkeypatch):
     prof = config.load_profile()
     assert prof.mode == "team"
     assert prof.endpoint == "http://localhost:8080/mcp"
+
+
+def test_login_self_configures_over_an_unloadable_ui_table(creds_env, monkeypatch):
+    """The browser flow is done and the tokens are already on disk by the time config.toml is
+    written, so a hand-edited `[ui]` value that aborts that write leaves mode/endpoint unset —
+    team sync off forever, and every retry re-runs the whole flow to fail the same way."""
+    _stub_oauth(monkeypatch)
+    config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text('[ui]\nport = "31500"\n')
+    auth.login(endpoint="http://localhost:8080/mcp")
+    assert auth._load_creds()["access_token"] == "AT"
+    profile = config.load_profile()
+    assert (profile.mode, profile.endpoint) == ("team", "http://localhost:8080/mcp")
 
 
 def test_login_defaults_endpoint(creds_env, monkeypatch):
