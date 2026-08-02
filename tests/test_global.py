@@ -31,6 +31,15 @@ def _add_repo(content: str, subtype: str = "constraint") -> str | None:
     return eid
 
 
+def _truncate_global() -> str:
+    """Truncate `_global.json` so it will not parse — an interrupted write, a disk-full
+    truncation, a hand-edit typo. Returns the exact bytes now on disk."""
+    path = store._global_path()
+    broken = path.read_text(encoding="utf-8")[:-3]
+    path.write_text(broken, encoding="utf-8")
+    return broken
+
+
 # ── update_global_decision ────────────────────────────────────────────────────
 
 class TestUpdateGlobalDecision:
@@ -125,6 +134,107 @@ class TestGetGlobalDecisions:
         store._save_global(data)
         decisions = store.get_global_decisions()
         assert not any(d["type"] == "task" for d in decisions)
+
+
+# ── an unreadable _global.json is reported, never silently overwritten ────────
+
+class TestUnreadableGlobalStore:
+    """`_global.json` holds every cross-repo rule on the machine. A read that degrades a
+    corrupt file to "no rules", next to a write that saves that degraded state back, destroys
+    the lot — the same hazard `delete_decision` already refuses for the tombstone sidecar."""
+
+    def test_adding_a_rule_never_overwrites_a_file_it_could_not_parse(self):
+        _add_global("Never commit untested code to the main branch", "constraint")
+        _add_global("Always write conventional commit messages in every repo", "convention")
+        broken = _truncate_global()
+
+        assert store.list_global_rules()["ok"] is False, \
+            "the view the Add button sits in must not read a corrupt file as empty"
+        ok, eid = store.update_global_decision("Always sign every commit with a gpg key",
+                                               SESSION, "convention")
+
+        assert ok is False
+        assert eid is None
+        after = store._global_path().read_text(encoding="utf-8")
+        assert after == broken, "the add rewrote _global.json over rules it could not read"
+        assert "untested code" in after and "conventional commit" in after, \
+            "the original rules must still be recoverable by hand"
+
+    def test_the_global_view_says_unreadable_instead_of_no_rules(self):
+        _add_global("Never commit untested code to the main branch", "constraint")
+        _truncate_global()
+
+        view = store.list_global_rules()
+
+        assert view["ok"] is False
+        assert "JSONDecodeError" in view["error"]
+        assert view["rules"] == []
+
+    def test_deleting_a_rule_never_overwrites_a_file_it_could_not_parse(self):
+        entry_id = _add_global("Never commit untested code to the main branch", "constraint")
+        broken = _truncate_global()
+
+        ok, msg = store.delete_global_rule(entry_id)
+
+        assert ok is False
+        assert "unreadable" in msg
+        assert store._global_path().read_text(encoding="utf-8") == broken
+
+    def test_a_non_object_entry_is_unreadable_rather_than_a_crash(self):
+        # Same shape as the tombstone sidecar's: `entries` was checked for being a list and
+        # nothing more, so one string in it reached `entry.get(...)`.
+        store._global_path().write_text('{"entries": ["oops"]}', encoding="utf-8")
+
+        assert store.global_diagnostics()["ok"] is False
+        assert store.get_global_decisions() == []
+        assert store.get_global_context() != ""
+        assert store.update_global_decision("Always sign every commit with a gpg key",
+                                            SESSION, "convention") == (False, None)
+
+    def test_a_session_read_still_degrades_instead_of_raising(self):
+        _add_global("Never commit untested code to the main branch", "constraint")
+        _truncate_global()
+        assert store._load_global() == {"repo_path": store.GLOBAL_SLUG, "entries": []}
+        assert store.get_global_decisions() == []
+
+
+class TestGlobalDiagnostics:
+    def test_a_readable_file_is_ok(self):
+        _add_global("Use uv not pip for dependency management", "convention")
+        assert store.global_diagnostics() == {"ok": True, "error": None}
+
+    def test_a_missing_file_is_ok_not_corrupt(self):
+        assert not store._global_path().exists()
+        assert store.global_diagnostics() == {"ok": True, "error": None}
+
+    def test_a_non_object_file_is_not_ok(self):
+        store._global_path().write_text("[]", encoding="utf-8")
+        assert store.global_diagnostics()["ok"] is False
+
+    def test_undecodable_bytes_are_not_ok(self):
+        store._global_path().write_bytes(b'{"entries": [], "x": "\xff\xfe"}')
+        assert "UnicodeDecodeError" in store.global_diagnostics()["error"]
+
+
+class TestListGlobalRules:
+    def test_an_empty_store_is_ok_and_says_so(self):
+        assert store.list_global_rules() == {"ok": True, "error": None, "rules": []}
+
+    def test_the_rows_carry_the_console_row_shape(self):
+        _add_global("Use uv not pip for dependency management", "convention")
+        view = store.list_global_rules()
+        assert view["ok"] is True
+        assert set(view["rules"][0]) == {"id", "title", "content", "subtype", "created_by",
+                                         "timestamp", "updated_at", "revision", "confidence"}
+
+    def test_only_decision_entries_are_listed(self):
+        _add_global("Use uv not pip for dependency management", "convention")
+        data = store._load_global()
+        data["entries"].append({"id": "x", "type": "task", "content": "some task",
+                                "session_id": SESSION, "timestamp": "2024-01-01T00:00:00+00:00"})
+        store._save_global(data)
+        assert [r["id"] for r in store.list_global_rules()["rules"]] != ["x"]
+        assert len(store.list_global_rules()["rules"]) == 1
 
 
 # ── get_global_context (formatted) ───────────────────────────────────────────
