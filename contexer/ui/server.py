@@ -75,6 +75,9 @@ ASSETS = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/console.css": ("console.css", "text/css; charset=utf-8"),
     "/console.js": ("console.js", "text/javascript; charset=utf-8"),
+    # The favicon. Behind the same session gate as everything else: the browser sends the cookie
+    # with it, so it resolves once paired and 401s before that, like every other route.
+    "/icon.svg": ("icon.svg", "image/svg+xml; charset=utf-8"),
 }
 
 

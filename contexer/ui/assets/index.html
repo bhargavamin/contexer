@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
     <title>Contexer Console</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/console.css" />
   </head>
   <body>
@@ -12,23 +13,28 @@
       <aside class="sidebar">
         <div class="sidebar-head">
           <span class="brand">
+            <!-- The canonical contexer mark: C-bracket + cursor tile. Same geometry as
+                 contexer-mark.svg and the dashboard's BrandGlyph, so the console and the hosted
+                 app open with the same logo. The tile is filled by .brand-tile rather than a
+                 literal, so it tracks --signal. -->
             <svg
               class="brand-glyph"
-              width="17"
-              height="17"
-              viewBox="0 0 15 15"
+              width="20"
+              height="20"
+              viewBox="0 0 32 32"
               fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
               aria-hidden="true"
             >
-              <ellipse cx="7.5" cy="3.75" rx="4.5" ry="1.75" />
-              <path d="M3 3.75v3.25c0 .97 2.02 1.75 4.5 1.75S12 7.97 12 7V3.75" />
-              <path d="M3 7v3.25C3 11.22 5.02 12 7.5 12S12 11.22 12 10.25V7" />
+              <path
+                d="M23 8 H13 A6 6 0 0 0 7 14 V18 A6 6 0 0 0 13 24 H23"
+                stroke="currentColor"
+                stroke-width="3.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <rect class="brand-tile" x="20.5" y="13.7" width="4.6" height="4.6" rx="1" />
             </svg>
-            <span>contexer<span class="brand-accent">.</span>console</span>
+            <span>contexer<span class="brand-accent">.console</span></span>
           </span>
         </div>
 

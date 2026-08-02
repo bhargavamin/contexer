@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Byte-for-byte the hosted dashboard's app/icon.svg. A console tab is long-lived, so the
+       favicon is the branding surface a user actually looks at all day; it has to be the same
+       mark. Literal hex rather than the CSS tokens because a favicon is rendered outside the
+       document that defines them. -->
+  <rect width="32" height="32" rx="7" fill="#15170d" />
+  <path
+    d="M23 8 H13 A6 6 0 0 0 7 14 V18 A6 6 0 0 0 13 24 H23"
+    fill="none"
+    stroke="#f2f1e6"
+    stroke-width="3.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <rect x="20.5" y="13.7" width="4.6" height="4.6" rx="1" fill="#cdeb36" />
+</svg>
