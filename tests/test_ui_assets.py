@@ -342,3 +342,132 @@ def test_hidden_still_means_hidden_for_the_toast_and_banner():
     assert re.search(r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important", css), (
         "console.css must neutralise `display` for [hidden] elements"
     )
+
+
+# --- brand and design-system parity with the hosted dashboard --------------------------
+#
+# The console is a second surface over the same product, so a user arriving from
+# app.contexer.ai has to recognise it. These guards pin the parts that a reviewer caught
+# drifting: the wrong logo, an uncoloured taxonomy, and two shared class names that had
+# quietly acquired different meanings here.
+
+ICON = ASSETS / "icon.svg"
+
+# The C-bracket of the canonical mark (contexer-mark.svg, and the dashboard's BrandGlyph).
+CANONICAL_MARK = "M23 8 H13 A6 6 0 0 0 7 14 V18 A6 6 0 0 0 13 24 H23"
+
+
+def test_the_sidebar_wears_the_canonical_contexer_mark():
+    """The console once drew a database cylinder here. The top-left corner is the one element a
+    user compares between the two surfaces, so a different glyph reads as a different product."""
+    markup = MARKUP.read_text()
+    assert CANONICAL_MARK in markup, "the sidebar brand must be the canonical C-bracket mark"
+    assert 'viewBox="0 0 32 32"' in markup, "the mark is authored on a 32-unit box"
+    assert "brand-tile" in markup, "the cursor tile must be filled through a class, not a literal"
+    assert re.search(r'\.brand-tile\s*\{[^}]*fill:\s*var\(--signal\)', STYLES.read_text()), (
+        "the tile has to track --signal rather than hardcoding the lime"
+    )
+
+
+def test_the_favicon_is_served_and_is_the_same_mark():
+    """A console tab is long-lived, so the favicon is the branding surface a user actually looks
+    at. Missing, it is also an automatic /favicon.ico request the daemon answers 404/401."""
+    from contexer.ui import server
+
+    assert "/icon.svg" in server.ASSETS, "the favicon must be in the static allowlist"
+    name, content_type = server.ASSETS["/icon.svg"]
+    assert name == "icon.svg" and content_type.startswith("image/svg+xml"), (name, content_type)
+    assert ICON.exists(), "contexer/ui/assets/icon.svg is missing"
+    icon = ICON.read_text()
+    assert CANONICAL_MARK in icon, "the favicon must be the same mark as the sidebar"
+    assert re.search(r'<link[^>]+rel="icon"[^>]+href="/icon\.svg"', MARKUP.read_text()), (
+        "index.html must point at the favicon"
+    )
+    # xmlns is a namespace name, not a fetch; nothing else may reach off-host.
+    assert re.findall(r"https?://(?!www\.w3\.org/2000/svg)", icon) == [], icon
+
+
+def test_every_subtype_has_a_colour_on_both_the_chip_and_the_row(script):
+    """Subtype is a colour as well as a word — that is what makes a 200-row list scannable, and
+    it is the dashboard's own language. A subtype with no rule falls back to neutral silently,
+    so the taxonomy and the stylesheet are checked against each other rather than by eye."""
+    m = re.search(r"const SUBTYPES = \[(.*?)\]", script, re.DOTALL)
+    assert m, "the subtype vocabulary moved"
+    subtypes = re.findall(r'"([a-z_]+)"', m.group(1))
+    assert subtypes, m.group(1)
+
+    classes = _block_at(script, script.index("{", script.index("const SUBTYPE_CLASS")))
+    css = STYLES.read_text()
+    for subtype in subtypes:
+        assert re.search(r'\b%s:\s*"badge-%s"' % (subtype, subtype), classes), (
+            "%s has no chip class" % subtype
+        )
+        assert re.search(r"\.badge-%s\s*\{[^}]*color:\s*var\(--t-%s\)" % (subtype, subtype), css), (
+            "%s's chip must take its colour from the shared token" % subtype
+        )
+        assert re.search(
+            r'\.drow\[data-subtype="%s"\]\s*\{[^}]*border-left-color:\s*var\(--t-%s\)'
+            % (subtype, subtype), css
+        ), "%s has no row stripe, or the stripe does not share the chip's token" % subtype
+        assert re.search(r"--t-%s:" % subtype, css), "%s has no colour token" % subtype
+
+
+def test_no_two_subtypes_share_a_colour_token():
+    css = STYLES.read_text()
+    values = dict(re.findall(r"--t-([a-z]+):\s*([^;]+);", css))
+    assert len(values) >= 4, values
+    assert len(set(values.values())) == len(values), "two subtypes resolve to the same hue: %r" % values
+
+
+def test_a_status_chip_never_borrows_a_subtype_hue():
+    """`suggested` used to be the exact blue that means `convention`, and the two render side by
+    side on the same row. Status is a maturity, not a category; it spends no hue."""
+    css = STYLES.read_text()
+    convention = re.search(r"--t-convention:\s*([^;]+);", css).group(1).strip()
+    suggested = re.search(r"\.badge-suggested\s*\{([^}]*)\}", css).group(1)
+    assert convention not in suggested, "badge-suggested is reusing the convention hue"
+    assert "dashed" in suggested, "suggested reads as provisional through its border, not a hue"
+    for token in ("--t-convention", "--t-constraint", "--t-architecture", "--t-pattern"):
+        assert token not in suggested, "%s belongs to a subtype" % token
+
+    # The dashboard's .badge-pending is neutral; an amber one here means the same class name
+    # carries two different urgencies across the two surfaces.
+    pending = re.search(r"\.badge-pending\s*\{([^}]*)\}", css).group(1)
+    assert "--warn" not in pending, "badge-pending must stay neutral, as it is on the dashboard"
+    assert "--muted-foreground" in pending, pending
+
+
+def test_stored_text_is_bidi_isolated_wherever_it_is_rendered():
+    """Decision bodies are stored without unicode sanitization. An un-isolated RTL/override run
+    reorders characters across the element boundary and can visually rewrite the control next to
+    it — here, Approve and Delete. Same rule, same reason, as the hosted dashboard."""
+    css = STYLES.read_text()
+    m = re.search(r"((?:\.[a-z-]+(?: li)?,\s*)+[.a-z -]+)\{\s*unicode-bidi:\s*isolate", css)
+    assert m, "console.css no longer isolates stored text"
+    isolated = set(re.findall(r"\.([a-z-]+)", m.group(1)))
+    for selector in ("drow-title", "drow-text", "detail-title", "tl-title", "review-title",
+                     "prose", "code-block", "rev-body", "diff", "factors", "notice-body"):
+        assert selector in isolated, "%s renders stored text but is not isolated" % selector
+
+
+def test_motion_is_dropped_under_prefers_reduced_motion():
+    css = STYLES.read_text()
+    m = re.search(r"@media \(prefers-reduced-motion: reduce\)\s*\{", css)
+    assert m, "console.css animates hover, icons and the press scale with no reduced-motion query"
+    block = _block_at(css, m.end() - 1)
+    assert "transition-duration" in block and "!important" in block, block
+    assert re.search(r"\.btn:active[^{]*\{[^}]*transform:\s*none", block), (
+        "with the transition gone the press scale is an instant jump, not a softer one"
+    )
+
+
+def test_every_view_names_itself_in_the_tab(script):
+    """Seven views sharing one static <title> cannot be told apart in a tab strip, and several
+    console tabs open on different repos is the normal case."""
+    m = re.search(r"const VIEW_TITLE = \{", script)
+    assert m, "no per-view tab titles"
+    titles = _block_at(script, m.end() - 1)
+    nav = _block_at(script, script.index("{", script.index("const activeNav = ")))
+    for view in re.findall(r"^\s*([a-z]+):", nav, re.MULTILINE):
+        assert re.search(r"\b%s:\s*\{" % view, titles), "%s has no tab title" % view
+    assert "document.title" in script, "the titles are computed but never applied"

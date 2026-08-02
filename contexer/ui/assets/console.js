@@ -12,8 +12,28 @@
 (() => {
   // ── Vocabulary (mirrors contexer/store.py; the console never invents values) ──────────
   const SUBTYPES = ["architecture", "constraint", "pattern", "convention"];
+  // Subtype -> chip class. The classes and their hues live in console.css; this map only says
+  // which subtypes HAVE one, so an unknown value falls through to the neutral chip.
+  const SUBTYPE_CLASS = {
+    architecture: "badge-architecture",
+    constraint: "badge-constraint",
+    pattern: "badge-pattern",
+    convention: "badge-convention",
+  };
   const GLOBAL_SUBTYPES = ["constraint", "convention"];
   const STATUSES = ["approved", "suggested", "pending_approval", "ignored"];
+  // Tab titles. `scoped` views belong to one repo, so their tab names it: several console tabs
+  // open on different repos is the normal case, and seven tabs all reading "Contexer Console"
+  // cannot be told apart. Most specific segment first — a tab strip truncates from the right.
+  const VIEW_TITLE = {
+    dashboard: { label: "Dashboard", scoped: true },
+    decisions: { label: "Decisions", scoped: true },
+    review: { label: "Review", scoped: true },
+    deleted: { label: "Deleted", scoped: true },
+    global: { label: "Global rules", scoped: false },
+    team: { label: "Team context", scoped: false },
+    config: { label: "Settings", scoped: false },
+  };
   const STATUS_LABEL = {
     approved: "approved",
     suggested: "suggested",
@@ -826,6 +846,11 @@
       }
     }
 
+    const title = VIEW_TITLE[activeNav];
+    document.title = title
+      ? title.label + (title.scoped && row ? " · " + name : "") + " · Contexer Console"
+      : "Contexer Console";
+
     document.getElementById("version-line").textContent =
       "contexer " + (state.version ? "v" + state.version : "—");
     document.getElementById("port-line").textContent = state.port ? "127.0.0.1:" + state.port : "";
@@ -840,8 +865,24 @@
     });
   }
 
+  /** Subtype is a colour as well as a word (see console.css "Subtype colour"). An unknown value
+   *  degrades to the neutral chip rather than throwing: the taxonomy is enforced at the write
+   *  path, and a display helper is the wrong place to re-litigate it. */
   function subtypeBadge(subtype) {
-    return h("span", { class: "badge", text: String(subtype || "unclassified") });
+    const s = String(subtype || "");
+    const tone = SUBTYPE_CLASS[s];
+    return h("span", {
+      class: "badge" + (tone ? " " + tone : ""),
+      text: s || "unclassified",
+    });
+  }
+
+  /** The row's left stripe, carrying the same colour as its chip. Returns null — which `h` drops
+   *  — for anything outside the taxonomy, so an unknown subtype gets no stripe rather than an
+   *  attribute no rule matches. */
+  function subtypeAttr(subtype) {
+    const s = String(subtype || "");
+    return SUBTYPE_CLASS[s] ? s : null;
   }
 
   function statCard(label, value, hint, href, signal) {
@@ -962,6 +1003,7 @@
       {
         class: "drow" + (id && id === activeId ? " is-active" : ""),
         href: hrefFor("decisions", slug, id),
+        "data-subtype": subtypeAttr(d.subtype),
       },
       [
         h("span", { class: "drow-title", text: titleOf(d) }),
@@ -1208,14 +1250,15 @@
   function needsRow(slug, d, isProposal) {
     const id = String(d.id || "");
     const proposed = isProposal ? d.proposed || {} : null;
-    return h("div", { class: "drow" }, [
+    const subtype = isProposal ? proposed.subtype || d.subtype : d.subtype;
+    return h("div", { class: "drow", "data-subtype": subtypeAttr(subtype) }, [
       h("a", { class: "drow-title", href: hrefFor("decisions", slug, id), text: titleOf(d) }),
       h("span", {
         class: "drow-text",
         text: isProposal ? String(proposed.content || "") : String(d.content || ""),
       }),
       h("span", { class: "drow-meta" }, [
-        subtypeBadge(isProposal ? proposed.subtype || d.subtype : d.subtype),
+        subtypeBadge(subtype),
         isProposal
           ? h("span", { class: "badge badge-warn", text: "proposed update" })
           : statusBadge(d.status),
@@ -1902,7 +1945,7 @@
             { class: "list" },
             rules.map((r) => {
               const id = String(r.id || "");
-              return h("div", { class: "drow is-static" }, [
+              return h("div", { class: "drow is-static", "data-subtype": subtypeAttr(r.subtype) }, [
                 h("span", { class: "drow-title", text: titleOf(r) }),
                 h("p", { class: "prose", text: String(r.content || "") }),
                 h("span", { class: "drow-meta" }, [
@@ -2118,7 +2161,7 @@
             "div",
             { class: "list" },
             rows.map((r) =>
-              h("div", { class: "drow is-static" }, [
+              h("div", { class: "drow is-static", "data-subtype": subtypeAttr(r.type) }, [
                 h("span", { class: "drow-title", text: titleOf(r) }),
                 h("span", { class: "drow-text", text: String(r.content || "") }),
                 r.rationale
@@ -2151,33 +2194,37 @@
               { class: "list list-scroll" },
               shareable.map((d) => {
                 const id = String(d.id || "");
-                return h("label", { class: "drow is-pick" }, [
-                  h("span", { class: "drow-meta" }, [
-                    h("input", {
-                      type: "checkbox",
-                      props: { checked: selected.has(id) },
-                      on: {
-                        change: (ev) => {
-                          if (ev.target.checked) selected.add(id);
-                          else selected.delete(id);
-                          render();
+                return h(
+                  "label",
+                  { class: "drow is-pick", "data-subtype": subtypeAttr(d.subtype || d.type) },
+                  [
+                    h("span", { class: "drow-meta" }, [
+                      h("input", {
+                        type: "checkbox",
+                        props: { checked: selected.has(id) },
+                        on: {
+                          change: (ev) => {
+                            if (ev.target.checked) selected.add(id);
+                            else selected.delete(id);
+                            render();
+                          },
                         },
-                      },
-                    }),
-                    h("span", { class: "drow-title", text: titleOf(d) }),
-                  ]),
-                  h("span", { class: "drow-text", text: String(d.content || "") }),
-                  h("span", { class: "drow-meta" }, [
-                    subtypeBadge(d.subtype || d.type),
-                    d.shared
-                      ? h("span", { class: "badge badge-approved", text: "shared " + fmtAgo(d.shared_at) })
-                      : null,
-                    num(d.redacted) > 0
-                      ? h("span", { class: "badge badge-warn", text: num(d.redacted) + " secrets redacted" })
-                      : null,
-                    h("span", { class: "drow-when", text: shortId(id) }),
-                  ]),
-                ]);
+                      }),
+                      h("span", { class: "drow-title", text: titleOf(d) }),
+                    ]),
+                    h("span", { class: "drow-text", text: String(d.content || "") }),
+                    h("span", { class: "drow-meta" }, [
+                      subtypeBadge(d.subtype || d.type),
+                      d.shared
+                        ? h("span", { class: "badge badge-approved", text: "shared " + fmtAgo(d.shared_at) })
+                        : null,
+                      num(d.redacted) > 0
+                        ? h("span", { class: "badge badge-warn", text: num(d.redacted) + " secrets redacted" })
+                        : null,
+                      h("span", { class: "drow-when", text: shortId(id) }),
+                    ]),
+                  ]
+                );
               })
             ),
             h("div", { class: "btn-row mt-3" }, [
@@ -2270,7 +2317,7 @@
       { class: "list" },
       rows.map((d) => {
         const id = String(d.id || "");
-        return h("div", { class: "drow is-static" }, [
+        return h("div", { class: "drow is-static", "data-subtype": subtypeAttr(d.subtype) }, [
           h("span", { class: "drow-title", text: titleOf(d) }),
           h("p", { class: "prose is-quiet", text: String(d.content || "") }),
           h("span", { class: "drow-meta" }, [
