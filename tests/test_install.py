@@ -276,6 +276,21 @@ class TestMemorySyncMigration:
         assert len(groups) == 1
 
 
+class TestInstallDoesNotImplyAConsole:
+    """`[ui] autostart` is opt-in: installing an OSS tool must not leave a listener behind."""
+
+    def test_no_console_statefile_is_created(self, installed_home):
+        assert not (installed_home / ".contexer" / "ui.json").exists()
+        assert not (installed_home / ".contexer" / "ui.log").exists()
+
+    def test_no_ui_table_is_written_to_config(self, installed_home, isolated_config):
+        assert not isolated_config.exists()
+
+    def test_autostart_stays_off(self, installed_home):
+        assert config.load_ui_settings(installed_home / ".contexer" / "config.toml").autostart \
+            is False
+
+
 class TestTargetSelection:
     def test_install_target_cursor_only(self, clean_home, monkeypatch):
         import contexer.cli as cli
