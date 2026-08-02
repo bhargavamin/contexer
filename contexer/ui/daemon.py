@@ -29,6 +29,9 @@ PROBE_TIMEOUT = 0.1
 PORT_SETTLE_SECONDS = 2.0    # only ever spent on the kill-then-respawn path
 PORT_SETTLE_TICK = 0.05
 MINT_GRACE_SECONDS = 1.0     # how long an empty statefile is assumed to be a live mid-mint
+# Only ever spent when another process is mid-mint, i.e. two session starts firing together.
+CLAIM_WAIT_SECONDS = 0.25
+CLAIM_WAIT_TICK = 0.002
 
 # Path duplicated instead of taken from store.STORE_DIR — see the module docstring.
 _STATE_DIR = pathlib.Path.home() / ".contexer"
@@ -284,13 +287,23 @@ def _claim_state(port: int, version: str, token: str | None) -> tuple[UiState, b
     try:
         fd = os.open(STATE_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
-        # The winner creates the file before filling it, so it can be observed empty for a few
-        # microseconds. Spin (no sleep — this is the hook path) rather than mint a rival token.
-        for _ in range(20):
+        # The winner creates the file before filling it, so it can be observed empty for a
+        # moment. Wait that out rather than mint a rival token.
+        #
+        # A bare 20-iteration spin (no sleep) covered well under a millisecond of real time and
+        # lost the race it exists to win on any filesystem slower than a warm page cache, which
+        # costs the console for the whole session. Bounded by a DEADLINE instead, so the budget
+        # is a duration rather than an iteration count, and the tick keeps it off a busy loop.
+        # Free in the common path: this branch is only reached when a rival already created the
+        # file, and the first read almost always finds it already filled.
+        deadline = time.monotonic() + CLAIM_WAIT_SECONDS
+        while True:
             existing = read_state()
             if existing is not None:
                 return existing, False
-        return None
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(CLAIM_WAIT_TICK)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(json.dumps(asdict(state), indent=2))
     return state, True

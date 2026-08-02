@@ -732,3 +732,44 @@ def test_importing_the_daemon_does_not_import_the_store():
                           cwd=str(Path(daemon.__file__).parents[2]))
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "HEAVY:", done.stdout
+
+
+class TestClaimStateWaitsOutARival:
+    """`_claim_state` loses to whoever wins O_EXCL and then has to READ what they wrote.
+
+    The wait used to be 20 iterations with no sleep — well under a millisecond of real time, so
+    on anything slower than a warm page cache it gave up and returned None, costing the console
+    for that whole session. It is a deadline now, so the budget is a DURATION. The fakes below
+    are therefore keyed on elapsed time, not on a call count: a count-based fake passes against
+    either implementation and proves nothing.
+    """
+
+    def test_it_waits_out_a_rival_that_is_slow_to_fill_the_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / "ui.json")
+        daemon.STATE_PATH.touch()  # the rival created it and has not filled it yet
+        rival = daemon.UiState(pid=4242, port=31415, token="rival-token",
+                               started_at="2026-01-01T00:00:00Z", version="1.0")
+        # 50ms is orders of magnitude past what 20 uninterrupted reads cover.
+        ready_at = time.monotonic() + 0.05
+        monkeypatch.setattr(daemon, "read_state",
+                            lambda: rival if time.monotonic() >= ready_at else None)
+
+        assert daemon._claim_state(31415, "1.0", None) == (rival, False), \
+            "gave up and minted a rival token"
+
+    def test_it_gives_up_on_a_file_that_is_never_filled(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / "ui.json")
+        monkeypatch.setattr(daemon, "CLAIM_WAIT_SECONDS", 0.01)
+        daemon.STATE_PATH.touch()
+        monkeypatch.setattr(daemon, "read_state", lambda: None)
+
+        assert daemon._claim_state(31415, "1.0", None) is None
+
+    def test_the_happy_path_never_waits(self, monkeypatch, tmp_path):
+        """No statefile => O_EXCL succeeds => the wait is not entered at all."""
+        monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / "ui.json")
+        monkeypatch.setattr(daemon.time, "sleep",
+                            lambda _s: pytest.fail("slept on the uncontended path"))
+
+        state, minted = daemon._claim_state(31415, "1.0", None)
+        assert minted and state.token

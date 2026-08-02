@@ -985,3 +985,36 @@ def test_cli_logout_dispatches(monkeypatch, capsys):
     monkeypatch.setattr(auth, "logout", lambda: True)
     cli.logout_cmd([])
     assert "logged out" in capsys.readouterr().out.lower()
+
+
+def test_the_login_output_drain_is_bounded(creds_env, login_job, monkeypatch):
+    """The drain kept EVERY line a child printed, for up to LOGIN_TIMEOUT, in a daemon that
+    stays up for days. Asserted on the container itself: the message below is identical either
+    way, so only its LENGTH can catch an unbounded collection."""
+    captured = {}
+    real_reader = auth._read_login_output
+
+    def spy(job, lines):
+        captured["lines"] = lines
+        return real_reader(job, lines)
+
+    monkeypatch.setattr(auth, "_read_login_output", spy)
+    login_job(FakeProc(returncode=1, output="".join(f"line {i}\n" for i in range(5000))))
+
+    _settled(auth.start_login_job())
+
+    assert len(captured["lines"]) <= auth._MAX_OUTPUT_LINES
+
+
+def test_the_output_cap_keeps_the_lines_the_failure_message_reads(creds_env, login_job):
+    """`_failure_message` reads `lines[-2:]`, so the cap has to keep the LAST lines, not the
+    first — a plain head-truncation would report startup chatter as the reason a login failed."""
+    proc = FakeProc(returncode=1,
+                    output="".join(f"noise {i}\n" for i in range(auth._MAX_OUTPUT_LINES * 3))
+                           + "second to last\nthe real error\n")
+
+    login_job(proc)
+    message = _settled(auth.start_login_job())["message"]
+
+    assert message.endswith("second to last the real error")
+    assert "noise 0" not in message

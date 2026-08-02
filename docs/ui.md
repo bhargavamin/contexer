@@ -79,11 +79,16 @@ read; session start is byte-identical to a build without the console. That is de
 installing an open-source tool should not imply a listening socket. This page is the only place
 the feature is announced, which is why it is worth reading before you turn it on.
 
-**Only Claude Code and Codex actually show you that line.** Cursor and Gemini CLI discard the
+**Autostart only applies under Claude Code and Codex.** Cursor and Gemini CLI discard the
 human-facing status line entirely — their hook contracts take injected context and nothing else —
-so under those two, autostart still starts the daemon but you will never see a URL. Run
-`contexer ui --open` instead. This is the hosts' hook model, not something Contexer can work
-around.
+so there is no way to hand you the URL. Under those two, autostart is therefore a no-op: no
+daemon is started at session start, because one started there could never be reached. Run
+`contexer ui --open` instead; everything else about the console works identically.
+
+The URL is *not* routed into the injected context to make it visible, which would be the only
+other option. That context goes to the model and is replayed into every later prompt, and the
+URL carries a live pairing code. A credential in the model's context is worse than no console.
+This is the hosts' hook model, not something Contexer can work around.
 
 ## Configuration
 
@@ -91,7 +96,7 @@ All console settings live in the `[ui]` table of `~/.contexer/config.toml`. Ever
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `autostart` | bool | `false` | Start the console and print its URL at session start |
+| `autostart` | bool | `false` | Start the console and print its URL at session start (Claude Code and Codex only — see above) |
 | `port` | int | `31415` | Fixed loopback port. Never scanned, so a printed URL survives a restart |
 | `idle_timeout_minutes` | int | `60` | Minutes without a user-driven request before the daemon exits. Minimum 1 |
 
