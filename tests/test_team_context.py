@@ -185,7 +185,30 @@ def test_pull_degraded_keeps_existing_cache(team_env, monkeypatch, capsys):
 def test_pull_auth_failure_degrades(team_env, monkeypatch, capsys):
     _fake_rs(monkeypatch, exc=RemoteAuthError("401"))
     assert team_context.pull(team_env, profile=TEAM_PROFILE) == (0, 0)
-    assert "contexer login --team" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "contexer login" in err and "--team" not in err  # a flag that never existed
+
+
+def test_an_auth_rejection_is_recorded_as_auth_not_a_generic_degradation(team_env, monkeypatch):
+    """`remote` classifies the failure, but `with_local_fallback` returns only its default, so
+    the class was discarded and every degradation landed as "degraded". A token the server has
+    REVOKED still looks unexpired locally, so with the type thrown away nothing downstream could
+    tell an auth failure from an outage — which is how one reads as the other and sends the
+    developer off to check their network."""
+    _fake_rs(monkeypatch, exc=RemoteAuthError("401"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["error"] == "auth"
+    assert cache["last_sync"]["ok"] is False
+
+
+def test_an_unreachable_endpoint_stays_a_generic_degradation(team_env, monkeypatch):
+    """The other half of the contract: only a rejection is labelled `auth`, so nothing can offer
+    a pointless login when the network is what broke."""
+    _fake_rs(monkeypatch, exc=RemoteUnavailableError("connection refused"))
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    cache = json.loads(team_context._cache_path(team_env).read_text())
+    assert cache["last_sync"]["error"] == "degraded"
 
 
 def test_pull_null_cursor_preserves_prior_cursor(team_env, monkeypatch):
@@ -769,6 +792,34 @@ def test_cli_pull_no_repo_errors(monkeypatch):
     monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
     with pytest.raises(SystemExit):
         cli.pull([])
+
+
+def test_cli_pull_names_a_dead_session_instead_of_reporting_zero(monkeypatch, capsys):
+    """"Pulled 0 team decision(s)." is the same sentence for "nothing new upstream" and "your
+    session died three days ago" — the ambiguity that let an expired login sit unnoticed while
+    every sync failed. auth_state is a local read, so naming the cause costs nothing."""
+    from contexer import auth, cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo: (0, 0))
+    monkeypatch.setattr(auth, "auth_state", lambda profile: {
+        "state": "refresh_failed", "issuer": "https://mcp.example", "expires_at": None,
+        "scope": None, "message": "The Teams session expired and the refresh was rejected."})
+    cli.pull([])
+    captured = capsys.readouterr()
+    assert "Pulled 0 team decision(s)." in captured.out
+    assert "refresh was rejected" in captured.err
+
+
+def test_cli_pull_stays_quiet_when_a_live_session_simply_has_nothing_new(monkeypatch, capsys):
+    """A healthy zero-row pull must not grow a scary second line."""
+    from contexer import auth, cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(team_context, "pull", lambda repo: (0, 0))
+    monkeypatch.setattr(auth, "auth_state", lambda profile: {
+        "state": "logged_in", "issuer": "https://mcp.example", "expires_at": None,
+        "scope": None, "message": "Signed in."})
+    cli.pull([])
+    assert capsys.readouterr().err == ""
 
 
 def test_adapter_pull_team_swallows_errors(monkeypatch):

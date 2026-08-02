@@ -18,7 +18,7 @@ import sys
 import time
 
 from contexer import config, share, store
-from contexer.remote import RemoteDecision, RemoteStore, with_local_fallback
+from contexer.remote import RemoteAuthError, RemoteDecision, RemoteStore, with_local_fallback
 from contexer.repo_key import canonical_repo_key
 
 # Max team rows rendered into a single get_context (mirrors the local filtered display).
@@ -118,11 +118,24 @@ def _sync(repo_path: str, profile: config.Profile,
 
     cache = _load_cache(repo_path)
     start = time.time()
-    ctx = with_local_fallback(
-        lambda: remote.get_context(repo=key, updated_since=cache.get("cursor")),
-        default=None,
-        action="pull team context",
-    )
+    # `remote` already classifies the failure (RemoteAuthError vs unreachable), but
+    # with_local_fallback returns only `default`, so that classification used to be thrown away
+    # and every degradation was recorded as "degraded". A token the server has REVOKED still
+    # looks unexpired locally, so with the type discarded there was no evidence anywhere that
+    # the cause was authentication - which is how an auth failure reads as an outage and sends
+    # the developer to check their network. Recording the kind here keeps with_local_fallback's
+    # contract exactly as it was (it still warns once and still returns None) and gives
+    # `contexer pull` / the console's Pull button something honest to act on.
+    failure: dict = {}
+
+    def _attempt():
+        try:
+            return remote.get_context(repo=key, updated_since=cache.get("cursor"))
+        except RemoteAuthError:
+            failure["kind"] = "auth"
+            raise
+
+    ctx = with_local_fallback(_attempt, default=None, action="pull team context")
     duration_ms = int((time.time() - start) * 1000)
     if ctx is None:
         # Degraded (cloud unreachable / auth rejected): record the attempt but leave the
@@ -130,7 +143,7 @@ def _sync(repo_path: str, profile: config.Profile,
         _save_cache(repo_path, {
             **cache,
             "last_sync": {"at": start, "ok": False, "duration_ms": duration_ms,
-                         "error": "degraded",
+                         "error": failure.get("kind", "degraded"),
                          "consecutive_failures": _consecutive_failures(cache) + 1},
         })
         return None  # degraded — leave the existing cache in place
@@ -387,8 +400,10 @@ def poll_nonblocking(repo_path: str, consumer: str = "claude", *,
 # SessionStart is the one seam where a slow cloud is directly on the user's critical path
 # (a hook running before the assistant can respond), so it trades some freshness for a hard
 # ceiling: at most ~3s stall instead of the full 10s transport default. Every other caller
-# (poll, poll_nonblocking, the CLI `pull` command) is either non-blocking or explicitly
-# interactive, so they keep the longer default - this bound is deliberately narrow.
+# (poll, poll_nonblocking, the CLI `pull` command, the console's Pull button) is either
+# non-blocking or explicitly interactive, so they keep the longer default - this bound is
+# deliberately narrow, and reusing this seam for an interactive caller reads as an outage
+# against any endpoint that answers in more than 3s.
 _SESSION_START_TIMEOUT = 3.0
 
 
