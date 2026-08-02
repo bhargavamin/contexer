@@ -10,6 +10,7 @@ MCP client). Stdlib only - no extra dependencies.
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import html
 import json
@@ -303,6 +304,10 @@ def auth_state(profile: Profile) -> dict:
 LOGIN_TIMEOUT = 300.0
 _MESSAGE_LINES = 2
 _MESSAGE_LINE_LIMIT = 200
+# The drain keeps only the TAIL, which is all `_failure_message` reads (`lines[-2:]`). An
+# unbounded list held every byte a child printed for up to LOGIN_TIMEOUT, in a daemon that
+# stays up for days — a chatty or looping child was the whole budget for it.
+_MAX_OUTPUT_LINES = 200
 # How long the waiter gives the output drain after the child is gone. The browser the child
 # launched can inherit its stdout and hold the pipe open, and the job has to settle anyway.
 _OUTPUT_DRAIN = 5.0
@@ -418,7 +423,7 @@ def _await_login(job: dict) -> None:
     """Wait out one login subprocess and record its outcome. Own thread: the wait is minutes
     long by design and the daemon has to keep serving."""
     proc = job["proc"]
-    lines: list[str] = []
+    lines: collections.deque[str] = collections.deque(maxlen=_MAX_OUTPUT_LINES)
     reader = threading.Thread(target=_read_login_output, args=(job, lines), daemon=True)
     reader.start()
     timed_out = False
@@ -442,7 +447,7 @@ def _await_login(job: dict) -> None:
             job.update(state="failed", message=_failure_message("".join(lines)))
 
 
-def _read_login_output(job: dict, lines: list[str]) -> None:
+def _read_login_output(job: dict, lines: "collections.deque[str]") -> None:
     """Drain the child's stdout as it arrives, publishing the authorize URL the moment it is
     printed.
 

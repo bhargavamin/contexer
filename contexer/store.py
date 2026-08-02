@@ -2181,6 +2181,10 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
     never wipes the body. A content change with no explicit `title` re-derives the heading,
     matching `update_decision`'s in-place revision path.
 
+    A CONTENT change also supersedes any unreviewed `proposed_revision` (moved to
+    `superseded_proposals`), because that proposal was authored against the text this edit
+    replaces; a title/subtype-only change leaves it pending. See the comment at the drop.
+
     `if_version` is the optimistic-concurrency guard against a live MCP session writing the
     same entry: on a mismatch nothing is written and the third element carries
     {"current_version": N}. Returns (ok, message, entry | conflict | None); on success the
@@ -2218,10 +2222,23 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
                        if _entry_status(entry) in ("approved", "suggested") else None)
         if subtype is not None:
             entry["subtype"] = subtype
+        # A Suggested Update was written against the text being replaced here. Kept across a
+        # title/subtype edit (it still reads coherently against unchanged content), but DROPPED
+        # when the content itself changes: approving it later would promote the pre-edit text
+        # over the developer's rewrite, silently reverting an explicit human edit that nothing
+        # in the console reports as lost. `if_version` does not cover this — approving a
+        # proposal checks no version at all. The superseded proposal is not discarded blind:
+        # it is preserved on the entry so the timeline can still show what was suggested.
+        dropped = (content is not None and content != _current_content(entry)
+                   and entry.pop("proposed_revision", None))
+        if dropped:
+            entry.setdefault("superseded_proposals", []).append(
+                {**dropped, "superseded_at": datetime.now(timezone.utc).isoformat()})
         _append_revision(entry, _current_content(entry) if content is None else content,
                          source=source, approved_at=approved_at, title=new_title)
         _save(repo_path, data)
-        return True, f"Updated {entry['id'][:8]} — now revision {entry['revision']}.", entry
+        note = " The pending Suggested Update was superseded by this edit." if dropped else ""
+        return True, f"Updated {entry['id'][:8]} — now revision {entry['revision']}.{note}", entry
 
 
 def load_diagnostics(repo_path: str) -> dict:
@@ -3601,7 +3618,7 @@ def _hook_cwd_repo(repo_path: str) -> str:
     return cwd if _is_sane_repo(cwd) else repo_path
 
 
-def _with_console_url(payload: dict, repo_path: str) -> dict:
+def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> dict:
     """`payload` with the local-console URL appended to its HUMAN-facing `status` line.
 
     `status` only, NEVER `context`: `adapters/claude.format_session_start` maps `status` to
@@ -3613,13 +3630,25 @@ def _with_console_url(payload: dict, repo_path: str) -> dict:
     untouched without even importing the daemon, so a build carrying the console produces a
     byte-identical session start to one without it until the developer asks for it.
 
+    `enabled` is the SECOND gate, and it defaults to off: only a caller that actually renders
+    `status` to a human may ask for the URL. Cursor and Gemini have no such channel — both emit
+    `additionalContext` only (Gemini with `suppressOutput: True`), and both drop `status` on the
+    floor. Appending there would either spawn a daemon whose address is never shown, or, if
+    routed into `context` to make it visible, put a live pairing code into MODEL context and
+    replay it through every later prompt — the one thing the `status`-only rule above exists to
+    prevent. On those hosts the console is started by `contexer ui`, and its URL comes from
+    `contexer ui --status`. `get_session_start_context` (Claude, Codex) is the only caller
+    that passes True.
+
     Both imports are function-level: `contexer.ui.daemon` on the SessionStart hook path costs
     ~11.5ms at module scope, against a whole-check budget of ~0.3ms warm. Everything is
     wrapped, and silently — a console problem must cost the console, never context injection,
     and a hook that prints anything unexpected corrupts its host's JSON."""
     status = payload.get("status", "")
-    if not status:
-        return payload  # a deliberately silent start (compact after the offer) stays silent
+    if not enabled or not status:
+        # No human-facing channel, or a deliberately silent start (compact after the offer).
+        # Returning before the config read keeps this off the daemon path entirely.
+        return payload
     try:
         from contexer import config
 
@@ -3644,7 +3673,8 @@ def _with_console_url(payload: dict, repo_path: str) -> dict:
     return {**payload, "status": f"{status} | console {url}"}
 
 
-def session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
+def session_start_payload(repo_path: str, source: str = "", session_id: str = "",
+                          *, console_url: bool = False) -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
 
@@ -3689,7 +3719,7 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     # so the status-suffix arithmetic below can never describe a different moment than `team`.
     team, count, deferred = _team_section_with_counts(repo_path)
     if not team or (source == "resume" and not payload.get("context")):
-        return _with_console_url(payload, repo_path)
+        return _with_console_url(payload, repo_path, console_url)
     status = payload.get("status", "")
     if count:
         cap = _team_display_cap()
@@ -3708,7 +3738,7 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         **payload,
         "status": status,
         "context": _join_context_sections(payload.get("context", ""), team),
-    }, repo_path)
+    }, repo_path, console_url)
 
 
 def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
@@ -3900,9 +3930,14 @@ def get_session_start_context(repo_path: str, source: str = "", session_id: str 
     kept for back-compat with installed hooks and the existing test suite.
 
     session_id (Retrieval V1 Part B): "" preserves every existing caller (Codex/Cursor
-    still call this without it)."""
+    still call this without it).
+
+    `console_url=True` here and nowhere else: this envelope is the ONE path that renders
+    `status` into a `systemMessage` (Claude and Codex), the only developer-facing channel any
+    adapter has. See `_with_console_url`."""
     from contexer.adapters import claude
-    return claude.format_session_start(session_start_payload(repo_path, source, session_id))
+    return claude.format_session_start(
+        session_start_payload(repo_path, source, session_id, console_url=True))
 
 
 # The article is OPTIONAL — "what is repo doing?" (no this/the) is just as much a newcomer

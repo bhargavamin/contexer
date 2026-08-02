@@ -138,7 +138,10 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
             query=_str_param(query, "q")[:MAX_QUERY],
             subtype=_str_param(query, "subtype"),
             status=_str_param(query, "status"),
-            limit=_int_param(query, "limit", MAX_LIMIT),
+            # Absent/0 means MAX_LIMIT, not "no cap": store.list_decisions reads `limit <= 0`
+            # as unbounded, so forwarding the bare 0 let a `limit`-less URL serialize every
+            # row after all — the exact thing MAX_LIMIT is here to prevent.
+            limit=_int_param(query, "limit", MAX_LIMIT) or MAX_LIMIT,
             offset=_int_param(query, "offset", MAX_OFFSET),
         )
 

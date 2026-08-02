@@ -361,3 +361,53 @@ class TestFailureModes:
         ok, msg, _p = store.edit_decision(tmp_repo, entry["id"], title="x")
         assert ok is False
         assert "not found" in msg
+
+
+class TestSupersededProposal:
+    """A CONTENT edit must not leave a Suggested Update pending against the text it replaced.
+
+    Approving that stale proposal promoted the pre-edit content over the developer's rewrite,
+    silently reverting an explicit human edit. `if_version` does not cover it: approving a
+    proposal checks no version at all.
+    """
+
+    @staticmethod
+    def _with_proposal(repo: str) -> dict:
+        entry = _approved(repo, "Use Postgres as the primary datastore for all services")
+        store.update_decision(
+            repo, "Use Postgres as the primary datastore for all services and read replicas",
+            "sess-proposer", subtype="architecture", replace_id=entry["id"])
+        assert _entry(repo, entry["id"]).get("proposed_revision")
+        return entry
+
+    def test_content_edit_supersedes_the_proposal(self, tmp_repo):
+        entry = self._with_proposal(tmp_repo)
+        ok, msg, _p = store.edit_decision(tmp_repo, entry["id"],
+                                          content="Use MySQL — Postgres was rejected on cost")
+        assert ok
+        assert "superseded" in msg
+        assert "proposed_revision" not in _entry(tmp_repo, entry["id"])
+
+    def test_approving_after_a_content_edit_cannot_revert_it(self, tmp_repo):
+        entry = self._with_proposal(tmp_repo)
+        store.edit_decision(tmp_repo, entry["id"],
+                            content="Use MySQL — Postgres was rejected on cost")
+        store.approve_decision(tmp_repo, entry["id"], "approve")
+        # The whole point: the developer's edit is still what a session would replay.
+        assert _entry(tmp_repo, entry["id"])["content"].startswith("Use MySQL")
+
+    def test_the_superseded_proposal_is_kept_for_the_timeline(self, tmp_repo):
+        entry = self._with_proposal(tmp_repo)
+        store.edit_decision(tmp_repo, entry["id"],
+                            content="Use MySQL — Postgres was rejected on cost")
+        superseded = _entry(tmp_repo, entry["id"])["superseded_proposals"]
+        assert len(superseded) == 1
+        assert "read replicas" in superseded[0]["content"]
+        assert superseded[0]["superseded_at"]
+
+    def test_a_no_op_content_edit_keeps_the_proposal(self, tmp_repo):
+        # Same text back is not a rewrite, so the proposal still reads against live content.
+        entry = self._with_proposal(tmp_repo)
+        ok, _msg, _p = store.edit_decision(tmp_repo, entry["id"], content=entry["content"])
+        assert ok
+        assert _entry(tmp_repo, entry["id"]).get("proposed_revision")

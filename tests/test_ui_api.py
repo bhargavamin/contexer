@@ -1439,3 +1439,35 @@ def test_the_watchdog_returns_when_the_server_is_already_stopping(console):
     console.last_request = 0.0
     server.watchdog(console, clock=lambda: 10 ** 9, tick=0)
     assert console.exit_reason == ""
+
+
+class TestListLimitIsBounded:
+    """`MAX_LIMIT` has to bound the DEFAULT response, not just an explicit oversized one.
+
+    store.list_decisions reads `limit <= 0` as unbounded, so forwarding the bare 0 that
+    `_int_param` returns for a missing parameter meant a `limit`-less URL serialized every
+    matching row — the exact thing the cap exists to prevent.
+    """
+
+    def test_a_limit_less_request_is_capped(self, repo):
+        _status, payload = api.dispatch(
+            "GET", f"/api/store/{repo['slug']}/decisions", {}, None)
+        assert payload["limit"] == api.MAX_LIMIT
+
+    def test_an_explicit_zero_is_capped_too(self, repo):
+        _status, payload = api.dispatch(
+            "GET", f"/api/store/{repo['slug']}/decisions", {"limit": ["0"]}, None)
+        assert payload["limit"] == api.MAX_LIMIT
+
+    def test_an_explicit_limit_is_still_honoured(self, repo):
+        _status, payload = api.dispatch(
+            "GET", f"/api/store/{repo['slug']}/decisions", {"limit": ["2"]}, None)
+        assert payload["limit"] == 2
+        assert len(payload["decisions"]) == 2
+        assert payload["total"] == 3
+
+    def test_over_the_cap_is_still_rejected(self, repo):
+        with pytest.raises(api.ApiError) as exc:
+            api.dispatch("GET", f"/api/store/{repo['slug']}/decisions",
+                         {"limit": [str(api.MAX_LIMIT + 1)]}, None)
+        assert exc.value.status == 400

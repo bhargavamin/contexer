@@ -102,59 +102,65 @@ class TestAutostartOffIsUnchanged:
         assert store.session_start_payload(tmp_repo)["status"] == NO_CONTEXT
 
 
+# `console_url=True` is what a host with a human-facing `status` channel passes; every test
+# below is about what that host sees, so they all go through this rather than repeating it.
+def _human(repo: str, source: str = "") -> dict:
+    return store.session_start_payload(repo, source, console_url=True)
+
+
 # ── autostart on: the URL, on the human channel only ────────────────────────
 
 class TestAutostartOn:
     def test_status_carries_a_pairing_url_deep_linked_to_this_repo(self, autostart):
         seed(autostart)
-        payload = store.session_start_payload(autostart)
+        payload = _human(autostart)
         port = daemon.read_state().port
         assert payload["status"].startswith(f"{POPULATED} | console http://127.0.0.1:{port}/?p=")
         assert payload["status"].endswith(f"#/store/{store._slug(autostart)}")
 
     def test_the_url_never_carries_the_console_token(self, autostart):
         seed(autostart)
-        payload = store.session_start_payload(autostart)
+        payload = _human(autostart)
         assert daemon.read_state().token not in payload["status"]
 
     def test_context_never_sees_the_url(self, autostart):
         """`context` goes to the model: a loopback address and a credential have no business
         there, and would be replayed into every later prompt."""
         seed(autostart)
-        payload = store.session_start_payload(autostart)
+        payload = _human(autostart)
         for needle in ("console", "127.0.0.1", "?p=", "#/store/"):
             assert needle not in payload["context"]
 
     def test_the_console_is_started_once_and_reused(self, autostart, spawns, monkeypatch):
         seed(autostart)
-        first = store.session_start_payload(autostart)["status"]
+        first = _human(autostart)["status"]
         monkeypatch.setattr(daemon, "probe", lambda port, token: True)  # now it is up
-        second = store.session_start_payload(autostart)["status"]
+        second = _human(autostart)["status"]
         assert len(spawns) == 1
         assert first == second  # same token, same pairing window
 
     def test_the_bootstrap_offer_line_gets_the_url_too(self, autostart):
-        assert store.session_start_payload(autostart)["status"].startswith(
+        assert _human(autostart)["status"].startswith(
             f"{NO_CONTEXT} | console http://127.0.0.1:")
 
     def test_a_resumed_session_gets_the_url(self, autostart):
         """The resume branch returns early, before the team suffix — it must not miss out."""
         seed(autostart)
-        status = store.session_start_payload(autostart, "resume")["status"]
+        status = _human(autostart, "resume")["status"]
         assert status.startswith(f"{RESUME_POPULATED} | console http://127.0.0.1:")
 
     def test_the_console_suffix_follows_the_team_suffix(self, monkeypatch, autostart):
         monkeypatch.setattr(store, "_team_section_with_counts",
                             lambda repo: ("## Team context\n- something", 1, 0))
         seed(autostart)
-        payload = store.session_start_payload(autostart)
+        payload = _human(autostart)
         assert " | team: 1 synced | console http://127.0.0.1:" in payload["status"]
         assert "## Team context" in payload["context"]
 
     def test_a_silent_start_stays_silent(self, autostart):
         """Compaction after the offer deliberately says nothing; a URL would be pure noise."""
-        store.session_start_payload(autostart)
-        assert store.session_start_payload(autostart, "compact") == {"status": "", "context": ""}
+        _human(autostart)
+        assert _human(autostart, "compact") == {"status": "", "context": ""}
 
 
 # ── the deep link only appears when it will actually resolve ────────────────
@@ -167,7 +173,7 @@ class TestDeepLinkResolves:
     def test_the_first_session_in_a_new_repo_links_to_the_console_root(self, autostart):
         assert not store._store_path(autostart).exists()
 
-        status = store.session_start_payload(autostart)["status"]
+        status = _human(autostart)["status"]
 
         port = daemon.read_state().port
         assert status.startswith(f"{NO_CONTEXT} | console http://127.0.0.1:{port}/?p=")
@@ -175,12 +181,12 @@ class TestDeepLinkResolves:
 
     def test_the_deep_link_appears_once_the_store_file_exists(self, autostart):
         seed(autostart)
-        assert store.session_start_payload(autostart)["status"].endswith(
+        assert _human(autostart)["status"].endswith(
             f"#/store/{store._slug(autostart)}")
 
     def test_a_session_with_no_repo_never_links_to_the_empty_string_slug(self, autostart):
         """`_slug("")` is sha1 of the empty string — `-da39a3ee`, a slug no store can have."""
-        payload = store._with_console_url({"status": "Contexer: something"}, "")
+        payload = store._with_console_url({"status": "Contexer: something"}, "", True)
 
         assert " | console http://127.0.0.1:" in payload["status"]
         assert "#/store/" not in payload["status"]
@@ -188,7 +194,7 @@ class TestDeepLinkResolves:
 
     def test_every_printed_deep_link_resolves(self, autostart):
         seed(autostart)
-        status = store.session_start_payload(autostart)["status"]
+        status = _human(autostart)["status"]
         slug = status.rsplit("#/store/", 1)[1]
         assert store.resolve_store_slug(slug) == autostart
 
@@ -199,14 +205,14 @@ class TestConsoleFailureIsInvisible:
     def test_a_console_that_will_not_start_leaves_the_line_alone(self, monkeypatch, autostart):
         monkeypatch.setattr(daemon, "ensure_running", lambda port=None: None)
         seed(autostart)
-        assert store.session_start_payload(autostart)["status"] == POPULATED
+        assert _human(autostart)["status"] == POPULATED
 
     def test_an_exception_is_swallowed_silently(self, monkeypatch, autostart, capsys):
         def boom(port=None):
             raise RuntimeError("no sockets today")
         monkeypatch.setattr(daemon, "ensure_running", boom)
         seed(autostart)
-        payload = store.session_start_payload(autostart)
+        payload = _human(autostart)
         assert payload["status"] == POPULATED
         assert capsys.readouterr() == ("", ""), "a hook that prints breaks its host's JSON"
 
@@ -214,7 +220,7 @@ class TestConsoleFailureIsInvisible:
         store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         (store.STORE_DIR / "config.toml").write_text("[ui]\nautostart = 'yes'\n")
         seed(tmp_repo)
-        assert store.session_start_payload(tmp_repo)["status"] == POPULATED
+        assert _human(tmp_repo)["status"] == POPULATED
         assert capsys.readouterr() == ("", "")
 
 
@@ -226,7 +232,7 @@ class TestEveryAdapterSeesTheSameSeam:
 
     def test_claude_renders_the_url_as_a_system_message_only(self, autostart):
         seed(autostart)
-        out = claude.format_session_start(store.session_start_payload(autostart))
+        out = store.get_session_start_context(autostart)
         assert " | console http://127.0.0.1:" in out["systemMessage"]
         assert "console" not in out["hookSpecificOutput"]["additionalContext"]
 
@@ -249,3 +255,20 @@ class TestEveryAdapterSeesTheSameSeam:
         monkeypatch.setattr(store, "_resolve_repo", lambda p: autostart)
         out = gemini.session_start(autostart, "{}")
         assert "console" not in out and "127.0.0.1" not in out
+
+    def test_a_host_that_cannot_show_the_url_never_starts_a_daemon(self, autostart, spawns):
+        """Not just "the line is dropped" — nothing is STARTED.
+
+        Cursor and Gemini call session_start_payload directly and render `context` only, so a
+        URL minted for them is unreachable by construction. Spawning anyway left a listener and
+        a process on the machine that nothing could ever hand the developer, and there is no
+        fixing it at the adapter: `additionalContext` is model context, and a live pairing code
+        replayed into every later prompt is worse than no console. `contexer ui` is the entry
+        point on those hosts."""
+        seed(autostart)
+        store.session_start_payload(autostart)          # the Cursor/Gemini call shape
+        assert spawns == []
+        assert not daemon.STATE_PATH.exists()
+
+        store.get_session_start_context(autostart)      # the Claude/Codex one
+        assert len(spawns) == 1
