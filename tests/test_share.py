@@ -208,7 +208,8 @@ def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
     monkeypatch.setattr(store, "_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteAuthError("401"))
     assert "fail" in share.share(tmp_repo, profile=TEAM).lower()
-    assert "contexer login --team" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "contexer login" in err and "--team" not in err  # a flag that never existed
 
 
 # ── share.share_all ──────────────────────────────────────────────────────────────

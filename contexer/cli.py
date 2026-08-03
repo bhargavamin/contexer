@@ -25,6 +25,8 @@ Commands:
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   review        Interactively approve, edit, or ignore pending engineering decisions;
                 also surfaces possibly-overlapping rules for manual consolidation.
+  ui            Local web console over the stored decisions: ui [--open] [--stop]
+                [--status] [--port N] [--foreground] [--reset-token].
   share         Push local decisions to your team cloud context: share [id | --all] (default: latest).
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
@@ -83,6 +85,20 @@ def _format_age(seconds: float) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+def _num(value: object, default: float = 0.0) -> float:
+    """A number out of one of the JSON files `status` reads, or `default` when it is not one.
+
+    `_read_team_creds` and `_read_team_cache` validate no further than "it is a dict", so a
+    hand-edited or half-written `"expires_at": "2026-01-01T00:00:00Z"` reaches arithmetic as a
+    string. `main()` runs `status` outside `_run_guarded`, so that TypeError is a raw traceback
+    in place of every other diagnostic line — from the command whose whole job is surviving the
+    state it is asked to diagnose. Booleans are excluded deliberately: JSON `true` is an int in
+    Python and would date a session to 1970."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value)
+
+
 def _read_team_cache(store_dir: Path, repo_path: str) -> dict:
     """Read the team cache file for `repo_path`, resolved off `store_dir` (the SAME home
     `status()` already derived for this call) rather than team_context.STORE_DIR, which is
@@ -111,6 +127,25 @@ def _read_team_creds(store_dir: Path) -> dict | None:
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _is_repo_store(path: Path) -> bool:
+    """Whether a `~/.contexer/*.json` file is one repo's decision store.
+
+    The same directory also holds the global rules (`_global.json`), the console statefile
+    (`ui.json`), per-repo tombstone sidecars (`<slug>.deleted.json`) and a family of
+    dot-prefixed caches (team cache, outbox, retrieval index, working sets). pathlib's glob
+    does not hide any of them, so counting them inflates both `repo stores` and
+    `entries total`. A leading underscore alone is NOT disqualifying: `store._slug` keeps one
+    from a repo path like /_vendor/app, and a pre-hash legacy store keeps its old name.
+
+    The global store's file name comes from `store.GLOBAL_SLUG` rather than a second literal:
+    the store owns that name, and two spellings of it drift apart silently."""
+    from contexer import store
+
+    name = path.name
+    return not (name.startswith(".") or name.endswith(".deleted.json")
+                or name in (f"{store.GLOBAL_SLUG}.json", "ui.json"))
 
 
 def _usage(stream=None) -> None:
@@ -359,7 +394,8 @@ def status(rest: list | None = None) -> None:
         entries = _load_safe(p).get("entries", [])
         return len(entries) if isinstance(entries, list) else 0
 
-    stores = sorted(store_dir.glob("*.json")) if store_dir.exists() else []
+    stores = sorted(p for p in store_dir.glob("*.json") if _is_repo_store(p)) \
+        if store_dir.exists() else []
     entries = sum(_entry_count(p) for p in stores)
     current = store_dir / ".current_repo"
 
@@ -398,7 +434,26 @@ def status(rest: list | None = None) -> None:
         print(f"  team sync:    on ({profile.endpoint})")
         creds = _read_team_creds(store_dir)
         if creds and creds.get("issuer") == auth._issuer_from_endpoint(profile.endpoint):
+            # "oauth" alone is what this line used to say for a session that expired days ago,
+            # so status agreed with itself while every sync failed. Derived from the creds dict
+            # already read off `store_dir` rather than from auth_state, which resolves the real
+            # home and would report on the wrong store when --store-dir is in play. No network,
+            # no refresh, no secret.
             token_source = "oauth"
+            expires_at = _num(creds.get("expires_at"))
+            if creds.get("refresh_failed_at"):
+                token_source += " (refresh rejected - run `contexer login`)"
+            elif expires_at and expires_at <= time.time():
+                age = _format_age(time.time() - expires_at)
+                # Past expiry is not the same as dead. Access tokens are minted with
+                # expires_in 3600, so an hour after the last sync a perfectly healthy session
+                # lands here and resolve_token renews it on the next call with no interaction.
+                # Only a session with nothing to renew from is worth sending someone to a
+                # browser. Mirrors auth_state's `renewable`, re-derived rather than imported
+                # because status reads a caller-supplied store_dir, not auth's frozen paths.
+                fix = ("renews on next sync" if creds.get("refresh_token")
+                       else "run `contexer login`")
+                token_source += f" (expired {age} ago - {fix})"
         elif profile.token:
             token_source = "config token"
         else:
@@ -408,19 +463,22 @@ def status(rest: list | None = None) -> None:
         if not repo:
             print("    cache:      (no current repo detected)")
         else:
+            # Every value below is typed by whatever is in the cache file, not by us —
+            # same reason `_num` exists: a torn write costs these lines, never the command.
             cache = _read_team_cache(store_dir, repo)
-            rows = cache.get("decisions", [])
-            print(f"    cache:      {len(rows)} decision(s), cursor={cache.get('cursor') or '(none)'}")
+            rows = cache.get("decisions")
+            count = len(rows) if isinstance(rows, list) else 0
+            print(f"    cache:      {count} decision(s), cursor={cache.get('cursor') or '(none)'}")
             last_sync = cache.get("last_sync")
-            if not last_sync:
+            if not isinstance(last_sync, dict):
                 print("    last sync:  never")
             else:
                 outcome = "ok" if last_sync.get("ok") else "failed"
-                age = _format_age(time.time() - last_sync.get("at", time.time()))
+                age = _format_age(time.time() - _num(last_sync.get("at"), time.time()))
                 print(f"    last sync:  {outcome}, {age} ago ({last_sync.get('duration_ms', 0)}ms)")
             last_render = cache.get("last_render")
-            if last_render:
-                kb = last_render.get("chars", 0) / 1024
+            if isinstance(last_render, dict):
+                kb = _num(last_render.get("chars")) / 1024
                 print(f"    last render: {last_render.get('rows', 0)} rows, ~{kb:.1f}KB")
 
     config_paths = (
@@ -490,6 +548,14 @@ def pull(rest: list | None = None) -> None:
     if removed:
         msg += f", removed {removed}"
     print(msg + ".")
+    if not upserted and not removed:
+        # "Pulled 0 team decision(s)." is the same sentence for "nothing new upstream" and
+        # "your session died three days ago", and that ambiguity is what let an expired login
+        # sit unnoticed. auth_state is a local read, so naming the cause costs nothing.
+        from contexer import auth, config
+        state = auth.auth_state(config.load_profile())
+        if state["state"] in ("expired", "refresh_failed", "none"):
+            print(f"contexer: {state['message']}", file=sys.stderr)
 
 
 def share_cmd(rest: list | None = None) -> None:
@@ -722,7 +788,7 @@ def login_cmd(rest: list | None = None) -> None:
 
     Self-configuring — writes config.toml itself, so no manual setup. Endpoint defaults to prod
     (or localhost under CONTEXER_ENV=local); override with --endpoint."""
-    from contexer import auth
+    from contexer import auth, config
 
     rest = rest or []
     endpoint = None
@@ -734,9 +800,12 @@ def login_cmd(rest: list | None = None) -> None:
         endpoint = rest[i + 1]
     try:
         auth.login(endpoint=endpoint)
-    except (ValueError, RuntimeError) as e:
+    except (ValueError, RuntimeError, config.ConfigError) as e:
         # ValueError: bad --endpoint; RuntimeError: OAuth flow failure (state mismatch,
-        # no code, no token). Both are user-actionable — print cleanly, no traceback.
+        # no code, no token); ConfigError: an unusable ~/.contexer/config.toml reached the
+        # profile write — it is NOT a ValueError subclass, so it needs naming here or it
+        # surfaces as a traceback out of a login that already spent the browser flow.
+        # All three are user-actionable — print cleanly, no traceback.
         print(f"contexer login: {e}", file=sys.stderr)
         sys.exit(1)
     _post_login_sync()  # refresh team sync so `contexer status` isn't stale after login
@@ -786,6 +855,113 @@ def logout_cmd(rest: list | None = None) -> None:
         print("Not logged in.")
 
 
+def ui_cmd(rest: list | None = None) -> None:
+    """`contexer ui [--open] [--stop] [--status] [--port N] [--foreground] [--reset-token]`.
+
+    Starts (or reports on) the local console — a loopback web UI over every store on this
+    machine. The printed URL carries a short-lived pairing code, never the console token."""
+    from contexer.ui import daemon
+
+    rest = rest or []
+    if "--stop" in rest:
+        print("Console stopped." if daemon.stop() else "Console was not running.")
+        return
+    if "--status" in rest:
+        _print_ui_status(daemon.status())
+        return
+
+    port = _ui_port(rest)
+    if "--foreground" in rest:
+        # Imported here, not at module scope: server.py pulls in http.server and the whole
+        # store, and cli.py is imported by every `contexer` invocation.
+        from contexer.ui import server
+        # server.main returns the process exit code: a failed bind must not look like a clean
+        # run to whatever supervises `contexer ui --foreground`.
+        code = server.main(["--port", str(port)])
+        if code:
+            sys.exit(code)
+        return
+    if "--reset-token" in rest:
+        old = daemon.read_state()  # stop() drops the statefile, so read the port off it first
+        if daemon.stop() and old is not None:
+            daemon.await_port_free(old.port)
+        daemon.clear_state()  # a fresh token is minted only when no statefile exists
+
+    state = daemon.read_state()
+    ours = state is not None and state.port == port and daemon.is_alive(state)
+    # await_port_free, not port_occupied alone: SIGTERM is asynchronous, and `--stop` drops the
+    # statefile, so the documented `contexer ui --stop && contexer ui` restart arrives while our
+    # own dying daemon still holds the socket and nothing is left to recognise it by. Blaming
+    # "another process" there sends the user to a different port to escape themselves.
+    if not ours and daemon.port_occupied(port) and not daemon.await_port_free(port):
+        print(f"Port {port} is in use by another process — the console cannot bind it.",
+              file=sys.stderr)
+        print(f"Pick another one: set `[ui] port` in {_ui_config_path()}, "
+              f"or run `contexer ui --port N`.", file=sys.stderr)
+        sys.exit(1)
+    # ensure_running short-circuits on a live daemon and hands back ITS port, so without this
+    # the URL printed below would name a port nothing was ever bound on. Refuse rather than
+    # SIGTERM the incumbent: a mistyped --port must not kill a console someone is using, and
+    # `--stop` (or `--reset-token`, which already stops it) is the explicit way to move it.
+    if "--port" in rest and state is not None and state.port != port and daemon.is_alive(state):
+        print(f"A console is already running on port {state.port} — there is one console per "
+              f"machine, so `--port {port}` cannot apply to it.", file=sys.stderr)
+        print(f"Move it: contexer ui --stop && contexer ui --port {port}", file=sys.stderr)
+        sys.exit(1)
+
+    running = daemon.ensure_running(port)
+    if running is None:
+        print(f"Could not start the console — see {daemon.LOG_PATH}.", file=sys.stderr)
+        sys.exit(1)
+    url = daemon.console_url(*running)
+    print(f"Console: {url}")
+    print(f"  log:          {daemon.LOG_PATH}")
+    if "--open" in rest:
+        import webbrowser
+        webbrowser.open(url)
+
+
+def _ui_config_path() -> Path:
+    """config.toml under THIS invocation's home, not config.CONFIG_PATH (frozen at import) —
+    same resolution status() uses, so the file we read is the file we name in errors."""
+    return Path.home() / ".contexer" / "config.toml"
+
+
+def _ui_port(rest: list) -> int:
+    """The port `contexer ui` targets: --port wins, else `[ui] port` from config.toml."""
+    from contexer import config
+
+    if "--port" in rest:
+        i = rest.index("--port")
+        value = rest[i + 1] if i + 1 < len(rest) else ""
+        if not value.isdigit() or not 1 <= int(value) <= 65535:
+            print("contexer ui: --port requires a port number (1-65535)", file=sys.stderr)
+            sys.exit(1)
+        return int(value)
+    try:
+        return config.load_ui_settings(_ui_config_path()).port
+    except config.ConfigError as e:
+        print(f"contexer ui: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _print_ui_status(info: dict) -> None:
+    """`contexer ui --status`, laid out like `contexer status`."""
+    if info["running"]:
+        state = f"running (pid {info['pid']}, started {info['started_at']})"
+    elif info["stale"]:
+        state = "not running (stale statefile — the next `contexer ui` replaces it)"
+    else:
+        state = "not running"
+    print(f"contexer console {info['version'] or _version()}")
+    print(f"  state:        {state}")
+    print(f"  port:         {info['port']}")
+    if info["url"]:
+        print(f"  url:          {info['url']}")
+    print(f"  statefile:    {info['state_path']}")
+    print(f"  log:          {info['log_path']}")
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -807,6 +983,8 @@ def main() -> None:
         _run_guarded(reinstall)
     elif cmd == "review":
         review()
+    elif cmd == "ui":
+        _run_guarded(lambda: ui_cmd(rest))
     elif cmd == "status":
         status(rest)
     elif cmd == "pull":

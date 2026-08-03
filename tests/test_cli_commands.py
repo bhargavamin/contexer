@@ -179,6 +179,51 @@ class TestStatusTeamSync:
         out = capsys.readouterr().out
         assert "last render: 10 rows, ~1.2KB" in out
 
+    def test_team_mode_dates_an_expired_oauth_session(self, installed_home, capsys):
+        store_dir = installed_home / ".contexer"
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".team_auth.json").write_text(json.dumps(
+            {"issuer": "https://t", "expires_at": time.time() - 7200}))
+        status()
+        out = capsys.readouterr().out
+        assert "token:      oauth (expired 2h ago - run `contexer login`)" in out
+
+    def test_a_non_numeric_expiry_costs_the_line_not_the_command(self, clean_home, capsys):
+        """`.team_auth.json` is validated no further than "it is a dict", and main() runs
+        status outside _run_guarded — so comparing a hand-edited string expiry against the
+        clock replaced the whole diagnostic with a TypeError traceback."""
+        store_dir = clean_home / ".contexer"
+        store_dir.mkdir()
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".team_auth.json").write_text(json.dumps(
+            {"issuer": "https://t", "expires_at": "2026-01-01T00:00:00Z"}))
+        status()
+        out = capsys.readouterr().out
+        assert "token:      oauth" in out
+        assert "expired" not in out  # unjudgeable, so unjudged
+        assert "Not fully installed" in out, "the lines after the team block still ran"
+
+    def test_a_corrupt_team_cache_costs_the_lines_not_the_command(self, clean_home, capsys):
+        """Same class as the expiry guard, on the other file status reads verbatim: a torn
+        write leaves `decisions`, `last_sync` and `last_render` any shape at all."""
+        from contexer import store as _store
+        store_dir = clean_home / ".contexer"
+        store_dir.mkdir()
+        (store_dir / "config.toml").write_text(
+            'mode = "team"\nendpoint = "https://t/mcp"\n')
+        (store_dir / ".current_repo").write_text("/repo/x")
+        slug = _store._slug("/repo/x")
+        (store_dir / f".team_{slug}.json").write_text(json.dumps(
+            {"decisions": 3, "last_sync": "yesterday", "last_render": {"chars": "lots"}}))
+        status()
+        out = capsys.readouterr().out
+        assert "cache:      0 decision(s)" in out
+        assert "last sync:  never" in out
+        assert "last render: 0 rows, ~0.0KB" in out
+        assert "Not fully installed" in out, "the lines after the team block still ran"
+
     def test_team_mode_omits_last_render_when_absent(self, installed_home, capsys):
         from contexer import store as _store
         store_dir = installed_home / ".contexer"
@@ -595,6 +640,26 @@ class TestInstallOnCorruptConfig:
         with pytest.raises(SystemExit) as exc:
             cli._run_guarded(lambda: install([]))
         assert exc.value.code == 1
+
+
+# ── login: clean failures ────────────────────────────────────────────────────
+
+class TestLoginFailures:
+    """`contexer login` must fail with a message and a non-zero exit, never a traceback."""
+
+    def test_an_unusable_config_toml_is_reported_cleanly(self, clean_home, monkeypatch, capsys):
+        """ConfigError is not a ValueError subclass, so it fell through login_cmd's except
+        clause AND _run_guarded's — out of a login that had already spent the browser flow."""
+        from contexer import auth, config
+
+        def boom(endpoint=None):
+            raise config.ConfigError(
+                f"invalid ui.port in {clean_home}/.contexer/config.toml: expected int")
+        monkeypatch.setattr(auth, "login", boom)
+        with pytest.raises(SystemExit) as exc:
+            cli.login_cmd([])
+        assert exc.value.code == 1
+        assert "contexer login: invalid ui.port" in capsys.readouterr().err
 
 
 # ── review: title headline ───────────────────────────────────────────────────

@@ -375,9 +375,11 @@ def _warn_degrade(exc: RemoteStoreError, action: str) -> None:
     """Emit the warn-once line matching a RemoteStoreError's category. Shared by the sync and
     async fallback wrappers so their degradation messages can never drift apart."""
     if isinstance(exc, RemoteAuthError):
+        # `contexer login --team` does not exist: login takes --endpoint, and --team was
+        # silently ignored, so this line sent people to a command that could not fix them.
         warn_once(
             f"Contexer: Teams authentication failed while trying to {action} - "
-            "continuing local-only (run 'contexer login --team' or check your token).",
+            "continuing local-only. Run `contexer login` to sign in again.",
             key="degrade:auth",
         )
     elif isinstance(exc, RemoteUnavailableError):

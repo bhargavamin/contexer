@@ -1642,6 +1642,25 @@ class TestNonDictStoreRecovery:
         assert isinstance(data, dict)
         assert data["entries"] == []
 
+    def test_a_non_object_entry_reads_as_empty_instead_of_crashing_capture(self, tmp_repo):
+        # `entries` was checked for being a list and nothing more, so one string inside it
+        # reached `entry.get(...)` and raised AttributeError with the store lock held.
+        store._store_path(tmp_repo).write_text(
+            json.dumps({"repo_path": tmp_repo, "entries": ["oops"]}), encoding="utf-8")
+
+        assert store._load(tmp_repo)["entries"] == []
+        ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
+        assert ok is True
+
+    def test_a_non_object_entry_reads_as_unreadable_not_empty(self, tmp_repo):
+        store._store_path(tmp_repo).write_text(
+            json.dumps({"repo_path": tmp_repo, "entries": ["oops"]}), encoding="utf-8")
+
+        assert store.load_diagnostics(tmp_repo)["ok"] is False
+        assert store.list_decisions(tmp_repo)["ok"] is False
+        assert store.dashboard_summary(tmp_repo)["ok"] is False
+        assert [r["ok"] for r in store.list_stores()] == [False]
+
 
 @pytest.fixture
 def isolated_store_dir(tmp_path, monkeypatch):

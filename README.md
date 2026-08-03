@@ -26,6 +26,7 @@
   <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not rule files?</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
+  <a href="#see-what-your-agents-are-being-told">Console</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
   <a href="#documentation">Docs</a> ·
   <a href="https://discord.gg/Fk6JSaW4p">Discord</a>
@@ -139,6 +140,24 @@ Capture beyond outright directives is best-effort (the *"store that decision"* e
 
 ---
 
+## See what your agents are being told
+
+```bash
+contexer ui --open
+```
+
+A local web console over **every repo on your machine**, not just the one you're in — because "what does my agent actually know?" is a question you shouldn't have to answer by reading JSON.
+
+- **Read it, then fix it.** Browse and search every stored decision with its full revision history. Edit one — history is kept, nothing is overwritten. Delete one for good: a delete sticks, instead of quietly reappearing next session from a memory file or a mined conversation. Restore it if you change your mind.
+- **See the whole review queue at once**, not one terminal prompt at a time — what's pending, and proposed changes to decisions you already approved shown as before/after diffs. The graphical counterpart to `contexer review`.
+- **The whole picture.** Per-repo dashboard, global rules, cached team context, deleted decisions, and your settings — one switcher, seven views.
+
+It binds `127.0.0.1`, every route is authenticated, and the server itself never reaches the network. It is also **off until you ask for it**: `contexer ui` starts it on demand, and the printed link is short-lived on purpose. Set `[ui] autostart = true` and every session start hands you the URL for the repo you just opened.
+
+Details, the `[ui]` settings, and the security model: **[the local console](docs/ui.md)**
+
+---
+
 ## Documentation
 
 | | |
@@ -147,6 +166,7 @@ Capture beyond outright directives is best-effort (the *"store that decision"* e
 | **[Integrations](docs/integrations.md)** | Claude Code, Cursor, Codex, Gemini CLI — wiring and parity notes |
 | **[How it works](docs/how-it-works.md)** | Capture, bootstrap, session injection, review/versioning, cost, privacy |
 | **[Usage & CLI](docs/usage.md)** | Natural-language commands, CLI reference, teams login, troubleshooting, limitations |
+| **[Local console](docs/ui.md)** | `contexer ui`, the seven views, `[ui]` settings, security model |
 | **[Benchmark](docs/benchmark.md)** | Live-session A/B methodology, findings (including negative ones), raw data |
 
 ---

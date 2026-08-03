@@ -37,6 +37,8 @@ contexer review
 
 For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
 
+Prefer to see them all at once? `contexer ui` opens a local web console with the same review queue — plus every stored decision, its revision history, global rules, and cached team context, for every repo on the machine. Proposed changes are shown as before/after diffs, and you can edit, delete, and restore decisions there too. It is loopback-only and starts on demand; see **[the local console](ui.md)**.
+
 ## Update or remove
 
 ```
@@ -54,6 +56,8 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer install` | Connect Contexer (auto-detects Claude Code, Cursor, Codex, and/or Gemini CLI) |
 | `contexer install --target claude\|cursor\|codex\|gemini\|all` | Install for a specific tool only, or all |
 | `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each. Also surfaces possibly-overlapping constraint/convention rules — keep the best one and retire the rest with `approve_decision(id, action="ignore")`, which works on already-approved rules too (Contexer itself never merges or deletes) |
+| `contexer ui [--open]` | Start the local web console over every store on this machine and print its URL (`--open` also opens the browser). See [the local console](ui.md) |
+| `contexer ui --status\|--stop\|--port N\|--foreground\|--reset-token` | Report on, stop, re-port, run in the foreground, or re-credential the console |
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |

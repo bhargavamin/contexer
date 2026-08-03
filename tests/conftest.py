@@ -1,5 +1,6 @@
 """Shared pytest fixtures for the contexer test suite."""
 import types
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +24,60 @@ def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
     return str(tmp_path / "repo")
+
+
+# Artefacts a test must never create in the developer's real ~/.contexer. Redirecting
+# store.STORE_DIR is not sufficient on its own: contexer/ui/daemon.py resolves its paths
+# from Path.home() at import time, so a test that patches the port (or only STORE_DIR)
+# but not HOME spawns a REAL console daemon against the real store. That happened twice
+# while this feature was being built, once leaving a daemon listening for 15 minutes.
+# The check is deliberately narrow — it names only files a test has no business creating,
+# so the live SessionStart/PostToolUse hooks writing .pending_capture or a team cache
+# alongside the suite can never fail the run.
+_FORBIDDEN = ("ui.json", "ui.log")
+_TEMP_MARKERS = ("private_tmp", "var_folders", "pytest", "tmp_")
+
+
+def _leaked(real_store_dir: Path) -> list[str]:
+    if not real_store_dir.is_dir():
+        return []
+    found = []
+    for entry in real_store_dir.iterdir():
+        name = entry.name
+        if name in _FORBIDDEN or name.endswith(".deleted.json"):
+            found.append(name)
+        elif any(marker in name for marker in _TEMP_MARKERS):
+            found.append(name)  # a store keyed to a tmp_path escaped into the real dir
+    return sorted(found)
+
+
+def _real_config_bytes(real_store_dir: Path) -> bytes | None:
+    path = real_store_dir / "config.toml"
+    return path.read_bytes() if path.is_file() else None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_real_store_writes():
+    """Fail the run if the suite leaked console artefacts into — or rewrote — the real store.
+
+    config.toml is checked by content, not existence: `PUT /api/config` rewrites it in place
+    (and drops the developer's comments), so a test that reaches the real path would leave the
+    file present but different, which a file-listing check cannot see. It holds the teams
+    bearer token, so a silent rewrite is the most expensive mistake available here."""
+    real = Path.home() / ".contexer"
+    before = set(_leaked(real))
+    config_before = _real_config_bytes(real)
+    yield
+    new = [n for n in _leaked(real) if n not in before]
+    assert not new, (
+        f"tests leaked into the real store dir {real}: {new}. Patch HOME (not just "
+        "store.STORE_DIR or the port) before anything that can spawn a daemon or "
+        "resolve paths from Path.home()."
+    )
+    assert _real_config_bytes(real) == config_before, (
+        f"tests rewrote the real {real / 'config.toml'}. Patch config.CONFIG_PATH before "
+        "anything that can call config.write_settings()."
+    )
 
 
 class FakeTeamsServer:

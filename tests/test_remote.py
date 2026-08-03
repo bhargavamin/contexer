@@ -544,7 +544,10 @@ def test_with_local_fallback_auth_returns_default_and_hints_login(capsys):
     assert result is None
     err = capsys.readouterr().err
     assert err.count("Contexer:") == 1
-    assert "contexer login --team" in err
+    # The suggested fix has to be a command that exists: `login` takes --endpoint, and --team
+    # was silently ignored, so the old wording sent people somewhere that could not help.
+    assert "contexer login" in err
+    assert "--team" not in err
 
 
 def test_with_local_fallback_refusal_warns_with_reason_not_unreachable(monkeypatch, capsys):

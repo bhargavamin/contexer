@@ -10,13 +10,18 @@ MCP client). Stdlib only - no extra dependencies.
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import html
 import json
+import re
 import secrets
 import socket
+import subprocess
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -26,6 +31,10 @@ from contexer.config import Profile, default_endpoint
 # Refresh a little before the token actually expires, to avoid a race at the boundary.
 _EXPIRY_SKEW = 60
 _HTTP_TIMEOUT = 30
+
+# Creds-file key recording that the LAST refresh grant was rejected. Non-secret, and its
+# ABSENCE means "unknown" so a creds file written before this existed still reads correctly.
+_REFRESH_FAILED_AT = "refresh_failed_at"
 
 
 def _creds_path():
@@ -130,6 +139,20 @@ def _refresh(token_endpoint: str, client_id: str, refresh_token: str) -> dict:
     })
 
 
+def _refresh_rejected(exc: BaseException) -> bool:
+    """True only when the AS actively REJECTED the refresh grant.
+
+    Proof of rejection is an answer from the token endpoint refusing the grant — an HTTP 4xx
+    (`invalid_grant` and friends, RFC 6749 §5.2). Everything else — DNS failure, timeout,
+    connection refused, a 5xx, a body that isn't JSON — means the endpoint was never reached
+    or never decided, and leaves the refresh token's validity UNKNOWN. Persisting "unknown" as
+    "rejected" is what turns a VPN outage into days of "log in again" on every surface, so the
+    two are separated here exactly as `remote._classify` separates RemoteAuthError from
+    RemoteUnavailableError. Note HTTPError SUBCLASSES URLError: an `except URLError` reading
+    would swallow the one case that does prove rejection."""
+    return isinstance(exc, urllib.error.HTTPError) and 400 <= exc.code < 500
+
+
 def _free_port() -> int:
     """An OS-assigned free port on the loopback interface (for the redirect listener)."""
     with socket.socket() as s:
@@ -175,12 +198,23 @@ def _locked_refresh(profile: Profile) -> str | None:
             return profile.token  # expired, nothing to refresh with — skip the doomed network call
         try:
             tok = _refresh(creds["token_endpoint"], creds["client_id"], refresh_token)
-        except Exception:
+        except Exception as exc:
+            # Record the rejection where the refresh actually happens: the refresh token is
+            # single-use, so a later reader (auth_state) cannot re-attempt one just to find out
+            # why the session is dead. Without this marker an expired session and a rejected
+            # renewal are indistinguishable, and the user is told "authentication failed" for
+            # days when the truth is "log in again". Only a REJECTION earns the marker — it is
+            # persistent, so an offline machine that recorded one would keep demanding a new
+            # login long after the network came back.
+            if _refresh_rejected(exc):
+                creds[_REFRESH_FAILED_AT] = time.time()
+                _save_creds(creds)
             return profile.token  # refresh failed — degrade to the static token (or None)
         creds["access_token"] = tok.get("access_token", creds.get("access_token"))
         if tok.get("refresh_token"):
             creds["refresh_token"] = tok["refresh_token"]  # persist the rotated (single-use) token
         creds["expires_at"] = time.time() + tok.get("expires_in", 3600)
+        creds.pop(_REFRESH_FAILED_AT, None)
         _save_creds(creds)
         return creds["access_token"]
 
@@ -205,6 +239,260 @@ def refresh_now(profile: Profile) -> str | None:
     us without a second network call. Returns the (possibly newly-refreshed) access token, or
     the static/None fallback. Never raises — the caller decides whether the token changed."""
     return _locked_refresh(profile)
+
+
+def _state(state: str, message: str, *, issuer: str | None = None,
+           expires_at: str | None = None, scope: str | None = None) -> dict:
+    """One shape for every auth_state answer, so no branch can omit a key a caller reads."""
+    return {"state": state, "issuer": issuer, "expires_at": expires_at, "scope": scope,
+            "message": message}
+
+
+def _iso(epoch: object) -> str | None:
+    return (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+            if isinstance(epoch, (int, float)) else None)
+
+
+def auth_state(profile: Profile) -> dict:
+    """Which credential this profile would use, and whether it can still work.
+
+    A READ, in the strict sense: it never refreshes. Attempting a refresh to answer the
+    question would SPEND a single-use token as the side effect of being asked, so renewing is
+    left to `refresh_now` — but the ANSWER must still describe what will happen, not just what
+    the clock says. Access tokens are minted with `expires_in` 3600 and `resolve_token` renews
+    them transparently, so a session past expiry that still holds a refresh token and carries
+    no recorded rejection is `renewable`: nothing is wrong with it and the user has nothing to
+    do. `expired` is kept for the session that genuinely cannot renew itself (no refresh
+    token), and `refresh_failed` for the one whose rotated refresh token the AS rejected —
+    which is the point of the marker `_locked_refresh` writes.
+
+    Never raises and never returns a token, a refresh token, or any other secret: the result
+    is serialized straight to a browser."""
+    try:
+        creds = _load_creds()
+        if not _creds_match(creds, profile):
+            if profile.token:
+                return _state("static_only", "Using the static token from config.toml — no "
+                                             "Contexer Teams session is stored here.")
+            return _state("none", "Not signed in to Contexer Teams — log in to sync with "
+                                  "your team.")
+        expires_at = creds.get("expires_at")
+        detail = {"issuer": creds.get("issuer"), "expires_at": _iso(expires_at),
+                  "scope": creds.get("scope") or None}
+        if isinstance(expires_at, (int, float)) and expires_at > time.time() + _EXPIRY_SKEW:
+            return _state("logged_in", "Signed in to Contexer Teams.", **detail)
+        if creds.get(_REFRESH_FAILED_AT):
+            return _state("refresh_failed", "Your Contexer Teams session expired and could "
+                                            "not be renewed — log in again.", **detail)
+        if creds.get("refresh_token"):
+            return _state("renewable", "Signed in to Contexer Teams — the access token is past "
+                                       "its expiry and renews itself on the next sync.",
+                          **detail)
+        return _state("expired", "Your Contexer Teams session has expired — log in again.",
+                      **detail)
+    except Exception:
+        return _state("none", "Contexer Teams sign-in state is unreadable — log in again.")
+
+
+# ── tracked login job (the console's "Log in" button) ────────────────────────────
+# `login` below is minutes-long, opens a browser and binds its own loopback port, so a caller
+# that must answer an HTTP request in seconds cannot run it in-process. These three functions
+# run it as ONE tracked subprocess instead — killable, capped, and reusing the CLI path verbatim.
+
+# Generous, but a cap: an abandoned flow must not leave a python process and a loopback
+# listener alive for the rest of the machine's uptime.
+LOGIN_TIMEOUT = 300.0
+_MESSAGE_LINES = 2
+_MESSAGE_LINE_LIMIT = 200
+# The drain keeps only the TAIL, which is all `_failure_message` reads (`lines[-2:]`). An
+# unbounded list held every byte a child printed for up to LOGIN_TIMEOUT, in a daemon that
+# stays up for days — a chatty or looping child was the whole budget for it.
+_MAX_OUTPUT_LINES = 200
+# How long the waiter gives the output drain after the child is gone. The browser the child
+# launched can inherit its stdout and hold the pipe open, and the job has to settle anyway.
+_OUTPUT_DRAIN = 5.0
+
+# Query values a login prints (the authorize URL it echoes for a browser that won't open, an
+# error redirect it reflects). The failure message is RENDERED IN THE CONSOLE, so this is not
+# defensive: an unscrubbed tail can put an OAuth `code=` on screen, and into any screenshot of
+# it. A superset of what `ui.server._scrub` redacts — sharing that function would point auth
+# at the ui layer, which imports auth.
+_QUERY_SECRET = re.compile(
+    r"(?i)\b(code|code_verifier|code_challenge|state|client_id|token|access_token"
+    r"|refresh_token|p|csrf|ctx_ui)=[^\s&;'\"]*")
+
+_login_lock = threading.Lock()
+_login_job: dict | None = None
+
+
+class LoginJobBusy(RuntimeError):
+    """A login subprocess is already running: two concurrent browser flows would race to
+    write the creds file, and only one of them could own the rotating refresh token.
+
+    Carries the id of the job in flight (`job_id`), so a caller told "busy" — a second console
+    tab, or a console while a terminal login runs — can follow THAT job's real outcome instead
+    of inferring success from the session going live and never seeing its failure."""
+
+    def __init__(self, message: str, job_id: str):
+        super().__init__(message)
+        self.job_id = job_id
+
+
+def start_login_job() -> str:
+    """Start `contexer login` as a tracked subprocess; returns the job id.
+
+    Takes NO endpoint, deliberately: a caller-supplied one would aim the OAuth flow at an
+    attacker's IdP and persist the token it handed back, so the endpoint is resolved here from
+    config. Single-flight — a second call while one is pending raises LoginJobBusy."""
+    global _login_job
+    endpoint = _configured_endpoint()
+    with _login_lock:
+        if _login_job is not None and _login_job["state"] == "pending":
+            raise LoginJobBusy("a login is already running", _login_job["id"])
+        job = {"id": secrets.token_urlsafe(8), "state": "pending",
+               "message": "Waiting for the browser sign-in to finish.",
+               "auth_url": None, "proc": _spawn_login(endpoint)}
+        _login_job = job
+    threading.Thread(target=_await_login, args=(job,), daemon=True).start()
+    return job["id"]
+
+
+def login_job_status(job_id: str) -> dict | None:
+    """`{state: pending|ok|failed, message, auth_url}` for a tracked login, or None for an
+    unknown id.
+
+    `auth_url` is the consent page the child opened a browser to, None until it prints one.
+    It is what makes a login possible where no browser can open — an SSH session, a container,
+    WSL — because `webbrowser.open` silently no-ops there and the printed fallback used to go
+    nowhere but into a captured pipe. Only meaningful while the job is `pending`: the loopback
+    listener that completes the flow dies with the child.
+
+    Only the most recent job is tracked (there is only ever one), so an id from a previous
+    one reads as unknown rather than as somebody else's outcome."""
+    with _login_lock:
+        job = _login_job
+        if job is None or job["id"] != job_id:
+            return None
+        return {"state": job["state"], "message": job["message"],
+                "auth_url": job["auth_url"]}
+
+
+def stop_login_job(reason: str = "Login was cancelled — the console stopped.") -> bool:
+    """Kill a pending login subprocess. True when one was killed.
+
+    Called wherever an orphaned browser flow could still write credentials nobody is waiting
+    for: the console stopping, and a logout (a flow started minutes earlier completes after
+    the unlink and silently restores the session the user just ended). `reason` becomes the
+    job's final message because a tab attached to that job is told it verbatim, and "the
+    console stopped" is a lie in the logout case."""
+    global _login_job
+    with _login_lock:
+        job = _login_job
+        if job is None or job["state"] != "pending":
+            return False
+        # Resolve it under the lock BEFORE the kill, so the waiter thread sees a settled job
+        # and does not overwrite this outcome with its own "the process died" reading.
+        job.update(state="failed", message=reason)
+    job["proc"].kill()
+    return True
+
+
+def _configured_endpoint() -> str:
+    """The endpoint a console-started login should use: the configured profile's, else the
+    default. Fail-soft — a malformed config.toml must not be what stops you logging in."""
+    try:
+        return config.load_profile().endpoint or default_endpoint()
+    except Exception:
+        return default_endpoint()
+
+
+def _spawn_login(endpoint: str):
+    """Spawn the CLI login with its output captured. The one seam tests replace — nothing in
+    a test may open a browser.
+
+    `-u` is load-bearing: the child's stdout is a pipe, so Python would block-buffer it and
+    the authorize URL printed at the START of the flow would not reach us until the END of it
+    — minutes after the only moment it is useful."""
+    return subprocess.Popen(
+        [sys.executable, "-u", "-m", "contexer", "login", "--endpoint", endpoint],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        start_new_session=True, text=True, errors="replace")
+
+
+def _await_login(job: dict) -> None:
+    """Wait out one login subprocess and record its outcome. Own thread: the wait is minutes
+    long by design and the daemon has to keep serving."""
+    proc = job["proc"]
+    lines: collections.deque[str] = collections.deque(maxlen=_MAX_OUTPUT_LINES)
+    reader = threading.Thread(target=_read_login_output, args=(job, lines), daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=LOGIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()  # reap it: a killed child left unwaited is a zombie for the daemon's life
+    reader.join(_OUTPUT_DRAIN)
+    with _login_lock:
+        if job["state"] != "pending":
+            return  # stop_login_job() already resolved it
+        if timed_out:
+            job.update(state="failed",
+                       message=f"Login timed out after {int(LOGIN_TIMEOUT // 60)} minutes "
+                               "— nothing was saved.")
+        elif proc.returncode == 0:
+            job.update(state="ok", message="Signed in to Contexer Teams.")
+        else:
+            job.update(state="failed", message=_failure_message("".join(lines)))
+
+
+def _read_login_output(job: dict, lines: "collections.deque[str]") -> None:
+    """Drain the child's stdout as it arrives, publishing the authorize URL the moment it is
+    printed.
+
+    Streaming, rather than reading the output at exit: on a machine where no browser can open
+    that URL is the ONLY way to finish the login, so it is needed WHILE the child sits waiting
+    for the callback — a post-mortem of a timed-out flow is exactly too late."""
+    proc = job["proc"]
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            url = _authorize_url(line)
+            if url:
+                with _login_lock:
+                    if job["state"] == "pending":
+                        job["auth_url"] = url
+    finally:
+        proc.stdout.close()
+
+
+def _authorize_url(line: str) -> str | None:
+    """The authorize URL in one line of the child's output, or None.
+
+    This is published verbatim — an authorize URL is the address of a consent page, not a
+    credential, and redacting its parameters would leave a link that cannot complete a flow.
+    So the match is narrow on purpose: the URL must carry the authorize REQUEST's own
+    parameters, and one holding a `code=` is refused outright rather than shown, because an
+    authorization CODE is a credential and a callback URL echoed into the output must never
+    come back out as a login link."""
+    match = re.search(r"https?://\S+", line)
+    if not match:
+        return None
+    params = urllib.parse.parse_qs(urllib.parse.urlsplit(match.group(0)).query)
+    if "code" in params:
+        return None
+    if params.get("response_type") == ["code"] and "code_challenge" in params:
+        return match.group(0)
+    return None
+
+
+def _failure_message(output: str) -> str:
+    """The tail of the child's output as one scrubbed line."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    tail = " ".join(line[:_MESSAGE_LINE_LIMIT] for line in lines[-_MESSAGE_LINES:])
+    scrubbed = _QUERY_SECRET.sub(lambda match: f"{match.group(1)}=REDACTED", tail)
+    return f"Login failed — {scrubbed}" if scrubbed else "Login failed."
 
 
 # Static CSS for the loopback result tab (kept out of the f-string so `{}` stays literal).
@@ -385,6 +673,12 @@ def login(endpoint: str | None = None) -> None:
         "expires_at": time.time() + tok.get("expires_in", 3600),
         "scope": tok.get("scope", ""),
     })
+    # Creds first, config second, deliberately: the authorization code behind these tokens is
+    # single-use, so a failure while writing config.toml must not throw away a session that
+    # already exists — config.toml is hand-fixable, a spent code is not. That ordering is only
+    # safe because write_team_profile can no longer fail on the CONTENT of the old file; it
+    # used to abort here on an invalid `[ui]` value, after the creds were saved, leaving team
+    # sync off with nothing on screen pointing at why.
     config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
     print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
 
