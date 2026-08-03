@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.29.0](https://github.com/bhargavamin/contexer/compare/v0.28.0...v0.29.0) (2026-08-03)
+
+
+### Features
+
+* **auth:** report credential state and run login as a tracked job ([bc46329](https://github.com/bhargavamin/contexer/commit/bc46329e0aad9dff921efafdd5fca576859bcc86))
+* **cli:** add `contexer ui`, and say why a team sync actually failed ([ef4053a](https://github.com/bhargavamin/contexer/commit/ef4053abf30b186083208d2bdeac0e7f6230ee01))
+* **config:** add the [ui] settings table and an allowlisted writer ([0c61a79](https://github.com/bhargavamin/contexer/commit/0c61a795eafcce62424cb98d72ed0aa75a5fe97d))
+* **store:** edit decisions, tombstone deletes, and read for a console ([75f6e21](https://github.com/bhargavamin/contexer/commit/75f6e21dbdaec7f9c2f8b5aca440135d8fa0c961))
+* **ui:** add a loopback web console over the decision store ([1f1d469](https://github.com/bhargavamin/contexer/commit/1f1d46957f28b29b573131ed1c2a7de8639cad99))
+* **ui:** local web console over the decision store ([301ffc9](https://github.com/bhargavamin/contexer/commit/301ffc9ca54053632743d292a1008a58661cdd8d))
+
+
+### Bug Fixes
+
+* **team-context:** record an auth rejection distinctly from an outage ([256bab3](https://github.com/bhargavamin/contexer/commit/256bab3422aca01e2a01b326cebaaf1ca7b8f763))
+* **ui:** address the five console review findings ([80c8e1a](https://github.com/bhargavamin/contexer/commit/80c8e1a10aa36c5c7efe54d93afb36ff434c56f4))
+* **ui:** address the five console review findings ([446fc0a](https://github.com/bhargavamin/contexer/commit/446fc0a5f7cfccca6adb07c9347bcba13966123c))
+* **ui:** bring the console back onto the Contexer design system ([f0dc236](https://github.com/bhargavamin/contexer/commit/f0dc236a5fc6684af3380737b0b852e86409291d))
+* **ui:** bring the console back onto the Contexer design system ([1769b7a](https://github.com/bhargavamin/contexer/commit/1769b7a44e68c402d547ba04e9d52050b44917af))
+
+
+### Documentation
+
+* document the console, and correct the module map ([b22c3ba](https://github.com/bhargavamin/contexer/commit/b22c3bafbc025e6e7c827e1f5ebd2036b639115b))
+
 ## [0.28.0](https://github.com/bhargavamin/contexer/compare/v0.27.0...v0.28.0) (2026-08-01)
 
 
