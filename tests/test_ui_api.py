@@ -449,14 +449,18 @@ def test_an_unknown_approve_action_is_a_400(console, repo):
 
 # --- edit ------------------------------------------------------------------------------
 
-def test_an_edit_appends_a_revision_sourced_to_the_console(console, repo):
+def test_an_edit_appends_a_revision_attributed_to_the_developer(console, repo):
+    """A console edit is a developer retyping the decision, so the revision's provenance is
+    `human` — matching what the Add form stores. It is deliberately not the console's own
+    `SOURCE` ("ui"): `share._WIRE_SOURCES` is closed, so `_wire_source` would degrade "ui" to
+    "ai" on push and the developer's edit would reach the cloud as AI-authored."""
     reply = write(console, "PATCH", f"/api/store/{repo['slug']}/decisions/{repo['plain']}",
                   body={"content": "Name test files test_<module>.py, one per module",
                         "title": "Test file naming", "if_version": 1})
     assert reply.status == 200
     detail = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['plain']}")
     assert detail["revision"] == 2 and detail["title"] == "Test file naming"
-    assert detail["revisions"][-1]["source"] == "ui"
+    assert detail["revisions"][-1]["source"] == "human"
     assert detail["status"] == "approved"  # an edit to a trusted decision stays trusted
 
 
@@ -606,6 +610,16 @@ def test_a_global_rule_can_be_added_and_deleted(console):
 
     assert write(console, "DELETE", f"/api/global/{rules[0]['id']}").status == 200
     assert ok(console, "/api/global")["rules"] == []
+
+
+def test_a_global_rule_added_from_the_console_is_attributed_to_the_developer(console):
+    """The console's Add form is a human typing a rule — the only other caller of
+    `update_global_decision` is the MCP tool, where the agent authors it. Defaulting both
+    to `ai` rendered every hand-written rule as "by ai" and cost it the
+    "Stated by developer" confidence factor."""
+    write(console, "POST", "/api/global",
+          body={"content": "Never commit generated files", "subtype": "constraint"})
+    assert ok(console, "/api/global")["rules"][0]["created_by"] == "human"
 
 
 def test_a_duplicate_global_rule_is_reported_not_stored(console):
