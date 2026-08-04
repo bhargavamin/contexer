@@ -207,8 +207,12 @@ def _edit(repo_path: str, entry_id: str, body: object) -> tuple[int, object]:
     if content is None and title is None and subtype is None:
         raise ApiError(400, "nothing to change — pass content, title, or subtype")
 
+    # `source="human"`, not SOURCE — same reasoning as `_add_global`: an edit arriving here was
+    # typed by a developer, and "ui" names the surface, not the author. Only this call site
+    # changes; `edit_decision`'s own "ui" default still covers a direct (non-console) caller,
+    # which by definition is not a developer at a form.
     ok, message, extra = store.edit_decision(repo_path, entry_id, content=content, title=title,
-                                             subtype=subtype, source=SOURCE,
+                                             subtype=subtype, source="human",
                                              if_version=if_version)
     if not ok and message == store.EDIT_CONFLICT:
         # A live MCP session wrote this decision between the console's read and this save.
@@ -363,7 +367,16 @@ def _add_global(body: object) -> tuple[int, object]:
     subtype = _text(payload, "subtype", MAX_WORD) or GLOBAL_SUBTYPES[1]
     if subtype not in GLOBAL_SUBTYPES:
         raise ApiError(400, f"subtype must be one of: {', '.join(GLOBAL_SUBTYPES)}")
-    stored, _entry_id = store.update_global_decision(content, SOURCE, subtype, title=title)
+    # `created_by="human"`, not SOURCE: a rule reaching this handler was typed by a developer
+    # into the Add form, and `created_by` is where that fact has to land — it drives the entry's
+    # attribution, revision 1's `source`, and `_compute_confidence`'s "Stated by developer" +20.
+    # SOURCE ("ui") stays the session id and is deliberately not reused as the provenance:
+    # `share._WIRE_SOURCES` is a closed allowlist (ai | human | scan | bootstrap | memory | plan)
+    # mirroring the cloud's push_decision enum, so `_wire_source` degrades "ui" back to "ai" on
+    # the way out — a rule born "ui" would reach the cloud indistinguishable from an AI-authored
+    # one. `_edit` passes "human" for the same reason.
+    stored, _entry_id = store.update_global_decision(content, SOURCE, subtype, title=title,
+                                                     created_by="human")
     if not stored:
         # The store signals a duplicate and its REFUSAL to write over an unparseable global
         # file with the same `(False, None)`. Reporting both as "already exists" told a
