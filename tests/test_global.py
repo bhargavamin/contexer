@@ -63,6 +63,23 @@ class TestUpdateGlobalDecision:
         assert ok is False
         assert eid is None
 
+    def test_provenance_defaults_to_ai(self):
+        store.update_global_decision("Always use conventional commits", SESSION)
+        entry = store.get_global_decisions()[0]
+        assert entry["created_by"] == "ai"
+        assert entry["revisions"][0]["source"] == "ai"
+
+    def test_provenance_is_carried_through_to_the_entry_and_its_revision(self):
+        """A rule the developer typed by hand must not read as AI-authored. `created_by`
+        also drives `_compute_confidence`'s "Stated by developer" factor, so losing it
+        under-scores every hand-written rule."""
+        store.update_global_decision("Never commit untested code", SESSION, "constraint",
+                                     created_by="human")
+        entry = store.get_global_decisions()[0]
+        assert entry["created_by"] == "human"
+        assert entry["revisions"][0]["source"] == "human"
+        assert "Stated by developer" in entry["confidence_factors"]
+
     def test_defaults_to_convention_when_subtype_omitted(self):
         store.update_global_decision("Always use conventional commits", SESSION)
         decisions = store.get_global_decisions()

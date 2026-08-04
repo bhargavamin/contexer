@@ -321,10 +321,17 @@ def _save_global(data: dict) -> None:
     _atomic_write(_global_path(), json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def update_global_decision(content: str, session_id: str, subtype: str = "", title: str = "") -> tuple[bool, str | None]:
+def update_global_decision(content: str, session_id: str, subtype: str = "", title: str = "",
+                           created_by: str = "ai") -> tuple[bool, str | None]:
     """Store a cross-cutting decision in the global store.
     Only constraint and convention subtypes are accepted — architecture and pattern
     decisions are always repo-specific.
+
+    `created_by` is the provenance, not the caller's identity: the MCP tool leaves the `ai`
+    default (the agent authored the rule), the console passes `human` (a developer typed it).
+    It must be threaded rather than defaulted for both, because it reaches the entry, its first
+    revision's `source`, and `_compute_confidence`'s "Stated by developer" factor — a
+    hand-written rule left as `ai` renders as "by ai" and scores 20 points short.
 
     Refuses when `_global.json` cannot be parsed, exactly as `delete_decision` refuses an
     unreadable tombstone sidecar: the degraded read is an EMPTY store, so appending and saving
@@ -348,7 +355,8 @@ def update_global_decision(content: str, session_id: str, subtype: str = "", tit
             _record_recurrence(match, session_id)
             _save_global(data)
             return False, None
-        entry = _new_decision_entry(content, session_id, subtype, status="approved", title=title)
+        entry = _new_decision_entry(content, session_id, subtype, status="approved", title=title,
+                                    created_by=created_by)
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save_global(data)
