@@ -67,6 +67,8 @@ Each repo's store is plain JSON at `~/.contexer/<repo_slug>.json`. A corrupt sto
 
 The `repo stores` line counts **repo stores only**. The same directory also holds the global rules (`_global.json`), the console statefile (`ui.json`), tombstone sidecars (`<repo_slug>.deleted.json`), and dot-prefixed caches — earlier versions counted those too, which inflated both the store count and `entries total`.
 
+Linked git worktrees share the main worktree's store — a session opened in a worktree reads and writes the same context as the main checkout. Earlier versions keyed each worktree to its own store file; those stray stores are merged back automatically at the next session start on that repo and left behind as `*.json.migrated` (safe to delete once verified). Submodules and worktrees of a bare repository keep their own stores.
+
 ## `*.tmp` files in `~/.contexer/`
 
 Leftovers from a hard-crashed write. Harmless — they are never read. `contexer status` cleans up any older than an hour.
