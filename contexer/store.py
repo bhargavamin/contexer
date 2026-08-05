@@ -142,17 +142,108 @@ def _resolve_repo(repo_path: str) -> str:
         return _SESSION_REPO
     return _current_repo_path()
 
+# _canonical_store_key result cache. A manual dict, NOT functools.lru_cache: failures
+# must return uncached (a transient git timeout would otherwise pin the wrong key for
+# the life of the long-lived MCP server), and lru_cache cannot express "cache only on
+# success". Bounded: cleared wholesale past _CANON_CACHE_MAX before the next insert.
+_CANON_CACHE: dict[str, str] = {}
+_CANON_CACHE_MAX = 256
+
+
+def _canonical_store_key(path: str) -> str:
+    """STORE-KEY canonicalization only: the main-worktree root for a linked-worktree
+    path, else `path` unchanged. Linked git worktrees each report their own
+    `--show-toplevel`, so without this every worktree got its own store file.
+
+    Rules, in order:
+    - "" passes through untouched — `_slug("")` is used for global-store contexts, and
+      os.path.join("", ".git") would stat `.git` relative to CWD, collapsing the GLOBAL
+      store key into the repo store whenever cwd is itself a worktree.
+    - Fast path: no regular `.git` FILE at `path` → return unchanged (main repos have a
+      `.git` directory; non-git dirs have nothing). Zero subprocess.
+    - The gitfile's `gitdir:` value must contain `/worktrees/` — this excludes
+      submodules (`.../.git/modules/<name>`) and `git init --separate-git-dir` repos
+      with zero subprocesses (separate-git-dir is a real false-positive: a gitdir named
+      `.git`, e.g. `--separate-git-dir=/backup/.git`, would mis-key the store to /backup).
+    - One subprocess: `git rev-parse --path-format=absolute --show-toplevel
+      --git-common-dir` (`--path-format=absolute` is required — from a main worktree
+      `--git-common-dir` returns the relative `.git`). If the common dir is `<x>/.git`
+      with an existing, sane `<x>`, the key is `<x>`; else `path` (bare-repo hosts
+      `repo.git` keep per-worktree keys — documented limitation).
+    - Cached ONLY on subprocess success; any failure returns `path` uncached.
+    Entirely fail-soft: never raises."""
+    if not path:
+        return path
+    try:
+        cached = _CANON_CACHE.get(path)
+        if cached is not None:
+            return cached
+        gitfile = os.path.join(path, ".git")
+        if not os.path.isfile(gitfile):
+            return path
+        try:
+            with open(gitfile, encoding="utf-8", errors="replace") as f:
+                head = f.read(4096)
+        except OSError:
+            return path
+        first = head.splitlines()[0].strip() if head else ""
+        if not first.startswith("gitdir:"):
+            return path
+        gitdir = first[len("gitdir:"):].strip()
+        if "/worktrees/" not in gitdir.replace(os.sep, "/"):
+            return path
+        out = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--path-format=absolute",
+             "--show-toplevel", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode != 0:
+            return path
+        lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+        if len(lines) != 2:
+            return path
+        common_dir = lines[1]
+        result = path
+        if os.path.basename(common_dir) == ".git":
+            parent = os.path.dirname(common_dir)
+            if os.path.isdir(parent) and _is_sane_repo(parent):
+                result = parent
+        if len(_CANON_CACHE) > _CANON_CACHE_MAX:
+            _CANON_CACHE.clear()
+        _CANON_CACHE[path] = result
+        return result
+    except Exception:
+        return path
+
+
+def _legacy_raw_slug(repo_path: str) -> str:
+    # The raw legacy character substitution, shared by _legacy_slug (canonicalized) and
+    # _raw_slug (deliberately not) — factor, don't duplicate the regex.
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", repo_path.strip("/"))
+
+
 def _legacy_slug(repo_path: str) -> str:
     # Pre-injective scheme: kept literal `_`/`-`, so `/a/my.repo`, `/a/my_repo`, and
     # `/a/my repo` all collapsed to the same file. Retained only to migrate old stores.
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", repo_path.strip("/"))
+    # Canonicalizes identically to _slug — otherwise the pre-hash migration compare in
+    # _store_path and the console's _resolve_store reverse mapping go inconsistent.
+    return _legacy_raw_slug(_canonical_store_key(repo_path))
+
+
+def _raw_slug(repo_path: str) -> str:
+    # The OLD _slug behavior — NO worktree canonicalization. Used only by
+    # migrate_worktree_strays to locate stray store files keyed under a worktree's
+    # own physical path by pre-fix versions.
+    digest = hashlib.sha1(repo_path.encode("utf-8")).hexdigest()[:8]
+    return f"{_legacy_raw_slug(repo_path)}-{digest}"
 
 
 def _slug(repo_path: str) -> str:
     # Append a short path hash so the slug is injective: paths that map to the same
     # readable base (a `.`/space vs a literal `_`) no longer share one store file.
-    digest = hashlib.sha1(repo_path.encode("utf-8")).hexdigest()[:8]
-    return f"{_legacy_slug(repo_path)}-{digest}"
+    # The path is canonicalized first so every worktree of a repo shares the main
+    # worktree's store (and every slug-keyed sidecar: lock, .deleted, flags, indexes).
+    return _raw_slug(_canonical_store_key(repo_path))
 
 
 def _store_path(repo_path: str) -> Path:
@@ -226,6 +317,10 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _save(repo_path: str, data: dict) -> None:
+    # Record the CANONICAL repo path so a store written from any linked worktree stops
+    # flip-flopping its recorded path between last-writer worktrees. (The global store
+    # never routes through here — _save_global writes it directly.)
+    data["repo_path"] = _canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
     _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
     # The retrieval index is a disposable sidecar maintained ONLY here — every store
@@ -3807,6 +3902,12 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except OSError:
         pass
     _gc_stale_session_files()
+    # Fold any pre-fix stray worktree stores into the canonical store. Fail-soft and
+    # silent — merged entries surface on the next load, never as a status section.
+    try:
+        migrate_worktree_strays(repo_path)
+    except Exception:
+        pass
 
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
@@ -4428,6 +4529,95 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
     if not lines:
         return ""
     return "## Rehydrated working context:\n" + "\n".join(lines)
+
+
+def migrate_worktree_strays(repo_path: str) -> int:
+    """Merge pre-fix stray worktree store files into the canonical (main-worktree) store.
+
+    Before store keys were canonicalized, each linked worktree wrote its own
+    `~/.contexer/<raw slug>.json`. This standalone entrypoint folds those strays into the
+    main store. NEVER call it from _slug/_canonical_store_key (every writer acquires
+    _store_lock(_slug(repo)), so a merge fired during slug computation would deadlock or
+    do an unlocked read-modify-write). Candidates come ONLY from self-detection (the
+    incoming path itself collapsed) and `git worktree list` enumeration — LIVE worktrees
+    only; stranded stores of pruned worktrees are unreachable by design. Never guess by
+    filename prefix: `Users_..._contexer` is a prefix of both a real worktree store and
+    the UNRELATED `contexer-teams` repo store, and merging that is data corruption.
+    Merge is id-first (re-merges after a crash between write and rename are idempotent),
+    then novelty-gated by the store's own >70% overlap logic (duplicates skipped without
+    occurrence bumps). A merged stray is renamed `*.json.migrated`, never deleted.
+    Fail-soft throughout: never raises; returns the number of entries merged."""
+    try:
+        resolved = _resolve_repo(repo_path) or repo_path
+        canonical = _canonical_store_key(resolved)
+        if not _is_sane_repo(canonical):
+            return 0
+        incoming_collapsed = _canonical_store_key(resolved) != resolved
+        # Cheap gate: .git/worktrees exists only when worktrees were ever added.
+        if not (incoming_collapsed
+                or os.path.isdir(os.path.join(canonical, ".git", "worktrees"))):
+            return 0
+        candidates: list[Path] = []
+        if incoming_collapsed:
+            candidates.append(STORE_DIR / f"{_raw_slug(resolved)}.json")
+        try:
+            out = subprocess.run(
+                ["git", "-C", canonical, "worktree", "list", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0:
+                for line in out.stdout.splitlines():
+                    if line.startswith("worktree "):
+                        wt = line[len("worktree "):].strip()
+                        if wt and wt != canonical:
+                            candidates.append(STORE_DIR / f"{_raw_slug(wt)}.json")
+        except Exception:
+            pass
+        canonical_store = _store_path(canonical)
+        merged_total = 0
+        seen: set[str] = set()
+        for stray in candidates:
+            try:
+                key = str(stray)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if key == str(canonical_store) or not stray.exists():
+                    continue
+                with _store_lock(_slug(canonical)):
+                    data = _load(canonical)
+                    try:
+                        stray_data = json.loads(stray.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(stray_data, dict):
+                        continue
+                    stray_entries = stray_data.get("entries")
+                    if _entries_error(stray_entries) is not None:
+                        continue
+                    existing_ids = {e.get("id") for e in data["entries"]}
+                    merged_here = 0
+                    for entry in stray_entries:
+                        if entry.get("id") in existing_ids:
+                            continue
+                        if _find_match(entry.get("content", ""), data["entries"]) is not None:
+                            continue  # duplicate by novelty metric — skip, no count bump
+                        data["entries"].append(entry)  # as-is: id/revisions/status kept
+                        existing_ids.add(entry.get("id"))
+                        merged_here += 1
+                    if merged_here:
+                        data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
+                        _save(canonical, data)
+                    merged_total += merged_here
+                try:
+                    os.replace(stray, stray.with_suffix(".json.migrated"))
+                except OSError:
+                    pass
+            except Exception:
+                continue
+        return merged_total
+    except Exception:
+        return 0
 
 
 def _gc_stale_session_files() -> None:
