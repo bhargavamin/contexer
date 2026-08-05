@@ -140,6 +140,20 @@ class TestCanonicalStoreKey:
                             lambda p: False if p == main else real(p))
         assert store._canonical_store_key(wt) == wt
 
+    def test_worktree_path_reuse_by_different_repo_not_stale_cached(self, tmp_path):
+        # A worktree path removed and later reused by a DIFFERENT repo's worktree in
+        # the same long-lived process must re-resolve — a stale cache hit here would
+        # route the replacement repo into the former repo's store.
+        root = Path(os.path.realpath(tmp_path))
+        repo_a = _make_repo(root / "repo_a")
+        repo_b = _make_repo(root / "repo_b")
+        p = str(root / "shared_wt")
+        _git("worktree", "add", p, cwd=repo_a)
+        assert store._canonical_store_key(p) == repo_a
+        _git("worktree", "remove", "--force", p, cwd=repo_a)
+        _git("worktree", "add", p, cwd=repo_b)
+        assert store._canonical_store_key(p) == repo_b
+
     def test_team_context_cache_path_collapses(self, wt_repo, store_dir):
         from contexer import team_context
         main, wt = wt_repo
@@ -188,6 +202,28 @@ class TestMigrateWorktreeStrays:
         assert store.migrate_worktree_strays(main) == 0
         data2 = json.loads(store._store_path(main).read_text())
         assert len(data2["entries"]) == len(data["entries"])
+
+    def test_first_session_renders_migrated_context_not_bootstrap_offer(
+            self, wt_repo, store_dir, tmp_path):
+        # Migration must run BEFORE the session-start store read: the first
+        # post-upgrade session over an empty canonical store renders the recovered
+        # rules, not the "no context stored" bootstrap offer.
+        main, wt = wt_repo
+        rule = "Always run database migrations through alembic scripts never raw SQL"
+        stray = self._make_stray(tmp_path, wt, [rule])
+        data = json.loads(stray.read_text())
+        for e in data["entries"]:
+            e["status"] = "approved"
+            e["subtype"] = "constraint"
+        stray.write_text(json.dumps(data))
+        assert not store._store_path(main).exists()  # canonical store starts empty
+
+        payload = store.session_start_payload(main)
+
+        assert "alembic" in payload["context"].lower()
+        assert "no context stored" not in payload["status"]
+        assert not stray.exists()
+        assert stray.with_suffix(".json.migrated").exists()
 
     def test_prefix_collision_repo_untouched(self, tmp_path, store_dir):
         root = Path(os.path.realpath(tmp_path))

@@ -142,11 +142,14 @@ def _resolve_repo(repo_path: str) -> str:
         return _SESSION_REPO
     return _current_repo_path()
 
-# _canonical_store_key result cache. A manual dict, NOT functools.lru_cache: failures
-# must return uncached (a transient git timeout would otherwise pin the wrong key for
-# the life of the long-lived MCP server), and lru_cache cannot express "cache only on
-# success". Bounded: cleared wholesale past _CANON_CACHE_MAX before the next insert.
-_CANON_CACHE: dict[str, str] = {}
+# _canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
+# functools.lru_cache: failures must return uncached (a transient git timeout would
+# otherwise pin the wrong key for the life of the long-lived MCP server), and lru_cache
+# cannot express "cache only on success". A hit is honored ONLY when the path's current
+# `gitdir:` line still equals the cached one — a worktree path removed and later reused
+# by a DIFFERENT repo's worktree in the same process must not resolve to the former
+# repo's store. Bounded: cleared wholesale past _CANON_CACHE_MAX before the next insert.
+_CANON_CACHE: dict[str, tuple[str, str]] = {}
 _CANON_CACHE_MAX = 256
 
 
@@ -170,14 +173,16 @@ def _canonical_store_key(path: str) -> str:
       `--git-common-dir` returns the relative `.git`). If the common dir is `<x>/.git`
       with an existing, sane `<x>`, the key is `<x>`; else `path` (bare-repo hosts
       `repo.git` keep per-worktree keys — documented limitation).
-    - Cached ONLY on subprocess success; any failure returns `path` uncached.
+    - Cached ONLY on subprocess success, keyed to the gitfile's current `gitdir:` line:
+      the stat + tiny gitfile read run on EVERY call (only actual gitfile paths pay the
+      read), so a cache hit is honored only while the path still belongs to the same
+      worktree — a reused path pointing at a different repo re-resolves via subprocess.
+      A path that became a plain repo (`.git` directory) misses at the isfile check
+      regardless of cache state.
     Entirely fail-soft: never raises."""
     if not path:
         return path
     try:
-        cached = _CANON_CACHE.get(path)
-        if cached is not None:
-            return cached
         gitfile = os.path.join(path, ".git")
         if not os.path.isfile(gitfile):
             return path
@@ -192,6 +197,9 @@ def _canonical_store_key(path: str) -> str:
         gitdir = first[len("gitdir:"):].strip()
         if "/worktrees/" not in gitdir.replace(os.sep, "/"):
             return path
+        cached = _CANON_CACHE.get(path)
+        if cached is not None and cached[0] == gitdir:
+            return cached[1]
         out = subprocess.run(
             ["git", "-C", path, "rev-parse", "--path-format=absolute",
              "--show-toplevel", "--git-common-dir"],
@@ -210,7 +218,7 @@ def _canonical_store_key(path: str) -> str:
                 result = parent
         if len(_CANON_CACHE) > _CANON_CACHE_MAX:
             _CANON_CACHE.clear()
-        _CANON_CACHE[path] = result
+        _CANON_CACHE[path] = (gitdir, result)
         return result
     except Exception:
         return path
@@ -3855,6 +3863,14 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     (content of the most-recently-injected decisions) after the normal rules injection —
     additionalContext re-injection doesn't otherwise know what the pre-compaction router
     already surfaced this session."""
+    # Fold any pre-fix stray worktree stores into the canonical store BEFORE the store
+    # read below: the first post-upgrade session must render the merged context (and must
+    # not show the bootstrap offer over a repo whose context was just recovered).
+    # Fail-soft and silent — never a status section.
+    try:
+        migrate_worktree_strays(repo_path)
+    except Exception:
+        pass
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
@@ -3902,12 +3918,6 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except OSError:
         pass
     _gc_stale_session_files()
-    # Fold any pre-fix stray worktree stores into the canonical store. Fail-soft and
-    # silent — merged entries surface on the next load, never as a status section.
-    try:
-        migrate_worktree_strays(repo_path)
-    except Exception:
-        pass
 
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
