@@ -21,10 +21,8 @@
 </p>
 
 <p align="center">
-  <a href="#the-developer-problem-re-teaching-your-agent-every-session">For developers</a> ·
-  <a href="#the-leadership-problem-your-standards-never-reach-the-code">For engineering leaders</a> ·
-  <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not rule files?</a> ·
   <a href="#quick-start">Quick start</a> ·
+  <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not rule files?</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#see-what-your-agents-are-being-told">Console</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
@@ -33,29 +31,28 @@
 </p>
 
 <p align="center">
-  <strong>🚀 Now live — <a href="https://contexer.ai/teams">Contexer Personal Cloud &amp; Teams</a></strong><br>
-  <sub>Sync your engineering decisions across every machine, and share a team decision layer that every agent on your team reads from.</sub>
+  <sub><strong>New:</strong> <a href="https://contexer.ai/teams">Contexer Personal Cloud &amp; Teams</a> — sync decisions across machines, share a team decision layer.</sub>
 </p>
 
 ---
 
-# Stop your AI agents from overthinking, repeating, and burning tokens on what you already decided.
+# Stop re-teaching your AI agents what you already decided.
 
-You explained it Monday. Again Wednesday. It's Friday, and your AI is asking again — or quietly re-deriving the answer from scratch, six turns at a time. **And if you're the diligent one who maintains a rules file — CLAUDE.md, AGENTS.md, GEMINI.md, `.cursor/rules`:** you updated it this morning; the afternoon session reworked an entire feature; the file is already out of date.
+You explained it Monday. Again Wednesday. On Friday the agent asks again — or quietly re-derives the answer from scratch, six turns at a time. Every AI coding session starts from zero, and the rules files you write to fix that go stale the moment an agent ships something new.
 
-Every AI coding session starts from zero, and the files you write to fix that go stale the moment an agent ships something new. Contexer is the fix: a **decision layer** that captures your engineering decisions as you work, keeps them current as they change, and hands them to **every agent** — Claude Code, Cursor, Codex, Gemini CLI — **before it starts reasoning**. The settled answer arrives first; the agent stops wondering, stops re-exploring — and just builds.
+Contexer is the **decision layer**: it captures engineering decisions as you work, keeps them current as they change, and hands them to every agent — Claude Code, Cursor, Codex, Gemini CLI — **before it starts reasoning**. The settled answer arrives first; the agent stops re-exploring and just builds.
 
-**Session 1, Tuesday** — the agent proposes `LIMIT/OFFSET` pagination for a listing endpoint. You correct it:
+**Tuesday** — the agent writes a raw `fetch` call with a hand-rolled retry loop. You correct it:
 
-> **You:** No offset pagination — that collapsed for us at 10M rows. Cursor-based on `(created_at, id)`, always, and the composite index is mandatory.
-> _Contexer stores the convention — including the reason._
+> All HTTP goes through `lib/apiClient` — it already does auth refresh, backoff, and rate-limit headers. Hand-rolled retries are what took us down on Black Friday.
 
-**Session 3, three weeks later** — fresh context, different feature, maybe a different tool. You ask for a new listing endpoint, and before the agent writes a line:
+**Three weeks later** — fresh context, different feature, any of the four tools. Before the agent writes a line, Contexer injects:
 
-> _Contexer injects:_ `[convention] Pagination is cursor-based on (created_at, id) with the composite index — offset pagination collapsed at 10M rows.`
-> The agent ships cursor pagination on the first try. And when a teammate's session asks *"why don't we use OFFSET here?"* — it gets the real answer, with the incident behind it, not a guess from training data.
+> `[convention] All HTTP goes through lib/apiClient (auth refresh, backoff, rate-limit handling) — hand-rolled retries caused the Black Friday outage.`
 
-Every claim about Contexer is **measured, not claimed** — hundreds of live agent sessions, deterministic scoring, independent validation, negative findings published. **[Read the benchmark →](docs/benchmark.md)**
+It ships through `apiClient` on the first try. And when a teammate asks *"why can't I just use fetch here?"* — their agent answers with the real incident, not a guess.
+
+Everything above is measured, not marketed: hundreds of live agent sessions, deterministic scoring, independent validation, negative findings published. **[Read the benchmark →](docs/benchmark.md)**
 
 ---
 
@@ -147,6 +144,10 @@ contexer ui --open
 ```
 
 A local web console over **every repo on your machine**, not just the one you're in — because "what does my agent actually know?" is a question you shouldn't have to answer by reading JSON.
+
+<p align="center">
+  <img src="assets/console-dashboard.png" alt="Contexer console — per-repo dashboard: stored decisions by subtype and status, review queue, global rules, cached team context, and recent decisions" width="900">
+</p>
 
 - **Read it, then fix it.** Browse and search every stored decision with its full revision history. Edit one — history is kept, nothing is overwritten. Delete one for good: a delete sticks, instead of quietly reappearing next session from a memory file or a mined conversation. Restore it if you change your mind.
 - **See the whole review queue at once**, not one terminal prompt at a time — what's pending, and proposed changes to decisions you already approved shown as before/after diffs. The graphical counterpart to `contexer review`.
