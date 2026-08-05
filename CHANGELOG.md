@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.29.1](https://github.com/bhargavamin/contexer/compare/v0.29.0...v0.29.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* address review findings on worktree store canonicalization ([7e33fe5](https://github.com/bhargavamin/contexer/commit/7e33fe5bd98a96d5a50cf8f38d9740406591c5f0))
+* attribute console-authored decisions to the developer ([c30a1fd](https://github.com/bhargavamin/contexer/commit/c30a1fd331cdeb6491738bd13d0f40fba3fc4569))
+* attribute console-authored decisions to the developer, not the AI ([fbef1b4](https://github.com/bhargavamin/contexer/commit/fbef1b4494efbdb5e912c4a5acd82353153e2228))
+* share the main worktree's store across linked git worktrees ([a450a23](https://github.com/bhargavamin/contexer/commit/a450a23fec8e3e236760bfa0c8743e7e771d1ddc))
+* share the main worktree's store across linked git worktrees ([677e467](https://github.com/bhargavamin/contexer/commit/677e46772818122d50feef976ba9030c685de76e))
+* thread created_by through update_global_decision ([a570dd2](https://github.com/bhargavamin/contexer/commit/a570dd2c064f0f40f63152f1a3bb5c859a40c686))
+
 ## [0.29.0](https://github.com/bhargavamin/contexer/compare/v0.28.0...v0.29.0) (2026-08-03)
 
 
