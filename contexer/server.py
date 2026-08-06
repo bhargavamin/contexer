@@ -343,7 +343,9 @@ def update_global_context(content: str, subtype: str = "", title: str = "") -> s
     """
     lint = store.capture_lint(content, created_by="ai", replace_id="")
     if lint:
-        return lint
+        # capture_lint's bounce text names update_context (the common case) — retarget it
+        # here so a restated GLOBAL rule gets re-submitted globally, not filed repo-scoped.
+        return lint.replace("update_context", "update_global_context")
     stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype, title=title)
     if stored:
         return f"Stored globally. id={entry_id}"

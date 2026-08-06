@@ -373,12 +373,23 @@ def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────
 
-def test_update_context_bounces_narrative(monkeypatch):
-    repo = "/test/repo"
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: repo)
+def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: tmp_repo)
     narrative = ("Investigated (2026-08-05) the loader bug at length. " +
                  " ".join(["detail"] * 150))
     out = server.update_context(content=narrative)
     assert "Not stored" in out
     # nothing was written
-    assert store.get_pending_decisions(repo) == []
+    assert store.get_pending_decisions(tmp_repo) == []
+
+
+def test_update_global_context_bounce_names_itself(monkeypatch):
+    # capture_lint's shared bounce text says "call update_context again" — the global
+    # tool must retarget that to its own name, or a restated GLOBAL rule gets re-filed
+    # repo-scoped instead of global.
+    narrative = ("Investigated (2026-08-05) the loader bug at length. " +
+                 " ".join(["detail"] * 150))
+    out = server.update_global_context(content=narrative)
+    assert "Not stored" in out
+    assert "call update_global_context again" in out
+    assert "call update_context again" not in out

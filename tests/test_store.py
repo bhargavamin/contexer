@@ -4894,3 +4894,61 @@ class TestScanConventionVerify:
         assert ignored_after.get("proposed_revision") is None
         assert ignored_after["content"] == ignored_content
         assert approved_after.get("proposed_revision") is not None
+
+    def test_reappearance_retracts_stale_scan_proposal(self, tmp_repo, monkeypatch):
+        # Disappear, then reappear: the withdrawal proposal must not survive the rule
+        # coming back, or a later bulk approve would clobber the fresh measurement with
+        # "(evidence withdrawn...)" text.
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry["proposed_revision"] is not None
+        assert entry["proposed_revision"]["source"] == "scan"
+
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry.get("proposed_revision") is None      # stale withdrawal retracted
+        assert entry["content"] == self.RULE_NEW            # and content refreshed
+
+    def test_reappearance_leaves_ai_sourced_proposal_alone(self, tmp_repo, monkeypatch):
+        # An 'ai'-sourced proposed_revision is an unrelated, developer-reviewable suggestion —
+        # a refresh pass must never discard it, only a scan-sourced withdrawal proposal.
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        from datetime import datetime, timezone
+        data = store._load(repo)
+        entry = data["entries"][-1]
+        entry["proposed_revision"] = store._build_proposal(
+            entry, "Functions use snake_case naming, per team style guide.", "convention",
+            "sess1", datetime.now(timezone.utc).isoformat(), source="ai")
+        store._save(repo, data)
+
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1  # the content refresh itself
+        entry = store._load(repo)["entries"][-1]
+        assert entry["content"] == self.RULE_NEW
+        assert entry.get("proposed_revision") is not None
+        assert entry["proposed_revision"]["source"] == "ai"  # untouched
+
+    def test_second_disappearance_run_does_not_pile_on(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 1
+        first_prop = store._load(repo)["entries"][-1]["proposed_revision"]
+        assert store.verify_scan_conventions(repo, force=True) == 0
+        second_prop = store._load(repo)["entries"][-1]["proposed_revision"]
+        assert second_prop == first_prop  # untouched, not replaced

@@ -2153,8 +2153,11 @@ def format_pending_review(repo_path: str) -> str:
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
                  "for the whole list.")
     if clipped:
+        # approve_decision(action='edit') requires the caller to already supply content — it
+        # does not render the full current text — so the second pointer is get_context, which
+        # renders pending entries unclipped with a [pending] tag.
         lines.append("Long bodies are clipped — full text: contexer ui, or "
-                     "approve_decision(action='edit') shows the full current text.")
+                     "get_context shows the full, unclipped text.")
     return "\n".join(lines)
 
 
@@ -3135,8 +3138,11 @@ def _share_item_line(proj: dict, maxlen: int = 0) -> str:
     _title_and_body, including its COLLAPSED-whitespace comparison — a title stays a single
     stripped line while content may carry newlines/runs of spaces, so comparing raw strings
     would show a spurious body line even when the two are the same text), so the preview
-    matches exactly what the wire will send. Content truncated to `maxlen` (0 = full). Shared
-    by the MCP and CLI push previews so both render identically."""
+    matches exactly what the wire will send. Content truncated to `maxlen` (0 = full); callers
+    doing human-surface clipping (e.g. format_shareable_list) do it themselves via `_clip_body`
+    on a shallow-copied dict before calling in — `maxlen` is a separate, lower-level knob and
+    not where that clipping mechanism lives. Shared by the MCP and CLI push previews so both
+    render identically."""
     full_content = proj.get("content", "")
     title = proj.get("title") or ""
     content = full_content
@@ -5825,6 +5831,15 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
         existing review flow (review_pending / .pending_review nudge / contexer review)
         instead of silently dropping a trusted convention.
 
+    Reappearance retraction: whenever the exact-or-fuzzy match succeeds (the first outcome
+    above), a stale scan-sourced disappearance proposal already sitting on that entry is
+    removed — the drift that produced it self-resolved, so leaving it pending would let a
+    later bulk approve overwrite the just-re-measured convention with "(evidence
+    withdrawn...)" text. Only a proposed_revision with source == 'scan' is retracted this
+    way; an 'ai'-sourced proposal is an unrelated, developer-reviewable suggestion and is
+    left untouched. The retraction counts toward the returned total only when the entry's
+    content itself did NOT also change this pass (so a single entry is never double-counted).
+
     Participants: created_by == 'scan' entries with status in (approved, suggested) whose
     content has a stats parenthetical. Pending/ignored entries are never touched — an
     unreviewed or rejected entry has no business being silently re-verified.
@@ -5903,9 +5918,21 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
                 if hit is not None:
                     fresh_sentence = hit["content"]
             if fresh_sentence is not None:
-                if fresh_sentence != current:
+                content_changed = fresh_sentence != current
+                if content_changed:
                     _append_revision(entry, fresh_sentence, source="scan", approved_at=now)
                     changed += 1
+                # Reappearance: a prior disappearance proposal on this entry is now stale —
+                # the drift self-resolved, so leaving the "(evidence withdrawn...)" proposal
+                # pending would let a bulk approve clobber the just-re-measured convention with
+                # withdrawal text. Only a scan-sourced proposal is retracted here; an AI-detected
+                # proposed_revision reflects a real developer-reviewable suggestion unrelated to
+                # this verification pass and must never be silently discarded.
+                proposal = entry.get("proposed_revision")
+                if proposal is not None and proposal.get("source") == "scan":
+                    entry.pop("proposed_revision", None)
+                    if not content_changed:
+                        changed += 1  # count the retraction itself when nothing else changed
                 continue
             # Real disappearance: exact and fuzzy both missed.
             if entry.get("proposed_revision") is not None:
