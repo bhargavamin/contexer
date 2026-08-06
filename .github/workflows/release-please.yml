@@ -22,7 +22,12 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      # Pinned to a full commit SHA, not the floating `v4` major tag: this job holds
+      # `contents: write` + `pull-requests: write`, and a moved upstream tag would change
+      # what runs with those permissions without a commit here. Same rule as the
+      # SHA-pinned setup-node in contexer-check.yml. Bump deliberately (stay on the v4
+      # line — v5 is a major with its own input changes).
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
         with:
           release-type: python
@@ -49,8 +54,11 @@ jobs:
       - name: Build package
         run: uv build
 
+      # SHA-pinned for the same reason, and more urgently: `release/v1` is a BRANCH, so
+      # every run pulled whatever sat on its head into the one job that mints the PyPI
+      # trusted-publishing token (`id-token: write`). Bump deliberately.
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
       - name: Upload dist to GitHub release
         env:
