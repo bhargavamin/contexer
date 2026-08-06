@@ -20,6 +20,15 @@ Run the test suite:
 uv run pytest tests/
 ```
 
+Running a subset (one file, `-k`, one class) exits non-zero on coverage even when
+every test passes: the ≥85% floor in `pyproject.toml`'s `addopts` judges whole-package
+coverage, and a single file naturally covers ~10%. That flag must stay in `addopts`
+(the convention miner reads it — see the comment there), so pass `--no-cov` instead:
+
+```bash
+uv run pytest tests/test_miner.py --no-cov
+```
+
 Smoke-test the MCP server:
 
 ```bash
