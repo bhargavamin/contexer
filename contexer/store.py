@@ -3424,7 +3424,7 @@ def _cached_insight(repo_path: str) -> tuple[str, bool]:
     path = _insight_cache_path(repo_path)
     key = None
     try:
-        cached = json.loads(path.read_text())
+        cached = json.loads(path.read_text(encoding="utf-8"))
         level, decisive, ts = cached["level"], cached["decisive"], cached["ts"]
         if level in _INSIGHT_ORDER and isinstance(decisive, bool) and \
                 time.time() - ts < _INSIGHT_CACHE_TTL:
@@ -3438,7 +3438,8 @@ def _cached_insight(repo_path: str) -> tuple[str, bool]:
         email, head = key if key is not None else _insight_cache_key(repo_path)
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         path.write_text(json.dumps({"level": level, "decisive": decisive,
-                                    "ts": time.time(), "email": email, "head": head}))
+                                    "ts": time.time(), "email": email, "head": head}),
+                        encoding="utf-8")
     except OSError:
         pass
     return level, decisive
@@ -3885,10 +3886,14 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         # Best-effort: the flag only silences a duplicate bootstrap offer on the first
         # prompt. An unwritable ~/.contexer (sandboxed host, #152) must not cost the
         # session its resume-mining instructions — the whole point of this branch.
+        # Broad on purpose, exactly as anchor_repo documents: OSError is the expected
+        # failure, but a repo path carrying non-UTF-8 filesystem bytes (a surrogate
+        # escape, routine on Linux) makes write_text raise UnicodeEncodeError — a
+        # ValueError that an OSError-only guard would let escape into the host.
         try:
             STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-            resume_flag.write_text(repo_path)
-        except OSError:
+            resume_flag.write_text(repo_path, encoding="utf-8")
+        except Exception:
             pass
         sys_parts = []
         if global_rules:
@@ -4122,11 +4127,20 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     resume_flag = STORE_DIR / ".resume_mining"
     if resume_flag.exists():
         try:
-            flagged = resume_flag.read_text().strip()
+            flagged = resume_flag.read_text(encoding="utf-8").strip()
         except Exception:
             flagged = ""
         if flagged == repo_path:
-            resume_flag.unlink(missing_ok=True)
+            # Guarded like its twin in _local_session_start_payload (3806-3813): consuming
+            # the flag is bookkeeping, and this runs inside a `python -c` UserPromptSubmit
+            # hook with no try/except of its own. A read-only ~/.contexer (#152, Codex's
+            # managed sandbox) makes unlink raise PermissionError, which would replace the
+            # hook's JSON with a traceback — losing the whole injection over a flag whose
+            # only job is staying silent. Staying silent is exactly what we return anyway.
+            try:
+                resume_flag.unlink(missing_ok=True)
+            except OSError:
+                pass
             return {"status": "", "context": ""}
     level, decisive = _cached_insight(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
@@ -5152,7 +5166,7 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     if pkg_json_path.exists():
         found_files.append("package.json")
         try:
-            pkg = json.loads(pkg_json_path.read_text())
+            pkg = json.loads(pkg_json_path.read_text(encoding="utf-8"))
             name = pkg.get("name", "")
             if name and not sig["project_name"]:
                 sig["project_name"] = name
@@ -5188,7 +5202,7 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     if (root / "go.mod").exists():
         found_files.append("go.mod")
         try:
-            for line in (root / "go.mod").read_text().splitlines():
+            for line in (root / "go.mod").read_text(encoding="utf-8").splitlines():
                 if line.startswith("module "):
                     _add(f"Go module: {line.split()[1]}")
                 elif line.startswith("go "):
@@ -5297,8 +5311,9 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     if (root / "Dockerfile").exists():
         found_files.append("Dockerfile")
         try:
+            dockerfile_lines = (root / "Dockerfile").read_text(encoding="utf-8").splitlines()
             first_from = next(
-                (l.split()[1] for l in (root / "Dockerfile").read_text().splitlines() if l.startswith("FROM")), None
+                (line.split()[1] for line in dockerfile_lines if line.startswith("FROM")), None
             )
             _add(f"Containerized — Dockerfile present{f' (base: {first_from})' if first_from else ''}")
         except Exception:
@@ -5351,8 +5366,8 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     if readme.exists():
         found_files.append("README.md")
         try:
-            text = readme.read_text(errors="ignore")
-            lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("#")]
+            text = readme.read_text(encoding="utf-8", errors="ignore")
+            lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
             if lines:
                 sig["readme_summary"] = lines[0][:120]
             if any(w in text.lower()[:2000] for w in _SIMPLE_REPO_SIGNALS):
@@ -5366,11 +5381,11 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         if cf_path.exists():
             found_files.append(cf)
             try:
-                cf_text = cf_path.read_text(errors="ignore")[:3000]
+                cf_text = cf_path.read_text(encoding="utf-8", errors="ignore")[:3000]
                 # Extract first meaningful non-heading line as summary if README had none
                 if not sig["readme_summary"]:
-                    lines = [l.strip() for l in cf_text.splitlines()
-                             if l.strip() and not l.startswith("#") and len(l.strip()) > 20]
+                    lines = [line.strip() for line in cf_text.splitlines()
+                             if line.strip() and not line.startswith("#") and len(line.strip()) > 20]
                     if lines:
                         sig["readme_summary"] = lines[0][:120]
                 if any(w in cf_text.lower() for w in _SIMPLE_REPO_SIGNALS):
@@ -5384,10 +5399,10 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         # Scan first doc file for purpose hints
         for doc in sorted(docs_dir.glob("*.md"))[:3]:
             try:
-                doc_text = doc.read_text(errors="ignore")[:1500]
+                doc_text = doc.read_text(encoding="utf-8", errors="ignore")[:1500]
                 if not sig["readme_summary"]:
-                    lines = [l.strip() for l in doc_text.splitlines()
-                             if l.strip() and not l.startswith("#") and len(l.strip()) > 20]
+                    lines = [line.strip() for line in doc_text.splitlines()
+                             if line.strip() and not line.startswith("#") and len(line.strip()) > 20]
                     if lines:
                         sig["readme_summary"] = lines[0][:120]
                 if any(w in doc_text.lower() for w in _SIMPLE_REPO_SIGNALS):
