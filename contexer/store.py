@@ -22,7 +22,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
 MAX_TITLE_LEN = 100
-_SCHEMA_VERSION = 3               # bumped when the on-disk entry shape changes; gates migration
+_SCHEMA_VERSION = 4               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
@@ -684,6 +684,23 @@ def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str |
     return title, (body if collapsed and collapsed != title else None)
 
 
+_BODY_CLIP = 400  # human review surfaces only — model-facing retrieval keeps full content
+
+
+def _clip_body(body: str, limit: int = _BODY_CLIP) -> str:
+    """Clip a decision body for HUMAN surfaces (review lists, share previews) at a word
+    boundary, marking how much was elided. The developer signs off on the title + first
+    sentences; the full text stays one step away (contexer ui / get_context). Model-facing
+    renders never clip — the AI needs the full reasoning."""
+    if len(body) <= limit:
+        return body
+    cut = body.rfind(" ", 0, limit)
+    if cut <= 0:
+        cut = limit
+    kept = body[:cut].rstrip()
+    return f"{kept}… [+{len(body) - len(kept)} chars]"
+
+
 def _is_novel(content: str, existing: list) -> bool:
     if not _is_storable(content):
         return False
@@ -695,6 +712,48 @@ def _passes_filter(content: str, existing: list) -> bool:
     # Novel content always passes: update_context is only called for significant decisions.
     decisions_only = [e for e in existing if e["type"] == "decision"]
     return _is_novel(content, decisions_only)
+
+
+_LINT_MIN_LEN = 400          # short captures are cheap to store; never bounce them
+_LINT_MAX_FIRST_SENT = 45    # words before the first sentence must have stated a decision
+_LINT_NARRATIVE_RE = re.compile(
+    r"^\(?\s*(?:\d{4}-\d{2}-\d{2}\)?\s*)?"                # optional leading (date)
+    r"(investigated|investigation|debugged|explored|traced|reviewed"
+    r"|bug ?fix|fixed|fix for|root cause|post-?mortem)\b",
+    re.IGNORECASE,
+)
+_LINT_BOUNCE = (
+    "Not stored — this reads as an investigation narrative, not a decision. "
+    "Restate it and call update_context again NOW, in this same turn:\n"
+    "- First sentence = the decision itself, imperative, with the why "
+    "(e.g. 'Key the store on the main worktree path, not the linked worktree — "
+    "rev-parse returns the worktree path').\n"
+    "- Evidence and investigation details may follow AFTER that first sentence.\n"
+    "- Pass a concise imperative title too.\n"
+    "Do not drop the capture — re-submit it restated."
+)
+
+
+def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> str:
+    """Deterministic capture-shape gate for model-authored captures ('' = passes).
+
+    Bounces content that opens as investigation narrative instead of a decision, with
+    restate instructions the calling model applies in the same turn. Regex-tier by
+    design (no LLM in the filter). Scope is deliberately narrow — only new, long,
+    ai/plan-sourced captures — so human directives, scan/bootstrap/memory imports,
+    replace_id corrections, and short entries can never be blocked."""
+    if created_by not in ("ai", "plan") or replace_id:
+        return ""
+    text = content.strip()
+    if len(text) <= _LINT_MIN_LEN:
+        return ""
+    first_line = text.splitlines()[0]
+    first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
+    if _LINT_NARRATIVE_RE.match(first_sentence):
+        return _LINT_BOUNCE
+    if len(first_sentence.split()) > _LINT_MAX_FIRST_SENT:
+        return _LINT_BOUNCE
+    return ""
 
 
 def _session_set(match: dict) -> set[str]:
@@ -1436,6 +1495,13 @@ def _migrate_decision(entry: dict) -> bool:
     `current_revision_id`. Returns True if the entry was changed."""
     if entry.get("type") != "decision":
         return False
+    stamped = False
+    if not entry.get("status"):
+        entry["status"] = "approved"   # legacy entries predate review; they were always injected as trusted
+        stamped = True
+    if not entry.get("created_by"):
+        entry["created_by"] = "ai"
+        stamped = True
     revs = entry.get("revisions")
     already = (
         entry.get("current_revision_id")
@@ -1454,10 +1520,10 @@ def _migrate_decision(entry: dict) -> bool:
             cur["content"] = cached
             healed = True
         backfilled = _backfill_titles(entry)
-        return healed or backfilled
+        return healed or backfilled or stamped
 
     did = entry.get("id", "")
-    created_by = entry.get("created_by", "ai")
+    created_by = entry["created_by"]
     legacy = revs if isinstance(revs, list) else []
     full: list[dict] = []
     for snap in legacy:
@@ -2060,24 +2126,38 @@ def format_pending_review(repo_path: str) -> str:
     if total > len(shown):
         header += f" — showing {len(shown)} of {total}; run `contexer review` for the rest"
     lines = [header + ":\n"]
+    clipped = False
     for d in shown:
         eid = (d.get("id") or "")[:8]
         st = d.get("subtype") or "decision"
         prop = d.get("proposed_revision")
         if prop:
+            raw_current = _current_content(d)
+            raw_detected = prop.get("content", "")
+            current = _clip_body(raw_current)
+            detected = _clip_body(raw_detected)
+            clipped = clipped or current != raw_current or detected != raw_detected
             lines.append(f"- {eid} [{st}] update")
-            lines.append(f'    current:  "{_current_content(d)}"')
-            lines.append(f'    detected: "{prop.get("content", "")}"')
+            lines.append(f'    current:  "{current}"')
+            lines.append(f'    detected: "{detected}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
         else:
             title, body = _title_and_body(d)
             lines.append(f'- {eid} [{st}] {title}')
             if body is not None:
-                lines.append(f'    "{body}"')
+                clipped_body = _clip_body(body)
+                clipped = clipped or clipped_body != body
+                lines.append(f'    "{clipped_body}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
     lines.append("\nReview each with the developer before approving. To clear several at once, "
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
                  "for the whole list.")
+    if clipped:
+        # approve_decision(action='edit') requires the caller to already supply content — it
+        # does not render the full current text — so the second pointer is get_context, which
+        # renders pending entries unclipped with a [pending] tag.
+        lines.append("Long bodies are clipped — full text: contexer ui, or "
+                     "get_context shows the full, unclipped text.")
     return "\n".join(lines)
 
 
@@ -3058,8 +3138,11 @@ def _share_item_line(proj: dict, maxlen: int = 0) -> str:
     _title_and_body, including its COLLAPSED-whitespace comparison — a title stays a single
     stripped line while content may carry newlines/runs of spaces, so comparing raw strings
     would show a spurious body line even when the two are the same text), so the preview
-    matches exactly what the wire will send. Content truncated to `maxlen` (0 = full). Shared
-    by the MCP and CLI push previews so both render identically."""
+    matches exactly what the wire will send. Content truncated to `maxlen` (0 = full); callers
+    doing human-surface clipping (e.g. format_shareable_list) do it themselves via `_clip_body`
+    on a shallow-copied dict before calling in — `maxlen` is a separate, lower-level knob and
+    not where that clipping mechanism lives. Shared by the MCP and CLI push previews so both
+    render identically."""
     full_content = proj.get("content", "")
     title = proj.get("title") or ""
     content = full_content
@@ -3160,7 +3243,8 @@ def format_shareable_list(repo_path: str) -> str:
         header += f" — showing {len(shown)} of {total}, run `contexer share` in a terminal for the rest"
     lines = [header + ". Tell me which to share, then I'll preview and confirm:\n"]
     for it in shown:
-        lines.append(_share_item_line(it))
+        clipped_it = {**it, "content": _clip_body(it.get("content", ""))}
+        lines.append(_share_item_line(clipped_it))
     lines.append('\nShare the selected: share_decision(decision_id="<id>[,<id2>…]") '
                  "— previews first; add confirm=true to send.")
     return "\n".join(lines)
@@ -3923,6 +4007,18 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except OSError:
         pass
     _gc_stale_session_files()
+
+    try:
+        if source not in ("resume", "compact"):
+            # A non-zero return means verification just changed the store (evidence
+            # refresh, withdrawal proposal, or retraction) — re-read so THIS session
+            # renders the verified state and any fresh proposal reaches the pending
+            # count, instead of the pre-verify snapshot loaded above.
+            if verify_scan_conventions(repo_path):
+                data = _load(repo_path)
+                decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    except Exception:
+        pass  # verification is opportunistic; a session start must never fail on it
 
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
@@ -5717,3 +5813,173 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
                 _touch_pending_review(repo_path)  # medium-tier items await review (after save)
 
     return {**result, "stored": stored, "pending": pending, "skipped": skipped}
+
+
+_MINER_VERIFY_TTL = 86400  # 24h — conventions don't drift fast enough to re-scan every session
+
+_SCAN_EVIDENCE_RE = re.compile(r"\s*\(\d{1,3}% of \d+[^)]*\)\s*$")
+
+
+def _scan_rule_key(content: str) -> str | None:
+    """Strips the miner's trailing stats parenthetical ("... (98% of 412 functions across
+    37 files)") to get the rule's identity, or None when content carries no such
+    parenthetical at all — config-presence conventions (ruff/mypy/pre-commit detected via
+    config, not measured with stats) never participate in re-verification."""
+    if not _SCAN_EVIDENCE_RE.search(content):
+        return None
+    return _SCAN_EVIDENCE_RE.sub("", content).strip()
+
+
+def _miner_verify_stamp_path(repo_path: str) -> Path:
+    return STORE_DIR / f".miner_verify_{_slug(repo_path)}"
+
+
+def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
+    """Re-measures every stored, scan-sourced convention/pattern against a fresh
+    miner.mine_conventions pass, so the evidence embedded in the sentence ("... 98% of 412
+    functions across 37 files") does not silently go stale as the repo changes underneath
+    it. Called fail-soft from session_start_payload. Returns the number of entries changed.
+
+    Three outcomes per participating entry, compared against the fresh scan by rule key
+    (content with the trailing stats parenthetical stripped):
+      - same rule key, different sentence -> the rule still holds, only its measurement
+        moved -> _append_revision in place (source='scan'); no review needed.
+      - rule key not found in the fresh scan, but a fuzzy match (_find_match) hits one of
+        the fresh sentences -> the miner merely reworded the rule, not a real
+        disappearance -> treated exactly like the changed-evidence case above.
+      - rule key absent AND no fuzzy hit -> a real disappearance -> attach a
+        proposed_revision (only if the entry doesn't already carry one) so it rides the
+        existing review flow (review_pending / .pending_review nudge / contexer review)
+        instead of silently dropping a trusted convention.
+
+    Reappearance retraction: whenever the exact-or-fuzzy match succeeds (the first outcome
+    above), a stale scan-sourced disappearance proposal already sitting on that entry is
+    removed — the drift that produced it self-resolved, so leaving it pending would let a
+    later bulk approve overwrite the just-re-measured convention with "(evidence
+    withdrawn...)" text. Only a proposed_revision with source == 'scan' is retracted this
+    way; an 'ai'-sourced proposal is an unrelated, developer-reviewable suggestion and is
+    left untouched. The retraction counts toward the returned total only when the entry's
+    content itself did NOT also change this pass (so a single entry is never double-counted).
+
+    Participants: created_by == 'scan' entries with status in (approved, suggested) whose
+    content has a stats parenthetical. Pending/ignored entries are never touched — an
+    unreviewed or rejected entry has no business being silently re-verified.
+
+    Fast path (session-start latency): participants are collected from a single _load
+    BEFORE any mining and BEFORE the TTL stamp is written. Zero participants — the common
+    case for every repo that was never bootstrapped, or was bootstrapped with only
+    config-presence conventions — returns 0 immediately, without importing the miner or
+    touching the stamp file. Mirrors team_poll: the session-start/prompt path must never
+    pay for work there is nothing to do.
+
+    TTL: a 24h stamp file (mtime-based), written BEFORE mining runs — a verifier that
+    crashes mid-scan must not retry on every following session start (same spawn-storm
+    rule as team_poll's throttle stamp). `force=True` bypasses the TTL read (tests only);
+    the stamp is still (re)written so the next un-forced call is correctly gated.
+
+    An empty fresh scan (`[]`) stamps the TTL and returns 0 WITHOUT flagging anything: an
+    empty result is indistinguishable from a scan failure (missing tool, unreadable repo),
+    and silence-over-noise says never manufacture a disappearance from an inconclusive
+    signal."""
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        participants = []
+        for entry in data["entries"]:
+            if entry.get("type") != "decision" or entry.get("created_by") != "scan":
+                continue
+            if _entry_status(entry) not in ("approved", "suggested"):
+                continue
+            key = _scan_rule_key(_current_content(entry))
+            if key is None:
+                continue
+            participants.append((entry, key))
+        if not participants:
+            return 0
+
+        stamp = _miner_verify_stamp_path(repo_path)
+        if not force:
+            mtime = _file_mtime(stamp)
+            if mtime is not None and time.time() - mtime < _MINER_VERIFY_TTL:
+                return 0
+        try:
+            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            stamp.touch()
+        except OSError:
+            pass
+
+        from contexer import miner          # function-level: mirrors bootstrap_apply's
+                                              # cycle-avoidance style used elsewhere here.
+        fresh = miner.mine_conventions(repo_path)
+        if not fresh:
+            return 0  # silence-over-noise: an empty scan is not evidence of disappearance
+
+        fresh_sentences = [item["content"] for item in fresh]
+        fresh_by_key: dict[str, str] = {}
+        # Fuzzy-match pool is restricted to stat-bearing sentences only: a config-presence
+        # sentence (no parenthetical) has no "evidence" to refresh a measured entry with, so
+        # letting it into the pool could fuzzy-match a measured entry and rewrite it into an
+        # unmeasured one — silently and permanently removing it from future verification.
+        fresh_stat_sentences: list[str] = []
+        for sentence in fresh_sentences:
+            key = _scan_rule_key(sentence)
+            if key is not None:
+                fresh_stat_sentences.append(sentence)
+                if key not in fresh_by_key:
+                    fresh_by_key[key] = sentence
+        fresh_entries = [{"content": s} for s in fresh_stat_sentences]
+
+        now = datetime.now(timezone.utc).isoformat()
+        changed = 0
+        review_needed = False
+        for entry, key in participants:
+            current = _current_content(entry)
+            fresh_sentence = fresh_by_key.get(key)
+            if fresh_sentence is None:
+                hit = _find_match(current, fresh_entries)  # fuzzy guard: miner wording drift
+                if hit is not None:
+                    fresh_sentence = hit["content"]
+            if fresh_sentence is not None:
+                content_changed = fresh_sentence != current
+                if content_changed:
+                    _append_revision(entry, fresh_sentence, source="scan", approved_at=now)
+                    changed += 1
+                # Reappearance: a prior disappearance proposal on this entry is now stale —
+                # the drift self-resolved, so leaving the "(evidence withdrawn...)" proposal
+                # pending would let a bulk approve clobber the just-re-measured convention with
+                # withdrawal text. Only a scan-sourced proposal is retracted here; an AI-detected
+                # proposed_revision reflects a real developer-reviewable suggestion unrelated to
+                # this verification pass and must never be silently discarded.
+                proposal = entry.get("proposed_revision")
+                if proposal is not None and proposal.get("source") == "scan":
+                    entry.pop("proposed_revision", None)
+                    if not content_changed:
+                        changed += 1  # count the retraction itself when nothing else changed
+                continue
+            # Real disappearance: exact and fuzzy both missed.
+            if entry.get("proposed_revision") is not None:
+                continue  # already awaiting review — don't pile on a second proposal
+            m = _SCAN_EVIDENCE_RE.search(current)
+            paren = m.group(0).strip() if m else ""
+            old_evidence = paren[1:-1] if paren.startswith("(") and paren.endswith(")") else paren
+            # Rule-shaped, not meta-shaped: this sentence becomes the CURRENT revision the
+            # instant a developer approves it (or bulk-approves via entry_id="all"), so it
+            # must read like a convention a developer can live with, not a status memo — and
+            # it must START with the rule text so replay still injects a real project rule.
+            # The trailing parenthetical deliberately starts with "evidence withdrawn", not a
+            # percentage, so it does NOT match _SCAN_EVIDENCE_RE: once approved, this entry's
+            # content no longer has a stats parenthetical and correctly exits participation in
+            # future verification instead of churning a fresh proposal every 24h.
+            proposal_content = (
+                f"{key} (evidence withdrawn on re-scan: was {old_evidence}, "
+                f"no longer measured at threshold)"
+            )
+            entry["proposed_revision"] = _build_proposal(
+                entry, proposal_content, "", "", now, source="scan")
+            changed += 1
+            review_needed = True
+
+        if changed:
+            _save(repo_path, data)
+            if review_needed:
+                _touch_pending_review(repo_path)  # a disappearance now awaits review (after save)
+        return changed

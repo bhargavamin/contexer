@@ -84,6 +84,9 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
+    lint = store.capture_lint(content, created_by=created_by, replace_id=replace_id)
+    if lint:
+        return lint
     stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
                                              created_by=created_by, replace_id=replace_id,
                                              title=title, source_files=source_files)
@@ -338,6 +341,11 @@ def update_global_context(content: str, subtype: str = "", title: str = "") -> s
            Only omit it when you can't summarize better than the content itself; the store
            then derives one from `content`.
     """
+    lint = store.capture_lint(content, created_by="ai", replace_id="")
+    if lint:
+        # capture_lint's bounce text names update_context (the common case) — retarget it
+        # here so a restated GLOBAL rule gets re-submitted globally, not filed repo-scoped.
+        return lint.replace("update_context", "update_global_context")
     stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype, title=title)
     if stored:
         return f"Stored globally. id={entry_id}"

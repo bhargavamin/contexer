@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from contexer import miner as miner_mod
 from contexer import store
 
 
@@ -2294,6 +2295,38 @@ class TestRevisionModel:
         assert len(second["revisions"]) == 1
 
 
+class TestLegacyStamping:
+    def _legacy_entry(self):
+        return {
+            "id": "legacy-1", "type": "decision", "subtype": "architecture",
+            "content": "Use the flat-list store.", "revision": 1,
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+
+    def test_fresh_migration_stamps_status_and_created_by(self):
+        e = self._legacy_entry()
+        changed = store._migrate_decision(e)
+        assert changed
+        assert e["status"] == "approved"
+        assert e["created_by"] == "ai"
+
+    def test_already_migrated_entry_gets_stamped_too(self):
+        e = self._legacy_entry()
+        store._migrate_decision(e)          # now has revisions + current_revision_id
+        e.pop("status", None)               # simulate pre-stamp store migrated by old code
+        changed = store._migrate_decision(e)
+        assert changed
+        assert e["status"] == "approved"
+
+    def test_existing_status_never_overwritten(self):
+        e = self._legacy_entry()
+        e["status"] = "ignored"
+        e["created_by"] = "human"
+        store._migrate_decision(e)
+        assert e["status"] == "ignored"
+        assert e["created_by"] == "human"
+
+
 # ── approve_decision ──────────────────────────────────────────────────────────
 
 class TestApproveDecision:
@@ -4241,7 +4274,7 @@ class TestTitleBackfill:
         e = reloaded["entries"][0]
         assert e["title"] == "Legacy decision body kept verbatim."
         assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
-        assert reloaded.get("schema_version") == 3
+        assert reloaded.get("schema_version") == 4
 
 
 class TestServerTitleParam:
@@ -4657,3 +4690,282 @@ class TestQueryMatchesTitle:
                               title="Adopt the outbox pattern")
         out = store.get_context(tmp_repo, query="outbox")
         assert "Adopt the outbox pattern" in out
+
+
+# ── capture_lint: bounce narrative-shaped AI captures with restate guidance ──
+
+class TestCaptureLint:
+    NARRATIVE = (
+        "Investigated (2026-08-05) the reported bug that a git worktree gets its own "
+        "decisions JSON named after the worktree. Root cause: the store key is the "
+        "filesystem path of git rev-parse --show-toplevel, and for a linked worktree "
+        "that command returns the WORKTREE path, not the main worktree. This means "
+        "every linked worktree got a fresh empty store file keyed by its own path, "
+        "so decisions captured in a worktree session never reached the main store "
+        "and the session started with no context at all, which is exactly the "
+        "reported symptom and why the fix must canonicalize the store key."
+    )
+
+    def test_narrative_opener_long_content_bounces(self):
+        msg = store.capture_lint(self.NARRATIVE)
+        assert msg != ""
+        assert "Not stored" in msg
+        assert "update_context" in msg  # tells the model to re-call
+
+    def test_decision_first_content_passes(self):
+        content = ("Key the store on the main worktree path, not the linked worktree. "
+                   + self.NARRATIVE)
+        assert store.capture_lint(content) == ""
+
+    def test_short_content_always_passes(self):
+        assert store.capture_lint("Fixed the flaky retry test by pinning the clock.") == ""
+
+    def test_human_and_scan_sources_never_bounce(self):
+        assert store.capture_lint(self.NARRATIVE, created_by="human") == ""
+        assert store.capture_lint(self.NARRATIVE, created_by="scan") == ""
+        assert store.capture_lint(self.NARRATIVE, created_by="memory") == ""
+
+    def test_replace_id_corrections_never_bounce(self):
+        assert store.capture_lint(self.NARRATIVE, replace_id="abc12345") == ""
+
+    def test_date_stamp_opener_bounces(self):
+        long_tail = " ".join(["detail"] * 120)
+        msg = store.capture_lint("(2026-08-05) traced the failure through the loader. " + long_tail)
+        assert msg != ""
+
+    def test_runaway_first_sentence_bounces(self):
+        # No narrative keyword, but the first sentence never states a decision in 45 words.
+        first = "The way the loader interacts with the cache and the index and the sidecar " \
+                "and the lock and the flags and the GC and the log and the router and the " \
+                "anchors and the miner and the store and the slug logic is complicated " \
+                "in several respects that matter here today somehow."
+        msg = store.capture_lint(first + " " + " ".join(["more"] * 100))
+        assert msg != ""
+
+
+class TestBodyClipping:
+    """_clip_body — the human-review-surface clip (review_pending, contexer review, share
+    lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
+    and are untouched by this class."""
+
+    def test_short_body_unchanged(self):
+        assert store._clip_body("short decision", 400) == "short decision"
+
+    def test_long_body_clipped_at_word_boundary(self):
+        body = "word " * 200  # 1000 chars
+        out = store._clip_body(body.strip(), 400)
+        assert len(out) < 450
+        assert "… [+" in out and out.endswith("chars]")
+        assert not out.split("…")[0].endswith("wor")  # no mid-word cut
+
+    def test_pending_review_clips_long_content(self, tmp_repo):
+        long_content = ("Use X over Y for the store backend. " + "Because reasons. " * 80)
+        store.update_decision(tmp_repo, long_content, "sess1", "architecture",
+                              created_by="ai")
+        # force it pending so format_pending_review shows it
+        data = store._load(tmp_repo)
+        data["entries"][-1]["status"] = "pending_approval"
+        store._save(tmp_repo, data)
+        out = store.format_pending_review(tmp_repo)
+        assert "… [+" in out
+        assert len(out) < len(long_content)
+
+
+class TestScanConventionVerify:
+    RULE_OLD = "Functions use snake_case naming (98% of 412 functions across 37 files)"
+    RULE_NEW = "Functions use snake_case naming (91% of 500 functions across 41 files)"
+
+    def _seed_scan_convention(self, repo, content=RULE_OLD):
+        store.update_decision(repo, content, "sess1", "convention", created_by="scan")
+
+    def test_changed_evidence_appends_revision_in_place(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1
+        data = store._load(repo)
+        entry = data["entries"][-1]
+        assert entry["content"] == self.RULE_NEW
+        assert len(entry["revisions"]) == 2
+        assert entry.get("proposed_revision") is None
+
+    def test_session_start_renders_post_verify_state(self, tmp_repo, monkeypatch):
+        # The payload loads the store BEFORE verification runs; when verification
+        # changes an entry, the render must re-read so the session sees the verified
+        # evidence, not the pre-verify snapshot (Greptile P1 on PR #169).
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        payload = store.session_start_payload(repo)
+        rendered = payload.get("context", "") + payload.get("status", "")
+        assert self.RULE_NEW.split(" (")[0] in rendered  # rule injected at all
+        assert "91% of 500" in rendered                  # fresh evidence, not stale
+        assert "98% of 412" not in rendered
+
+    def test_disappeared_rule_attaches_proposed_revision(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry["proposed_revision"] is not None
+        prop_content = entry["proposed_revision"]["content"]
+        # Rule-shaped, not meta-shaped: approving this must yield a convention a developer
+        # can live with, so it has to START with the rule text (not a status memo).
+        assert prop_content.startswith("Functions use snake_case naming")
+        assert "no longer measured" in prop_content
+        assert entry["status"] == "approved"  # current revision stays trusted
+
+    def test_empty_scan_flags_nothing(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions", lambda p: [])
+        assert store.verify_scan_conventions(repo, force=True) == 0
+        assert store._load(repo)["entries"][-1].get("proposed_revision") is None
+
+    def test_ttl_gate_skips_second_run(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        calls = []
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: calls.append(1) or [])
+        store.verify_scan_conventions(repo)          # no force: stamps TTL
+        store.verify_scan_conventions(repo)          # inside TTL: must not scan
+        assert len(calls) == 1
+
+    def test_no_scan_entries_skips_miner_entirely(self, tmp_repo, monkeypatch):
+        # Fast path: a store with no scan-sourced stats entries must never invoke the miner,
+        # even with force=True — this is the session-start latency guarantee.
+        repo = tmp_repo
+        store.update_decision(repo, "Use uv for everything.", "sess1", "convention",
+                              created_by="human")
+        calls = []
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: calls.append(1) or [])
+        assert store.verify_scan_conventions(repo, force=True) == 0
+        assert calls == []
+
+    def test_reworded_rule_is_refresh_not_disappearance(self, tmp_repo, monkeypatch):
+        # Miner wording drift: fuzzy match (>70% containment) routes to in-place refresh.
+        repo = tmp_repo
+        self._seed_scan_convention(repo)  # "Functions use snake_case naming (98% of 412 ...)"
+        reworded = "Functions use snake_case naming convention (97% of 415 functions across 37 files)"
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": reworded,
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry.get("proposed_revision") is None      # NOT flagged as disappeared
+        assert entry["content"] == reworded                # refreshed in place
+
+    def test_ai_sourced_entries_untouched(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        store.update_decision(repo, self.RULE_OLD, "sess1", "convention", created_by="ai")
+        # would be a "disappearance", but entry is not scan-sourced -> not a participant,
+        # and with no participants the fast path returns before mining
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Other rule (90% of 100 things)",
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 0
+
+    def test_pending_and_ignored_scan_entries_never_touched(self, tmp_repo, monkeypatch):
+        # An approved participant plus a pending_approval and an ignored scan entry, all
+        # with rules absent from the fresh scan (would-be disappearances). Mining must
+        # actually run (the approved entry keeps the fast path from short-circuiting), but
+        # only the approved entry may be touched — pending/ignored entries are never
+        # re-verified, no matter what the fresh scan says about their rule.
+        repo = tmp_repo
+        self._seed_scan_convention(repo, self.RULE_OLD)
+        pending_content = "Classes use PascalCase naming (90% of 50 classes across 10 files)"
+        ignored_content = "Modules use kebab-case naming (92% of 30 modules across 8 files)"
+        store.update_decision(repo, pending_content, "sess1", "convention", created_by="scan")
+        store.update_decision(repo, ignored_content, "sess1", "convention", created_by="scan")
+        data = store._load(repo)
+        pending_entry = next(e for e in data["entries"] if e["content"] == pending_content)
+        ignored_entry = next(e for e in data["entries"] if e["content"] == ignored_content)
+        pending_entry["status"] = "pending_approval"
+        ignored_entry["status"] = "ignored"
+        store._save(repo, data)
+
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Other rule entirely (99% of 10 things across 2 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1  # only the approved participant
+
+        data = store._load(repo)
+        pending_after = next(e for e in data["entries"] if e["id"] == pending_entry["id"])
+        ignored_after = next(e for e in data["entries"] if e["id"] == ignored_entry["id"])
+        approved_after = next(e for e in data["entries"] if e["content"].startswith("Functions use snake_case naming"))
+
+        assert pending_after.get("proposed_revision") is None
+        assert pending_after["content"] == pending_content
+        assert ignored_after.get("proposed_revision") is None
+        assert ignored_after["content"] == ignored_content
+        assert approved_after.get("proposed_revision") is not None
+
+    def test_reappearance_retracts_stale_scan_proposal(self, tmp_repo, monkeypatch):
+        # Disappear, then reappear: the withdrawal proposal must not survive the rule
+        # coming back, or a later bulk approve would clobber the fresh measurement with
+        # "(evidence withdrawn...)" text.
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry["proposed_revision"] is not None
+        assert entry["proposed_revision"]["source"] == "scan"
+
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry.get("proposed_revision") is None      # stale withdrawal retracted
+        assert entry["content"] == self.RULE_NEW            # and content refreshed
+
+    def test_reappearance_leaves_ai_sourced_proposal_alone(self, tmp_repo, monkeypatch):
+        # An 'ai'-sourced proposed_revision is an unrelated, developer-reviewable suggestion —
+        # a refresh pass must never discard it, only a scan-sourced withdrawal proposal.
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        from datetime import datetime, timezone
+        data = store._load(repo)
+        entry = data["entries"][-1]
+        entry["proposed_revision"] = store._build_proposal(
+            entry, "Functions use snake_case naming, per team style guide.", "convention",
+            "sess1", datetime.now(timezone.utc).isoformat(), source="ai")
+        store._save(repo, data)
+
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1  # the content refresh itself
+        entry = store._load(repo)["entries"][-1]
+        assert entry["content"] == self.RULE_NEW
+        assert entry.get("proposed_revision") is not None
+        assert entry["proposed_revision"]["source"] == "ai"  # untouched
+
+    def test_second_disappearance_run_does_not_pile_on(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 1
+        first_prop = store._load(repo)["entries"][-1]["proposed_revision"]
+        assert store.verify_scan_conventions(repo, force=True) == 0
+        second_prop = store._load(repo)["entries"][-1]["proposed_revision"]
+        assert second_prop == first_prop  # untouched, not replaced
