@@ -12,7 +12,6 @@ import errno
 import json
 from pathlib import Path
 
-import pytest
 
 from contexer import store
 from contexer.adapters import cursor, gemini

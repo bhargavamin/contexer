@@ -869,10 +869,13 @@ class TestReactionMatrix:
     bounded question counts, well-formed gaps, and a handler for every advertised option."""
 
     def _repo_states(self, tmp_path):
-        bare = tmp_path / "bare"; bare.mkdir()
-        simple = tmp_path / "simple"; simple.mkdir()
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        simple = tmp_path / "simple"
+        simple.mkdir()
         (simple / "main.py").write_text("print('hi')\n")
-        rich = tmp_path / "rich"; rich.mkdir()
+        rich = tmp_path / "rich"
+        rich.mkdir()
         (rich / "pyproject.toml").write_text(
             '[project]\nname = "x"\ndependencies = ["fastapi", "stripe", "boto3", '
             '"httpx", "pydantic", "sqlalchemy"]\n')

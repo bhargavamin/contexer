@@ -43,7 +43,7 @@ def _conditions_present(rows):
 
 
 def render(runs_path: Path) -> str:
-    rows = [json.loads(l) for l in runs_path.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in runs_path.read_text().splitlines() if line.strip()]
     models = {r["model"] for r in rows if r.get("model")}
     if len(models) > 1:
         raise ValueError(f"Mixed models in campaign: {sorted(models)} — refusing to aggregate.")

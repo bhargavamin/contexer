@@ -3,7 +3,6 @@ import json
 import re
 from pathlib import Path
 
-import pytest
 
 from contexer import memory_sync, store
 from contexer.adapters import claude
@@ -173,7 +172,8 @@ class TestUpdateInPlace:
         assert entry["subtype"] == "architecture"              # subtype refreshed too
 
     def test_reworded_fact_updates_in_place_via_import(self, tmp_repo, tmp_path):
-        mem = tmp_path / "memory"; mem.mkdir()
+        mem = tmp_path / "memory"
+        mem.mkdir()
         f = mem / "rule.md"
         f.write_text(_md("Use ruff", "Always run ruff before commit."))
         assert memory_sync.import_dir(mem, tmp_repo) == 1
@@ -217,7 +217,8 @@ class TestDuplicateHeadings:
         doc = ("---\nname: spec\ndescription: d\nmetadata:\n  type: project\n"
                "  originSessionId: s1\n---\n\n"
                "## Notes\nfirst note about alpha.\n\n## Notes\nsecond note about beta.\n")
-        mem = tmp_path / "memory"; mem.mkdir()
+        mem = tmp_path / "memory"
+        mem.mkdir()
         (mem / "spec.md").write_text(doc)
         assert memory_sync.import_dir(mem, tmp_repo) == 2
         entries = json.loads(store._store_path(tmp_repo).read_text())["entries"]

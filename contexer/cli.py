@@ -8,7 +8,6 @@ from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
 from contexer import adapters
-from contexer.adapters import claude
 from contexer.adapters.base import _is_corrupt, _load_safe
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
