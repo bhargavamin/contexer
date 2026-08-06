@@ -417,8 +417,11 @@ def status(rest: list | None = None) -> None:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     if current.exists():
         try:
-            print(f"  current repo: {current.read_text().strip()}")
-        except OSError:
+            # UnicodeDecodeError too, not just OSError: the shell hooks write this pointer
+            # with `printf` (raw bytes, no encoding contract), so a non-UTF-8 path must
+            # print "(unreadable)" rather than traceback out of `contexer status`.
+            print(f"  current repo: {current.read_text(encoding='utf-8').strip()}")
+        except (OSError, UnicodeDecodeError):
             print("  current repo: (unreadable)")
 
     # Team sync block (Phase 2 observability). ZERO network calls - config.toml + the team
@@ -458,8 +461,17 @@ def status(rest: list | None = None) -> None:
         else:
             token_source = "none"
         print(f"    token:      {token_source}")
-        repo = current.read_text().strip() if current.exists() else ""
-        if not repo:
+        unreadable = False
+        try:
+            repo = current.read_text(encoding="utf-8").strip() if current.exists() else ""
+        except (OSError, UnicodeDecodeError):
+            # Distinguished from an absent pointer on purpose: the line above already
+            # printed "(unreadable)", and reporting the same file as "not detected" here
+            # would send the reader hunting for a hook that in fact ran.
+            repo, unreadable = "", True
+        if unreadable:
+            print("    cache:      (current repo pointer unreadable)")
+        elif not repo:
             print("    cache:      (no current repo detected)")
         else:
             # Every value below is typed by whatever is in the cache file, not by us —

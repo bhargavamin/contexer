@@ -689,10 +689,19 @@ def install(home: Path) -> list[str]:
     # command file only works inside that repo, so the command ships in the package
     # and installs globally. Never clobber a bootstrap.md we don't own.
     cmd_path = home / ".claude" / "commands" / "bootstrap.md"
-    existing_cmd = cmd_path.read_text() if cmd_path.exists() else ""
-    if not existing_cmd or _BOOTSTRAP_CMD_MARKER in existing_cmd:
+    try:
+        existing_cmd = cmd_path.read_text(encoding="utf-8") if cmd_path.exists() else ""
+        ours = not existing_cmd or _BOOTSTRAP_CMD_MARKER in existing_cmd
+    except (OSError, UnicodeDecodeError):
+        # Unreadable or not UTF-8 (a hand-authored file in a legacy encoding) → treat as
+        # a file we do NOT own: leave it alone, and do not let it abort install here.
+        # claude.json is already saved above and settings.json is saved below, so raising
+        # between them would leave the MCP server registered with zero hooks — the same
+        # tolerance base._load_safe and base._is_corrupt already apply to host configs.
+        ours = False
+    if ours:
         cmd_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd_path.write_text(_bootstrap_command_text())
+        cmd_path.write_text(_bootstrap_command_text(), encoding="utf-8")
         log.append("  ✓ /bootstrap command installed to ~/.claude/commands/")
     else:
         log.append("  ! ~/.claude/commands/bootstrap.md exists and is not Contexer's — left untouched")
@@ -730,7 +739,7 @@ def _stale_plugin_warning(home: Path) -> str | None:
                 if not isinstance(inst, dict):
                     continue
                 hooks_file = Path(inst.get("installPath", "")) / "hooks" / "hooks.json"
-                if hooks_file.is_file() and "capture_context" in hooks_file.read_text():
+                if hooks_file.is_file() and "capture_context" in hooks_file.read_text(encoding="utf-8"):
                     return ("  ! Outdated Contexer plugin detected (calls the removed "
                             "capture_context tool). Run `claude plugin update contexer` "
                             "or uninstall the plugin — its hooks fire in addition to "
@@ -812,7 +821,11 @@ def uninstall(home: Path) -> list[str]:
             log.append("  - No Contexer hooks found in ~/.claude/settings.json")
 
     cmd_path = home / ".claude" / "commands" / "bootstrap.md"
-    if cmd_path.exists() and _BOOTSTRAP_CMD_MARKER in cmd_path.read_text():
+    try:
+        ours = cmd_path.exists() and _BOOTSTRAP_CMD_MARKER in cmd_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        ours = False      # not ours if we cannot read it — and uninstall must still finish
+    if ours:
         cmd_path.unlink()
         log.append("  ✓ /bootstrap command removed from ~/.claude/commands/")
 

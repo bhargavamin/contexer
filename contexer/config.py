@@ -60,7 +60,7 @@ def load_profile(path: Path | None = None) -> Profile:
         return Profile()
 
     try:
-        data = tomllib.loads(config_path.read_text())
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"failed to parse {config_path}: {exc}") from exc
 
@@ -102,7 +102,7 @@ def write_team_profile(endpoint: str, path: Path | None = None) -> None:
         lines.append("redact_secrets = false")
     lines.extend(_preserved_ui_lines(config_path))  # `contexer login` must not reset [ui]
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text("\n".join(lines) + "\n")
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     config_path.chmod(0o600)  # may hold a bearer token — owner-only, like .team_auth.json
 
 
@@ -140,7 +140,7 @@ def load_ui_settings(path: Path | None = None) -> UiSettings:
         return UiSettings()
 
     try:
-        data = tomllib.loads(config_path.read_text())
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"failed to parse {config_path}: {exc}") from exc
 
@@ -241,7 +241,7 @@ def _raw_ui_lines(config_path: Path) -> list[str]:
     TOML binds every key after a table header to that table, so the header to EOF IS the
     table — and the file has already parsed as TOML (load_profile would have raised first),
     so copying that tail through cannot produce something unreadable."""
-    lines = config_path.read_text().splitlines()
+    lines = config_path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
         if line.strip().startswith("[ui]"):
             return ["", *lines[index:]]
