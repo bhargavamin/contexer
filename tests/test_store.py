@@ -4790,6 +4790,21 @@ class TestScanConventionVerify:
         assert len(entry["revisions"]) == 2
         assert entry.get("proposed_revision") is None
 
+    def test_session_start_renders_post_verify_state(self, tmp_repo, monkeypatch):
+        # The payload loads the store BEFORE verification runs; when verification
+        # changes an entry, the render must re-read so the session sees the verified
+        # evidence, not the pre-verify snapshot (Greptile P1 on PR #169).
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        payload = store.session_start_payload(repo)
+        rendered = payload.get("context", "") + payload.get("status", "")
+        assert self.RULE_NEW.split(" (")[0] in rendered  # rule injected at all
+        assert "91% of 500" in rendered                  # fresh evidence, not stale
+        assert "98% of 412" not in rendered
+
     def test_disappeared_rule_attaches_proposed_revision(self, tmp_repo, monkeypatch):
         repo = tmp_repo
         self._seed_scan_convention(repo)

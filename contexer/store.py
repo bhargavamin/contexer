@@ -4005,7 +4005,13 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
 
     try:
         if source not in ("resume", "compact"):
-            verify_scan_conventions(repo_path)
+            # A non-zero return means verification just changed the store (evidence
+            # refresh, withdrawal proposal, or retraction) — re-read so THIS session
+            # renders the verified state and any fresh proposal reaches the pending
+            # count, instead of the pre-verify snapshot loaded above.
+            if verify_scan_conventions(repo_path):
+                data = _load(repo_path)
+                decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     except Exception:
         pass  # verification is opportunistic; a session start must never fail on it
 
