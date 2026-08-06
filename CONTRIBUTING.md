@@ -29,6 +29,18 @@ coverage, and a single file naturally covers ~10%. That flag must stay in `addop
 uv run pytest tests/test_miner.py --no-cov
 ```
 
+
+Lint (CI runs the same pinned version; keep the two in step when bumping it):
+
+```bash
+uvx ruff@0.15.4 check .
+uvx ruff@0.15.4 check --fix .    # apply the safe fixes
+```
+
+Rules live in `pyproject.toml` under `[tool.ruff.lint]`. Ruff is intentionally not a dev-group
+dependency — it is a binary we never import, so pinning it here and in the workflow keeps
+`uv.lock` out of the loop.
+
 Smoke-test the MCP server:
 
 ```bash

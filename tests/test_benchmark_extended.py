@@ -219,7 +219,7 @@ class TestTokenApproximationAccuracy:
     def test_scales_linearly(self):
         base = "we use postgresql for transactional consistency"
         ratios = [_tokens_words(base * k) / _tokens_words(base) for k in range(2, 5)]
-        print(f"\n  Linearity check:")
+        print("\n  Linearity check:")
         for i, r in enumerate(ratios, 2):
             print(f"    {i}× length → {r:.2f}× tokens  (expected ~{i}×)")
             assert abs(r - i) / i < 0.15
@@ -233,7 +233,7 @@ class TestTokenApproximationAccuracy:
                                "existing team expertise with SQL, lower operational complexity, and native JSONB support "
                                "for semi-structured product metadata without sacrificing schema integrity guarantees.")),
         ]
-        print(f"\n  Token cost by length:")
+        print("\n  Token cost by length:")
         print(f"    {'Category':<14} {'Words':>6} {'word×1.3':>10} {'char÷4':>8}")
         for label, text in cases:
             print(f"    {label:<14} {len(text.split()):>6} {_tokens_words(text):>10} {_tokens_chars(text):>8}")
@@ -253,7 +253,7 @@ class TestDisplayCapBoundaries:
         self.repo = "/bench/cap"
 
     def _count(self, result: str) -> int:
-        return len([l for l in result.splitlines() if l.startswith("- [")])
+        return len([line for line in result.splitlines() if line.startswith("- [")])
 
     def test_unfiltered_exactly_at_cap(self):
         _write_direct(self.repo, 10)
@@ -357,7 +357,7 @@ class TestStorageAtCapacity:
             store.get_context(self.repo, query="00300")
             times.append((time.perf_counter() - t) * 1000)
         stats = _pstats(times)
-        print(f"\n  Retrieval latency at 500 entries (50 runs):")
+        print("\n  Retrieval latency at 500 entries (50 runs):")
         _print_stats("Stats", stats)
         # Median is the real SLO — retrieval stays fast at capacity. p99 over 50 runs is the
         # single worst sample, dominated by GC/scheduler hiccups on shared CI, so it gets 3x
@@ -375,7 +375,7 @@ class TestStorageAtCapacity:
             store.update_decision(self.repo, content, SESSION, "architecture")
             times.append((time.perf_counter() - t) * 1000)
         stats = _pstats(times)
-        print(f"\n  Novelty filter write latency at 500 entries (20 writes):")
+        print("\n  Novelty filter write latency at 500 entries (20 writes):")
         _print_stats("Stats", stats)
         # Steady-state write at the 500-entry hard cap (the store is pre-migrated, so this
         # excludes the one-time upgrade migration). Each write parses + serializes the full
@@ -436,10 +436,10 @@ class TestRealisticPromptNoise:
         print(f"\n{'='*60}")
         print("BENCHMARK 5 — Realistic prompt noise")
         print(f"{'='*60}")
-        print(f"\n  Algorithm constraints:")
-        print(f"    - Rationale word required (why/reason/rationale/decided...)")
-        print(f"    - Content keyword: isalpha AND len >= 3 AND not stop word (jwt/api/sdk now included)")
-        print(f"    - Top 3 keywords by length searched (\\b left-boundary match — no mid-word false positives)")
+        print("\n  Algorithm constraints:")
+        print("    - Rationale word required (why/reason/rationale/decided...)")
+        print("    - Content keyword: isalpha AND len >= 3 AND not stop word (jwt/api/sdk now included)")
+        print("    - Top 3 keywords by length searched (\\b left-boundary match — no mid-word false positives)")
         print(f"\n  {'Prompt':<55} {'Exp':>5} {'Act':>5} {'OK':>4}  Note")
         print(f"  {'-'*100}")
 
@@ -449,7 +449,8 @@ class TestRealisticPromptNoise:
             result  = store.get_context_for_prompt(self.repo, prompt)
             actual  = bool(result)
             match   = actual == expected
-            if match: correct += 1
+            if match:
+                correct += 1
             marker  = "✓" if match else "✗"
             exp_str = "hit"  if expected else "miss"
             act_str = "hit"  if actual   else "miss"
@@ -460,11 +461,11 @@ class TestRealisticPromptNoise:
         accuracy = correct / len(NOISY_PROMPTS) * 100
         print(f"\n  Correct predictions: {correct}/{len(NOISY_PROMPTS)} ({accuracy:.0f}%)")
         print(f"  True hits:   {len(findings['true_hit'])}  |  True misses: {len(findings['true_miss'])}  |  Surprises: {len(findings['surprise'])}")
-        print(f"\n  Key findings:")
-        print(f"    - Short tech terms ≤3 chars (jwt, db, ui) are NEVER extracted as keywords")
-        print(f"    - Indirect phrasing ('remind me', 'database') still hits via substring match")
-        print(f"    - Top-3-by-length rule risks excluding the relevant keyword if 3+ longer irrelevant words exist")
-        print(f"    - Short common words ('over') produce false positives via substring ('coverage')")
+        print("\n  Key findings:")
+        print("    - Short tech terms ≤3 chars (jwt, db, ui) are NEVER extracted as keywords")
+        print("    - Indirect phrasing ('remind me', 'database') still hits via substring match")
+        print("    - Top-3-by-length rule risks excluding the relevant keyword if 3+ longer irrelevant words exist")
+        print("    - Short common words ('over') produce false positives via substring ('coverage')")
 
         # All expected values were derived by tracing the algorithm — they should all match
         assert correct == len(NOISY_PROMPTS), (
@@ -512,7 +513,7 @@ class TestNoveltyThresholdSensitivity:
         print(f"\n{'='*60}")
         print("BENCHMARK 6 — Novelty threshold sensitivity")
         print(f"{'='*60}")
-        print(f"\n  Measured overlap for each pair:")
+        print("\n  Measured overlap for each pair:")
         print(f"  {'Label':<45} {'Overlap':>8}")
         for orig, rewrite, label in THRESHOLD_PAIRS:
             ov = _overlap(orig, rewrite)
@@ -520,9 +521,10 @@ class TestNoveltyThresholdSensitivity:
 
     def test_threshold_sweep(self):
         thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
-        print(f"\n  Threshold sweep — B=blocked (duplicate), P=passed (novel):")
+        print("\n  Threshold sweep — B=blocked (duplicate), P=passed (novel):")
         print(f"  {'Pair':<43}", end="")
-        for t in thresholds: print(f"  {t:.2f}", end="")
+        for t in thresholds:
+            print(f"  {t:.2f}", end="")
         print()
         print(f"  {'-'*85}")
         for orig, rewrite, label in THRESHOLD_PAIRS:
@@ -532,7 +534,7 @@ class TestNoveltyThresholdSensitivity:
                 print(f"    {'B' if ov > t else 'P'}", end="")
             print(f"  ({ov*100:.0f}%)")
 
-        print(f"\n  At current threshold=0.70:")
+        print("\n  At current threshold=0.70:")
         for orig, rewrite, label in THRESHOLD_PAIRS:
             ov = _overlap(orig, rewrite)
             blocked = ov > 0.70
@@ -541,7 +543,7 @@ class TestNoveltyThresholdSensitivity:
             elif ov < 0.55:
                 verdict = "PASSED ✓" if not blocked else "BLOCKED ✗ (false positive)"
             else:
-                verdict = f"BLOCKED" if blocked else "PASSED"
+                verdict = "BLOCKED" if blocked else "PASSED"
             print(f"    {label:<45} {ov*100:.1f}%  → {verdict}")
 
     def test_comma_tokenisation_degrades_overlap(self):
@@ -551,7 +553,7 @@ class TestNoveltyThresholdSensitivity:
 
         ov_c = _overlap(orig_commas, rewrite_clean)
         ov_k = _overlap(orig_clean,  rewrite_clean)
-        print(f"\n  Comma tokenisation degradation:")
+        print("\n  Comma tokenisation degradation:")
         print(f"    With commas    vs no-commas rewrite: overlap={ov_c*100:.1f}%  "
               f"→ {'PASSES (false negative)' if ov_c <= 0.70 else 'BLOCKED'} at 0.70")
         print(f"    Without commas vs no-commas rewrite: overlap={ov_k*100:.1f}%  "
@@ -602,7 +604,7 @@ class TestDecisionLengthSensitivity:
         print(f"\n{'='*60}")
         print("BENCHMARK 7 — Decision length sensitivity")
         print(f"{'='*60}")
-        print(f"\n  Token cost by length:")
+        print("\n  Token cost by length:")
         print(f"  {'Category':<12} {'Avg words':>10} {'word×1.3':>10} {'char÷4':>8}")
         for label, decisions in [("short", SHORT_D), ("medium", MEDIUM_D), ("long", LONG_D)]:
             texts  = [d[0] for d in decisions]
@@ -622,12 +624,12 @@ class TestDecisionLengthSensitivity:
 
         ov_near  = _overlap("use postgres", near)
         ov_exact = _overlap("use postgres", exact)
-        print(f"\n  Short decision novelty filter:")
+        print("\n  Short decision novelty filter:")
         print(f"    'use postgres' vs 'use postgresql db': overlap={ov_near*100:.0f}%  "
               f"→ {'PASSED' if stored_near else 'BLOCKED'}")
         print(f"    'use postgres' vs 'use postgres' (exact): overlap={ov_exact*100:.0f}%  "
               f"→ {'PASSED' if stored_exact else 'BLOCKED'}")
-        print(f"    Note: short decisions are sensitive to single-word changes")
+        print("    Note: short decisions are sensitive to single-word changes")
         assert not stored_exact, "Exact duplicate must be blocked"
 
     def test_novelty_filter_on_long_decisions(self):
@@ -640,12 +642,12 @@ class TestDecisionLengthSensitivity:
         )
         ov = _overlap(LONG_D[0][0], near_dup)
         stored, _ = store.update_decision(self.repo, near_dup, SESSION, "architecture")
-        print(f"\n  Long decision novelty filter (~80 words, minor conclusion change):")
+        print("\n  Long decision novelty filter (~80 words, minor conclusion change):")
         print(f"    Overlap: {ov*100:.1f}%  → {'BLOCKED ✓' if not stored else 'PASSED (false negative)'}")
-        print(f"    Long decisions are more robust to minor rewording — more signal tokens")
+        print("    Long decisions are more robust to minor rewording — more signal tokens")
 
     def test_session_start_tokens_by_length(self):
-        print(f"\n  Session start tokens by decision length (all stored as convention/constraint):")
+        print("\n  Session start tokens by decision length (all stored as convention/constraint):")
         print(f"  {'Category':<12} {'Rules preloaded':>16} {'Tokens injected':>16} {'Tokens/rule':>12}")
         for label, decisions in [("short", SHORT_D), ("medium", MEDIUM_D), ("long", LONG_D)]:
             repo = f"/bench/length-{label}"
@@ -654,7 +656,7 @@ class TestDecisionLengthSensitivity:
             result     = store.get_session_start_context(repo)
             ctx        = result["hookSpecificOutput"]["additionalContext"]
             tokens     = _tokens_words(ctx)
-            preloaded  = [l for l in ctx.splitlines() if l.startswith("- [")]
+            preloaded  = [line for line in ctx.splitlines() if line.startswith("- [")]
             per_rule   = tokens // max(len(preloaded), 1)
             print(f"  {label:<12} {len(preloaded):>16} {tokens:>16} {per_rule:>12}")
 
@@ -679,8 +681,10 @@ class TestConcurrentSessionIsolation:
 
         t1 = threading.Thread(target=session, args=(repo_a,))
         t2 = threading.Thread(target=session, args=(repo_b,))
-        t1.start(); t2.start()
-        t1.join();  t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
         final = current_file.read_text().strip()
         valid = final in (repo_a, repo_b)
@@ -688,11 +692,11 @@ class TestConcurrentSessionIsolation:
         print(f"\n{'='*60}")
         print("BENCHMARK 8 — Concurrent session isolation")
         print(f"{'='*60}")
-        print(f"\n  .current_repo race (2 threads × 50 writes each):")
+        print("\n  .current_repo race (2 threads × 50 writes each):")
         print(f"    Final value:   {final!r}")
         print(f"    Corrupt:       {'no ✓' if valid else 'YES ✗'}")
-        print(f"    Risk:          stale context (wrong repo), not corrupted data")
-        print(f"    Severity:      low — anchor hook corrects it on the next prompt")
+        print("    Risk:          stale context (wrong repo), not corrupted data")
+        print("    Severity:      low — anchor hook corrects it on the next prompt")
         assert valid, f"File corrupted: {final!r}"
 
     def test_store_file_integrity_under_concurrent_writes(self, tmp_path, monkeypatch):
@@ -718,15 +722,17 @@ class TestConcurrentSessionIsolation:
                     errors.append(str(e))
 
         threads = [threading.Thread(target=writer, args=(i,)) for i in range(3)]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         store_file = tmp_path / f"{store._slug(repo)}.json"
         data = json.loads(store_file.read_text())  # must parse — atomic save invariant
         count = len(data["entries"])
 
-        print(f"\n  Concurrent store writes (3 threads × 10 writes = 30 attempted):")
-        print(f"    File valid JSON post-writes: yes ✓ (atomic temp-file + os.replace)")
+        print("\n  Concurrent store writes (3 threads × 10 writes = 30 attempted):")
+        print("    File valid JSON post-writes: yes ✓ (atomic temp-file + os.replace)")
         print(f"    Entries stored:              {count}/30  (gap = novelty filter rejecting "
               f"near-identical payloads + last-write-wins races; locking would fix only the latter)")
         print(f"    Writer exceptions:           {len(errors)}")
@@ -766,11 +772,13 @@ class TestConcurrentSessionIsolation:
 
         workers = [threading.Thread(target=writer) for _ in range(2)] + \
                   [threading.Thread(target=reader) for _ in range(2)]
-        for t in workers: t.start()
+        for t in workers:
+            t.start()
         time.sleep(0.5)
         stop.set()
-        for t in workers: t.join()
+        for t in workers:
+            t.join()
 
-        print(f"\n  Torn-read hammer (2 writers vs 2 readers, 0.5s):")
+        print("\n  Torn-read hammer (2 writers vs 2 readers, 0.5s):")
         print(f"    Torn/failed reads: {len(torn)}")
         assert not torn, f"Reader saw torn JSON: {torn[:3]}"

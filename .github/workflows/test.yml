@@ -64,3 +64,28 @@ jobs:
 
       - name: Run stubbed benchmark harness tests
         run: uv run pytest tests/ -m slow -v --tb=short --no-cov
+
+  # Ruff was already in use locally (a .ruff_cache sits in the tree) but nothing enforced
+  # it, so unused imports and dead locals could land unnoticed. Rules live in pyproject's
+  # [tool.ruff.lint]; only the runner lives here.
+  #
+  # Version pinned exactly, and run via uvx rather than the dev group: ruff is a binary we
+  # never import, so pinning here keeps uv.lock untouched when it is bumped — and a fresh
+  # ruff release can never turn a green PR red on its own. Keep in step with CONTRIBUTING.
+  lint:
+    # Name carries no version: it is the GitHub check name, so baking 0.15.4 into it would
+    # rename the check on every bump and silently stop any branch-protection rule keyed to it.
+    name: Lint / ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      # `.` and not an explicit path list: ruff honours .gitignore, so .venv and the
+      # caches are already out, and a new top-level module is linted the day it lands.
+      - name: Run ruff
+        run: uvx ruff@0.15.4 check .

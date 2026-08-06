@@ -2964,7 +2964,7 @@ class TestReviewPendingAndSharePreview:
             "s1", "constraint", title="No Friday migrations")
         out = store.format_pending_review(tmp_repo)
         lines = out.splitlines()
-        head = next(l for l in lines if l.startswith("- "))
+        head = next(line for line in lines if line.startswith("- "))
         assert "No Friday migrations" in head
         assert "Never deploy database migrations" not in head  # body not on the bullet line
         idx = lines.index(head)
@@ -2976,7 +2976,7 @@ class TestReviewPendingAndSharePreview:
         store.update_decision(tmp_repo, "Never deploy on Fridays", "s1", "constraint")
         out = store.format_pending_review(tmp_repo)
         lines = out.splitlines()
-        head = next(l for l in lines if l.startswith("- "))
+        head = next(line for line in lines if line.startswith("- "))
         assert "Never deploy on Fridays" in head
         # the very next line is the action line, not a quoted repeat of the content
         idx = lines.index(head)
@@ -3555,7 +3555,7 @@ class TestRetrievalLog:
         store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-log")
         path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
         assert path.exists()
-        events = [json.loads(l) for l in path.read_text().splitlines() if l]
+        events = [json.loads(line) for line in path.read_text().splitlines() if line]
         assert events[-1]["e"] == "pointer"
         assert "db" in events[-1]["topics"]
         assert events[-1]["sid"] == "sess-log"
@@ -3564,7 +3564,7 @@ class TestRetrievalLog:
         for i in range(store._RETRIEVAL_LOG_CAP + 25):
             store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["db"], "sid": "s", "ts": i})
         path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
-        lines = [l for l in path.read_text().splitlines() if l]
+        lines = [line for line in path.read_text().splitlines() if line]
         assert len(lines) == store._RETRIEVAL_LOG_CAP
         assert json.loads(lines[-1])["ts"] == store._RETRIEVAL_LOG_CAP + 24  # tail kept
 
@@ -3842,7 +3842,7 @@ class TestCompactRehydration:
         store._ws_add(tmp_repo, "sess-title", [eid])
         rendered = store._rehydrate_working_set(tmp_repo, "sess-title")
         lines = rendered.splitlines()
-        head = next(l for l in lines if l.startswith("- ["))
+        head = next(line for line in lines if line.startswith("- ["))
         assert "Postgres over sqlite" in head
         assert "Use postgres for storage, not sqlite" not in head  # not on the bullet
         idx = lines.index(head)
@@ -3970,7 +3970,7 @@ class TestFollowThroughLog:
 
         store.log_followup_if_matching(tmp_repo, "db")
 
-        events = [json.loads(l) for l in path.read_text().splitlines() if l]
+        events = [json.loads(line) for line in path.read_text().splitlines() if line]
         assert events[-1]["e"] == "followup"
         assert events[-1]["query"] == "db"
 
@@ -4249,7 +4249,8 @@ class TestServerTitleParam:
         from contexer import server
         seen = {}
         def fake_update(repo, content, sid, subtype="", created_by="ai", replace_id="", title="", **kw):
-            seen.update(title=title, content=content); return True, "id123"
+            seen.update(title=title, content=content)
+            return True, "id123"
         monkeypatch.setattr(server.store, "update_decision", fake_update)
         monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
         server.update_context("body", subtype="architecture", title="My Title")
@@ -4259,7 +4260,8 @@ class TestServerTitleParam:
         from contexer import server
         seen = {}
         def fake_update_global(content, sid, subtype="", title=""):
-            seen.update(title=title, content=content); return True, "id456"
+            seen.update(title=title, content=content)
+            return True, "id456"
         monkeypatch.setattr(server.store, "update_global_decision", fake_update_global)
         server.update_global_context("body", subtype="constraint", title="My Global Title")
         assert seen["title"] == "My Global Title"
@@ -4272,7 +4274,7 @@ class TestTitleDisplay:
                               title="Adopt outbox for share retries")
         out = store.get_context(tmp_repo)
         lines = out.splitlines()
-        head = next(l for l in lines if "Adopt outbox for share retries" in l)
+        head = next(line for line in lines if "Adopt outbox for share retries" in line)
         # title on the bullet line; full body on the following indented line
         idx = lines.index(head)
         assert lines[idx].lstrip().startswith("- [")
@@ -4285,7 +4287,7 @@ class TestTitleDisplay:
         store.update_decision(tmp_repo, short_body, "s1", subtype="constraint")
         out = store.get_context(tmp_repo)
         lines = out.splitlines()
-        head = next(l for l in lines if short_body in l)
+        head = next(line for line in lines if short_body in line)
         idx = lines.index(head)
         assert lines[idx].lstrip().startswith("- [")
         # no follow-up indented duplicate of the same content
@@ -4299,7 +4301,7 @@ class TestTitleDisplay:
         store.update_decision(tmp_repo, long_body, "s1", subtype="architecture")
         out = store.get_context(tmp_repo)
         lines = out.splitlines()
-        head = next(l for l in lines if l.lstrip().startswith("- [") and "sharding" in l)
+        head = next(line for line in lines if line.lstrip().startswith("- [") and "sharding" in line)
         idx = lines.index(head)
         assert long_body not in lines[idx]          # bullet line has the truncated title, not the full body
         assert lines[idx + 1] == f"    {long_body}"  # full body on the next, indented line
@@ -4309,7 +4311,7 @@ class TestTitleDisplay:
         # a personal and a team decision on the same topic both appear in one get_context call.
         store.update_decision(tmp_repo, "Use postgres for storage", "s1", subtype="architecture")
         out = store.get_context(tmp_repo)
-        head = next(l for l in out.splitlines() if "Use postgres for storage" in l)
+        head = next(line for line in out.splitlines() if "Use postgres for storage" in line)
         assert head.lstrip().startswith("- [scope=personal] [")
 
 

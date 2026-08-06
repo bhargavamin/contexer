@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from contexer import adapters, store
+from contexer.adapters import claude, cursor
 
 
 class TestRegistry:
@@ -71,9 +72,6 @@ class TestSelect:
     def test_select_unknown_raises(self):
         with pytest.raises(KeyError):
             adapters.select("emacs")
-
-
-from contexer.adapters import claude
 
 
 class TestClaudeFormatters:
@@ -177,9 +175,6 @@ class TestClaudeCaptureEntrypoints:
         assert claude.rationale(tmp_repo, "garbage") == "{}"
 
 
-from contexer.adapters import cursor
-
-
 class TestCursorFormatters:
     def test_session_start_injects_additional_context_with_nudge(self):
         d = cursor.format_session_start({"status": "ignored on cursor", "context": "RULES"})
@@ -206,7 +201,6 @@ class TestCursorEntrypoints:
         assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
 
     def test_session_start_writes_managed_rule_file(self, tmp_repo):
-        from pathlib import Path
         raw = _json.dumps({"workspace_roots": [tmp_repo], "session_id": "s1"})
         cursor.session_start("", raw)
         rule = Path(tmp_repo) / ".cursor" / "rules" / "contexer.mdc"
@@ -217,7 +211,6 @@ class TestCursorEntrypoints:
         assert "get_context" in body and "update_context" in body
 
     def test_session_start_does_not_overwrite_user_rule_file(self, tmp_repo):
-        from pathlib import Path
         rule = Path(tmp_repo) / ".cursor" / "rules" / "contexer.mdc"
         rule.parent.mkdir(parents=True)
         rule.write_text("my own rule, hands off")
@@ -234,7 +227,6 @@ class TestCursorEntrypoints:
         assert (store.STORE_DIR / ".current_repo").read_text() == tmp_repo
 
     def test_capture_does_not_anchor_config_dir(self, tmp_repo, monkeypatch):
-        from pathlib import Path
         from contexer import store
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
         (store.STORE_DIR / ".current_repo").write_text(tmp_repo)  # a sane prior value

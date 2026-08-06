@@ -82,7 +82,7 @@ def _read_config_command(home: Path):
     if not path.exists():
         return None
     try:
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
         return None
     servers = data.get("mcp_servers", {})
@@ -203,16 +203,25 @@ def install(home: Path) -> list[str]:
     # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
     config_path = home / ".codex" / "config.toml"
-    existing = config_path.read_text() if config_path.exists() else ""
-    new_text = _set_contexer_stanza(existing, contexer_bin)
     try:
-        tomllib.loads(new_text)
-    except tomllib.TOMLDecodeError:
-        log.append("  ! ~/.codex/config.toml is not valid TOML — left untouched (fix it, then re-run)")
-    else:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(config_path, new_text)
-        log.append("  ✓ MCP server registered in ~/.codex/config.toml")
+        existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    except (OSError, UnicodeDecodeError):
+        # The same tolerance _read_config_command already applies to this file. Raising here
+        # would surface through cli._run_guarded as "not valid JSON" (it is TOML), and it
+        # would strand `--target all` half-installed: the adapters iterated before Codex
+        # already wired, the ones after it never reached.
+        existing = None
+        log.append("  ! ~/.codex/config.toml is unreadable (not UTF-8?) — left untouched (fix it, then re-run)")
+    if existing is not None:
+        new_text = _set_contexer_stanza(existing, contexer_bin)
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError:
+            log.append("  ! ~/.codex/config.toml is not valid TOML — left untouched (fix it, then re-run)")
+        else:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(config_path, new_text)
+            log.append("  ✓ MCP server registered in ~/.codex/config.toml")
 
     # Hooks (~/.codex/hooks.json) — same JSON schema and event names as Claude Code.
     hooks_path = home / ".codex" / "hooks.json"
@@ -348,8 +357,12 @@ def uninstall(home: Path) -> list[str]:
     log: list[str] = []
 
     config_path = home / ".codex" / "config.toml"
-    if config_path.exists():
-        text = config_path.read_text()
+    try:
+        text = config_path.read_text(encoding="utf-8") if config_path.exists() else None
+    except (OSError, UnicodeDecodeError):
+        text = None      # must not abort uninstall — the user has to get out of this state
+        log.append("  ! ~/.codex/config.toml is unreadable (not UTF-8?) — left untouched")
+    if text is not None:
         new_text = _remove_contexer_stanza(text)
         if new_text == text:
             log.append("  - No MCP server entry found in ~/.codex/config.toml")

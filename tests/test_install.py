@@ -1,7 +1,6 @@
 """Tests for contexer CLI install/uninstall commands."""
 import json
 import sys
-from pathlib import Path
 
 import pytest
 

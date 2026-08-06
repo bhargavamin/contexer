@@ -1,6 +1,5 @@
 """A/B report: medians, deltas, chain curves, telemetry agreement, model guard."""
 import json
-from pathlib import Path
 
 import pytest
 

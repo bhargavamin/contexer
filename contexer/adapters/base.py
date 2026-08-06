@@ -24,7 +24,7 @@ _BOOTSTRAP_CMD_MARKER = "managed by contexer"
 
 
 def _bootstrap_command_text() -> str:
-    return resources.files("contexer").joinpath("bootstrap_command.md").read_text()
+    return resources.files("contexer").joinpath("bootstrap_command.md").read_text(encoding="utf-8")
 
 
 def _load(path: Path) -> dict:
@@ -34,7 +34,7 @@ def _load(path: Path) -> dict:
     # mid-install that could leave the config half-written.
     if not path.exists():
         return {}
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} is not a JSON object")
     return data

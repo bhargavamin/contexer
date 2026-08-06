@@ -8,7 +8,6 @@ from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
 from contexer import adapters
-from contexer.adapters import claude
 from contexer.adapters.base import _is_corrupt, _load_safe
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
@@ -286,17 +285,28 @@ def review() -> None:
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
-                print(f"Approved.")
+                print("Approved.")
+            else:
+                # Print the store's reason instead of dropping it. `pending` was read before
+                # the prompt, so a concurrent MCP session (or a second terminal) can have
+                # approved this id already — silence there reads as a lost keypress, and the
+                # tail would print "nothing changed" under a message the user never saw.
+                skipped += 1
+                print(msg)
         elif choice in ("D", "DISMISS"):
             ok, msg = store.approve_decision(repo_path, entry["id"], "dismiss")
             if ok:
                 dismissed += 1
-                print(msg)
+            else:
+                skipped += 1
+            print(msg)
         elif choice in ("N", "NO"):
             ok, msg = store.approve_decision(repo_path, entry["id"], "ignore")
             if ok:
                 ignored += 1
-                print(msg)
+            else:
+                skipped += 1
+            print(msg)
         elif choice in ("E", "EDIT"):
             print(f'Current: "{entry["content"]}"')
             try:
@@ -310,6 +320,9 @@ def review() -> None:
                 if ok:
                     edited += 1
                     print("Approved with edits.")
+                else:
+                    skipped += 1
+                    print(msg)
             else:
                 print("No changes made, skipping.")
                 skipped += 1
@@ -418,8 +431,11 @@ def status(rest: list | None = None) -> None:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     if current.exists():
         try:
-            print(f"  current repo: {current.read_text().strip()}")
-        except OSError:
+            # UnicodeDecodeError too, not just OSError: the shell hooks write this pointer
+            # with `printf` (raw bytes, no encoding contract), so a non-UTF-8 path must
+            # print "(unreadable)" rather than traceback out of `contexer status`.
+            print(f"  current repo: {current.read_text(encoding='utf-8').strip()}")
+        except (OSError, UnicodeDecodeError):
             print("  current repo: (unreadable)")
 
     # Team sync block (Phase 2 observability). ZERO network calls - config.toml + the team
@@ -459,8 +475,17 @@ def status(rest: list | None = None) -> None:
         else:
             token_source = "none"
         print(f"    token:      {token_source}")
-        repo = current.read_text().strip() if current.exists() else ""
-        if not repo:
+        unreadable = False
+        try:
+            repo = current.read_text(encoding="utf-8").strip() if current.exists() else ""
+        except (OSError, UnicodeDecodeError):
+            # Distinguished from an absent pointer on purpose: the line above already
+            # printed "(unreadable)", and reporting the same file as "not detected" here
+            # would send the reader hunting for a hook that in fact ran.
+            repo, unreadable = "", True
+        if unreadable:
+            print("    cache:      (current repo pointer unreadable)")
+        elif not repo:
             print("    cache:      (no current repo detected)")
         else:
             # Every value below is typed by whatever is in the cache file, not by us —

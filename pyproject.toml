@@ -56,6 +56,21 @@ dev = [
     "pytest-cov>=7.1.0",
 ]
 
+[tool.ruff]
+# The lint gate CI enforces (.github/workflows/test.yml). Ruff is not a dev-group
+# dependency on purpose: it is a standalone binary, never imported, so CI and
+# CONTRIBUTING both invoke it as `uvx ruff@<exact version> check` — pinned like every
+# other tool here, and no uv.lock churn when it is bumped.
+target-version = "py312"          # matches requires-python; never inferred from the local interpreter
+# Deliberately NO line-length: E501 is not selected (comment-heavy modules run past
+# any bound worth setting), and declaring one would make miner._emit_ruff advertise a
+# "Line length N enforced by ruff" convention this repo does not actually enforce.
+
+[tool.ruff.lint]
+# Ruff's current default set, spelled out on purpose: a future ruff release widening
+# its defaults must arrive as an explicit commit here, not as a red PR nobody changed.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # --cov-fail-under must stay HERE, not on the CI command line: addopts is the

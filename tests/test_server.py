@@ -11,6 +11,7 @@ import json
 import threading
 
 import contexer.share as share_mod
+from contexer import config as _config_mod
 from contexer import server, store
 
 
@@ -128,7 +129,6 @@ def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
 
 
 # ── cloud-push preview gate + review_pending ─────────────────────────────────────
-from contexer import config as _config_mod
 
 
 def test_share_decision_previews_by_default_without_pushing(monkeypatch):
@@ -331,7 +331,7 @@ def test_get_context_logs_followup_on_matching_pointer(tmp_repo):
     result = server.get_context(tmp_repo, "db")
 
     assert result == expected  # log-only side effect — the returned context is unchanged
-    events = [json.loads(l) for l in path.read_text().splitlines() if l]
+    events = [json.loads(line) for line in path.read_text().splitlines() if line]
     assert events[-1]["e"] == "followup"
     assert events[-1]["query"] == "db"
 

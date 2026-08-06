@@ -30,8 +30,11 @@ jobs:
       - name: Build package
         run: uv build
 
+      # SHA-pinned, never the `release/v1` BRANCH it used to track: this job carries
+      # `id-token: write` (PyPI trusted publishing), so what runs here must not change
+      # without a commit. Keep in lockstep with release-please.yml's pin.
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
       - name: Upload dist to GitHub release
         env:

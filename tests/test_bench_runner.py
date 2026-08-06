@@ -111,7 +111,7 @@ class TestRunCampaign:
     def test_rows_cache_fields_and_totals(self, tmp_path, stub_claude):
         out = _run_stubbed_campaign(tmp_path / "a", reps=1, task_ids=["rat-storage", "conv-endpoint"],
                                     claude_cmd=stub_claude, seed=5, model="stub-model")
-        rows = [json.loads(l) for l in out.read_text().splitlines()]
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
         assert len(rows) == 6  # 2 tasks x 3 conditions x 1 rep
         for r in rows:
             assert r["condition"] in ("without", "claudemd", "with") and r["error"] == ""
@@ -131,7 +131,7 @@ class TestRunCampaign:
                                     task_ids=["rat-storage", "conv-endpoint"],
                                     claude_cmd=stub_claude, seed=5,
                                     conditions=("without", "claudemd"))
-        rows = [json.loads(l) for l in out.read_text().splitlines()]
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
         assert [r["condition"] for r in rows] == ["without", "claudemd"] * 4
         # per rep: task1 both conditions, then task2 both conditions
         assert [(r["rep"], r["task_id"], r["condition"]) for r in rows[:4]] == [
@@ -144,7 +144,7 @@ class TestRunCampaign:
         out = _run_stubbed_campaign(
             tmp_path / "b", reps=1, task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
             claude_cmd=stub_claude, seed=5)
-        rows = [json.loads(l) for l in out.read_text().splitlines()]
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
         chain_rows = [r for r in rows if r["chain"] == "orders"]
         assert sorted({r["step"] for r in chain_rows}) == [1, 2, 3]
         # Steps stay sequential within a condition; conditions cycle within the rep.
@@ -160,7 +160,7 @@ class TestRunCampaign:
             claude_cmd=stub_claude_probe, seed=5,
             conditions=("without", "claudemd", "with", "claudemd_with"))
         rows = {r["condition"]: r for r in
-                (json.loads(l) for l in out.read_text().splitlines())}
+                (json.loads(line) for line in out.read_text().splitlines())}
         assert "settings:no claudemd:no" in rows["without"]["result_snippet"]
         # the honest competitor: a CLAUDE.md, but NO contexer hooks in its HOME
         assert "settings:no claudemd:yes" in rows["claudemd"]["result_snippet"]
@@ -175,7 +175,7 @@ class TestRunCampaign:
             claude_cmd=stub_claude_probe, seed=5,
             conditions=("agentsmd", "claudemd_agentsmd"))
         rows = {r["condition"]: r for r in
-                (json.loads(l) for l in out.read_text().splitlines())}
+                (json.loads(line) for line in out.read_text().splitlines())}
         assert "settings:no claudemd:no agents:yes" in rows["agentsmd"]["result_snippet"]
         assert "settings:no claudemd:yes agents:yes" in rows["claudemd_agentsmd"]["result_snippet"]
 
@@ -240,7 +240,7 @@ class TestRunCampaign:
         out = _run_stubbed_campaign(
             tmp_path / "e", reps=1, task_ids=["rat-storage"],
             claude_cmd=stub_claude_fail, seed=5)
-        rows = [json.loads(l) for l in out.read_text().splitlines()]
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
         assert rows and all(r["error"].startswith("session error (api_error)") for r in rows)
         assert all("Please run /login" in r["error"] for r in rows)
 
@@ -306,7 +306,7 @@ class TestChainScoringIsolation:
             tmp_path / "c", reps=1,
             task_ids=["chain-1-cache", "chain-2-list", "chain-3-audit"],
             claude_cmd=str(p), seed=5, conditions=("without",))
-        rows = [json.loads(l) for l in out.read_text().splitlines()]
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
         by_step = {r["step"]: r for r in rows}
         assert by_step[1]["violations"] >= 1   # the bad file is step 1's work
         assert by_step[2]["violations"] == 0   # not re-counted
@@ -317,7 +317,8 @@ class TestContexerSourcesCLI:
     def test_malformed_pair_rejected_before_any_run(self, tmp_path):
         # Greptile #117: a pair without '=' must be an argparse error (exit 2 with a
         # clear message), never a ValueError after the campaign machinery starts.
-        import subprocess, sys
+        import subprocess
+        import sys
         proc = subprocess.run(
             [sys.executable, "-m", "benchmarks.run",
              "--tasks", "rat-storage", "--out", str(tmp_path / "out"),

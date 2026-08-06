@@ -17,7 +17,6 @@ Token approximation: words × 1.3 (GPT/Claude tokenisers average ~0.75 words per
 
 import math
 import time
-from pathlib import Path
 
 import pytest
 
@@ -217,8 +216,8 @@ class TestSessionStartContext:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         msg = result["systemMessage"]
 
-        preloaded_lines = [l for l in ctx.splitlines() if l.startswith("- [")]
-        deferred_note = [l for l in ctx.splitlines() if "decision(s) stored" in l]
+        preloaded_lines = [line for line in ctx.splitlines() if line.startswith("- [")]
+        deferred_note = [line for line in ctx.splitlines() if "decision(s) stored" in line]
 
         preloaded_count = len(preloaded_lines)
         deferred_count = int(deferred_note[0].split()[0]) if deferred_note else 0
@@ -230,9 +229,9 @@ class TestSessionStartContext:
         print(f"  Preloaded:        {preloaded_count} decisions (convention + constraint + pattern)")
         print(f"  Deferred (JIT):   {deferred_count} decisions (architecture)")
         print(f"  Tokens injected:  ~{_approx_tokens(ctx)}")
-        print(f"  Tokens baseline:  0 (no Contexer)")
+        print("  Tokens baseline:  0 (no Contexer)")
         print(f"  Overhead:         +{_approx_tokens(ctx)} tokens per session start")
-        print(f"\n  Preloaded content preview:")
+        print("\n  Preloaded content preview:")
         for line in preloaded_lines[:3]:
             print(f"    {line[:80]}...")
         if len(preloaded_lines) > 3:
@@ -293,7 +292,7 @@ class TestRationaleHitRate:
                 misses.append(prompt)
                 print(f"    ✗ [miss] \"{prompt[:55]}\"")
 
-        print(f"\n  MISSES (expected to be silent no-ops):")
+        print("\n  MISSES (expected to be silent no-ops):")
         false_positives = []
         for prompt in MISS_PROMPTS:
             start = time.perf_counter()
@@ -306,22 +305,21 @@ class TestRationaleHitRate:
             else:
                 print(f"    ✓ [silent, {elapsed_ms:.1f}ms] \"{prompt[:55]}\"")
 
-        hit_rate = len(hits) / len(HIT_PROMPTS) * 100
         avg_hit_ms = sum(ms for _, ms, _ in hits) / len(hits) if hits else 0
         avg_hit_tokens = sum(tk for _, _, tk in hits) / len(hits) if hits else 0
 
-        print(f"\n  Summary:")
+        print("\n  Summary:")
         print(f"    Hit rate:           {_pct(len(hits), len(HIT_PROMPTS))}")
         print(f"    False positive rate:{_pct(len(false_positives), len(MISS_PROMPTS))}")
         print(f"    Avg retrieval time: {avg_hit_ms:.2f}ms")
         print(f"    Avg tokens injected:{avg_hit_tokens:.0f} per hit")
-        print(f"    Tokens on miss:     0 (silent no-op)")
+        print("    Tokens on miss:     0 (silent no-op)")
 
         # Document known false positives separately — short keywords substring-matching
         # unrelated stored decisions (e.g. "form" → "format").
         unexpected_fps = [(p, r) for p, r in false_positives if p not in KNOWN_FALSE_POSITIVES]
         if false_positives:
-            print(f"\n  Known false positives (documented limitations):")
+            print("\n  Known false positives (documented limitations):")
             for p, r in false_positives:
                 kw = [w for w in p.lower().split() if len(w) > 3 and w not in store._QUERY_STOP_WORDS and w.isalpha()]
                 print(f"    \"{p}\" → keyword '{kw}' substring-matched an unrelated decision")
@@ -395,13 +393,13 @@ class TestOnDemandRetrieval:
         avg_hit_ms = sum(ms for _, ms, _ in hits) / len(hits) if hits else 0
         avg_miss_ms = sum(ms for _, ms in misses) / len(misses) if misses else 0
 
-        print(f"\n  Summary:")
+        print("\n  Summary:")
         print(f"    Queries run:       {len(ONDEMAND_QUERIES)}")
         print(f"    Hits:              {len(hits)}")
         print(f"    Misses:            {len(misses)}")
         print(f"    Avg hit latency:   {avg_hit_ms:.2f}ms")
         print(f"    Avg miss latency:  {avg_miss_ms:.2f}ms")
-        print(f"    Tokens on miss:    0 (no context injected)")
+        print("    Tokens on miss:    0 (no context injected)")
 
         # Validate expected hits match actual hits
         for query, expected_hit in ONDEMAND_QUERIES:
@@ -417,7 +415,7 @@ class TestOnDemandRetrieval:
         for subtype, expected_count in [("convention", 5), ("constraint", 5),
                                          ("architecture", 5), ("pattern", 5)]:
             result = store.get_context(DEMO_REPO, entry_type=subtype, limit=100)
-            lines = [l for l in result.splitlines() if l.startswith("- [")]
+            lines = [line for line in result.splitlines() if line.startswith("- [")]
             print(f"\n  Filter entry_type={subtype!r}: returned {len(lines)} decisions "
                   f"(expected {expected_count})")
             assert len(lines) == expected_count, (
@@ -451,7 +449,7 @@ class TestGlobalStoreFallback:
         print("BENCHMARK 4 — Global store fallback")
         print(f"{'='*60}")
         print(f"  Prompt:   \"{prompt}\"")
-        print(f"  Keyword not in repo → falls back to global store")
+        print("  Keyword not in repo → falls back to global store")
         print(f"  Result:   {'HIT (global fallback)' if result else 'MISS'} [{elapsed_ms:.2f}ms]")
         if result:
             print(f"  Tokens:   ~{_approx_tokens(result)}")
@@ -463,7 +461,7 @@ class TestGlobalStoreFallback:
         # "postgresql" exists in repo — should return repo result, not global
         prompt = "why did we choose postgresql for our database?"
         result = store.get_context_for_prompt(DEMO_REPO, prompt)
-        print(f"\n  Priority test: repo match beats global fallback")
+        print("\n  Priority test: repo match beats global fallback")
         print(f"  Prompt:   \"{prompt}\"")
         print(f"  Result:   {'repo (correct)' if result and 'global context' not in result.lower() else 'global (incorrect)'}")
 
@@ -485,7 +483,7 @@ class TestNoveltyFilter:
         print(f"\n{'='*60}")
         print("BENCHMARK 5 — Novelty filter effectiveness")
         print(f"{'='*60}")
-        print(f"  Duplicate decisions attempted: 20")
+        print("  Duplicate decisions attempted: 20")
         print(f"  Blocked by novelty filter:     {blocked}/20 ({100*blocked//20}%)")
         print(f"  Noise that got through:        {20-blocked}/20")
 
@@ -497,10 +495,10 @@ class TestNoveltyFilter:
         # Only "PR" → "pull request" changed — 17/19 token overlap = 89% > 70% threshold
         near_dup = "Never commit directly to main — all changes require a pull request with at least one approval before merging"
         stored, _ = store.update_decision(DEMO_REPO, near_dup, SESSION)
-        print(f"\n  Near-duplicate test:")
+        print("\n  Near-duplicate test:")
         print(f"    Input:   \"{near_dup[:75]}\"")
         print(f"    Result:  {'BLOCKED ✓' if not stored else 'STORED (false negative) ✗'}")
-        print(f"    Note:    'PR' → 'pull request' rewording; token overlap ~89% > 70% threshold")
+        print("    Note:    'PR' → 'pull request' rewording; token overlap ~89% > 70% threshold")
         assert not stored, "Near-duplicate should be blocked by novelty filter"
 
     def test_tokenisation_edge_case(self, populated_store, monkeypatch_module):
@@ -509,16 +507,16 @@ class TestNoveltyFilter:
         # blocks when overlap IS high, so this causes false negatives, not false positives.
         edge_case = "Always use conventional commits format type scope description types are feat fix docs refactor chore test"
         stored, _ = store.update_decision(DEMO_REPO, edge_case, SESSION)
-        print(f"\n  Tokenisation edge case (comma stripping):")
-        print(f"    Original: 'feat, fix, docs, refactor, chore, test' — commas attached = separate tokens")
-        print(f"    Rewrite:  'feat fix docs refactor chore test' — same words, no commas")
+        print("\n  Tokenisation edge case (comma stripping):")
+        print("    Original: 'feat, fix, docs, refactor, chore, test' — commas attached = separate tokens")
+        print("    Rewrite:  'feat fix docs refactor chore test' — same words, no commas")
         print(f"    Result:   {'STORED (false negative — commas reduced measured overlap)' if stored else 'BLOCKED ✓'}")
-        print(f"    Note:     This is a known filter limitation, not data corruption.")
+        print("    Note:     This is a known filter limitation, not data corruption.")
 
     def test_genuinely_new_decision_passes(self, populated_store, monkeypatch_module):
         genuinely_new = "All background jobs use Bull queue with Redis — no direct setTimeout or setInterval for async work"
         stored, eid = store.update_decision(DEMO_REPO, genuinely_new, SESSION)
-        print(f"\n  Genuinely new decision test:")
+        print("\n  Genuinely new decision test:")
         print(f"    Input:   \"{genuinely_new[:70]}\"")
         print(f"    Result:  {'STORED ✓' if stored else 'BLOCKED (false positive) ✗'}")
         assert stored, "Novel decision should pass the filter"
@@ -643,8 +641,8 @@ class TestLargeScaleBenchmark:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         msg = result["systemMessage"]
 
-        preloaded_lines = [l for l in ctx.splitlines() if l.startswith("- [")]
-        deferred_note   = [l for l in ctx.splitlines() if "decision(s) stored" in l]
+        preloaded_lines = [line for line in ctx.splitlines() if line.startswith("- [")]
+        deferred_note   = [line for line in ctx.splitlines() if "decision(s) stored" in line]
         preloaded_count = len(preloaded_lines)
         deferred_count  = int(deferred_note[0].split()[0]) if deferred_note else 0
         tokens = _approx_tokens(ctx)
@@ -657,9 +655,9 @@ class TestLargeScaleBenchmark:
         print(f"\n{'='*60}")
         print("LARGE-SCALE BENCHMARK (50 decisions) vs baseline (20)")
         print(f"{'='*60}")
-        print(f"\n  Decision breakdown:")
-        print(f"    conventions:  13   constraints: 12   architecture: 13   patterns: 12")
-        print(f"\n  Session start:")
+        print("\n  Decision breakdown:")
+        print("    conventions:  13   constraints: 12   architecture: 13   patterns: 12")
+        print("\n  Session start:")
         print(f"    {'Metric':<28} {'20 decisions':>14} {'50 decisions':>14} {'Delta':>10}")
         print(f"    {'-'*66}")
         print(f"    {'Preloaded (conv+con+pat)':<28} {BASELINE_PRE:>14} {preloaded_count:>14} {preloaded_count-BASELINE_PRE:>+10}")
@@ -681,7 +679,7 @@ class TestLargeScaleBenchmark:
     def test_retrieval_timing_at_scale(self, large_store, monkeypatch_module):
         times_ms = []
 
-        print(f"\n  On-demand retrieval latency at 50 decisions:")
+        print("\n  On-demand retrieval latency at 50 decisions:")
         for query, _ in LARGE_HIT_PROMPTS:
             kw = [w for w in query.lower().split()
                   if len(w) > 3 and w not in store._QUERY_STOP_WORDS and w.isalpha()]
@@ -697,7 +695,7 @@ class TestLargeScaleBenchmark:
 
         avg_ms = sum(times_ms) / len(times_ms)
         print(f"\n  Avg latency (50 decisions): {avg_ms:.3f}ms")
-        print(f"  Avg latency (20 decisions): 0.040ms  (from baseline benchmark)")
+        print("  Avg latency (20 decisions): 0.040ms  (from baseline benchmark)")
         print(f"  Delta:                      {avg_ms - 0.040:+.3f}ms")
 
         # Effectively instant at 50 decisions (~0.5ms locally). Versioned entries carry
@@ -709,8 +707,8 @@ class TestLargeScaleBenchmark:
     def test_rationale_hit_rate_at_scale(self, large_store, monkeypatch_module):
         hits, misses, false_positives = [], [], []
 
-        print(f"\n  Rationale auto-injection at 50 decisions:")
-        print(f"  HITS:")
+        print("\n  Rationale auto-injection at 50 decisions:")
+        print("  HITS:")
         for prompt, _ in LARGE_HIT_PROMPTS:
             start = time.perf_counter()
             result = store.get_context_for_prompt(LARGE_REPO, prompt)
@@ -723,10 +721,9 @@ class TestLargeScaleBenchmark:
                 misses.append(prompt)
                 print(f"    ✗ [miss] \"{prompt[:60]}\"")
 
-        print(f"\n  MISSES (expected silent):")
+        print("\n  MISSES (expected silent):")
         for prompt in LARGE_MISS_PROMPTS:
             result = store.get_context_for_prompt(LARGE_REPO, prompt)
-            elapsed_ms_r = time.perf_counter()
             if result:
                 false_positives.append(prompt)
                 print(f"    ✗ [false positive] \"{prompt}\"")
@@ -736,7 +733,7 @@ class TestLargeScaleBenchmark:
         avg_hit_ms  = sum(ms for _, ms, _ in hits) / len(hits) if hits else 0
         avg_hit_tk  = sum(tk for _, _, tk in hits) / len(hits) if hits else 0
 
-        print(f"\n  Comparison:")
+        print("\n  Comparison:")
         print(f"    {'Metric':<32} {'20 decisions':>14} {'50 decisions':>14}")
         print(f"    {'-'*60}")
         print(f"    {'Hit rate':<32} {'10/10 (100%)':>14} {_pct(len(hits), len(LARGE_HIT_PROMPTS)):>14}")
@@ -748,10 +745,10 @@ class TestLargeScaleBenchmark:
 
     def test_subtype_filter_precision_at_scale(self, large_store, monkeypatch_module):
         expected = {"convention": 13, "constraint": 12, "architecture": 13, "pattern": 12}
-        print(f"\n  Subtype filter precision at 50 decisions:")
+        print("\n  Subtype filter precision at 50 decisions:")
         for subtype, count in expected.items():
             result = store.get_context(LARGE_REPO, entry_type=subtype, limit=100)
-            lines = [l for l in result.splitlines() if l.startswith("- [")]
+            lines = [line for line in result.splitlines() if line.startswith("- [")]
             status = "✓" if len(lines) == count else "✗"
             print(f"    {status} entry_type={subtype!r}: {len(lines)}/{count} returned")
             assert len(lines) == count
@@ -760,12 +757,12 @@ class TestLargeScaleBenchmark:
         # Unfiltered get_context is capped at 10; filtered at 25.
         # With 25 decisions per half, the caps are now actually exercised.
         unfiltered = store.get_context(LARGE_REPO)
-        unfiltered_lines = [l for l in unfiltered.splitlines() if l.startswith("- [")]
+        unfiltered_lines = [line for line in unfiltered.splitlines() if line.startswith("- [")]
 
         filtered = store.get_context(LARGE_REPO, entry_type="convention")
-        filtered_lines = [l for l in filtered.splitlines() if l.startswith("- [")]
+        filtered_lines = [line for line in filtered.splitlines() if line.startswith("- [")]
 
-        print(f"\n  Display caps at 50 decisions (25 conv+constraint, 25 arch+pattern):")
+        print("\n  Display caps at 50 decisions (25 conv+constraint, 25 arch+pattern):")
         print(f"    Unfiltered overview: shows {len(unfiltered_lines)} of 50 total (cap=10)")
         print(f"    'showing N of M' note present: {'yes' if 'showing' in unfiltered else 'no'}")
         print(f"    Filtered (convention): shows {len(filtered_lines)} of 13 (cap=25)")
@@ -781,7 +778,7 @@ class TestLargeScaleBenchmark:
             1 for content in LARGE_CONVENTIONS + LARGE_CONSTRAINTS + LARGE_ARCHITECTURE + LARGE_PATTERNS
             if not store.update_decision(LARGE_REPO, content, LARGE_SESSION)[0]
         )
-        print(f"\n  Novelty filter at 50 decisions:")
+        print("\n  Novelty filter at 50 decisions:")
         print(f"    Duplicates attempted: {total}")
         print(f"    Blocked:              {blocked}/{total} ({100*blocked//total}%)")
         assert blocked == total
@@ -803,25 +800,25 @@ class TestSummaryReport:
         print(f"\n{'='*60}")
         print("SUMMARY — Contexer effectiveness report")
         print(f"{'='*60}")
-        print(f"\n  Demo project: 20 decisions (5 each: convention, constraint, architecture, pattern)")
+        print("\n  Demo project: 20 decisions (5 each: convention, constraint, architecture, pattern)")
         print()
-        print(f"  Session start overhead:")
-        print(f"    Without Contexer: 0 tokens — Claude starts blind")
+        print("  Session start overhead:")
+        print("    Without Contexer: 0 tokens — Claude starts blind")
         print(f"    With Contexer:    ~{session_tokens} tokens — 10 rules preloaded, 10 deferred")
         print(f"    Cost:             ~{session_tokens} tokens once at session open")
-        print(f"    Benefit:          conventions + constraints always active — no re-explaining")
+        print("    Benefit:          conventions + constraints always active — no re-explaining")
         print()
-        print(f"  On-demand retrieval (architecture/pattern):")
-        print(f"    Only fetched when relevant — 0 token cost on unrelated tasks")
-        print(f"    Typical retrieval: <1ms (in-process JSON read + substring filter)")
+        print("  On-demand retrieval (architecture/pattern):")
+        print("    Only fetched when relevant — 0 token cost on unrelated tasks")
+        print("    Typical retrieval: <1ms (in-process JSON read + substring filter)")
         print()
-        print(f"  Rationale auto-injection:")
+        print("  Rationale auto-injection:")
         print(f"    Hit rate on 'why/reason/rationale' prompts: {_pct(hit_count, len(HIT_PROMPTS))}")
-        print(f"    Cost on miss: 0 tokens (pure no-op)")
+        print("    Cost on miss: 0 tokens (pure no-op)")
         print(f"    Cost on hit: ~{_approx_tokens(store.get_context(DEMO_REPO, query='postgresql'))} tokens (one decision excerpt)")
         print()
-        print(f"  Novelty filter:")
-        print(f"    Blocks duplicate/near-duplicate decisions before storage")
-        print(f"    Keeps store clean — no manual curation needed")
+        print("  Novelty filter:")
+        print("    Blocks duplicate/near-duplicate decisions before storage")
+        print("    Keeps store clean — no manual curation needed")
         print(f"{'='*60}")
         assert True  # summary always passes

@@ -45,7 +45,8 @@ only; they are not part of any pytest run or CI job.
 # Install dev dependencies
 uv sync
 
-# Everything, with the ≥85% coverage gate
+# Everything, with the ≥85% coverage gate (it lives in pyproject's addopts, so it applies
+# to every invocation below too — see "Coverage floor" under Contributing)
 uv run pytest tests/
 
 # Run a single file — --no-cov required: the ≥85% floor in addopts judges

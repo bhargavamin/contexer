@@ -13,7 +13,7 @@ import subprocess
 import pytest
 
 from contexer import store
-from contexer.adapters import claude, cursor, gemini
+from contexer.adapters import cursor, gemini
 from contexer.ui import daemon
 
 # The exact status lines this build produced before the console existed. Literals, not

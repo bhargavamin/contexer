@@ -1,6 +1,5 @@
 """Tests for global context store — all permutations of global/repo store interaction."""
 import json
-from pathlib import Path
 
 import pytest
 
