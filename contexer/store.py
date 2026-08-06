@@ -697,6 +697,48 @@ def _passes_filter(content: str, existing: list) -> bool:
     return _is_novel(content, decisions_only)
 
 
+_LINT_MIN_LEN = 400          # short captures are cheap to store; never bounce them
+_LINT_MAX_FIRST_SENT = 45    # words before the first sentence must have stated a decision
+_LINT_NARRATIVE_RE = re.compile(
+    r"^\(?\s*(?:\d{4}-\d{2}-\d{2}\)?\s*)?"                # optional leading (date)
+    r"(investigated|investigation|debugged|explored|traced|reviewed"
+    r"|bug ?fix|fixed|fix for|root cause|post-?mortem)\b",
+    re.IGNORECASE,
+)
+_LINT_BOUNCE = (
+    "Not stored — this reads as an investigation narrative, not a decision. "
+    "Restate it and call update_context again NOW, in this same turn:\n"
+    "- First sentence = the decision itself, imperative, with the why "
+    "(e.g. 'Key the store on the main worktree path, not the linked worktree — "
+    "rev-parse returns the worktree path').\n"
+    "- Evidence and investigation details may follow AFTER that first sentence.\n"
+    "- Pass a concise imperative title too.\n"
+    "Do not drop the capture — re-submit it restated."
+)
+
+
+def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> str:
+    """Deterministic capture-shape gate for model-authored captures ('' = passes).
+
+    Bounces content that opens as investigation narrative instead of a decision, with
+    restate instructions the calling model applies in the same turn. Regex-tier by
+    design (no LLM in the filter). Scope is deliberately narrow — only new, long,
+    ai/plan-sourced captures — so human directives, scan/bootstrap/memory imports,
+    replace_id corrections, and short entries can never be blocked."""
+    if created_by not in ("ai", "plan") or replace_id:
+        return ""
+    text = content.strip()
+    if len(text) <= _LINT_MIN_LEN:
+        return ""
+    first_line = text.splitlines()[0]
+    first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
+    if _LINT_NARRATIVE_RE.match(first_sentence):
+        return _LINT_BOUNCE
+    if len(first_sentence.split()) > _LINT_MAX_FIRST_SENT:
+        return _LINT_BOUNCE
+    return ""
+
+
 def _session_set(match: dict) -> set[str]:
     """Distinct sessions that have hit this entry. Reconstructs from the legacy
     single `session_id` for entries written before `session_ids` existed."""

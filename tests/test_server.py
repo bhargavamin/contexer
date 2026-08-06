@@ -369,3 +369,16 @@ def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
     monkeypatch.setattr(server.store, "bootstrap_scan",
                         lambda *a, **k: {"gaps": [{"question": "Tests in scope?"}]})
     assert "how_to_ask" in json.loads(server.bootstrap_context("/repo/x", apply=False))
+
+
+# ── capture_lint: bounce narrative-shaped AI captures ───────────────────────
+
+def test_update_context_bounces_narrative(monkeypatch):
+    repo = "/test/repo"
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: repo)
+    narrative = ("Investigated (2026-08-05) the loader bug at length. " +
+                 " ".join(["detail"] * 150))
+    out = server.update_context(content=narrative)
+    assert "Not stored" in out
+    # nothing was written
+    assert store.get_pending_decisions(repo) == []

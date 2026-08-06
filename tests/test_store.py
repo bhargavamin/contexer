@@ -4655,3 +4655,54 @@ class TestQueryMatchesTitle:
                               title="Adopt the outbox pattern")
         out = store.get_context(tmp_repo, query="outbox")
         assert "Adopt the outbox pattern" in out
+
+
+# ── capture_lint: bounce narrative-shaped AI captures with restate guidance ──
+
+class TestCaptureLint:
+    NARRATIVE = (
+        "Investigated (2026-08-05) the reported bug that a git worktree gets its own "
+        "decisions JSON named after the worktree. Root cause: the store key is the "
+        "filesystem path of git rev-parse --show-toplevel, and for a linked worktree "
+        "that command returns the WORKTREE path, not the main worktree. This means "
+        "every linked worktree got a fresh empty store file keyed by its own path, "
+        "so decisions captured in a worktree session never reached the main store "
+        "and the session started with no context at all, which is exactly the "
+        "reported symptom and why the fix must canonicalize the store key."
+    )
+
+    def test_narrative_opener_long_content_bounces(self):
+        msg = store.capture_lint(self.NARRATIVE)
+        assert msg != ""
+        assert "Not stored" in msg
+        assert "update_context" in msg  # tells the model to re-call
+
+    def test_decision_first_content_passes(self):
+        content = ("Key the store on the main worktree path, not the linked worktree. "
+                   + self.NARRATIVE)
+        assert store.capture_lint(content) == ""
+
+    def test_short_content_always_passes(self):
+        assert store.capture_lint("Fixed the flaky retry test by pinning the clock.") == ""
+
+    def test_human_and_scan_sources_never_bounce(self):
+        assert store.capture_lint(self.NARRATIVE, created_by="human") == ""
+        assert store.capture_lint(self.NARRATIVE, created_by="scan") == ""
+        assert store.capture_lint(self.NARRATIVE, created_by="memory") == ""
+
+    def test_replace_id_corrections_never_bounce(self):
+        assert store.capture_lint(self.NARRATIVE, replace_id="abc12345") == ""
+
+    def test_date_stamp_opener_bounces(self):
+        long_tail = " ".join(["detail"] * 120)
+        msg = store.capture_lint("(2026-08-05) traced the failure through the loader. " + long_tail)
+        assert msg != ""
+
+    def test_runaway_first_sentence_bounces(self):
+        # No narrative keyword, but the first sentence never states a decision in 45 words.
+        first = "The way the loader interacts with the cache and the index and the sidecar " \
+                "and the lock and the flags and the GC and the log and the router and the " \
+                "anchors and the miner and the store and the slug logic is complicated " \
+                "in several respects that matter here today somehow."
+        msg = store.capture_lint(first + " " + " ".join(["more"] * 100))
+        assert msg != ""
