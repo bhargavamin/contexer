@@ -188,9 +188,13 @@ class TestConfigConventions:
         # addopts and use --no-cov for subset runs instead.
         repo_root = Path(__file__).resolve().parents[1]
         items = miner._config_conventions(repo_root)
-        assert any("--cov-fail-under" in i["content"] for i in items), (
-            "Coverage floor not minable from pyproject addopts — "
-            "see the comment above addopts in pyproject.toml"
+        assert any(
+            "--cov-fail-under" in i["content"] and "85" in i["content"]
+            for i in items
+        ), (
+            "Coverage floor not minable from pyproject addopts, or its 85% "
+            "threshold changed without updating this pin — see the comment "
+            "above addopts in pyproject.toml"
         )
 
 
