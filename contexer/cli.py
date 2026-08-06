@@ -285,17 +285,28 @@ def review() -> None:
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
-                print(f"Approved.")
+                print("Approved.")
+            else:
+                # Print the store's reason instead of dropping it. `pending` was read before
+                # the prompt, so a concurrent MCP session (or a second terminal) can have
+                # approved this id already — silence there reads as a lost keypress, and the
+                # tail would print "nothing changed" under a message the user never saw.
+                skipped += 1
+                print(msg)
         elif choice in ("D", "DISMISS"):
             ok, msg = store.approve_decision(repo_path, entry["id"], "dismiss")
             if ok:
                 dismissed += 1
-                print(msg)
+            else:
+                skipped += 1
+            print(msg)
         elif choice in ("N", "NO"):
             ok, msg = store.approve_decision(repo_path, entry["id"], "ignore")
             if ok:
                 ignored += 1
-                print(msg)
+            else:
+                skipped += 1
+            print(msg)
         elif choice in ("E", "EDIT"):
             print(f'Current: "{entry["content"]}"')
             try:
@@ -309,6 +320,9 @@ def review() -> None:
                 if ok:
                     edited += 1
                     print("Approved with edits.")
+                else:
+                    skipped += 1
+                    print(msg)
             else:
                 print("No changes made, skipping.")
                 skipped += 1
