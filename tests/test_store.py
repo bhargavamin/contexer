@@ -2294,6 +2294,38 @@ class TestRevisionModel:
         assert len(second["revisions"]) == 1
 
 
+class TestLegacyStamping:
+    def _legacy_entry(self):
+        return {
+            "id": "legacy-1", "type": "decision", "subtype": "architecture",
+            "content": "Use the flat-list store.", "revision": 1,
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+
+    def test_fresh_migration_stamps_status_and_created_by(self):
+        e = self._legacy_entry()
+        changed = store._migrate_decision(e)
+        assert changed
+        assert e["status"] == "approved"
+        assert e["created_by"] == "ai"
+
+    def test_already_migrated_entry_gets_stamped_too(self):
+        e = self._legacy_entry()
+        store._migrate_decision(e)          # now has revisions + current_revision_id
+        e.pop("status", None)               # simulate pre-stamp store migrated by old code
+        changed = store._migrate_decision(e)
+        assert changed
+        assert e["status"] == "approved"
+
+    def test_existing_status_never_overwritten(self):
+        e = self._legacy_entry()
+        e["status"] = "ignored"
+        e["created_by"] = "human"
+        store._migrate_decision(e)
+        assert e["status"] == "ignored"
+        assert e["created_by"] == "human"
+
+
 # ── approve_decision ──────────────────────────────────────────────────────────
 
 class TestApproveDecision:
@@ -4241,7 +4273,7 @@ class TestTitleBackfill:
         e = reloaded["entries"][0]
         assert e["title"] == "Legacy decision body kept verbatim."
         assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
-        assert reloaded.get("schema_version") == 3
+        assert reloaded.get("schema_version") == 4
 
 
 class TestServerTitleParam:

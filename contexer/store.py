@@ -22,7 +22,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
 MAX_TITLE_LEN = 100
-_SCHEMA_VERSION = 3               # bumped when the on-disk entry shape changes; gates migration
+_SCHEMA_VERSION = 4               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
@@ -1495,6 +1495,13 @@ def _migrate_decision(entry: dict) -> bool:
     `current_revision_id`. Returns True if the entry was changed."""
     if entry.get("type") != "decision":
         return False
+    stamped = False
+    if not entry.get("status"):
+        entry["status"] = "approved"   # legacy entries predate review; they were always injected as trusted
+        stamped = True
+    if not entry.get("created_by"):
+        entry["created_by"] = "ai"
+        stamped = True
     revs = entry.get("revisions")
     already = (
         entry.get("current_revision_id")
@@ -1513,10 +1520,10 @@ def _migrate_decision(entry: dict) -> bool:
             cur["content"] = cached
             healed = True
         backfilled = _backfill_titles(entry)
-        return healed or backfilled
+        return healed or backfilled or stamped
 
     did = entry.get("id", "")
-    created_by = entry.get("created_by", "ai")
+    created_by = entry["created_by"]
     legacy = revs if isinstance(revs, list) else []
     full: list[dict] = []
     for snap in legacy:
