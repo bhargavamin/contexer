@@ -178,6 +178,21 @@ class TestConfigConventions:
         items = miner._config_conventions(tmp_path)
         assert any("Mypy strict mode" in c for c in _contents(items))
 
+    def test_own_repo_coverage_floor_stays_minable(self):
+        # Self-referential pin: the ≥85% floor must live in
+        # [tool.pytest.ini_options].addopts because that key is the ONLY
+        # place _config_conventions can mine it from. Moving the flag to the
+        # CI command line keeps enforcement but silently deletes the repo's
+        # own mined "coverage ≥85%" convention — which is exactly what a
+        # hygiene PR did once. If this test fails, put the flag back in
+        # addopts and use --no-cov for subset runs instead.
+        repo_root = Path(__file__).resolve().parents[1]
+        items = miner._config_conventions(repo_root)
+        assert any("--cov-fail-under" in i["content"] for i in items), (
+            "Coverage floor not minable from pyproject addopts — "
+            "see the comment above addopts in pyproject.toml"
+        )
+
 
 # ── python source stats ───────────────────────────────────────────────────────
 
