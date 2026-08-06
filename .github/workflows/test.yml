@@ -38,6 +38,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      # No --cov-fail-under here — the floor lives in pyproject addopts so the
+      # convention miner can see it (see the comment there before moving it).
       - name: Run tests with coverage
         run: uv run pytest tests/ -m "not slow and not perf" -v --tb=short
 
