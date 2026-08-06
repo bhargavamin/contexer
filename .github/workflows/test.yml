@@ -8,9 +8,6 @@ on:
       - "LICENSE"
       - "docs/**"
       - "assets/**"
-  # Manual recovery path: re-verify a branch after an Actions outage (push events
-  # are never replayed once Actions is re-enabled).
-  workflow_dispatch:
   pull_request:
     branches: [main]
     paths-ignore:
