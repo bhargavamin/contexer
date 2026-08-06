@@ -56,8 +56,30 @@ dev = [
     "pytest-cov>=7.1.0",
 ]
 
+[tool.ruff]
+# The lint gate CI enforces (.github/workflows/test.yml). Ruff is not a dev-group
+# dependency on purpose: it is a standalone binary, never imported, so CI and
+# CONTRIBUTING both invoke it as `uvx ruff@<exact version> check` — pinned like every
+# other tool here, and no uv.lock churn when it is bumped.
+target-version = "py312"          # matches requires-python; never inferred from the local interpreter
+# Deliberately NO line-length: E501 is not selected (comment-heavy modules run past
+# any bound worth setting), and declaring one would make miner._emit_ruff advertise a
+# "Line length N enforced by ruff" convention this repo does not actually enforce.
+
+[tool.ruff.lint]
+# Ruff's current default set, spelled out on purpose: a future ruff release widening
+# its defaults must arrive as an explicit commit here, not as a red PR nobody changed.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The floor stays HERE and not on the CI command, even though addopts also applies it to
+# subset runs (`pytest tests/test_miner.py` exits 1 with "Required test coverage of 85% not
+# reached" while all 41 of its tests pass — use `--no-cov` for that). miner._config_conventions
+# reads the floor ONLY from this string, so moving it to the workflow makes the repo's own
+# gate invisible to the tool whose job is surfacing such rules: bootstrap stops storing
+# "Test coverage must stay ≥85%", and a fresh session learns about the gate from a red PR.
+# A documented dev-run flag beats an undiscoverable project rule.
 addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
 markers = [
     "slow: benchmark-harness tests (tests/test_bench_*.py), deselected in the PR gate",

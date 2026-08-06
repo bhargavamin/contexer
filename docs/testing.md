@@ -45,11 +45,13 @@ only; they are not part of any pytest run or CI job.
 # Install dev dependencies
 uv sync
 
-# Everything, with the ≥85% coverage gate
+# Everything, with the ≥85% coverage gate (it lives in pyproject's addopts, so it applies
+# to every invocation below too — see "Coverage floor" under Contributing)
 uv run pytest tests/
 
-# Run a single file
-uv run pytest tests/test_store.py
+# Run a single file. Add --no-cov: a subset run is measured against the WHOLE-package floor,
+# so it exits non-zero on coverage even when every test in the file passes
+uv run pytest tests/test_store.py --no-cov
 
 # Run a specific test class or method
 uv run pytest tests/test_store.py::TestSanitizeDirective

@@ -20,6 +20,28 @@ Run the test suite:
 uv run pytest tests/
 ```
 
+The ≥85% coverage floor lives in `pyproject.toml`'s `addopts`, so it applies to *every* pytest
+invocation — a single-file run reports ~10% coverage and exits non-zero even when its tests all
+pass. That is expected; add `--no-cov` while iterating:
+
+```bash
+uv run pytest tests/test_store.py --no-cov
+```
+
+(The floor is kept in `addopts` rather than on the CI command on purpose: `miner` mines it from
+there as a project rule, and a rule nothing surfaces is worse than a flag you type.)
+
+Lint (CI runs the same pinned version; keep the two in step when bumping it):
+
+```bash
+uvx ruff@0.15.4 check .
+uvx ruff@0.15.4 check --fix .    # apply the safe fixes
+```
+
+Rules live in `pyproject.toml` under `[tool.ruff.lint]`. Ruff is intentionally not a dev-group
+dependency — it is a binary we never import, so pinning it here and in the workflow keeps
+`uv.lock` out of the loop.
+
 Smoke-test the MCP server:
 
 ```bash
