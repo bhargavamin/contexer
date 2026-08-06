@@ -4706,3 +4706,31 @@ class TestCaptureLint:
                 "in several respects that matter here today somehow."
         msg = store.capture_lint(first + " " + " ".join(["more"] * 100))
         assert msg != ""
+
+
+class TestBodyClipping:
+    """_clip_body — the human-review-surface clip (review_pending, contexer review, share
+    lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
+    and are untouched by this class."""
+
+    def test_short_body_unchanged(self):
+        assert store._clip_body("short decision", 400) == "short decision"
+
+    def test_long_body_clipped_at_word_boundary(self):
+        body = "word " * 200  # 1000 chars
+        out = store._clip_body(body.strip(), 400)
+        assert len(out) < 450
+        assert "… [+" in out and out.endswith("chars]")
+        assert not out.split("…")[0].endswith("wor")  # no mid-word cut
+
+    def test_pending_review_clips_long_content(self, tmp_repo):
+        long_content = ("Use X over Y for the store backend. " + "Because reasons. " * 80)
+        store.update_decision(tmp_repo, long_content, "sess1", "architecture",
+                              created_by="ai")
+        # force it pending so format_pending_review shows it
+        data = store._load(tmp_repo)
+        data["entries"][-1]["status"] = "pending_approval"
+        store._save(tmp_repo, data)
+        out = store.format_pending_review(tmp_repo)
+        assert "… [+" in out
+        assert len(out) < len(long_content)

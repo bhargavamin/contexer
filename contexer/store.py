@@ -684,6 +684,23 @@ def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str |
     return title, (body if collapsed and collapsed != title else None)
 
 
+_BODY_CLIP = 400  # human review surfaces only — model-facing retrieval keeps full content
+
+
+def _clip_body(body: str, limit: int = _BODY_CLIP) -> str:
+    """Clip a decision body for HUMAN surfaces (review lists, share previews) at a word
+    boundary, marking how much was elided. The developer signs off on the title + first
+    sentences; the full text stays one step away (contexer ui / get_context). Model-facing
+    renders never clip — the AI needs the full reasoning."""
+    if len(body) <= limit:
+        return body
+    cut = body.rfind(" ", 0, limit)
+    if cut <= 0:
+        cut = limit
+    kept = body[:cut].rstrip()
+    return f"{kept}… [+{len(body) - len(kept)} chars]"
+
+
 def _is_novel(content: str, existing: list) -> bool:
     if not _is_storable(content):
         return False
@@ -2102,24 +2119,35 @@ def format_pending_review(repo_path: str) -> str:
     if total > len(shown):
         header += f" — showing {len(shown)} of {total}; run `contexer review` for the rest"
     lines = [header + ":\n"]
+    clipped = False
     for d in shown:
         eid = (d.get("id") or "")[:8]
         st = d.get("subtype") or "decision"
         prop = d.get("proposed_revision")
         if prop:
+            raw_current = _current_content(d)
+            raw_detected = prop.get("content", "")
+            current = _clip_body(raw_current)
+            detected = _clip_body(raw_detected)
+            clipped = clipped or current != raw_current or detected != raw_detected
             lines.append(f"- {eid} [{st}] update")
-            lines.append(f'    current:  "{_current_content(d)}"')
-            lines.append(f'    detected: "{prop.get("content", "")}"')
+            lines.append(f'    current:  "{current}"')
+            lines.append(f'    detected: "{detected}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
         else:
             title, body = _title_and_body(d)
             lines.append(f'- {eid} [{st}] {title}')
             if body is not None:
-                lines.append(f'    "{body}"')
+                clipped_body = _clip_body(body)
+                clipped = clipped or clipped_body != body
+                lines.append(f'    "{clipped_body}"')
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
     lines.append("\nReview each with the developer before approving. To clear several at once, "
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
                  "for the whole list.")
+    if clipped:
+        lines.append("Long bodies are clipped — full text: contexer ui, or "
+                     "approve_decision(action='edit') shows the full current text.")
     return "\n".join(lines)
 
 
@@ -3202,7 +3230,8 @@ def format_shareable_list(repo_path: str) -> str:
         header += f" — showing {len(shown)} of {total}, run `contexer share` in a terminal for the rest"
     lines = [header + ". Tell me which to share, then I'll preview and confirm:\n"]
     for it in shown:
-        lines.append(_share_item_line(it))
+        clipped_it = {**it, "content": _clip_body(it.get("content", ""))}
+        lines.append(_share_item_line(clipped_it))
     lines.append('\nShare the selected: share_decision(decision_id="<id>[,<id2>…]") '
                  "— previews first; add confirm=true to send.")
     return "\n".join(lines)

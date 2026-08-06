@@ -256,14 +256,14 @@ def review() -> None:
             factors = prop.get("confidence_factors") or []
             rev = entry.get("revision", 1)
             print(f"[{subtype}] Suggested update")
-            print(f'  Current (revision {rev}): "{entry["content"]}"')
-            print(f'  Detected:                "{prop.get("content", "")}"\n')
+            print(f'  Current (revision {rev}): "{store._clip_body(entry["content"])}"')
+            print(f'  Detected:                "{store._clip_body(prop.get("content", ""))}"\n')
         else:
             score, factors = store._compute_confidence(entry)
             title, body = store._title_and_body(entry)
             print(f"[{subtype}] {title}")
             if body is not None:
-                print(f'  "{body}"')
+                print(f'  "{store._clip_body(body)}"')
             print()
         print(f"Confidence: {score}%")
         if factors:
