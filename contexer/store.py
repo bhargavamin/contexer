@@ -3997,6 +3997,12 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         pass
     _gc_stale_session_files()
 
+    try:
+        if source not in ("resume", "compact"):
+            verify_scan_conventions(repo_path)
+    except Exception:
+        pass  # verification is opportunistic; a session start must never fail on it
+
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
             return {"status": "", "context": ""}
@@ -5780,3 +5786,136 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
                 _touch_pending_review(repo_path)  # medium-tier items await review (after save)
 
     return {**result, "stored": stored, "pending": pending, "skipped": skipped}
+
+
+_MINER_VERIFY_TTL = 86400  # 24h — conventions don't drift fast enough to re-scan every session
+
+_SCAN_EVIDENCE_RE = re.compile(r"\s*\(\d{1,3}% of \d+[^)]*\)\s*$")
+
+
+def _scan_rule_key(content: str) -> str | None:
+    """Strips the miner's trailing stats parenthetical ("... (98% of 412 functions across
+    37 files)") to get the rule's identity, or None when content carries no such
+    parenthetical at all — config-presence conventions (ruff/mypy/pre-commit detected via
+    config, not measured with stats) never participate in re-verification."""
+    if not _SCAN_EVIDENCE_RE.search(content):
+        return None
+    return _SCAN_EVIDENCE_RE.sub("", content).strip()
+
+
+def _miner_verify_stamp_path(repo_path: str) -> Path:
+    return STORE_DIR / f".miner_verify_{_slug(repo_path)}"
+
+
+def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
+    """Re-measures every stored, scan-sourced convention/pattern against a fresh
+    miner.mine_conventions pass, so the evidence embedded in the sentence ("... 98% of 412
+    functions across 37 files") does not silently go stale as the repo changes underneath
+    it. Called fail-soft from session_start_payload. Returns the number of entries changed.
+
+    Three outcomes per participating entry, compared against the fresh scan by rule key
+    (content with the trailing stats parenthetical stripped):
+      - same rule key, different sentence -> the rule still holds, only its measurement
+        moved -> _append_revision in place (source='scan'); no review needed.
+      - rule key not found in the fresh scan, but a fuzzy match (_find_match) hits one of
+        the fresh sentences -> the miner merely reworded the rule, not a real
+        disappearance -> treated exactly like the changed-evidence case above.
+      - rule key absent AND no fuzzy hit -> a real disappearance -> attach a
+        proposed_revision (only if the entry doesn't already carry one) so it rides the
+        existing review flow (review_pending / .pending_review nudge / contexer review)
+        instead of silently dropping a trusted convention.
+
+    Participants: created_by == 'scan' entries with status in (approved, suggested) whose
+    content has a stats parenthetical. Pending/ignored entries are never touched — an
+    unreviewed or rejected entry has no business being silently re-verified.
+
+    Fast path (session-start latency): participants are collected from a single _load
+    BEFORE any mining and BEFORE the TTL stamp is written. Zero participants — the common
+    case for every repo that was never bootstrapped, or was bootstrapped with only
+    config-presence conventions — returns 0 immediately, without importing the miner or
+    touching the stamp file. Mirrors team_poll: the session-start/prompt path must never
+    pay for work there is nothing to do.
+
+    TTL: a 24h stamp file (mtime-based), written BEFORE mining runs — a verifier that
+    crashes mid-scan must not retry on every following session start (same spawn-storm
+    rule as team_poll's throttle stamp). `force=True` bypasses the TTL read (tests only);
+    the stamp is still (re)written so the next un-forced call is correctly gated.
+
+    An empty fresh scan (`[]`) stamps the TTL and returns 0 WITHOUT flagging anything: an
+    empty result is indistinguishable from a scan failure (missing tool, unreadable repo),
+    and silence-over-noise says never manufacture a disappearance from an inconclusive
+    signal."""
+    with _store_lock(_slug(repo_path)):
+        data = _load(repo_path)
+        participants = []
+        for entry in data["entries"]:
+            if entry.get("type") != "decision" or entry.get("created_by") != "scan":
+                continue
+            if _entry_status(entry) not in ("approved", "suggested"):
+                continue
+            key = _scan_rule_key(_current_content(entry))
+            if key is None:
+                continue
+            participants.append((entry, key))
+        if not participants:
+            return 0
+
+        stamp = _miner_verify_stamp_path(repo_path)
+        if not force:
+            mtime = _file_mtime(stamp)
+            if mtime is not None and time.time() - mtime < _MINER_VERIFY_TTL:
+                return 0
+        try:
+            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            stamp.touch()
+        except OSError:
+            pass
+
+        from contexer import miner          # function-level: mirrors bootstrap_apply's
+                                              # cycle-avoidance style used elsewhere here.
+        fresh = miner.mine_conventions(repo_path)
+        if not fresh:
+            return 0  # silence-over-noise: an empty scan is not evidence of disappearance
+
+        fresh_sentences = [item["content"] for item in fresh]
+        fresh_entries = [{"content": s} for s in fresh_sentences]
+        fresh_by_key: dict[str, str] = {}
+        for sentence in fresh_sentences:
+            key = _scan_rule_key(sentence)
+            if key is not None and key not in fresh_by_key:
+                fresh_by_key[key] = sentence
+
+        now = datetime.now(timezone.utc).isoformat()
+        changed = 0
+        review_needed = False
+        for entry, key in participants:
+            current = _current_content(entry)
+            fresh_sentence = fresh_by_key.get(key)
+            if fresh_sentence is None:
+                hit = _find_match(current, fresh_entries)  # fuzzy guard: miner wording drift
+                if hit is not None:
+                    fresh_sentence = hit["content"]
+            if fresh_sentence is not None:
+                if fresh_sentence != current:
+                    _append_revision(entry, fresh_sentence, source="scan", approved_at=now)
+                    changed += 1
+                continue
+            # Real disappearance: exact and fuzzy both missed.
+            if entry.get("proposed_revision") is not None:
+                continue  # already awaiting review — don't pile on a second proposal
+            m = _SCAN_EVIDENCE_RE.search(current)
+            old_evidence = m.group(0).strip() if m else ""
+            proposal_content = (
+                f"{key} — no longer measured at threshold on re-scan; "
+                f"previous evidence: {old_evidence}"
+            )
+            entry["proposed_revision"] = _build_proposal(
+                entry, proposal_content, "", "", now, source="scan")
+            changed += 1
+            review_needed = True
+
+        if changed:
+            _save(repo_path, data)
+            if review_needed:
+                _touch_pending_review(repo_path)  # a disappearance now awaits review (after save)
+        return changed

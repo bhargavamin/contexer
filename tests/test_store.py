@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from contexer import miner as miner_mod
 from contexer import store
 
 
@@ -4766,3 +4767,90 @@ class TestBodyClipping:
         out = store.format_pending_review(tmp_repo)
         assert "… [+" in out
         assert len(out) < len(long_content)
+
+
+class TestScanConventionVerify:
+    RULE_OLD = "Functions use snake_case naming (98% of 412 functions across 37 files)"
+    RULE_NEW = "Functions use snake_case naming (91% of 500 functions across 41 files)"
+
+    def _seed_scan_convention(self, repo, content=RULE_OLD):
+        store.update_decision(repo, content, "sess1", "convention", created_by="scan")
+
+    def test_changed_evidence_appends_revision_in_place(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": self.RULE_NEW,
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1
+        data = store._load(repo)
+        entry = data["entries"][-1]
+        assert entry["content"] == self.RULE_NEW
+        assert len(entry["revisions"]) == 2
+        assert entry.get("proposed_revision") is None
+
+    def test_disappeared_rule_attaches_proposed_revision(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry["proposed_revision"] is not None
+        assert "no longer measured" in entry["proposed_revision"]["content"]
+        assert entry["status"] == "approved"  # current revision stays trusted
+
+    def test_empty_scan_flags_nothing(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        monkeypatch.setattr(miner_mod, "mine_conventions", lambda p: [])
+        assert store.verify_scan_conventions(repo, force=True) == 0
+        assert store._load(repo)["entries"][-1].get("proposed_revision") is None
+
+    def test_ttl_gate_skips_second_run(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        self._seed_scan_convention(repo)
+        calls = []
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: calls.append(1) or [])
+        store.verify_scan_conventions(repo)          # no force: stamps TTL
+        store.verify_scan_conventions(repo)          # inside TTL: must not scan
+        assert len(calls) == 1
+
+    def test_no_scan_entries_skips_miner_entirely(self, tmp_repo, monkeypatch):
+        # Fast path: a store with no scan-sourced stats entries must never invoke the miner,
+        # even with force=True — this is the session-start latency guarantee.
+        repo = tmp_repo
+        store.update_decision(repo, "Use uv for everything.", "sess1", "convention",
+                              created_by="human")
+        calls = []
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: calls.append(1) or [])
+        assert store.verify_scan_conventions(repo, force=True) == 0
+        assert calls == []
+
+    def test_reworded_rule_is_refresh_not_disappearance(self, tmp_repo, monkeypatch):
+        # Miner wording drift: fuzzy match (>70% containment) routes to in-place refresh.
+        repo = tmp_repo
+        self._seed_scan_convention(repo)  # "Functions use snake_case naming (98% of 412 ...)"
+        reworded = "Functions use snake_case naming convention (97% of 415 functions across 37 files)"
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": reworded,
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 1
+        entry = store._load(repo)["entries"][-1]
+        assert entry.get("proposed_revision") is None      # NOT flagged as disappeared
+        assert entry["content"] == reworded                # refreshed in place
+
+    def test_ai_sourced_entries_untouched(self, tmp_repo, monkeypatch):
+        repo = tmp_repo
+        store.update_decision(repo, self.RULE_OLD, "sess1", "convention", created_by="ai")
+        # would be a "disappearance", but entry is not scan-sourced -> not a participant,
+        # and with no participants the fast path returns before mining
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Other rule (90% of 100 things)",
+                                        "subtype": "convention", "tier": "high"}])
+        assert store.verify_scan_conventions(repo, force=True) == 0
