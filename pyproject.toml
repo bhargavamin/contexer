@@ -73,13 +73,11 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The floor stays HERE and not on the CI command, even though addopts also applies it to
-# subset runs (`pytest tests/test_miner.py` exits 1 with "Required test coverage of 85% not
-# reached" while all 41 of its tests pass — use `--no-cov` for that). miner._config_conventions
-# reads the floor ONLY from this string, so moving it to the workflow makes the repo's own
-# gate invisible to the tool whose job is surfacing such rules: bootstrap stops storing
-# "Test coverage must stay ≥85%", and a fresh session learns about the gate from a red PR.
-# A documented dev-run flag beats an undiscoverable project rule.
+# --cov-fail-under must stay HERE, not on the CI command line: addopts is the
+# only key contexer/miner.py mines the coverage floor from, so relocating the
+# flag silently deletes this repo's own "coverage ≥85%" convention (enforced
+# by test_own_repo_coverage_floor_stays_minable). Known cost: subset runs
+# exit 1 on coverage — pass --no-cov (see CONTRIBUTING.md).
 addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
 markers = [
     "slow: benchmark-harness tests (tests/test_bench_*.py), deselected in the PR gate",

@@ -20,16 +20,15 @@ Run the test suite:
 uv run pytest tests/
 ```
 
-The ≥85% coverage floor lives in `pyproject.toml`'s `addopts`, so it applies to *every* pytest
-invocation — a single-file run reports ~10% coverage and exits non-zero even when its tests all
-pass. That is expected; add `--no-cov` while iterating:
+Running a subset (one file, `-k`, one class) exits non-zero on coverage even when
+every test passes: the ≥85% floor in `pyproject.toml`'s `addopts` judges whole-package
+coverage, and a single file naturally covers ~10%. That flag must stay in `addopts`
+(the convention miner reads it — see the comment there), so pass `--no-cov` instead:
 
 ```bash
-uv run pytest tests/test_store.py --no-cov
+uv run pytest tests/test_miner.py --no-cov
 ```
 
-(The floor is kept in `addopts` rather than on the CI command on purpose: `miner` mines it from
-there as a project rule, and a rule nothing surfaces is worse than a flag you type.)
 
 Lint (CI runs the same pinned version; keep the two in step when bumping it):
 

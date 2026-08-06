@@ -25,9 +25,12 @@ uv run python server.py
 # Smoke-test the server responds to MCP initialize
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}' | uv run python server.py
 
-# Tests. The >=85% coverage floor is in pyproject's addopts, so it applies to subset runs
-# too — add --no-cov for a single file, or the run exits 1 on coverage alone
-uv run pytest tests/ -m "not slow and not perf"
+# Run tests. Subset runs (single file / -k / class) MUST pass --no-cov: the ≥85%
+# coverage floor in pyproject addopts judges the whole package, so a subset run
+# exits 1 on coverage even with every test passing. Do not "fix" this by moving
+# the flag to CI — the convention miner reads addopts (see pyproject.toml).
+uv run pytest tests/                       # full suite, coverage gate on
+uv run pytest tests/test_store.py --no-cov # subset iteration
 
 # Lint — the exact version CI pins
 uvx ruff@0.15.4 check .

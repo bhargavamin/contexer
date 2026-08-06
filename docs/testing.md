@@ -49,15 +49,15 @@ uv sync
 # to every invocation below too — see "Coverage floor" under Contributing)
 uv run pytest tests/
 
-# Run a single file. Add --no-cov: a subset run is measured against the WHOLE-package floor,
-# so it exits non-zero on coverage even when every test in the file passes
+# Run a single file — --no-cov required: the ≥85% floor in addopts judges
+# whole-package coverage, so any subset run exits 1 without it
 uv run pytest tests/test_store.py --no-cov
 
-# Run a specific test class or method
-uv run pytest tests/test_store.py::TestSanitizeDirective
-uv run pytest tests/test_store.py::TestSanitizeDirective::test_profanity_stripped
+# Run a specific test class or method (same rule)
+uv run pytest tests/test_store.py::TestSanitizeDirective --no-cov
+uv run pytest tests/test_store.py::TestSanitizeDirective::test_profanity_stripped --no-cov
 
-# Run without coverage (faster for quick iteration)
+# Full run without coverage (faster for quick iteration)
 uv run pytest tests/ --no-cov
 
 # Show which lines are not covered
@@ -110,3 +110,7 @@ The CI gate requires **≥85% overall coverage**. The two excluded files are:
 - `contexer/__main__.py` — CLI entry point
 
 If you add a new function to `store.py`, add at least one test covering the happy path and the most likely failure mode before committing.
+
+The floor lives in `pyproject.toml`'s `addopts` — not the CI command line — because
+`contexer/miner.py` mines the "coverage ≥85%" convention from that key alone; a test
+(`test_own_repo_coverage_floor_stays_minable`) pins it there.
