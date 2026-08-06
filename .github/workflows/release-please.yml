@@ -9,6 +9,10 @@ on:
       - "LICENSE"
       - "docs/**"
       - "assets/**"
+  # Manual recovery path: if Actions was down when a merge landed (push events are
+  # never replayed), trigger from the Actions tab — release-please scans everything
+  # since the last release tag, so missed merges are picked up in full.
+  workflow_dispatch:
 
 permissions:
   contents: write
