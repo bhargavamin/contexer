@@ -5878,12 +5878,19 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
             return 0  # silence-over-noise: an empty scan is not evidence of disappearance
 
         fresh_sentences = [item["content"] for item in fresh]
-        fresh_entries = [{"content": s} for s in fresh_sentences]
         fresh_by_key: dict[str, str] = {}
+        # Fuzzy-match pool is restricted to stat-bearing sentences only: a config-presence
+        # sentence (no parenthetical) has no "evidence" to refresh a measured entry with, so
+        # letting it into the pool could fuzzy-match a measured entry and rewrite it into an
+        # unmeasured one — silently and permanently removing it from future verification.
+        fresh_stat_sentences: list[str] = []
         for sentence in fresh_sentences:
             key = _scan_rule_key(sentence)
-            if key is not None and key not in fresh_by_key:
-                fresh_by_key[key] = sentence
+            if key is not None:
+                fresh_stat_sentences.append(sentence)
+                if key not in fresh_by_key:
+                    fresh_by_key[key] = sentence
+        fresh_entries = [{"content": s} for s in fresh_stat_sentences]
 
         now = datetime.now(timezone.utc).isoformat()
         changed = 0
@@ -5904,10 +5911,19 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
             if entry.get("proposed_revision") is not None:
                 continue  # already awaiting review — don't pile on a second proposal
             m = _SCAN_EVIDENCE_RE.search(current)
-            old_evidence = m.group(0).strip() if m else ""
+            paren = m.group(0).strip() if m else ""
+            old_evidence = paren[1:-1] if paren.startswith("(") and paren.endswith(")") else paren
+            # Rule-shaped, not meta-shaped: this sentence becomes the CURRENT revision the
+            # instant a developer approves it (or bulk-approves via entry_id="all"), so it
+            # must read like a convention a developer can live with, not a status memo — and
+            # it must START with the rule text so replay still injects a real project rule.
+            # The trailing parenthetical deliberately starts with "evidence withdrawn", not a
+            # percentage, so it does NOT match _SCAN_EVIDENCE_RE: once approved, this entry's
+            # content no longer has a stats parenthetical and correctly exits participation in
+            # future verification instead of churning a fresh proposal every 24h.
             proposal_content = (
-                f"{key} — no longer measured at threshold on re-scan; "
-                f"previous evidence: {old_evidence}"
+                f"{key} (evidence withdrawn on re-scan: was {old_evidence}, "
+                f"no longer measured at threshold)"
             )
             entry["proposed_revision"] = _build_proposal(
                 entry, proposal_content, "", "", now, source="scan")

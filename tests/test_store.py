@@ -4800,7 +4800,11 @@ class TestScanConventionVerify:
         assert changed == 1
         entry = store._load(repo)["entries"][-1]
         assert entry["proposed_revision"] is not None
-        assert "no longer measured" in entry["proposed_revision"]["content"]
+        prop_content = entry["proposed_revision"]["content"]
+        # Rule-shaped, not meta-shaped: approving this must yield a convention a developer
+        # can live with, so it has to START with the rule text (not a status memo).
+        assert prop_content.startswith("Functions use snake_case naming")
+        assert "no longer measured" in prop_content
         assert entry["status"] == "approved"  # current revision stays trusted
 
     def test_empty_scan_flags_nothing(self, tmp_repo, monkeypatch):
@@ -4854,3 +4858,39 @@ class TestScanConventionVerify:
                             lambda p: [{"content": "Other rule (90% of 100 things)",
                                         "subtype": "convention", "tier": "high"}])
         assert store.verify_scan_conventions(repo, force=True) == 0
+
+    def test_pending_and_ignored_scan_entries_never_touched(self, tmp_repo, monkeypatch):
+        # An approved participant plus a pending_approval and an ignored scan entry, all
+        # with rules absent from the fresh scan (would-be disappearances). Mining must
+        # actually run (the approved entry keeps the fast path from short-circuiting), but
+        # only the approved entry may be touched — pending/ignored entries are never
+        # re-verified, no matter what the fresh scan says about their rule.
+        repo = tmp_repo
+        self._seed_scan_convention(repo, self.RULE_OLD)
+        pending_content = "Classes use PascalCase naming (90% of 50 classes across 10 files)"
+        ignored_content = "Modules use kebab-case naming (92% of 30 modules across 8 files)"
+        store.update_decision(repo, pending_content, "sess1", "convention", created_by="scan")
+        store.update_decision(repo, ignored_content, "sess1", "convention", created_by="scan")
+        data = store._load(repo)
+        pending_entry = next(e for e in data["entries"] if e["content"] == pending_content)
+        ignored_entry = next(e for e in data["entries"] if e["content"] == ignored_content)
+        pending_entry["status"] = "pending_approval"
+        ignored_entry["status"] = "ignored"
+        store._save(repo, data)
+
+        monkeypatch.setattr(miner_mod, "mine_conventions",
+                            lambda p: [{"content": "Other rule entirely (99% of 10 things across 2 files)",
+                                        "subtype": "convention", "tier": "high"}])
+        changed = store.verify_scan_conventions(repo, force=True)
+        assert changed == 1  # only the approved participant
+
+        data = store._load(repo)
+        pending_after = next(e for e in data["entries"] if e["id"] == pending_entry["id"])
+        ignored_after = next(e for e in data["entries"] if e["id"] == ignored_entry["id"])
+        approved_after = next(e for e in data["entries"] if e["content"].startswith("Functions use snake_case naming"))
+
+        assert pending_after.get("proposed_revision") is None
+        assert pending_after["content"] == pending_content
+        assert ignored_after.get("proposed_revision") is None
+        assert ignored_after["content"] == ignored_content
+        assert approved_after.get("proposed_revision") is not None
