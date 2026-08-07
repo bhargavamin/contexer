@@ -24,6 +24,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-contexer-gives-you-that-a-md-file-cant">Why not rule files?</a> ·
   <a href="#how-it-works">How it works</a> ·
+  <a href="#decision-guardrails">Guardrails</a> ·
   <a href="#see-what-your-agents-are-being-told">Console</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
   <a href="#documentation">Docs</a> ·
@@ -134,6 +135,27 @@ Deep dive: **[how it works](docs/how-it-works.md)** · **[day-to-day usage & CLI
 ### Honest limits
 
 Capture beyond outright directives is best-effort (the *"store that decision"* escape hatch exists for a reason); Cursor's hook model limits per-prompt injection there; the OSS store is per-developer, not shared. Full list, published on purpose: **[limitations](docs/usage.md#limitations-read-this--we-publish-them-on-purpose)**.
+
+---
+
+## Decision guardrails
+
+Contexer doesn't just hand your agent the rules — `contexer guard` checks staged changes against them at commit time.
+
+```bash
+contexer guard --install-hook   # wires .git/hooks/pre-commit for this repo (opt-in, not run by `install`)
+```
+
+Two tiers:
+
+- **Advisory (default).** An approved decision that's human-reviewed, scanned, or set up at bootstrap — never a bare AI guess — and mentions a staged file surfaces as a reminder before the commit lands. This is commit-time *visibility that reaches the committing agent's context*, not enforcement — the commit still goes through.
+- **Blocking, opt-in.** Arm any approved decision as a machine-checkable rule (`contexer guard arm <id> --regex '<pattern>'` or `--check secret`) and it fails the commit (exit 1) if violated. Only rules you explicitly arm can block anything.
+
+GUI commit flows (VS Code, Cursor, and similar) run the hook but surface only the blocking tier's failure — the advisory reminders are terminal output a graphical commit panel won't show you.
+
+The guard fails open (any internal error, or a run over budget, skips checks rather than blocking your commit) and can be bypassed per-commit with `CONTEXER_GUARD=0 git commit …`, same as any pre-commit hook is bypassed with `--no-verify`. It's a local nudge, not a substitute for CI — your pipeline's checks are the backstop that can't be skipped from a developer's machine.
+
+Details: **[mechanism](docs/how-it-works.md#commit-time-guard)** · **[CLI reference](docs/usage.md#commit-time-guard)**
 
 ---
 
