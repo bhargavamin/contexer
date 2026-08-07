@@ -3453,6 +3453,117 @@ def _git(repo_path: str, *args: str, timeout: int = 5) -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
+# ── Commit-time guard: staged-file plumbing + path-matching helpers ──────────
+# Task 1 of the commit-time guard feature (later tasks hash staged content against
+# stored decisions). All fail-soft: any git failure -> empty result, never raise.
+
+_GUARD_MAX_FILE_BYTES = 200_000
+
+
+def _staged_files(repo: str) -> list[str]:
+    """Repo-relative paths of staged Added/Copied/Modified/Renamed files. R is
+    included deliberately: renamed files must still be scanned, and `--name-only`
+    on an R entry yields only the new path, which is exactly what the guard scans.
+    Deleted files (filter D) are excluded — nothing to scan. `[]` on any git
+    failure (fail-soft, never raises)."""
+    out = _git(repo, "diff", "--cached", "--name-only", "--diff-filter=ACMR",
+               timeout=_GIT_FAST_TIMEOUT)
+    return out.splitlines() if out else []
+
+
+def _staged_content(repo: str, path: str) -> str:
+    """Staged (index) content of `path` via `git show :<path>` — deliberately NOT
+    the working-tree version, since the guard must judge what's about to be
+    committed. `""` when: git fails, the content exceeds _GUARD_MAX_FILE_BYTES, or
+    a null byte appears in the first 1024 bytes (binary skip — a regex over binary
+    content can false-match encoded bytes). Reads raw bytes directly rather than
+    through the text-mode `_git` helper, because the binary/size checks need the
+    untouched byte stream; only decodes utf-8 (errors="replace") once those checks
+    pass. Fail-soft: any failure returns "", never raises."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, "show", f":{path}"],
+            capture_output=True, timeout=_GIT_FAST_TIMEOUT,
+        )
+    except Exception:
+        return ""
+    if out.returncode != 0:
+        return ""
+    data = out.stdout
+    if len(data) > _GUARD_MAX_FILE_BYTES:
+        return ""
+    if b"\x00" in data[:1024]:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _merge_in_progress(repo: str) -> bool:
+    """True iff a merge is in progress (MERGE_HEAD resolves). Fail-soft: any git
+    failure (including "no such repo") reads as no merge in progress."""
+    return _git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD",
+                timeout=_GIT_FAST_TIMEOUT) is not None
+
+
+def _guard_relpath(repo: str, path: str) -> str:
+    """THE single canonicalization chokepoint for the commit-time guard: any
+    absolute or relative spelling of a file resolves to one normalized
+    repo-relative POSIX (forward-slash) path. Every hash and path-pairing
+    comparison downstream must consume only this function's output — never a raw
+    staged path or artifact string. Works for paths that don't exist on disk yet
+    (Path.resolve() is non-strict), since guard callers canonicalize staged paths
+    that may not exist in the working tree in every context. Fail-soft: any
+    resolution failure returns "" rather than raising."""
+    try:
+        repo_root = Path(repo).resolve()
+        raw = Path(path)
+        abs_path = (raw if raw.is_absolute() else repo_root / raw).resolve()
+        rel = os.path.relpath(str(abs_path), str(repo_root))
+        return rel.replace(os.sep, "/")
+    except Exception:
+        return ""
+
+
+_GUARD_PATH_ARTIFACT_RE = re.compile(r"^[\w][\w./-]*\.\w+$")
+_GUARD_MODULE_ARTIFACT_RE = re.compile(r"^[a-z_]\w*(\.[a-z_]\w*)+$")
+
+
+def _pathlike_artifact(artifact: str) -> bool:
+    """True iff `artifact` is shaped like something that can participate in path
+    pairing against a staged file: a relative path with an extension (e.g.
+    "contexer/store.py", no leading "/") or a dotted module (e.g.
+    "contexer.store", no "/"). Excludes symbol artifacts ("FooError"),
+    route-shaped strings ("/api/users"), and bare names — none of those pair
+    against a staged file path."""
+    if not isinstance(artifact, str) or not artifact:
+        return False
+    return bool(_GUARD_PATH_ARTIFACT_RE.match(artifact)
+                or _GUARD_MODULE_ARTIFACT_RE.match(artifact))
+
+
+def _artifact_path_match(artifact: str, staged: str) -> bool:
+    """Pure — no I/O. `staged` is assumed already canonical (see _guard_relpath).
+    True iff: exact relpath equality; OR `artifact` is a dotted module that maps
+    onto `staged` ("contexer.store" -> "contexer/store.py" or
+    "contexer/store/__init__.py"); OR `artifact` contains "/" and `staged` ends
+    with "/" + artifact (a multi-segment suffix match at a path boundary, so
+    "za/utils.py" does NOT match artifact "a/utils.py").
+
+    Bare basename matching is forbidden by construction: a slashless artifact
+    that isn't an exact match and isn't a mapping dotted module (e.g. "utils.py"
+    against staged "a/utils.py") falls through to the final `return False` —
+    it never reaches the suffix-match branch, which requires "/" in `artifact`."""
+    if not artifact or not staged:
+        return False
+    if artifact == staged:
+        return True
+    if "/" not in artifact and _GUARD_MODULE_ARTIFACT_RE.match(artifact):
+        as_path = artifact.replace(".", "/")
+        return staged == f"{as_path}.py" or staged == f"{as_path}/__init__.py"
+    if "/" in artifact:
+        return staged.endswith("/" + artifact)
+    return False
+
+
 def _detect_insight(repo_path: str) -> tuple[str, bool]:
     """Infers how much insight the current user has into this repo from git
     signals. Returns (level, decisive) — non-decisive means ask the user.
