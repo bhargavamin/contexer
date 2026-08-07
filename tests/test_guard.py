@@ -333,6 +333,21 @@ class TestGuardTrusted:
                              created_by="bootstrap", status="approved")
         assert store._guard_trusted(entry) is True
 
+    def test_plan_approved_is_trusted(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="plan",
+                             status="approved")
+        assert store._guard_trusted(entry) is True
+
+    def test_plan_pending_approval_not_trusted(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="plan",
+                             status="pending_approval")
+        assert store._guard_trusted(entry) is False
+
+    def test_plan_suggested_not_trusted(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="plan",
+                             status="suggested")
+        assert store._guard_trusted(entry) is False
+
     def test_ai_created_not_trusted(self, repo):
         entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
                              status="approved")
@@ -452,6 +467,22 @@ class TestGuardPairs:
         assert {p["reason"] for p in pairs} == {"source_files match"}
         assert all(p["decision_id"] == entry["id"] for p in pairs)
 
+    def test_plan_approved_source_files_pairs_as_emitted(self, repo):
+        entry = _seed_entry(repo, "Decided to use JWT for auth", created_by="plan",
+                             status="approved", source_files=["auth/jwt.py"])
+        pairs = store._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert len(pairs) == 1
+        assert pairs[0]["decision_id"] == entry["id"]
+        assert pairs[0]["emitted"] is True
+
+    def test_plan_pending_approval_never_pairs_as_emitted(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", created_by="plan",
+                    status="pending_approval", source_files=["auth/jwt.py"])
+        pairs = store._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert len(pairs) == 1
+        assert pairs[0]["emitted"] is False
+        assert pairs[0]["reason"] == "rejected: untrusted provenance"
+
     def test_module_artifact_match(self, repo):
         _seed_entry(repo, "The contexer.store module owns all read/write logic")
         pairs = store._guard_pairs(str(repo), ["contexer/store.py"])
@@ -528,6 +559,55 @@ class TestGuardPairs:
         pairs = store._guard_pairs(str(repo), [absolute])
         assert len(pairs) == 1
         assert pairs[0]["file"] == "auth/jwt.py"
+
+
+# ── legacy revision source back-stamp (guard integration) ─────────────────────
+
+class TestGuardTrustsBackstampedLegacyRevisions:
+    """A legacy store entry whose revision was persisted with an explicit falsy `source`
+    (predates the source back-stamp) becomes trust-eligible after `_load` migrates it, but
+    only when `created_by` names a trusted provenance — an ai-authored legacy entry stays
+    untrusted through the same back-stamp."""
+
+    def _legacy_data(self, created_by, rev_source):
+        return {
+            "entries": [{
+                "id": "legacy-guard-1", "type": "decision", "subtype": "architecture",
+                "content": "Decided to use JWT for auth",
+                "session_id": "s1", "session_ids": ["s1"],
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "revision": 1, "status": "approved", "created_by": created_by,
+                "source_files": ["auth/jwt.py"],
+                "current_revision_id": "rev-legacy-1",
+                "revisions": [{
+                    "revision_id": "rev-legacy-1", "decision_id": "legacy-guard-1",
+                    "version_number": 1, "content": "Decided to use JWT for auth",
+                    "title": "Decided to use JWT for auth", "confidence_score": 0,
+                    "evidence": [], "created_at": "2026-01-01T00:00:00+00:00",
+                    "approved_at": "2026-01-01T00:00:00+00:00", "source": rev_source,
+                }],
+            }],
+        }
+
+    def test_human_created_becomes_trusted_and_pairs_after_load(self, repo):
+        store._save(str(repo), self._legacy_data(created_by="human", rev_source=None))
+        entry = store._load(str(repo))["entries"][0]
+        assert entry["revisions"][0]["source"] == "human"
+        assert store._guard_trusted(entry) is True
+        pairs = store._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert len(pairs) == 1
+        assert pairs[0]["emitted"] is True
+
+    def test_ai_created_stays_untrusted_after_load(self, repo):
+        store._save(str(repo), self._legacy_data(created_by="ai", rev_source=None))
+        entry = store._load(str(repo))["entries"][0]
+        assert entry["revisions"][0]["source"] == "ai"
+        assert store._guard_trusted(entry) is False
+        pairs = store._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert len(pairs) == 1
+        assert pairs[0]["emitted"] is False
+        assert pairs[0]["reason"] == "rejected: untrusted provenance"
 
 
 # ── guard_staged ──────────────────────────────────────────────────────────────

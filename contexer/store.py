@@ -23,7 +23,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
 MAX_TITLE_LEN = 100
-_SCHEMA_VERSION = 4               # bumped when the on-disk entry shape changes; gates migration
+_SCHEMA_VERSION = 5               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
@@ -1489,6 +1489,24 @@ def _backfill_titles(entry: dict) -> bool:
     return changed
 
 
+def _backstamp_revision_sources(entry: dict) -> bool:
+    """Set `source` on any revision whose `source` is falsy (None/""/absent) to the
+    decision's `created_by`, defaulting to "ai" when that is also falsy — mirrors the
+    schema-v4 status/created_by stamping, but for revision provenance. Covers entries
+    stored with an explicit falsy revision source (the gap `_migrate_decision`'s
+    snapshot-synthesis fallback, `source=snap.get("source") or created_by`, does not
+    reach: a legacy snapshot already shaped as a full revision object, or an
+    already-migrated entry's revision, both pass through untouched otherwise). Never
+    overwrites a non-empty source. Idempotent; returns True if anything changed."""
+    fallback = entry.get("created_by") or "ai"
+    changed = False
+    for rev in entry.get("revisions", []):
+        if not rev.get("source"):
+            rev["source"] = fallback
+            changed = True
+    return changed
+
+
 def _migrate_decision(entry: dict) -> bool:
     """Transparently upgrade a legacy decision entry to the revision model. Idempotent.
     Builds full revision objects from the legacy historical snapshots (`revisions[]`, which
@@ -1521,7 +1539,8 @@ def _migrate_decision(entry: dict) -> bool:
             cur["content"] = cached
             healed = True
         backfilled = _backfill_titles(entry)
-        return healed or backfilled or stamped
+        backstamped = _backstamp_revision_sources(entry)
+        return healed or backfilled or backstamped or stamped
 
     did = entry.get("id", "")
     created_by = entry["created_by"]
@@ -1555,6 +1574,7 @@ def _migrate_decision(entry: dict) -> bool:
     entry["revisions"] = full
     entry["current_revision_id"] = current["revision_id"]
     entry["revision"] = current["version_number"]
+    _backstamp_revision_sources(entry)
     _backfill_titles(entry)
     return True
 
@@ -3611,7 +3631,7 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
 # (dismiss list, throttle stamp) are ever written here, and always best-effort
 # except on the explicit management path (dismiss_guard).
 
-_GUARD_TRUSTED_SOURCES = frozenset({"human", "scan", "bootstrap"})
+_GUARD_TRUSTED_SOURCES = frozenset({"human", "scan", "bootstrap", "plan"})
 _GUARD_MAX_ADVISORIES = 5
 _GUARD_THROTTLE_CAP = 500
 
@@ -3620,7 +3640,10 @@ def _guard_trusted(entry: dict) -> bool:
     """A decision may only pair as an advisory if it is BOTH developer-approved
     (status) and born from a trusted provenance (current revision's source) — an
     AI-inferred or memory-imported entry never nags at commit time, no matter how
-    confident, until a human has actually looked at it."""
+    confident, until a human has actually looked at it. `plan` is trusted too: a
+    plan-sourced decision that survived reconciliation AND developer approval is
+    more vetted than `scan`; the status check above still keeps an unapproved plan
+    suggestion untrusted."""
     if _entry_status(entry) != "approved":
         return False
     rev = _current_revision(entry)
