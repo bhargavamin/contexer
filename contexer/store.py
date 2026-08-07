@@ -3564,6 +3564,313 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
     return False
 
 
+# ── Commit-time guard: Tier-1 advisory engine (Task 2) — pairing, throttle, ──
+# dismissals. Builds on Task 1's plumbing above. The whole engine is READ-ONLY
+# against the decision store (never calls _save/_save_global) and its public
+# entrypoint (guard_staged) never raises. Only the guard's own sidecar files
+# (dismiss list, throttle stamp) are ever written here, and always best-effort
+# except on the explicit management path (dismiss_guard).
+
+_GUARD_TRUSTED_SOURCES = frozenset({"human", "scan", "bootstrap"})
+_GUARD_MAX_ADVISORIES = 5
+_GUARD_THROTTLE_CAP = 500
+
+
+def _guard_trusted(entry: dict) -> bool:
+    """A decision may only pair as an advisory if it is BOTH developer-approved
+    (status) and born from a trusted provenance (current revision's source) — an
+    AI-inferred or memory-imported entry never nags at commit time, no matter how
+    confident, until a human has actually looked at it."""
+    if _entry_status(entry) != "approved":
+        return False
+    rev = _current_revision(entry)
+    if rev is None:
+        return False
+    return rev.get("source") in _GUARD_TRUSTED_SOURCES
+
+
+def _guard_hash(decision_id: str, relpath: str) -> str:
+    """Identity for one (decision, staged-file) advisory pair — sha1 of
+    "<decision_id>\\n<relpath>", first 12 hex chars. `relpath` must already be
+    _guard_relpath's canonical output; the caller owns that, this function is
+    pure. Ports the shape of doc-drift's `_drift_hash` (see
+    `git show feat/doc-drift:contexer/store.py`): keying on (decision, FILE) only
+    — never content or line — means ordinary editing of the file never
+    resurrects a dismissed or already-advised pair."""
+    return hashlib.sha1(f"{decision_id}\n{relpath}".encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _guard_content_hash(text: str) -> str:
+    """Full sha1 hex digest of staged file content — the throttle key's value.
+    Deliberately untruncated (unlike _guard_hash): this hashes arbitrary file
+    content, not a short identity string, so the full digest is cheap insurance
+    against collision."""
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+
+
+def _guard_dismissed_path(repo_path: str) -> Path:
+    return STORE_DIR / f".guard_dismissed_{_slug(repo_path)}.json"
+
+
+def _dismissed_guard(repo_path: str) -> set[str]:
+    """The set of permanently dismissed guard-pair hashes for this repo. Fail-soft:
+    a missing or corrupt file reads as no dismissals, never raises."""
+    path = _guard_dismissed_path(repo_path)
+    try:
+        hashes = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(hashes, list):
+            hashes = []
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        hashes = []
+    return set(hashes)
+
+
+def dismiss_guard(repo_path: str, decision_id: str, source_ref: str) -> None:
+    """Permanently dismiss one (decision_id, source_ref) advisory pair, repo-wide
+    and cross-session. `source_ref` is canonicalized via _guard_relpath before
+    hashing, so an absolute or relative spelling of the same file dismisses the
+    identical pair. This is the MANAGEMENT path (the CLI's `--dismiss`), not the
+    guard run path: unlike every other guard helper it is deliberately NOT
+    fail-soft — a write failure here must surface to the developer, not vanish
+    silently, since a dismissal the developer believes succeeded but didn't
+    would let a "permanent" suppression silently not stick."""
+    relpath = _guard_relpath(repo_path, source_ref)
+    h = _guard_hash(decision_id, relpath)
+    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    dismissed = _dismissed_guard(repo_path)
+    if h in dismissed:
+        return
+    dismissed.add(h)
+    _atomic_write(_guard_dismissed_path(repo_path), json.dumps(sorted(dismissed)))
+
+
+def _guard_advised_path(repo_path: str) -> Path:
+    return STORE_DIR / f".guard_advised_{_slug(repo_path)}.json"
+
+
+def _guard_advised(repo_path: str) -> dict:
+    """{pair_hash: staged_content_sha1} throttle stamp for this repo. Fail-soft:
+    a missing or corrupt file reads as {}, never raises."""
+    path = _guard_advised_path(repo_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        data = {}
+    return data
+
+
+def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
+    """Best-effort update of the content-keyed throttle stamp: pairs is
+    {pair_hash: staged_content_sha1} for every advisory just surfaced. A refreshed
+    entry is moved to the end (re-inserted) so the cap evicts truly-stale pairs
+    first, not a pair that just advised again with new content. Capped at
+    _GUARD_THROTTLE_CAP, oldest dropped. Never raises — a failed stamp write only
+    costs one extra (harmless) re-advisory next run, never blocks anything."""
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        advised = _guard_advised(repo_path)
+        for h, content_hash in pairs.items():
+            advised.pop(h, None)
+            advised[h] = content_hash
+        while len(advised) > _GUARD_THROTTLE_CAP:
+            advised.pop(next(iter(advised)))
+        _atomic_write(_guard_advised_path(repo_path), json.dumps(advised))
+    except OSError:
+        pass
+
+
+def _guard_content_artifacts(content: str) -> list[str]:
+    """Path/module-shaped artifacts pulled from decision content, for exact-path
+    pairing against a staged file via _artifact_path_match. Deliberately reuses
+    the same underlying regexes as _extract_artifacts (_ARTIFACT_PATH_RE /
+    _ARTIFACT_DOTTED_RE) but WITHOUT that function's word-segmentation post-
+    processing step: _extract_artifacts is built for BM25/topic token overlap
+    and intentionally throws away path structure ("contexer/store.py" ->
+    ["contexer", "store", "py"]), which would never satisfy _pathlike_artifact
+    (it requires the "." / "/" structure back). The guard needs the raw matched
+    span intact so it can compare it against a real staged path, so this stays a
+    separate helper rather than a call to _extract_artifacts."""
+    raw = _ARTIFACT_PATH_RE.findall(content) + _ARTIFACT_DOTTED_RE.findall(content)
+    return [a for a in raw if _pathlike_artifact(a)]
+
+
+def _guard_artifact_reason(artifact: str) -> str:
+    return f"module artifact {artifact}" if "/" not in artifact else f"path artifact {artifact}"
+
+
+def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None = None) -> list[dict]:
+    """Candidate generation: pair every staged file against every trusted decision
+    from the repo store AND the global store (loaded via _load / _load_global).
+    `decisions=` overrides BOTH loaded sources with the given list (tagged
+    scope="personal") — an extension point that keeps this engine reusable by a
+    future CI runner without touching this function's body.
+
+    A candidate is produced only when there is an actual pairing SIGNAL: the
+    staged file is one of the decision's `source_files` (repo-store entries
+    only — global entries never carry source_files and pair via artifact match
+    only), or a path/module-shaped artifact extracted from the decision's
+    content matches the staged path (_artifact_path_match). No signal -> no
+    candidate at all (not even a rejected one). When a signal exists, the
+    decision must ALSO pass _guard_trusted or the candidate is emitted=False
+    with reason="rejected: untrusted provenance" — trust is checked AFTER
+    matching so an untrusted/irrelevant decision never manufactures noise for
+    every staged file it happens not to mention.
+
+    Each candidate: {decision_id, title, file, hash, scope, reason, emitted}."""
+    staged_rel = [p for p in (_guard_relpath(repo_path, s) for s in staged) if p]
+    if not staged_rel:
+        return []
+    if decisions is not None:
+        sources: list[tuple[list[dict], str]] = [(decisions, "personal")]
+    else:
+        sources = [(_load(repo_path).get("entries") or [], "personal"),
+                   (_load_global().get("entries") or [], "global")]
+
+    candidates: list[dict] = []
+    for entries, scope in sources:
+        for entry in entries:
+            decision_id = entry.get("id", "")
+            rev = _current_revision(entry)
+            content = rev.get("content", "") if rev else entry.get("content", "")
+            title = entry.get("title") or _derive_title(content)
+            source_files = set(entry.get("source_files") or []) if scope == "personal" else set()
+            artifacts = _guard_content_artifacts(content)
+            for relpath in staged_rel:
+                if relpath in source_files:
+                    reason = "source_files match"
+                else:
+                    reason = None
+                    for artifact in artifacts:
+                        if _artifact_path_match(artifact, relpath):
+                            reason = _guard_artifact_reason(artifact)
+                            break
+                if reason is None:
+                    continue
+                h = _guard_hash(decision_id, relpath)
+                if not _guard_trusted(entry):
+                    candidates.append({"decision_id": decision_id, "title": title,
+                                        "file": relpath, "hash": h, "scope": scope,
+                                        "reason": "rejected: untrusted provenance",
+                                        "emitted": False})
+                    continue
+                candidates.append({"decision_id": decision_id, "title": title,
+                                    "file": relpath, "hash": h, "scope": scope,
+                                    "reason": reason, "emitted": True})
+    return candidates
+
+
+def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | None = None) -> list[dict]:
+    """_guard_pairs plus the dismiss/throttle checks — still entirely read-only
+    (no stamp mutation, that's guard_staged's job after capping). Every
+    candidate from _guard_pairs comes through; one that matched, was trusted,
+    but is dismissed or throttled has its reason/emitted flipped to say why it
+    stops short of surfacing. A staged file's content is read (and hashed) at
+    most once per call regardless of how many decisions pair to it."""
+    pairs = _guard_pairs(repo_path, staged, decisions)
+    if not pairs:
+        return pairs
+    dismissed = _dismissed_guard(repo_path)
+    advised = _guard_advised(repo_path)
+    content_hashes: dict[str, str] = {}
+
+    def _content_hash_for(relpath: str) -> str:
+        if relpath not in content_hashes:
+            content_hashes[relpath] = _guard_content_hash(_staged_content(repo_path, relpath))
+        return content_hashes[relpath]
+
+    out: list[dict] = []
+    for p in pairs:
+        if not p["emitted"]:
+            out.append(p)
+            continue
+        if p["hash"] in dismissed:
+            out.append({**p, "reason": "rejected: dismissed", "emitted": False})
+            continue
+        if advised.get(p["hash"]) == _content_hash_for(p["file"]):
+            out.append({**p, "reason": "rejected: throttled (content unchanged)",
+                        "emitted": False})
+            continue
+        out.append(p)
+    return out
+
+
+def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
+    """Canonicalized staged-file list: `paths` (canonicalized) when explicitly
+    given, else the real `git diff --cached` staged set. Shared by guard_staged
+    and guard_candidates so both agree on what "staged" means."""
+    if paths is not None:
+        raw = paths
+    else:
+        raw = _staged_files(repo_path)
+    return [p for p in (_guard_relpath(repo_path, s) for s in raw) if p]
+
+
+def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
+    """The Tier-1 advisory engine's orchestrator — the CLI's commit-time entrypoint
+    (Task 4). Store-READ-ONLY (never calls _save/_save_global) and fail-soft: the
+    ENTIRE body is wrapped so any exception degrades to
+    {"advisories": [], "violations": [], "error": True} rather than raising or
+    ever blocking a commit. `violations` is always present but always empty here
+    — Task 3 (armed blocking rules) is the only writer of that key.
+
+    Order: CONTEXER_GUARD=0 short-circuits before any other work; then repo
+    resolution; then the staged-file list (empty -> empty result); then the
+    merge-in-progress check (advisory tier skipped, but the dict shape stays
+    intact for Task 3, which still runs during a merge); then pairing -> drop
+    dismissed -> drop throttled -> cap at _GUARD_MAX_ADVISORIES (the true count
+    is reported as "total_advisories" only when capping actually happened) ->
+    best-effort stamp the throttle for exactly the advisories that surfaced (a
+    pair pushed past the cap is NOT stamped, so it's free to surface next run
+    once something ahead of it clears)."""
+    try:
+        if os.environ.get("CONTEXER_GUARD") == "0":
+            return {"advisories": [], "violations": [], "skipped": "env"}
+        repo = _resolve_repo(repo_path)
+        staged = _guard_staged_paths(repo, paths)
+        if not staged:
+            return {"advisories": [], "violations": []}
+        if _merge_in_progress(repo):
+            return {"advisories": [], "violations": [], "skipped": "merge"}
+
+        evaluated = _guard_evaluate(repo, staged)
+        surfaced = [p for p in evaluated if p["emitted"]]
+        capped = surfaced[:_GUARD_MAX_ADVISORIES]
+        result: dict = {"advisories": capped, "violations": []}
+        if len(surfaced) > len(capped):
+            result["total_advisories"] = len(surfaced)
+        if capped:
+            stamps = {p["hash"]: _guard_content_hash(_staged_content(repo, p["file"]))
+                      for p in capped}
+            _guard_stamp_advised(repo, stamps)
+        return result
+    except Exception:
+        return {"advisories": [], "violations": [], "error": True}
+
+
+def guard_candidates(repo_path: str, paths: list[str] | None = None, explain: bool = False) -> list[dict]:
+    """Read-only `--explain` counterpart to guard_staged: the identical pairing +
+    dismiss/throttle pipeline, but NEVER mutates the throttle stamp (or anything
+    else). explain=False returns only candidates that would actually surface
+    right now (matched, trusted, not dismissed, not throttled) — unlike
+    guard_staged, NOT capped at _GUARD_MAX_ADVISORIES, since this is a diagnostic
+    listing, not the noise-controlled commit-time nag. explain=True additionally
+    includes every rejected candidate, each carrying its reason. Fail-soft: any
+    exception -> []."""
+    try:
+        repo = _resolve_repo(repo_path)
+        staged = _guard_staged_paths(repo, paths)
+        if not staged:
+            return []
+        evaluated = _guard_evaluate(repo, staged)
+        if explain:
+            return evaluated
+        return [p for p in evaluated if p["emitted"]]
+    except Exception:
+        return []
+
+
 def _detect_insight(repo_path: str) -> tuple[str, bool]:
     """Infers how much insight the current user has into this repo from git
     signals. Returns (level, decisive) — non-decisive means ask the user.
