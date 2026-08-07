@@ -57,6 +57,49 @@ def _real_config_bytes(real_store_dir: Path) -> bytes | None:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def console_paths_never_resolve_the_real_home(tmp_path_factory):
+    """Baseline the three import-time `Path.home()` globals somewhere disposable, for the
+    WHOLE session — so undoing a per-test monkeypatch restores a sandbox, not the real one.
+
+    A per-test `monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ...)` protects only the
+    window in which that test is running. The console is a threaded HTTP server whose handler
+    threads are daemon threads that shutdown deliberately does NOT join (`daemon_threads` +
+    `block_on_close = False`, so a stalled client cannot decide when SIGTERM finishes), and
+    EVERY request logs through `server._log` -> `daemon.LOG_PATH`. A handler still in flight
+    when the test ends therefore reaches its `send_response` -> `log_request` AFTER monkeypatch
+    has restored `LOG_PATH` to `~/.contexer/ui.log`, and writes the real developer's store dir
+    from a thread nobody is waiting on — minutes of test time later, under whatever unrelated
+    test happens to be running then.
+
+    That is the CI flake this fixture closes: `test_ui_auth.py::
+    test_sigterm_clears_the_statefile_with_a_half_sent_request_open` deliberately abandons a
+    handler mid-request (that is the property it proves), and its `PUT /api/config 400` access
+    line landed in the runner's real `~/.contexer/ui.log`, failing `no_real_store_writes`
+    against a random later test. Convicted by instrumenting `_log` to record
+    `PYTEST_CURRENT_TEST` whenever the path resolved under the real home.
+
+    Fixing that one test would not close the class: any of the ~300 console requests in
+    test_ui_api.py / test_ui_auth.py can be the one still in flight. One baseline is the
+    chokepoint — after it, no in-process code path can name the real ui.json / ui.log /
+    config.toml no matter which thread runs when.
+
+    `no_real_store_writes` keeps its teeth for what this cannot reach: a SUBPROCESS resolves
+    `Path.home()` from its own HOME, so a child spawned with an unpatched env still leaks and
+    still fails the run."""
+    from contexer import config
+    from contexer.ui import daemon
+
+    sandbox = tmp_path_factory.mktemp("home") / ".contexer"
+    sandbox.mkdir()
+    saved = (daemon.STATE_PATH, daemon.LOG_PATH, config.CONFIG_PATH)
+    daemon.STATE_PATH = sandbox / "ui.json"
+    daemon.LOG_PATH = sandbox / "ui.log"
+    config.CONFIG_PATH = sandbox / "config.toml"
+    yield
+    daemon.STATE_PATH, daemon.LOG_PATH, config.CONFIG_PATH = saved
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_real_store_writes():
     """Fail the run if the suite leaked console artefacts into — or rewrote — the real store.
 

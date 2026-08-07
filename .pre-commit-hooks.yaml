@@ -1,0 +1,8 @@
+- id: contexer-guard
+  name: contexer guard
+  description: Check staged changes against approved Contexer decisions before commit.
+  entry: contexer guard
+  language: system
+  verbose: true
+  pass_filenames: false
+  always_run: true

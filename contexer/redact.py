@@ -50,6 +50,17 @@ _GENERIC = re.compile(
     r"(\s*[:=]\s*)"
     r"(?:(['\"])(.+?)\3|([^\s'\"]+))")
 
+# ── additive export for external high-confidence-only consumers ──────────────
+# The commit-time guard's Tier-2 "secret" armed rule (contexer/store.py) needs to
+# ask "does this line look like a real credential?" with ZERO tolerance for false
+# positives (a blocking check, unlike scrub's redact-on-suspicion posture). So it
+# gets ONLY the already-compiled high-confidence pattern objects — provider token
+# shapes, PEM private-key blocks, JWTs, and connection-string passwords — never the
+# keyword-gated generic catch-all, whose `_looks_secretlike` gate is precision-
+# risky on ordinary code (`token = short_lived`). Pure re-export of existing
+# pattern objects: no new regex, no behavior change to `scrub`, module stays leaf.
+HIGH_CONFIDENCE_PATTERNS: list[re.Pattern] = [rx for rx, _kind in _FULL] + [_CONN]
+
 _MIN_VALUE_LEN = 6
 # A plain lowercase word or hyphenated/apostrophed phrase ("required", "short-lived",
 # "bearer") — prose, not a credential. Used to gate the generic keyword catch-all.
