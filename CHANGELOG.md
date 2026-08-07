@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.30.0](https://github.com/bhargavamin/contexer/compare/v0.29.1...v0.30.0) (2026-08-07)
+
+
+### Features
+
+* **guard:** add contexer guard CLI subcommand family ([fa6db74](https://github.com/bhargavamin/contexer/commit/fa6db746efca2ae361f356926e60002a0ae0610e))
+* **guard:** add git hook install/uninstall + pre-commit framework spec ([40de902](https://github.com/bhargavamin/contexer/commit/40de9029f0558ff83be55047a32150843cdb4934))
+* **guard:** add staged plumbing and path-matching helpers ([a670012](https://github.com/bhargavamin/contexer/commit/a670012acd1fbcab64d1a0ba0aae298400770a49))
+* **guard:** add Tier-1 advisory engine — pairing, throttle, dismissals ([c9d75a8](https://github.com/bhargavamin/contexer/commit/c9d75a84001c7683f960d6ffc9fceae7726f5c56))
+* **guard:** add Tier-2 armed rules — machine-checkable blocking checks ([918b585](https://github.com/bhargavamin/contexer/commit/918b58534e2b4acd16e5a4662cd5ba9b134b8254))
+* **guard:** commit-time decision guard — advisory pairing and armed blocking rules ([67469f7](https://github.com/bhargavamin/contexer/commit/67469f73ed8a2c879e06ff86dad33fba6151fc62))
+* **store:** bounce narrative-shaped AI captures with restate guidance ([02ee9ce](https://github.com/bhargavamin/contexer/commit/02ee9ceaf1d2da67734d1e7c5154628af4619755))
+* **store:** clip long decision bodies in human review surfaces ([8da4a3a](https://github.com/bhargavamin/contexer/commit/8da4a3aaf713833edd12e6d667a3b451c6c48e38))
+* **store:** re-verify scan conventions against fresh miner evidence ([bd5648d](https://github.com/bhargavamin/contexer/commit/bd5648dc29fd16d688dac9c60e66d29c93a638e7))
+* week-1 capture quality — lint narrative captures, clip review surfaces, stamp legacy entries, re-verify scan conventions ([29d461f](https://github.com/bhargavamin/contexer/commit/29d461fbc554fb360e311b303b64400f5bd78d75))
+
+
+### Bug Fixes
+
+* **cli:** surface approve_decision failures in `contexer review` ([f0f76dd](https://github.com/bhargavamin/contexer/commit/f0f76dd62c229647e18326f8ac31b2e1c585ba18))
+* **guard:** budget the whole run and pair by lookup, not scan ([833af75](https://github.com/bhargavamin/contexer/commit/833af75608e6408b1db9210a4840d70c615f2a1c))
+* **guard:** probe the hook's binary and shell-quote its path ([68ee302](https://github.com/bhargavamin/contexer/commit/68ee3028b997c4b0314a99b87b0c5cb31ac6e8eb))
+* **guard:** read staged paths NUL-separated so exotic names are scanned ([7e606c2](https://github.com/bhargavamin/contexer/commit/7e606c262408bdd90ebb195671d27feee152df5d))
+* **guard:** report arm/disarm refusals under their own command ([420d2a2](https://github.com/bhargavamin/contexer/commit/420d2a254042695477645baa199ea912271b1a6a))
+* **guard:** resolve repo once across guard CLI paths ([0f84961](https://github.com/bhargavamin/contexer/commit/0f84961fe37e4af89672760e37c19ae014efb188))
+* **guard:** scan invalid-UTF-8 staged paths via surrogateescape ([5d57f6b](https://github.com/bhargavamin/contexer/commit/5d57f6b6923917d15b4198d786b1d7e899a59787))
+* pin encoding="utf-8" on package text IO and guard host-config reads ([80acd21](https://github.com/bhargavamin/contexer/commit/80acd211c7323d0133b5b20e59575da764c43103))
+* **store:** make disappearance proposals rule-shaped, tighten fuzzy pool ([4fe08e9](https://github.com/bhargavamin/contexer/commit/4fe08e9bbe4fb95a98d052ba18b8f5fe0fd979fb))
+* **store:** pin utf-8 on the remaining reads and make .resume_mining fail-soft ([0a61370](https://github.com/bhargavamin/contexer/commit/0a6137057298e46d752a443ceb35590fa3278d7b))
+* **store:** render post-verify state at session start; document capture lint in CLAUDE.md ([7ae2851](https://github.com/bhargavamin/contexer/commit/7ae2851b6ce9c632b8925a57b2ec096b2c4186cd))
+* **store:** retract stale scan proposals on reappearance, tidy review pointers ([3da80db](https://github.com/bhargavamin/contexer/commit/3da80db16c11f516cafcc5659e462f9b21810e08))
+* **store:** stamp missing status/created_by on legacy entries at migration ([0cac917](https://github.com/bhargavamin/contexer/commit/0cac917638935277742063ffe031509523a15dc4))
+* **tests:** baseline the console's home-derived paths for the whole session ([2219c8b](https://github.com/bhargavamin/contexer/commit/2219c8b2031a93a56dfdcaf0ceec038909742217))
+* **tests:** pin the real daemon test's subprocess env explicitly ([93b3398](https://github.com/bhargavamin/contexer/commit/93b3398a46d74ecfafaf59e29895b9d2fcd2c6da))
+
+
+### Documentation
+
+* document --no-cov for subset runs (coverage floor stays in addopts) ([4bcdfc7](https://github.com/bhargavamin/contexer/commit/4bcdfc712ff20c7c41155239d3232dbec8e9b9b7))
+* **guard:** document the commit-time guard ([58c1e3b](https://github.com/bhargavamin/contexer/commit/58c1e3bdaf613770f0dba0a10f7c1ca0b61a1c27))
+* make AGENTS.md a pointer to CLAUDE.md instead of a second copy ([dc8ccb7](https://github.com/bhargavamin/contexer/commit/dc8ccb7b87d59e8efcdfbe4b14ae38a1bd60849c))
+* state why the coverage floor must stay in pytest addopts ([deb2c11](https://github.com/bhargavamin/contexer/commit/deb2c11d9c392342aaea21b721645dd6924f30fa))
+
 ## [0.29.1](https://github.com/bhargavamin/contexer/compare/v0.29.0...v0.29.1) (2026-08-05)
 
 
