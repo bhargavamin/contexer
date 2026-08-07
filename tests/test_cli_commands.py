@@ -2,6 +2,7 @@
 uninstall --purge, help, and the main() dispatch."""
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -693,3 +694,302 @@ class TestReviewTitleHeadline:
         head_idx = out.index("Adopt outbox for retries")
         body_idx = out.index("Long body explaining the outbox pattern")
         assert head_idx < body_idx
+
+
+# ── guard ────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def guard_repo(tmp_path, monkeypatch):
+    """A real throwaway git repo, STORE_DIR redirected, cwd chdir'd into it — the
+    CLI guard commands resolve their repo via os.getcwd() (contexer guard has no
+    --repo flag), so unlike tmp_repo this fixture must actually chdir. Mirrors
+    tests/test_guard.py's `repo` fixture."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "guard@test.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Guard Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    from contexer import store
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def _gwrite(repo, relpath, content):
+    path = repo / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
+def _ggit(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _gseed(repo, content, *, subtype="architecture", status="approved",
+           created_by="human", source_files=None, title=""):
+    from contexer import store
+    entry = store._new_decision_entry(content, "test-session", subtype,
+                                       created_by=created_by, status=status, title=title)
+    if source_files is not None:
+        entry["source_files"] = source_files
+    data = store._load(str(repo))
+    data["entries"].append(entry)
+    store._save(str(repo), data)
+    return entry
+
+
+class TestGuardDispatchAndExitCodes:
+    def test_dispatch_reaches_guard_no_staged_changes(self, guard_repo, monkeypatch):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+
+    def test_advisory_only_exits_0(self, guard_repo, monkeypatch, capsys):
+        entry = _gseed(guard_repo, "Decided to use JWT for auth",
+                        source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "review this commit against 1 approved decision(s)" in out
+        assert entry["id"][:8] in out
+        assert "auth/jwt.py" in out
+        assert "dismiss: contexer guard --dismiss" in out
+
+    def test_violation_exits_1(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        entry = _gseed(guard_repo, "Never commit TODO markers")
+        store.arm_guard(str(guard_repo), entry["id"], "regex", pattern="TODO")
+        _gwrite(guard_repo, "a.py", "# TODO fix this\n")
+        _ggit(guard_repo, "add", "a.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert f"✗ a.py:1 violates decision [{entry['id'][:8]}]" in out
+        assert "CONTEXER_GUARD=0 git commit" in out
+        assert "contexer guard disarm" in out
+
+    def test_advisories_and_violations_both_print_violation_wins_exit(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        rule_entry = _gseed(guard_repo, "Never commit TODO markers")
+        store.arm_guard(str(guard_repo), rule_entry["id"], "regex", pattern="TODO")
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1 # TODO\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "review this commit against 1 approved decision(s)" in out
+        assert "✗ auth/jwt.py" in out
+
+    def test_advisory_cap_reports_suppressed_count(self, guard_repo, monkeypatch, capsys):
+        for i in range(7):
+            _gseed(guard_repo, f"Decision number {i} about auth handling",
+                   source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "review this commit against 5 approved decision(s)" in out
+        assert "(2 more suppressed)" in out
+
+    def test_env_var_zero_is_silent_exit_0(self, guard_repo, monkeypatch, capsys):
+        monkeypatch.setenv("CONTEXER_GUARD", "0")
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        out, err = capsys.readouterr()
+        assert out == "" and err == ""
+
+    def test_internal_exception_exits_0_with_exact_stderr_line(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(store, "guard_staged", boom)
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        assert capsys.readouterr().err.strip() == \
+            "contexer guard: internal error, skipping checks"
+
+    def test_engine_error_result_exits_0_with_exact_stderr_line(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        monkeypatch.setattr(store, "guard_staged",
+                             lambda *a, **k: {"advisories": [], "violations": [], "error": True})
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        assert capsys.readouterr().err.strip() == \
+            "contexer guard: internal error, skipping checks"
+
+    def test_explain_shows_rejected_with_reason(self, guard_repo, monkeypatch, capsys):
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"],
+               created_by="ai", status="suggested")
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "--explain")
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "REJECTED" in out
+        assert "untrusted provenance" in out
+
+
+class TestGuardDismiss:
+    def test_hash_form_acts_directly_without_prompting(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        h = store.guard_candidates(str(guard_repo))[0]["hash"]
+
+        monkeypatch.setattr("builtins.input",
+                             lambda *_a: pytest.fail("hash form must not prompt"))
+        _run_main(monkeypatch, "guard", "--dismiss", h)
+        assert "Dismissed" in capsys.readouterr().out
+        assert store._dismissed_guard(str(guard_repo)) == {h}
+
+    def test_numeric_form_prompts_and_confirms(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "y")
+        _run_main(monkeypatch, "guard", "--dismiss", "1")
+        assert "Dismissed" in capsys.readouterr().out
+        assert len(store._dismissed_guard(str(guard_repo))) == 1
+
+    def test_numeric_form_declined_dismisses_nothing(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "n")
+        _run_main(monkeypatch, "guard", "--dismiss", "1")
+        assert "Cancelled" in capsys.readouterr().out
+        assert store._dismissed_guard(str(guard_repo)) == set()
+
+    def test_numeric_form_out_of_range_exits_1(self, guard_repo, monkeypatch, capsys):
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "--dismiss", "9")
+        assert exc.value.code == 1
+
+    def test_unknown_hash_exits_1(self, guard_repo, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "--dismiss", "deadbeef0000")
+        assert exc.value.code == 1
+
+
+class TestGuardArmDisarmList:
+    def test_arm_disarm_round_trip(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        entry = _gseed(guard_repo, "Never commit TODO markers")
+
+        _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "TODO")
+        assert "Armed" in capsys.readouterr().out
+        data = store._load(str(guard_repo))
+        armed = store._entry_by_id(data["entries"], entry["id"])
+        assert armed["guard_check"]["type"] == "regex"
+        assert armed["guard_check"]["pattern"] == "TODO"
+
+        _run_main(monkeypatch, "guard", "disarm", entry["id"])
+        assert "Disarmed" in capsys.readouterr().out
+        data = store._load(str(guard_repo))
+        armed = store._entry_by_id(data["entries"], entry["id"])
+        assert "guard_check" not in armed
+
+    def test_arm_check_secret(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        entry = _gseed(guard_repo, "Never commit secrets")
+        _run_main(monkeypatch, "guard", "arm", entry["id"], "--check", "secret")
+        assert "Armed" in capsys.readouterr().out
+        data = store._load(str(guard_repo))
+        armed = store._entry_by_id(data["entries"], entry["id"])
+        assert armed["guard_check"]["type"] == "secret"
+
+    def test_arm_with_flags_paths_message(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        entry = _gseed(guard_repo, "Never commit TODO markers")
+        _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "todo",
+                   "--flags", "i", "--paths", "*.py", "--message", "no TODOs")
+        data = store._load(str(guard_repo))
+        gc = store._entry_by_id(data["entries"], entry["id"])["guard_check"]
+        assert gc["flags"] == "i"
+        assert gc["paths"] == "*.py"
+        assert gc["message"] == "no TODOs"
+
+    def test_arm_missing_id_exits_1(self, guard_repo, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "arm")
+        assert exc.value.code == 1
+        assert "requires a decision id" in capsys.readouterr().err
+
+    def test_arm_missing_check_kind_exits_1(self, guard_repo, monkeypatch, capsys):
+        entry = _gseed(guard_repo, "Never commit TODO markers")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "arm", entry["id"])
+        assert exc.value.code == 1
+        assert "--regex" in capsys.readouterr().err
+
+    def test_arm_unapproved_entry_refusal_surfaces(self, guard_repo, monkeypatch, capsys):
+        entry = _gseed(guard_repo, "Some pending thing", created_by="ai",
+                        status="pending_approval")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "TODO")
+        assert exc.value.code == 1
+        assert "only approved decisions can be armed" in capsys.readouterr().err
+
+    def test_disarm_missing_id_exits_1(self, guard_repo, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "disarm")
+        assert exc.value.code == 1
+        assert "requires a decision id" in capsys.readouterr().err
+
+    def test_disarm_unknown_id_exits_1(self, guard_repo, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "disarm", "no-such-id")
+        assert exc.value.code == 1
+
+    def test_list_shows_armed_rule(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        entry = _gseed(guard_repo, "Never commit TODO markers")
+        store.arm_guard(str(guard_repo), entry["id"], "regex", pattern="TODO")
+        _run_main(monkeypatch, "guard", "list")
+        out = capsys.readouterr().out
+        assert entry["id"][:8] in out
+        assert "regex" in out
+        assert "TODO" in out
+
+    def test_list_empty(self, guard_repo, monkeypatch, capsys):
+        _run_main(monkeypatch, "guard", "list")
+        assert "No armed guard rules" in capsys.readouterr().out
+
+
+class TestGuardUsage:
+    def test_usage_documents_guard(self):
+        assert "guard" in cli.USAGE
+        assert "CONTEXER_GUARD=0" in cli.USAGE
+        assert "arm" in cli.USAGE
+        assert "disarm" in cli.USAGE

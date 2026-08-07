@@ -29,9 +29,26 @@ Commands:
   share         Push local decisions to your team cloud context: share [id | --all] (default: latest).
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
+  guard         Commit-time decision guard (invoked by the pre-commit hook — see below).
   status        Show install state: version, binary path, MCP/hooks, store summary.
   version       Print the installed version.
   help          Show this message.
+
+Guard (contexer guard):
+  guard [path…] [--explain]
+                Check staged changes against approved decisions. Advisories (non-blocking)
+                print and exit 0; a violated armed rule prints and exits 1. --explain shows
+                every candidate pair, including rejected ones, with its reason.
+                Bypass for one commit: CONTEXER_GUARD=0 git commit …
+  guard --dismiss <hash|n>
+                Permanently dismiss one advisory pair. <hash> (from an advisory line) acts
+                directly; a numeric index re-lists current candidates and asks to confirm.
+  guard arm <id> --regex '<pattern>' [--flags i] [--paths <glob>] [--message <hint>]
+  guard arm <id> --check secret
+                Arm an approved decision as a blocking rule (regex match or secret detection).
+  guard disarm <id>
+                Remove an armed rule.
+  guard list    Show every currently armed rule.
 
 Flags:
   -V, --version   Same as `version`.
@@ -987,6 +1004,228 @@ def _print_ui_status(info: dict) -> None:
     print(f"  log:          {info['log_path']}")
 
 
+def _print_guard_advisories(advisories: list, total_advisories: int | None) -> None:
+    """Non-blocking advisory block: instruction-first, addressed to whoever reads
+    it (human or committing agent). `total_advisories` is only present when
+    guard_staged actually capped the list, so the suppressed-count line only
+    appears then."""
+    n = len(advisories)
+    print(f"⚠️ Contexer: review this commit against {n} approved decision(s) before proceeding:")
+    for a in advisories:
+        id8 = (a.get("decision_id") or "")[:8]
+        print(f"  - [{id8}] {a.get('title')} — {a.get('file')}  "
+              f"(dismiss: contexer guard --dismiss {a.get('hash')})")
+    if total_advisories and total_advisories > n:
+        print(f"  ({total_advisories - n} more suppressed)")
+
+
+def _print_guard_violations(violations: list) -> None:
+    """Blocking violations, plus a footer naming both ways past them: a one-commit
+    env bypass, or permanently disarming the rule."""
+    for v in violations:
+        id8 = (v.get("decision_id") or "")[:8]
+        line = f"✗ {v.get('path')}:{v.get('line')} violates decision [{id8}]: {v.get('title')}"
+        if v.get("message"):
+            line += f" — {v['message']}"
+        print(line)
+    print()
+    print("To bypass this commit: CONTEXER_GUARD=0 git commit …")
+    print("To remove the rule: contexer guard disarm <id>")
+
+
+def _print_guard_explain(candidates: list) -> None:
+    """`--explain`: the full candidate table, including rejected pairs with why."""
+    if not candidates:
+        print("No candidate decision/file pairs for the staged changes.")
+        return
+    print(f"{len(candidates)} candidate pair(s):\n")
+    for c in candidates:
+        id8 = (c.get("decision_id") or "")[:8]
+        tag = "EMITTED " if c.get("emitted") else "REJECTED"
+        print(f"  [{tag}] [{id8}] {c.get('title')} — {c.get('file')}  "
+              f"({c.get('reason')})  hash={c.get('hash')}")
+
+
+def _guard_run(rest: list) -> None:
+    """`contexer guard [path…] [--explain]` — the commit-time run path.
+
+    Deliberately NOT `_run_guarded`-wrapped: a broken guard must never block a
+    commit, so any exception, or the engine's own `error: True`, degrades to a
+    single stderr line and exit 0 rather than a traceback or a nonzero exit."""
+    try:
+        from contexer import store
+
+        if os.environ.get("CONTEXER_GUARD") == "0":
+            sys.exit(0)
+
+        explain = "--explain" in rest
+        paths = [a for a in rest if not a.startswith("--")] or None
+        repo = store._git_root(os.getcwd())
+
+        if explain:
+            _print_guard_explain(store.guard_candidates(repo, paths, explain=True))
+            sys.exit(0)
+
+        result = store.guard_staged(repo, paths)
+        if result.get("error"):
+            print("contexer guard: internal error, skipping checks", file=sys.stderr)
+            sys.exit(0)
+        if result.get("skipped") == "env":
+            sys.exit(0)
+
+        advisories = result.get("advisories") or []
+        violations = result.get("violations") or []
+        if advisories:
+            _print_guard_advisories(advisories, result.get("total_advisories"))
+        if violations:
+            if advisories:
+                print()
+            _print_guard_violations(violations)
+            sys.exit(1)
+        sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        print("contexer guard: internal error, skipping checks", file=sys.stderr)
+        sys.exit(0)
+
+
+def _guard_dismiss(rest: list) -> None:
+    """`contexer guard --dismiss <hash|n>` — permanently suppress one advisory
+    pair. Management path (called under `_run_guarded`). The hash form (usually
+    copy-pasted straight off an advisory line) acts directly with no prompt; the
+    numeric form re-derives the current candidate listing and requires an
+    explicit y/N confirmation, since an index can silently mean something
+    different on a later run."""
+    from contexer import store
+
+    i = rest.index("--dismiss")
+    if i + 1 >= len(rest):
+        print("contexer guard --dismiss: requires a hash or index", file=sys.stderr)
+        sys.exit(1)
+    arg = rest[i + 1]
+    paths = [a for a in rest[:i] + rest[i + 2:] if not a.startswith("--")] or None
+    repo = store._git_root(os.getcwd())
+
+    if arg.isdigit():
+        candidates = store.guard_candidates(repo, paths, explain=False)
+        idx = int(arg)
+        if idx < 1 or idx > len(candidates):
+            print(f"contexer guard --dismiss: no candidate at index {idx} "
+                  f"({len(candidates)} currently listed)", file=sys.stderr)
+            sys.exit(1)
+        cand = candidates[idx - 1]
+        try:
+            reply = input(f'Dismiss "{cand.get("title")}" for {cand.get("file")}? '
+                          f'[y/N]: ').strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return
+        if reply not in ("y", "yes"):
+            print("Cancelled.")
+            return
+    else:
+        candidates = store.guard_candidates(repo, paths, explain=True)
+        cand = next((c for c in candidates if c.get("hash") == arg), None)
+        if cand is None:
+            print(f"contexer guard --dismiss: hash {arg!r} not found among "
+                  f"current candidates", file=sys.stderr)
+            sys.exit(1)
+
+    store.dismiss_guard(repo, cand["decision_id"], cand["file"])
+    print(f"Dismissed [{cand['decision_id'][:8]}] for {cand['file']}.")
+
+
+def _guard_arm(rest: list) -> None:
+    """`contexer guard arm <id> --regex '<pattern>' [--flags i] [--paths <glob>]
+    [--message <hint>]` or `contexer guard arm <id> --check secret`. Delegates
+    entirely to `store.arm_guard`; its ValueError refusals surface via
+    `_run_guarded`."""
+    from contexer import store
+
+    if not rest:
+        print("contexer guard arm: requires a decision id", file=sys.stderr)
+        sys.exit(1)
+    entry_id, opts = rest[0], rest[1:]
+
+    def _opt(name: str) -> str | None:
+        if name in opts:
+            i = opts.index(name)
+            if i + 1 < len(opts):
+                return opts[i + 1]
+        return None
+
+    check = _opt("--check")
+    regex = _opt("--regex")
+    if check == "secret":
+        check_type, pattern = "secret", ""
+    elif regex is not None:
+        check_type, pattern = "regex", regex
+    else:
+        print("contexer guard arm: requires --regex '<pattern>' or --check secret",
+              file=sys.stderr)
+        sys.exit(1)
+
+    repo = store._git_root(os.getcwd())
+    msg = store.arm_guard(repo, entry_id, check_type, pattern=pattern,
+                           flags=_opt("--flags") or "", paths=_opt("--paths") or "",
+                           message=_opt("--message") or "")
+    print(msg)
+
+
+def _guard_disarm(rest: list) -> None:
+    """`contexer guard disarm <id>` — remove a decision's armed rule."""
+    from contexer import store
+
+    if not rest:
+        print("contexer guard disarm: requires a decision id", file=sys.stderr)
+        sys.exit(1)
+    repo = store._git_root(os.getcwd())
+    print(store.disarm_guard(repo, rest[0]))
+
+
+def _guard_list() -> None:
+    """`contexer guard list` — show every currently armed rule, repo + global."""
+    from contexer import store
+
+    repo = store._git_root(os.getcwd())
+    personal = store._armed_rules(store._load(repo).get("entries") or []) if repo else []
+    glob = store._armed_rules(store._load_global().get("entries") or [])
+    rows = [(e, "personal") for e in personal] + [(e, "global") for e in glob]
+    if not rows:
+        print("No armed guard rules.")
+        return
+    print(f"{len(rows)} armed guard rule(s):\n")
+    for entry, scope in rows:
+        gc = entry.get("guard_check") or {}
+        id8 = (entry.get("id") or "")[:8]
+        title = entry.get("title") or store._derive_title(store._current_content(entry))
+        check_type = gc.get("type", "")
+        detail = gc.get("pattern") if check_type == "regex" else "HIGH_CONFIDENCE_PATTERNS"
+        paths = gc.get("paths") or "*"
+        print(f"  [{id8}] ({scope}, {check_type}) {title}")
+        print(f"      pattern={detail!r}  paths={paths}")
+
+
+def guard(rest: list | None = None) -> None:
+    """`contexer guard` — the commit-time hook entrypoint, plus its management
+    subcommands (`arm`, `disarm`, `list`, `--dismiss`). The run path is
+    deliberately NOT `_run_guarded`-wrapped (see `_guard_run`); the management
+    subcommands are deliberate developer acts and fail loudly like every other
+    mutating command."""
+    rest = rest or []
+    if rest and rest[0] == "arm":
+        _run_guarded(lambda: _guard_arm(rest[1:]))
+    elif rest and rest[0] == "disarm":
+        _run_guarded(lambda: _guard_disarm(rest[1:]))
+    elif rest and rest[0] == "list":
+        _run_guarded(_guard_list)
+    elif "--dismiss" in rest:
+        _run_guarded(lambda: _guard_dismiss(rest))
+    else:
+        _guard_run(rest)
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -1020,6 +1259,8 @@ def main() -> None:
         _run_guarded(lambda: login_cmd(rest))
     elif cmd == "logout":
         _run_guarded(lambda: logout_cmd(rest))
+    elif cmd == "guard":
+        guard(rest)
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)
