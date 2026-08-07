@@ -29,6 +29,12 @@ def git_repo(tmp_path, monkeypatch):
     return repo
 
 
+# "café/módulo.py" — built from escapes on purpose: a pasted glyph is invisible
+# in a diff and easy to mangle. Any path outside ASCII is C-quoted by
+# `git diff --cached --name-only` without `-z`.
+_NON_ASCII_REL = "caf\u00e9/m\u00f3dulo.py"
+
+
 def _write(repo, relpath, content):
     path = repo / relpath
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +128,22 @@ class TestStagedFiles:
         not_a_repo = tmp_path / "not_a_repo"
         not_a_repo.mkdir()
         assert store._staged_files(str(not_a_repo)) == []
+
+    def test_non_ascii_path_is_returned_unquoted(self, git_repo):
+        """`--name-only` C-quotes any path outside ASCII (\"caf\\303\\251/...\"),
+        and the quoted spelling survives canonicalization only to make every
+        later `git show :<path>` fail — silently skipping the file. `-z` turns
+        quoting off entirely."""
+        relpath = _NON_ASCII_REL
+        _write(git_repo, relpath, "x = 1\n")
+        _git(git_repo, "add", relpath)
+        assert store._staged_files(str(git_repo)) == [relpath]
+
+    def test_paths_with_spaces_and_quotes_survive(self, git_repo):
+        relpath = 'a dir/we"ird file.py'
+        _write(git_repo, relpath, "x = 1\n")
+        _git(git_repo, "add", relpath)
+        assert store._staged_files(str(git_repo)) == [relpath]
 
 
 # ── _staged_content ──────────────────────────────────────────────────────────
@@ -988,6 +1010,18 @@ class TestGuardStagedViolations:
         result = store.guard_staged(str(repo))
         assert len(result["violations"]) == 1
         assert result["violations"][0]["decision_id"] == entry["id"]
+
+    def test_non_ascii_filename_is_actually_scanned(self, repo):
+        """Regression: a C-quoted staged path made `git show :<path>` fail, so
+        `_staged_content` returned "" and every armed rule silently skipped the
+        file — a secret in it would have sailed through."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        _write(repo, _NON_ASCII_REL, "# TODO fix this\n")
+        _git(repo, "add", _NON_ASCII_REL)
+        result = store.guard_staged(str(repo))
+        assert len(result["violations"]) == 1
+        assert result["violations"][0]["path"] == _NON_ASCII_REL
 
     def test_no_armed_rules_no_violations(self, repo):
         _write(repo, "a.py", "# TODO fix this\n")

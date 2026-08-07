@@ -3466,10 +3466,28 @@ def _staged_files(repo: str) -> list[str]:
     included deliberately: renamed files must still be scanned, and `--name-only`
     on an R entry yields only the new path, which is exactly what the guard scans.
     Deleted files (filter D) are excluded — nothing to scan. `[]` on any git
-    failure (fail-soft, never raises)."""
-    out = _git(repo, "diff", "--cached", "--name-only", "--diff-filter=ACMR",
-               timeout=_GIT_FAST_TIMEOUT)
-    return out.splitlines() if out else []
+    failure (fail-soft, never raises).
+
+    `-z` (NUL-separated, splitting on b"\\0") is load-bearing, not a style
+    choice: without it git C-QUOTES any path holding a non-ASCII byte, a quote,
+    or a backslash — `"caf\\303\\251/m\\303\\263dulo.py"` — and that quoted
+    spelling survives canonicalization intact, only to make the later
+    `git show :<path>` fail. _staged_content then returns "" and every armed
+    Tier-2 rule silently skips the file, so a secret in it ships. `-z` turns
+    quoting off entirely. That means reading raw bytes (the same subprocess
+    shape _staged_content already uses) and decoding each path AFTER the split,
+    since the separator is a byte."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, "diff", "--cached", "--name-only", "-z",
+             "--diff-filter=ACMR"],
+            capture_output=True, timeout=_GIT_FAST_TIMEOUT,
+        )
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    return [p.decode("utf-8", errors="replace") for p in out.stdout.split(b"\0") if p]
 
 
 def _staged_content(repo: str, path: str) -> str:
