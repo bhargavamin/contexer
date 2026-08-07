@@ -204,8 +204,9 @@ def install(rest: list | None = None) -> None:
             print(line)
     print()
     print("Done. Restart your AI assistant and open any git repo to activate Contexer.")
-    print("To enable commit-time blocking in a repo (not done automatically): "
-          "run `contexer guard --install-hook` inside it.")
+    print("To get commit-time advisories in a repo (not done automatically): "
+          "run `contexer guard --install-hook` inside it. Nothing blocks a commit "
+          "until you arm a decision with `contexer guard arm`.")
 
 
 def _confirm_purge(store_dir: Path) -> bool:
@@ -1156,8 +1157,14 @@ def _guard_dismiss(rest: list) -> None:
 def _guard_arm(rest: list) -> None:
     """`contexer guard arm <id> --regex '<pattern>' [--flags i] [--paths <glob>]
     [--message <hint>]` or `contexer guard arm <id> --check secret`. Delegates
-    entirely to `store.arm_guard`; its ValueError refusals surface via
-    `_run_guarded`."""
+    entirely to `store.arm_guard`.
+
+    Its ValueError refusals ("machine-checkable", "only approved decisions can
+    be armed") are a documented CONTRACT — a rejected request, not a broken
+    file — so they are caught and printed here under this command's own name.
+    Left to `_run_guarded`'s generic ValueError arm they came out prefixed
+    "Corrupt config:" and followed by advice to fix or remove a config file,
+    which is both wrong and destructive to act on."""
     from contexer import store
 
     if not rest:
@@ -1184,21 +1191,32 @@ def _guard_arm(rest: list) -> None:
         sys.exit(1)
 
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
-    msg = store.arm_guard(repo, entry_id, check_type, pattern=pattern,
-                           flags=_opt("--flags") or "", paths=_opt("--paths") or "",
-                           message=_opt("--message") or "")
+    try:
+        msg = store.arm_guard(repo, entry_id, check_type, pattern=pattern,
+                               flags=_opt("--flags") or "", paths=_opt("--paths") or "",
+                               message=_opt("--message") or "")
+    except ValueError as e:
+        print(f"contexer guard arm: {e}", file=sys.stderr)
+        sys.exit(1)
     print(msg)
 
 
 def _guard_disarm(rest: list) -> None:
-    """`contexer guard disarm <id>` — remove a decision's armed rule."""
+    """`contexer guard disarm <id>` — remove a decision's armed rule. Its
+    ValueError refusal (unknown id) is a contract refusal, reported under this
+    command's own name — see `_guard_arm` for why it must not fall through to
+    `_run_guarded`'s "Corrupt config:" arm."""
     from contexer import store
 
     if not rest:
         print("contexer guard disarm: requires a decision id", file=sys.stderr)
         sys.exit(1)
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
-    print(store.disarm_guard(repo, rest[0]))
+    try:
+        print(store.disarm_guard(repo, rest[0]))
+    except ValueError as e:
+        print(f"contexer guard disarm: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _guard_list() -> None:

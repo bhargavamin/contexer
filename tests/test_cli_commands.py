@@ -986,7 +986,23 @@ class TestGuardArmDisarmList:
         with pytest.raises(SystemExit) as exc:
             _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "TODO")
         assert exc.value.code == 1
-        assert "only approved decisions can be armed" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "only approved decisions can be armed" in err
+        # arm's refusals are a documented contract, not a broken file: they must
+        # never be dressed up as a corrupt-config error telling users to delete
+        # config files.
+        assert err.startswith("contexer guard arm: ")
+        assert "Corrupt config" not in err
+
+    def test_arm_unmachine_checkable_refusal_surfaces(self, guard_repo, monkeypatch, capsys):
+        entry = _gseed(guard_repo, "Never commit TODO markers")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "(unclosed")
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("contexer guard arm: ")
+        assert "machine-checkable" in err
+        assert "Corrupt config" not in err
 
     def test_disarm_missing_id_exits_1(self, guard_repo, monkeypatch, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -998,6 +1014,9 @@ class TestGuardArmDisarmList:
         with pytest.raises(SystemExit) as exc:
             _run_main(monkeypatch, "guard", "disarm", "no-such-id")
         assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("contexer guard disarm: ")
+        assert "Corrupt config" not in err
 
     def test_list_shows_armed_rule(self, guard_repo, monkeypatch, capsys):
         from contexer import store
@@ -1209,6 +1228,9 @@ class TestInstallStatusMentionGuardHook:
         install()
         out = capsys.readouterr().out
         assert "guard --install-hook" in out
+        # Installing the hook enables the ADVISORY tier only — blocking needs an
+        # explicit `contexer guard arm`, so the offer must not promise blocking.
+        assert "blocking" not in out.lower()
 
     def test_status_reports_guard_hook_not_installed(self, guard_repo, monkeypatch, capsys):
         _stub_guard_bin(monkeypatch)
