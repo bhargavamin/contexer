@@ -1060,7 +1060,7 @@ def _guard_run(rest: list) -> None:
 
         explain = "--explain" in rest
         paths = [a for a in rest if not a.startswith("--")] or None
-        repo = store._git_root(os.getcwd())
+        repo = store._git_root(os.getcwd()) or store._resolve_repo("")
 
         if explain:
             _print_guard_explain(store.guard_candidates(repo, paths, explain=True))
@@ -1105,7 +1105,12 @@ def _guard_dismiss(rest: list) -> None:
         sys.exit(1)
     arg = rest[i + 1]
     paths = [a for a in rest[:i] + rest[i + 2:] if not a.startswith("--")] or None
-    repo = store._git_root(os.getcwd())
+    # Resolved ONCE and reused for both the candidates lookup and dismiss_guard below:
+    # unlike arm_guard/disarm_guard, dismiss_guard does not call _resolve_repo itself
+    # (it writes straight to the sidecar keyed on whatever path it's given), so passing
+    # it something different from what guard_candidates just searched would dismiss a
+    # pair found under one repo against a completely different sidecar file.
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
 
     if arg.isdigit():
         candidates = store.guard_candidates(repo, paths, explain=False)
@@ -1166,7 +1171,7 @@ def _guard_arm(rest: list) -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    repo = store._git_root(os.getcwd())
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     msg = store.arm_guard(repo, entry_id, check_type, pattern=pattern,
                            flags=_opt("--flags") or "", paths=_opt("--paths") or "",
                            message=_opt("--message") or "")
@@ -1180,7 +1185,7 @@ def _guard_disarm(rest: list) -> None:
     if not rest:
         print("contexer guard disarm: requires a decision id", file=sys.stderr)
         sys.exit(1)
-    repo = store._git_root(os.getcwd())
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     print(store.disarm_guard(repo, rest[0]))
 
 
@@ -1188,7 +1193,7 @@ def _guard_list() -> None:
     """`contexer guard list` — show every currently armed rule, repo + global."""
     from contexer import store
 
-    repo = store._git_root(os.getcwd())
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     personal = store._armed_rules(store._load(repo).get("entries") or []) if repo else []
     glob = store._armed_rules(store._load_global().get("entries") or [])
     rows = [(e, "personal") for e in personal] + [(e, "global") for e in glob]

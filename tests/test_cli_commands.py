@@ -866,6 +866,32 @@ class TestGuardDismiss:
         assert "Dismissed" in capsys.readouterr().out
         assert store._dismissed_guard(str(guard_repo)) == {h}
 
+    def test_dismiss_uses_same_resolved_repo_as_candidates_lookup(
+            self, guard_repo, monkeypatch, capsys):
+        """Regression: dismiss_guard, unlike arm_guard/disarm_guard, does not call
+        _resolve_repo internally — it writes straight to whatever path it's given.
+        So the CLI must resolve the repo ONCE and reuse that exact value for both
+        the candidates lookup and the dismiss call; resolving twice (git-root
+        fails, falls back through the .current_repo pointer each time) would be
+        fine here since both calls fall back identically, but a naive
+        implementation that passed the raw (unresolved) git-root result straight
+        to dismiss_guard would silently dismiss into the wrong sidecar file."""
+        from contexer import store
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        h = store.guard_candidates(str(guard_repo))[0]["hash"]
+
+        # Simulate a cwd git-root can't resolve, falling back to the shared
+        # .current_repo pointer instead — exactly the path where the two calls
+        # inside _guard_dismiss could diverge if not resolved once and reused.
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: "")
+        assert store.anchor_repo(str(guard_repo))
+
+        _run_main(monkeypatch, "guard", "--dismiss", h)
+        assert "Dismissed" in capsys.readouterr().out
+        assert store._dismissed_guard(str(guard_repo)) == {h}
+
     def test_numeric_form_prompts_and_confirms(self, guard_repo, monkeypatch, capsys):
         from contexer import store
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
