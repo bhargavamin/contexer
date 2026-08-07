@@ -1034,6 +1034,46 @@ class TestGuardStagedViolations:
         assert len(result["violations"]) == 1
         assert result["violations"][0]["path"] == _NON_ASCII_REL
 
+    def test_invalid_utf8_filename_is_actually_scanned(self, repo):
+        """Regression, one layer below the C-quoting bug: a staged path whose
+        bytes are not valid UTF-8 at all (not just non-ASCII). Decoding it with
+        errors="replace" (the pre-fix behaviour) collapses the bad byte to
+        U+FFFD, a lossy spelling that can never round-trip back through `git
+        show :<path>` — _staged_content then returns "" and every armed rule
+        silently skips the file, the same silent-bypass class the C-quoting fix
+        closed one layer up. errors="surrogateescape" + re-encoding via
+        os.fsencode keeps the real bytes addressable end to end.
+
+        Built from raw bytes via os.open on a bytes path — never a pasted
+        glyph, and never routed through the str-based _write/_git helpers,
+        since a genuinely invalid byte can't round-trip through a Python str
+        without surrogateescape already applied. macOS (APFS) rejects
+        filenames that aren't valid UTF-8, so this skips there and only
+        actually exercises the invalid-byte path on Linux (where CI runs)."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+
+        raw_name = b"bad_\xffname.py"  # 0xff is never valid as a UTF-8 lead byte
+        raw_path = os.fsencode(str(repo)) + b"/" + raw_name
+        try:
+            fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except (OSError, UnicodeError):
+            pytest.skip("filesystem rejects filenames that aren't valid UTF-8")
+        try:
+            os.write(fd, b"# TODO fix this\n")
+        finally:
+            os.close(fd)
+        subprocess.run(["git", "-C", str(repo), "add", "--", raw_name],
+                        check=True, capture_output=True)
+
+        expected_relpath = raw_name.decode("utf-8", "surrogateescape")
+        staged = store._staged_files(str(repo))
+        assert staged == [expected_relpath]  # not U+FFFD-mangled
+
+        result = store.guard_staged(str(repo))
+        assert len(result["violations"]) == 1
+        assert result["violations"][0]["path"] == expected_relpath
+
     def test_no_armed_rules_no_violations(self, repo):
         _write(repo, "a.py", "# TODO fix this\n")
         _git(repo, "add", "a.py")

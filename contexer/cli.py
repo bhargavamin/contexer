@@ -1017,19 +1017,36 @@ def _print_ui_status(info: dict) -> None:
     print(f"  log:          {info['log_path']}")
 
 
+def _safe_print(text: str = "", **kwargs) -> None:
+    """print(), but never raises on a surrogate-bearing string — a staged
+    filename that wasn't valid UTF-8, carried through as a surrogate-escaped
+    path (see store._staged_files). Some terminal/locale combinations encode
+    stdout in strict mode, where printing a lone surrogate raises
+    UnicodeEncodeError; guard rendering must degrade to a lossy-but-visible
+    rendering instead, never let a print failure turn a real violation into a
+    silently-passed commit (the guard's own outer try/except would otherwise
+    swallow the exception and fail OPEN — correct per the guard's fail-open
+    invariant, but a worse outcome than just rendering the escape visibly)."""
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or "utf-8"
+        print(text.encode(enc, "backslashreplace").decode(enc, "replace"), **kwargs)
+
+
 def _print_guard_advisories(advisories: list, total_advisories: int | None) -> None:
     """Non-blocking advisory block: instruction-first, addressed to whoever reads
     it (human or committing agent). `total_advisories` is only present when
     guard_staged actually capped the list, so the suppressed-count line only
     appears then."""
     n = len(advisories)
-    print(f"⚠️ Contexer: review this commit against {n} approved decision(s) before proceeding:")
+    _safe_print(f"⚠️ Contexer: review this commit against {n} approved decision(s) before proceeding:")
     for a in advisories:
         id8 = (a.get("decision_id") or "")[:8]
-        print(f"  - [{id8}] {a.get('title')} — {a.get('file')}  "
-              f"(dismiss: contexer guard --dismiss {a.get('hash')})")
+        _safe_print(f"  - [{id8}] {a.get('title')} — {a.get('file')}  "
+                    f"(dismiss: contexer guard --dismiss {a.get('hash')})")
     if total_advisories and total_advisories > n:
-        print(f"  ({total_advisories - n} more suppressed)")
+        _safe_print(f"  ({total_advisories - n} more suppressed)")
 
 
 def _print_guard_violations(violations: list) -> None:
@@ -1040,23 +1057,23 @@ def _print_guard_violations(violations: list) -> None:
         line = f"✗ {v.get('path')}:{v.get('line')} violates decision [{id8}]: {v.get('title')}"
         if v.get("message"):
             line += f" — {v['message']}"
-        print(line)
-    print()
-    print("To bypass this commit: CONTEXER_GUARD=0 git commit …")
-    print("To remove the rule: contexer guard disarm <id>")
+        _safe_print(line)
+    _safe_print()
+    _safe_print("To bypass this commit: CONTEXER_GUARD=0 git commit …")
+    _safe_print("To remove the rule: contexer guard disarm <id>")
 
 
 def _print_guard_explain(candidates: list) -> None:
     """`--explain`: the full candidate table, including rejected pairs with why."""
     if not candidates:
-        print("No candidate decision/file pairs for the staged changes.")
+        _safe_print("No candidate decision/file pairs for the staged changes.")
         return
-    print(f"{len(candidates)} candidate pair(s):\n")
+    _safe_print(f"{len(candidates)} candidate pair(s):\n")
     for c in candidates:
         id8 = (c.get("decision_id") or "")[:8]
         tag = "EMITTED " if c.get("emitted") else "REJECTED"
-        print(f"  [{tag}] [{id8}] {c.get('title')} — {c.get('file')}  "
-              f"({c.get('reason')})  hash={c.get('hash')}")
+        _safe_print(f"  [{tag}] [{id8}] {c.get('title')} — {c.get('file')}  "
+                    f"({c.get('reason')})  hash={c.get('hash')}")
 
 
 def _guard_run(rest: list) -> None:

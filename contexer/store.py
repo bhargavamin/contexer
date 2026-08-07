@@ -3476,7 +3476,18 @@ def _staged_files(repo: str) -> list[str]:
     Tier-2 rule silently skips the file, so a secret in it ships. `-z` turns
     quoting off entirely. That means reading raw bytes (the same subprocess
     shape _staged_content already uses) and decoding each path AFTER the split,
-    since the separator is a byte."""
+    since the separator is a byte.
+
+    Decoded with `errors="surrogateescape"`, not "replace": a filename holding a
+    byte sequence that isn't valid UTF-8 (rare, but real — a stray Latin-1 export,
+    a broken merge tool) would otherwise collapse to U+FFFD, an information-losing
+    spelling that can no longer round-trip back to the real path. `git show
+    :<path>` on that mangled spelling then fails, and _staged_content's "" return
+    makes every armed regex/secret rule silently skip the file — the exact
+    silent-bypass class this whole module exists to close. surrogateescape keeps
+    each unmappable byte recoverable (as a lone surrogate codepoint), so
+    _staged_content can re-encode the SAME bytes back out via os.fsencode and the
+    lookup succeeds."""
     try:
         out = subprocess.run(
             ["git", "-C", repo, "diff", "--cached", "--name-only", "-z",
@@ -3487,7 +3498,7 @@ def _staged_files(repo: str) -> list[str]:
         return []
     if out.returncode != 0:
         return []
-    return [p.decode("utf-8", errors="replace") for p in out.stdout.split(b"\0") if p]
+    return [p.decode("utf-8", errors="surrogateescape") for p in out.stdout.split(b"\0") if p]
 
 
 def _staged_content(repo: str, path: str) -> str:
@@ -3498,10 +3509,20 @@ def _staged_content(repo: str, path: str) -> str:
     content can false-match encoded bytes). Reads raw bytes directly rather than
     through the text-mode `_git` helper, because the binary/size checks need the
     untouched byte stream; only decodes utf-8 (errors="replace") once those checks
-    pass. Fail-soft: any failure returns "", never raises."""
+    pass. Fail-soft: any failure returns "", never raises.
+
+    `path` may carry surrogate-escaped bytes from _staged_files's
+    surrogateescape decode (an invalid-UTF-8 filename). A plain f-string arg
+    would hand subprocess a str it re-encodes with the *default* filesystem
+    error handler — surrogateescape on POSIX too, so this usually round-trips,
+    but relying on that default is exactly the kind of implicit behavior that
+    broke once already (the C-quoting bug this module's docstring above
+    describes). Building the argv element as bytes explicitly — b":" +
+    os.fsencode(path) — makes the byte-for-byte round trip the actual
+    contract, not an accident of subprocess's default encoding path."""
     try:
         out = subprocess.run(
-            ["git", "-C", repo, "show", f":{path}"],
+            ["git", "-C", repo, "show", b":" + os.fsencode(path)],
             capture_output=True, timeout=_GIT_FAST_TIMEOUT,
         )
     except Exception:
@@ -3615,8 +3636,16 @@ def _guard_hash(decision_id: str, relpath: str) -> str:
     pure. Ports the shape of doc-drift's `_drift_hash` (see
     `git show feat/doc-drift:contexer/store.py`): keying on (decision, FILE) only
     — never content or line — means ordinary editing of the file never
-    resurrects a dismissed or already-advised pair."""
-    return hashlib.sha1(f"{decision_id}\n{relpath}".encode("utf-8", "replace")).hexdigest()[:12]
+    resurrects a dismissed or already-advised pair.
+
+    Encoded with errors="surrogateescape", not "replace": `relpath` can carry
+    surrogate-escaped bytes from an invalid-UTF-8 filename (see _staged_files),
+    and "replace" would collapse every such byte to the same literal "?",
+    letting two DIFFERENT exotic filenames collide onto the same pair hash.
+    surrogateescape recovers the original bytes instead, so the hash — like
+    the git lookup in _staged_content — stays keyed on the real path."""
+    return hashlib.sha1(
+        f"{decision_id}\n{relpath}".encode("utf-8", "surrogateescape")).hexdigest()[:12]
 
 
 def _guard_content_hash(text: str) -> str:
