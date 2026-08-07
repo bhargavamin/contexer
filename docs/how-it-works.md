@@ -102,7 +102,7 @@ Two mechanisms keep the advisory tier from becoming noise:
 
 ### Fail-open, always
 
-The guard is read-only against your decision store — it never writes or approves anything on its own — and is built so its own failure can never block your commit: the whole check runs under a wall-clock time budget, and any internal error or a run that exceeds the budget returns nothing rather than raising, which the CLI turns into a single line on stderr and a clean exit. `CONTEXER_GUARD=0 git commit …` bypasses the guard for one commit; `git commit --no-verify` bypasses any pre-commit hook, guard included, same as it always has. Neither the guard nor any pre-commit hook is a substitute for CI — a developer's own machine is never the enforcement backstop.
+The guard is read-only against your decision store — it never writes or approves anything on its own — and is built so its own failure can never block your commit: a single wall-clock time budget covers the whole check — both the blocking rules and the advisory pairing, from the first staged file to the last decision considered — and any internal error, or a run that exceeds that budget in either half, returns nothing rather than raising, which the CLI turns into a single line on stderr and a clean exit. `CONTEXER_GUARD=0 git commit …` bypasses the guard for one commit; `git commit --no-verify` bypasses any pre-commit hook, guard included, same as it always has. Neither the guard nor any pre-commit hook is a substitute for CI — a developer's own machine is never the enforcement backstop.
 
 Already use the pre-commit framework? Add Contexer's check via `.pre-commit-config.yaml` instead of `--install-hook` — see the [CLI reference](usage.md#commit-time-guard).
 

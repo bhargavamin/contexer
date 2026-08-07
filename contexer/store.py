@@ -3686,7 +3686,12 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
     entry is moved to the end (re-inserted) so the cap evicts truly-stale pairs
     first, not a pair that just advised again with new content. Capped at
     _GUARD_THROTTLE_CAP, oldest dropped. Never raises — a failed stamp write only
-    costs one extra (harmless) re-advisory next run, never blocks anything."""
+    costs one extra (harmless) re-advisory next run, never blocks anything. The
+    except is deliberately BROAD (not just OSError): this runs after the
+    advisories are already computed, so ANY failure here — a corrupt stamp file
+    deserializing oddly, a JSON encoding error — would otherwise propagate into
+    guard_staged's fail-open handler and convert real, computed advisories into
+    a spurious "internal error"."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         advised = _guard_advised(repo_path)
@@ -3696,7 +3701,7 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
         while len(advised) > _GUARD_THROTTLE_CAP:
             advised.pop(next(iter(advised)))
         _atomic_write(_guard_advised_path(repo_path), json.dumps(advised))
-    except OSError:
+    except Exception:
         pass
 
 
@@ -3719,7 +3724,47 @@ def _guard_artifact_reason(artifact: str) -> str:
     return f"module artifact {artifact}" if "/" not in artifact else f"path artifact {artifact}"
 
 
-def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None = None) -> list[dict]:
+class _GuardBudgetExceeded(Exception):
+    """Raised inside the Tier-1 pairing engine when guard_staged's wall-clock
+    deadline passes mid-evaluation. Never escapes guard_staged (whose fail-open
+    handler turns it into {"advisories": [], "violations": [], "error": True});
+    exists as a distinct type so the bail-out reads as a budget bail-out rather
+    than as an accidental internal error."""
+
+
+def _guard_artifact_matches(artifact: str, staged_set: set[str],
+                             staged_by_base: dict[str, list[str]]) -> list[str]:
+    """Every staged path `artifact` pairs with, resolved by LOOKUP rather than a
+    scan over the whole staged list — semantically identical to filtering
+    staged paths through _artifact_path_match, but O(1) for the two cases that
+    demand exact equality:
+
+      * exact relpath equality -> one set membership test;
+      * a dotted module -> its two possible spellings, two membership tests.
+
+    Only the "/"-suffix case genuinely needs a scan (any staged path may END
+    with the artifact), and even there a suffix match at a path boundary
+    REQUIRES the last segment to be equal — so the scan runs over just the
+    staged paths sharing the artifact's basename, never the full list. The
+    endswith test is still applied, so the semantics are exactly
+    _artifact_path_match's ("za/utils.py" still doesn't match "a/utils.py")."""
+    if "/" not in artifact:
+        if artifact in staged_set:
+            return [artifact]
+        if _GUARD_MODULE_ARTIFACT_RE.match(artifact):
+            as_path = artifact.replace(".", "/")
+            return [p for p in (f"{as_path}.py", f"{as_path}/__init__.py")
+                    if p in staged_set]
+        return []
+    out = [artifact] if artifact in staged_set else []
+    suffix = "/" + artifact
+    out.extend(p for p in staged_by_base.get(artifact.rsplit("/", 1)[-1], ())
+               if p.endswith(suffix))
+    return out
+
+
+def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None = None,
+                  deadline: float | None = None) -> list[dict]:
     """Candidate generation: pair every staged file against every trusted decision
     from the repo store AND the global store (loaded via _load / _load_global).
     `decisions=` overrides BOTH loaded sources with the given list (tagged
@@ -3737,6 +3782,11 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
     matching so an untrusted/irrelevant decision never manufactures noise for
     every staged file it happens not to mention.
 
+    `deadline` (a time.time() value, from guard_staged) bounds this half of the
+    run exactly like the Tier-2 half: an overrun raises _GuardBudgetExceeded
+    rather than finishing an unbounded scan. Checked once per decision, which is
+    the loop that scales with store size.
+
     Each candidate: {decision_id, title, file, hash, scope, reason, emitted}."""
     staged_rel = [p for p in (_guard_relpath(repo_path, s) for s in staged) if p]
     if not staged_rel:
@@ -3747,28 +3797,47 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
         sources = [(_load(repo_path).get("entries") or [], "personal"),
                    (_load_global().get("entries") or [], "global")]
 
+    # Built ONCE for the whole call: matching is then a lookup per artifact
+    # instead of a scan over every staged path per artifact (the pairing loop
+    # used to be files x decisions x artifacts — seconds on a large staged set).
+    staged_set = set(staged_rel)
+    staged_by_base: dict[str, list[str]] = {}
+    for relpath in staged_rel:
+        staged_by_base.setdefault(relpath.rsplit("/", 1)[-1], []).append(relpath)
+
     candidates: list[dict] = []
     for entries, scope in sources:
         for entry in entries:
+            if deadline is not None and time.time() > deadline:
+                raise _GuardBudgetExceeded
             decision_id = entry.get("id", "")
             rev = _current_revision(entry)
             content = rev.get("content", "") if rev else entry.get("content", "")
             title = entry.get("title") or _derive_title(content)
-            source_files = set(entry.get("source_files") or []) if scope == "personal" else set()
-            artifacts = _guard_content_artifacts(content)
+            # source_files goes through _guard_relpath like every other path the
+            # guard compares — a decision anchored with an absolute or "./"-
+            # prefixed spelling must still pair (fail-soft: unresolvable -> dropped).
+            source_files = ({p for p in (_guard_relpath(repo_path, f)
+                                          for f in (entry.get("source_files") or [])) if p}
+                             if scope == "personal" else set())
+            # relpath -> reason, source_files winning over artifacts (as before),
+            # and the FIRST matching artifact winning among artifacts.
+            matched: dict[str, str] = {p: "source_files match"
+                                       for p in source_files & staged_set}
+            for artifact in _guard_content_artifacts(content):
+                reason = _guard_artifact_reason(artifact)
+                for relpath in _guard_artifact_matches(artifact, staged_set, staged_by_base):
+                    matched.setdefault(relpath, reason)
+            if not matched:
+                continue
+            trusted = _guard_trusted(entry)
+            # Emitted in staged order, which is the order the old nested loop produced.
             for relpath in staged_rel:
-                if relpath in source_files:
-                    reason = "source_files match"
-                else:
-                    reason = None
-                    for artifact in artifacts:
-                        if _artifact_path_match(artifact, relpath):
-                            reason = _guard_artifact_reason(artifact)
-                            break
+                reason = matched.get(relpath)
                 if reason is None:
                     continue
                 h = _guard_hash(decision_id, relpath)
-                if not _guard_trusted(entry):
+                if not trusted:
                     candidates.append({"decision_id": decision_id, "title": title,
                                         "file": relpath, "hash": h, "scope": scope,
                                         "reason": "rejected: untrusted provenance",
@@ -3780,14 +3849,19 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
     return candidates
 
 
-def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | None = None) -> list[dict]:
+def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | None = None,
+                     deadline: float | None = None) -> list[dict]:
     """_guard_pairs plus the dismiss/throttle checks — still entirely read-only
     (no stamp mutation, that's guard_staged's job after capping). Every
     candidate from _guard_pairs comes through; one that matched, was trusted,
     but is dismissed or throttled has its reason/emitted flipped to say why it
     stops short of surfacing. A staged file's content is read (and hashed) at
-    most once per call regardless of how many decisions pair to it."""
-    pairs = _guard_pairs(repo_path, staged, decisions)
+    most once per call regardless of how many decisions pair to it — and only
+    for a pair the throttle actually has a stamp for, so a run that surfaces N
+    fresh advisories costs no `git show` per pair.
+
+    `deadline` is passed straight through to _guard_pairs (see there)."""
+    pairs = _guard_pairs(repo_path, staged, decisions, deadline)
     if not pairs:
         return pairs
     dismissed = _dismissed_guard(repo_path)
@@ -3807,7 +3881,8 @@ def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | N
         if p["hash"] in dismissed:
             out.append({**p, "reason": "rejected: dismissed", "emitted": False})
             continue
-        if advised.get(p["hash"]) == _content_hash_for(p["file"]):
+        stamped = advised.get(p["hash"])
+        if stamped is not None and stamped == _content_hash_for(p["file"]):
             out.append({**p, "reason": "rejected: throttled (content unchanged)",
                         "emitted": False})
             continue
@@ -3839,7 +3914,12 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
 
 _GUARD_CHECK_TYPES = frozenset({"regex", "secret"})
 _GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
-_GUARD_TIME_BUDGET = 2.0  # wall-clock seconds, across the WHOLE guard_staged call
+# Wall-clock seconds, across the WHOLE guard_staged call: the deadline is stamped
+# at the top of guard_staged and threaded through BOTH tiers — Tier-2 rule
+# evaluation (checked between files/rules) and Tier-1 pairing (checked per
+# decision, bailing via _GuardBudgetExceeded). Either overrun fails OPEN with
+# error=True; neither tier can run unbounded while the developer waits to commit.
+_GUARD_TIME_BUDGET = 2.0
 
 
 def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
@@ -4032,12 +4112,14 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     {"advisories": [], "violations": [], "error": True} rather than raising or
     ever blocking a commit on the guard's OWN failure.
 
-    Order: CONTEXER_GUARD=0 short-circuits before any other work; then repo
-    resolution; then the staged-file list (empty -> empty result); then Tier-2
-    violations run FIRST, budgeted at _GUARD_TIME_BUDGET wall-clock seconds
-    (checked between files/rules) — on overrun, both advisories and violations
-    come back empty with error=True, since a hung run must fail open, never
-    half-block; then the merge-in-progress check (Tier-1's advisory pairing is
+    Order: CONTEXER_GUARD=0 short-circuits before any other work; then the
+    deadline is stamped — _GUARD_TIME_BUDGET wall-clock seconds covering
+    EVERYTHING below it, both tiers; then repo resolution; then the staged-file
+    list (empty -> empty result); then Tier-2 violations run FIRST (budget
+    checked between files/rules), then Tier-1 pairing (checked per decision, via
+    _GuardBudgetExceeded) — on overrun in either tier, both advisories and
+    violations come back empty with error=True, since a hung run must fail open,
+    never half-block; then the merge-in-progress check (Tier-1's advisory pairing is
     skipped during a merge, but Tier-2's violations already ran above and are
     still reported — a merge conflict is not a license to skip a blocking
     rule); then pairing -> drop dismissed -> drop throttled -> cap at
@@ -4049,12 +4131,12 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     try:
         if os.environ.get("CONTEXER_GUARD") == "0":
             return {"advisories": [], "violations": [], "skipped": "env"}
+        deadline = time.time() + _GUARD_TIME_BUDGET
         repo = _resolve_repo(repo_path)
         staged = _guard_staged_paths(repo, paths)
         if not staged:
             return {"advisories": [], "violations": []}
 
-        deadline = time.time() + _GUARD_TIME_BUDGET
         violations, budget_exceeded = _guard_violations(repo, staged, deadline)
         if budget_exceeded:
             return {"advisories": [], "violations": [], "error": True}
@@ -4062,7 +4144,7 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
         if _merge_in_progress(repo):
             return {"advisories": [], "violations": violations, "skipped": "merge"}
 
-        evaluated = _guard_evaluate(repo, staged)
+        evaluated = _guard_evaluate(repo, staged, deadline=deadline)
         surfaced = [p for p in evaluated if p["emitted"]]
         capped = surfaced[:_GUARD_MAX_ADVISORIES]
         result: dict = {"advisories": capped, "violations": violations}

@@ -441,6 +441,17 @@ class TestGuardPairs:
         assert c["emitted"] is True
         assert c["hash"] == store._guard_hash(entry["id"], "auth/jwt.py")
 
+    def test_source_files_are_canonicalized_before_comparison(self, repo):
+        """source_files must go through _guard_relpath like every other path the
+        guard compares — an absolute or "./"-prefixed anchor still names the same
+        staged file."""
+        entry = _seed_entry(repo, "Decided to use JWT for auth",
+                             source_files=[str(repo / "auth" / "jwt.py"), "./other.py"])
+        pairs = store._guard_pairs(str(repo), ["auth/jwt.py", "other.py"])
+        assert {p["file"] for p in pairs} == {"auth/jwt.py", "other.py"}
+        assert {p["reason"] for p in pairs} == {"source_files match"}
+        assert all(p["decision_id"] == entry["id"] for p in pairs)
+
     def test_module_artifact_match(self, repo):
         _seed_entry(repo, "The contexer.store module owns all read/write logic")
         pairs = store._guard_pairs(str(repo), ["contexer/store.py"])
@@ -1101,6 +1112,61 @@ class TestGuardStagedViolations:
         result = store.guard_staged(str(repo))
         assert result["error"] is True
         assert result["violations"] == []
+
+    def test_budget_covers_tier_1_pairing_too(self, repo, monkeypatch):
+        """The budget is the WHOLE guard_staged call, not just the Tier-2 half:
+        with no armed rules at all, an overrun must still be caught (in pairing)
+        and fail open rather than run unbounded."""
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _write(repo, "auth/jwt.py", "token = 1\n")
+        _git(repo, "add", "auth/jwt.py")
+
+        real_time = time.time
+        calls = {"n": 0}
+
+        def _fake_time():
+            calls["n"] += 1
+            if calls["n"] <= 1:
+                return real_time()
+            return real_time() + store._GUARD_TIME_BUDGET + 100
+
+        monkeypatch.setattr(time, "time", _fake_time)
+        result = store.guard_staged(str(repo))
+        assert result == {"advisories": [], "violations": [], "error": True}
+
+    def test_large_repo_completes_well_inside_the_budget(self, repo):
+        """Perf regression (functional, not a benchmark — the budget is a hard
+        bound the guard fails open on): 500 staged paths against a 500-decision
+        store used to run the pairing loop as files x decisions x artifacts,
+        measured at ~9s for 1000 staged files. Bound generously so CI variance
+        can't flake it."""
+        def _content(i):
+            # A realistically wordy decision naming a handful of files: ~38
+            # path/module artifacts each, which is what the cross product
+            # multiplied by.
+            return (f"Decision {i}: route traffic through pkg{i}/mod{i}.py rather "
+                    f"than pkg{i}.legacy, because the adapter in svc{i}/handler{i}.py "
+                    "owns it; see also "
+                    + ", ".join(f"lib{i}/part{j}.py" for j in range(15))
+                    + f" and contexer{i}.store, tests/test_{i}.py")
+
+        data = store._load(str(repo))
+        data["entries"] = [
+            store._new_decision_entry(_content(i), "perf-session", "architecture",
+                                       created_by="human", status="approved")
+            for i in range(500)
+        ]
+        for i, entry in enumerate(data["entries"]):
+            entry["source_files"] = [f"other{i}/thing{i}.py"]
+        store._save(str(repo), data)
+        staged = [f"src/module_{i}/file_{i}.py" for i in range(500)]
+
+        start = time.time()
+        result = store.guard_staged(str(repo), paths=staged)
+        elapsed = time.time() - start
+        assert result["advisories"] == []
+        assert "error" not in result
+        assert elapsed < 2.0, f"guard_staged took {elapsed:.2f}s"
 
     def test_invalid_armed_regex_pattern_is_skipped_not_raised(self, repo):
         # A pattern that once compiled at arm time but can't be re-derived cleanly
