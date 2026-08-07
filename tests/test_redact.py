@@ -186,3 +186,40 @@ def test_never_raises_on_bad_input(bad):
 
 def test_empty_string():
     assert redact.scrub("") == ("", 0)
+
+
+# ── HIGH_CONFIDENCE_PATTERNS (additive export for the commit-time guard) ─────
+
+class TestHighConfidencePatterns:
+    def test_is_a_list_of_compiled_patterns(self):
+        assert isinstance(redact.HIGH_CONFIDENCE_PATTERNS, list)
+        assert redact.HIGH_CONFIDENCE_PATTERNS
+        assert all(hasattr(p, "search") for p in redact.HIGH_CONFIDENCE_PATTERNS)
+
+    def test_matches_aws_key(self):
+        assert any(p.search("AKIAIOSFODNN7EXAMPLE") for p in redact.HIGH_CONFIDENCE_PATTERNS)
+
+    def test_matches_pem_block(self):
+        pem = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEpAIBAAKCAQEA1234567890abcdefG\n"
+            "abcdefghijklmnopqrstuvwxyz0123456\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        assert any(p.search(pem) for p in redact.HIGH_CONFIDENCE_PATTERNS)
+
+    def test_matches_connection_string_password(self):
+        assert any(p.search("postgres://user:hunter2secret@host/db")
+                   for p in redact.HIGH_CONFIDENCE_PATTERNS)
+
+    def test_does_not_match_generic_prose_password(self):
+        # The keyword-gated generic catch-all is deliberately excluded: a blocking
+        # check demands zero false positives on ordinary code/prose.
+        text = 'password = "hunter2-wordy"'
+        assert not any(p.search(text) for p in redact.HIGH_CONFIDENCE_PATTERNS)
+
+    def test_scrub_behavior_unchanged(self):
+        # Pure re-export: adding the module-level list must not alter scrub's output.
+        out, n = redact.scrub("the key is AKIAIOSFODNN7EXAMPLE ok")
+        assert n == 1
+        assert "[REDACTED:aws_key]" in out

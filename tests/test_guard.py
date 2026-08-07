@@ -1,8 +1,10 @@
 """Tests for the commit-time guard's Task-1 plumbing (staged-file reading and
-path-matching helpers) and Task-2 Tier-1 advisory engine (pairing, throttle,
-dismissals) in store.py."""
+path-matching helpers), Task-2 Tier-1 advisory engine (pairing, throttle,
+dismissals), and Task-3 Tier-2 armed rules (arm/disarm, regex + secret checks,
+blocking violations) in store.py."""
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -721,3 +723,374 @@ class TestGuardCandidates:
         _git(repo, "add", "a.py")
         assert store.guard_candidates(str(repo)) == []
         assert store.guard_candidates(str(repo), explain=True) == []
+
+
+# ── Task 3: arm_guard / disarm_guard (management path) ───────────────────────
+
+class TestArmGuard:
+    def test_arm_regex_success(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        msg = store.arm_guard(str(repo), entry["id"], "regex", pattern=r"TODO",
+                               message="no TODOs allowed")
+        assert isinstance(msg, str) and msg
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        gc = stored["guard_check"]
+        assert gc["type"] == "regex"
+        assert gc["pattern"] == "TODO"
+        assert gc["message"] == "no TODOs allowed"
+        assert gc["flags"] == ""
+        assert gc["paths"] == ""
+        assert "armed_at" in gc and gc["armed_at"]
+
+    def test_arm_regex_with_i_flag(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern=r"todo", flags="i")
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert stored["guard_check"]["flags"] == "i"
+
+    def test_arm_secret_success(self, repo):
+        entry = _seed_entry(repo, "Never commit secrets")
+        store.arm_guard(str(repo), entry["id"], "secret")
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert stored["guard_check"]["type"] == "secret"
+        assert stored["guard_check"]["pattern"] == ""
+
+    def test_arm_honors_paths_glob(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO", paths="*.py")
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert stored["guard_check"]["paths"] == "*.py"
+
+    def test_arm_short_id_resolution(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"][:8], "regex", pattern="TODO")
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert stored.get("guard_check")
+
+    def test_arm_refuses_unknown_id(self, repo):
+        with pytest.raises(ValueError):
+            store.arm_guard(str(repo), "no-such-id", "regex", pattern="TODO")
+
+    def test_arm_refuses_unapproved_entry(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers", created_by="ai",
+                             status="pending_approval")
+        with pytest.raises(ValueError, match="approved"):
+            store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+
+    def test_arm_refuses_non_machine_checkable_type(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        with pytest.raises(ValueError, match="machine-checkable"):
+            store.arm_guard(str(repo), entry["id"], "prose")
+
+    def test_arm_refuses_secret_with_pattern(self, repo):
+        entry = _seed_entry(repo, "Never commit secrets")
+        with pytest.raises(ValueError, match="machine-checkable"):
+            store.arm_guard(str(repo), entry["id"], "secret", pattern="AKIA.*")
+
+    def test_arm_refuses_regex_without_pattern(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        with pytest.raises(ValueError, match="machine-checkable"):
+            store.arm_guard(str(repo), entry["id"], "regex", pattern="")
+
+    def test_arm_refuses_invalid_regex(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        with pytest.raises(ValueError, match="machine-checkable"):
+            store.arm_guard(str(repo), entry["id"], "regex", pattern="(unclosed")
+
+    def test_arm_refuses_unsupported_flags(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        with pytest.raises(ValueError, match="machine-checkable"):
+            store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO", flags="m")
+
+    def test_arm_global_entry(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers globally", global_store=True)
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        data = store._load_global()
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert stored.get("guard_check")
+
+    def test_arm_repo_entry_preferred_over_global_when_id_collides(self, repo):
+        # Extremely unlikely in production (real UUIDs), but pins the documented
+        # resolution order: repo store is tried before the global store.
+        entry = _seed_entry(repo, "Repo-scoped decision")
+        global_data = store._load_global()
+        clashing = store._new_decision_entry("Global-scoped decision", "s", "architecture",
+                                              created_by="human", status="approved")
+        clashing["id"] = entry["id"]
+        global_data["entries"].append(clashing)
+        store._save_global(global_data)
+
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        repo_entry = store._entry_by_id(store._load(str(repo))["entries"], entry["id"])
+        global_entry = store._entry_by_id(store._load_global()["entries"], entry["id"])
+        assert repo_entry.get("guard_check")
+        assert not global_entry.get("guard_check")
+
+
+class TestDisarmGuard:
+    def test_disarm_removes_guard_check(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        store.disarm_guard(str(repo), entry["id"])
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert "guard_check" not in stored
+
+    def test_disarm_global_entry(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers globally", global_store=True)
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        store.disarm_guard(str(repo), entry["id"])
+        data = store._load_global()
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        assert "guard_check" not in stored
+
+    def test_disarm_unknown_id_raises(self, repo):
+        with pytest.raises(ValueError):
+            store.disarm_guard(str(repo), "no-such-id")
+
+    def test_disarm_unarmed_entry_is_a_noop(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        msg = store.disarm_guard(str(repo), entry["id"])
+        assert isinstance(msg, str) and msg
+
+
+# ── Task 3: _armed_rules runtime status re-check ─────────────────────────────
+
+class TestArmedRulesLifecycle:
+    def test_armed_approved_entry_is_returned(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        data = store._load(str(repo))
+        rules = store._armed_rules(data["entries"])
+        assert [r["id"] for r in rules] == [entry["id"]]
+
+    def test_unarmed_entry_excluded(self, repo):
+        _seed_entry(repo, "Never commit TODO markers")
+        data = store._load(str(repo))
+        assert store._armed_rules(data["entries"]) == []
+
+    def test_ignored_after_arming_stops_firing_without_disarm(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        ok, msg = store.approve_decision(str(repo), entry["id"], "ignore")
+        assert ok, msg
+
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        # guard_check is still physically present (no disarm happened)...
+        assert stored.get("guard_check")
+        # ...but the runtime re-check excludes it because status != approved.
+        assert store._armed_rules(data["entries"]) == []
+
+    def test_end_to_end_guard_staged_stops_firing_after_ignore(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+
+        before = store.guard_staged(str(repo))
+        assert len(before["violations"]) == 1
+
+        store.approve_decision(str(repo), entry["id"], "ignore")
+        after = store.guard_staged(str(repo))
+        assert after["violations"] == []
+
+
+# ── Task 3: _rule_violations ──────────────────────────────────────────────────
+
+class TestRuleViolations:
+    def test_regex_hit_reports_correct_path_and_line(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers", title="No TODOs")
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "", "message": "no TODOs", "armed_at": "t"}
+        content = "line one\nline two\n# TODO fix\nline four\n"
+        hits = store._rule_violations([entry], "a.py", content)
+        assert len(hits) == 1
+        assert hits[0]["path"] == "a.py"
+        assert hits[0]["line"] == 3
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["title"] == "No TODOs"
+        assert hits[0]["message"] == "no TODOs"
+
+    def test_regex_no_match_no_violation(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "", "message": "", "armed_at": "t"}
+        assert store._rule_violations([entry], "a.py", "nothing to see here\n") == []
+
+    def test_regex_case_insensitive_flag_honored(self, repo):
+        entry = _seed_entry(repo, "Never commit todo markers")
+        entry["guard_check"] = {"type": "regex", "pattern": "todo", "flags": "i",
+                                 "paths": "", "message": "", "armed_at": "t"}
+        hits = store._rule_violations([entry], "a.py", "# TODO fix\n")
+        assert len(hits) == 1
+
+    def test_paths_glob_filters_out_non_matching_file(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "*.md", "message": "", "armed_at": "t"}
+        hits = store._rule_violations([entry], "a.py", "# TODO fix\n")
+        assert hits == []
+
+    def test_paths_glob_matches_intended_file(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "*.py", "message": "", "armed_at": "t"}
+        hits = store._rule_violations([entry], "a.py", "# TODO fix\n")
+        assert len(hits) == 1
+
+    def test_secret_rule_catches_aws_key(self, repo):
+        entry = _seed_entry(repo, "Never commit secrets")
+        entry["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
+                                 "paths": "", "message": "", "armed_at": "t"}
+        content = "line one\nkey = 'AKIAIOSFODNN7EXAMPLE'\nline three\n"
+        hits = store._rule_violations([entry], "a.py", content)
+        assert len(hits) == 1
+        assert hits[0]["line"] == 2
+
+    def test_secret_rule_catches_pem_block(self, repo):
+        entry = _seed_entry(repo, "Never commit secrets")
+        entry["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
+                                 "paths": "", "message": "", "armed_at": "t"}
+        pem = (
+            "before\n"
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEpAIBAAKCAQEA1234567890abcdefG\n"
+            "abcdefghijklmnopqrstuvwxyz0123456\n"
+            "-----END RSA PRIVATE KEY-----\n"
+            "after\n"
+        )
+        hits = store._rule_violations([entry], "a.py", pem)
+        assert len(hits) == 1
+
+    def test_secret_rule_ignores_generic_prose_password(self, repo):
+        entry = _seed_entry(repo, "Never commit secrets")
+        entry["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
+                                 "paths": "", "message": "", "armed_at": "t"}
+        content = 'password = "hunter2-wordy"\n'
+        hits = store._rule_violations([entry], "a.py", content)
+        assert hits == []
+
+
+# ── Task 3: guard_staged integration (violations) ─────────────────────────────
+
+class TestGuardStagedViolations:
+    def test_regex_violation_surfaces(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+        result = store.guard_staged(str(repo))
+        assert len(result["violations"]) == 1
+        assert result["violations"][0]["decision_id"] == entry["id"]
+
+    def test_no_armed_rules_no_violations(self, repo):
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+        result = store.guard_staged(str(repo))
+        assert result["violations"] == []
+
+    def test_violations_run_during_merge(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        # A genuine merge conflict on b.txt puts the repo into merge-in-progress
+        # state (MERGE_HEAD present) without needing to resolve it.
+        _write(repo, "b.txt", "line1\n")
+        _git(repo, "add", "b.txt")
+        _commit(repo, "base")
+        _git(repo, "checkout", "-q", "-b", "other")
+        _write(repo, "b.txt", "line1\nfrom-other\n")
+        _git(repo, "add", "b.txt")
+        _commit(repo, "other change")
+        _git(repo, "checkout", "-q", "-")
+        _write(repo, "b.txt", "line1\nfrom-main\n")
+        _git(repo, "add", "b.txt")
+        _commit(repo, "main change")
+        _git(repo, "merge", "other", check=False)
+        assert store._merge_in_progress(str(repo))
+
+        # A cleanly-staged file unrelated to the conflict, added while the merge
+        # is still unresolved: proves violations run against real staged content
+        # during a merge (a conflicted path itself has no readable stage-0 blob
+        # via `git show :path`, which is a separate, expected limitation).
+        _write(repo, "a.py", "# TODO from-main\n")
+        _git(repo, "add", "a.py")
+
+        result = store.guard_staged(str(repo), paths=["a.py"])
+        assert result["skipped"] == "merge"
+        assert result["advisories"] == []
+        assert len(result["violations"]) == 1
+
+    def test_global_armed_rule_fires_in_repo_run(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers globally", global_store=True)
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+        result = store.guard_staged(str(repo))
+        assert len(result["violations"]) == 1
+        assert result["violations"][0]["decision_id"] == entry["id"]
+
+    def test_never_writes_the_store_with_violations(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+        store_path = store._store_path(str(repo))
+        before = store_path.read_bytes()
+        store.guard_staged(str(repo))
+        after = store_path.read_bytes()
+        assert before == after
+
+    def test_budget_overrun_returns_error_open(self, repo, monkeypatch):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        store.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+
+        real_time = time.time
+        calls = {"n": 0}
+
+        def _fake_time():
+            calls["n"] += 1
+            # First call establishes the deadline baseline; every call after
+            # jumps far enough forward to blow the whole budget immediately.
+            if calls["n"] <= 1:
+                return real_time()
+            return real_time() + store._GUARD_TIME_BUDGET + 100
+
+        monkeypatch.setattr(time, "time", _fake_time)
+        result = store.guard_staged(str(repo))
+        assert result["error"] is True
+        assert result["violations"] == []
+
+    def test_invalid_armed_regex_pattern_is_skipped_not_raised(self, repo):
+        # A pattern that once compiled at arm time but can't be re-derived cleanly
+        # (defensive: guard_check written directly, bypassing arm_guard's validation)
+        # must never raise the whole guard_staged call.
+        entry = _seed_entry(repo, "Weird rule")
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], entry["id"])
+        stored["guard_check"] = {"type": "regex", "pattern": "(unclosed", "flags": "",
+                                  "paths": "", "message": "", "armed_at": "t"}
+        store._save(str(repo), data)
+        _write(repo, "a.py", "# TODO fix this\n")
+        _git(repo, "add", "a.py")
+        result = store.guard_staged(str(repo))
+        assert result["violations"] == []
+        assert "error" not in result
+
+
+# ── Task 3: wire-safety regression ────────────────────────────────────────────
+
+class TestWireSafety:
+    def test_share_projection_never_leaks_guard_check(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "", "message": "no TODOs", "armed_at": "t"}
+        projected = store._share_projection(entry, redact_on=False)
+        assert "guard_check" not in projected

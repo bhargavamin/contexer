@@ -1,4 +1,5 @@
 import contextlib
+import fnmatch
 import hashlib
 import json
 import os
@@ -3807,23 +3808,226 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
     return [p for p in (_guard_relpath(repo_path, s) for s in raw) if p]
 
 
+# ── Commit-time guard: Tier-2 armed rules (Task 3) — machine-checkable, ──────
+# blocking. Two paths, sharply separated:
+#   MANAGEMENT (arm_guard / disarm_guard): under _store_lock, WRITES the store,
+#   and MAY raise ValueError — arming/disarming is a deliberate developer act, so
+#   a malformed request should fail loudly, not degrade silently.
+#   RUN (_armed_rules / _rule_violations, and guard_staged's violations half):
+#   store-READ-ONLY and fail-soft, exactly like the Tier-1 engine above — rule
+#   evaluation must never raise out of guard_staged and never block a commit on
+#   its own failure (see _GUARD_TIME_BUDGET below: a catastrophic regex fails
+#   OPEN, never partial-blocks).
+
+_GUARD_CHECK_TYPES = frozenset({"regex", "secret"})
+_GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
+_GUARD_TIME_BUDGET = 2.0  # wall-clock seconds, across the WHOLE guard_staged call
+
+
+def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
+    """Refuse anything not deterministically machine-checkable — the structural
+    half of arm_guard's refusal contract (entry existence and approval status are
+    checked by the caller, which needs the store loaded first). Every failure
+    here raises the SAME message: the caller only needs to know arming was
+    refused because the request wasn't checkable, not which specific rule of
+    the check tripped."""
+    if check_type not in _GUARD_CHECK_TYPES:
+        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
+    if check_type == "secret":
+        # `secret` always means "match redact.HIGH_CONFIDENCE_PATTERNS" — a
+        # pattern alongside it is nonsensical, not merely redundant.
+        if pattern:
+            raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
+        return
+    if not pattern:
+        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
+    if set(flags) - {"i"}:
+        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
+    try:
+        re.compile(pattern, re.IGNORECASE if "i" in flags else 0)
+    except re.error:
+        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
+
+
+def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
+              flags: str = "", paths: str = "", message: str = "") -> str:
+    """Arm a decision with a machine-checkable commit-time rule — the blocking
+    (Tier-2) counterpart to Tier-1's advisory pairing. MANAGEMENT path: under
+    _store_lock, may raise ValueError (see _validate_guard_check for the
+    machine-checkable refusals; separately refuses an entry that doesn't exist,
+    or one whose _entry_status isn't "approved" — an armed rule must already be
+    developer-trusted, since arming an unreviewed AI guess would let it block a
+    commit no human ever signed off on).
+
+    Id resolution mirrors approve_decision's (_apply_approval): exact id, then
+    an 8-char prefix — tried against the REPO store first, then the GLOBAL
+    store, so a global armed rule (see _armed_rules) also blocks every repo's
+    commits, matching how global rules are already injected everywhere else."""
+    _validate_guard_check(check_type, pattern, flags)
+    repo = _resolve_repo(repo_path)
+    guard_check = {"type": check_type, "pattern": pattern, "flags": flags,
+                    "paths": paths, "message": message,
+                    "armed_at": datetime.now(timezone.utc).isoformat()}
+
+    with _store_lock(_slug(repo)):
+        data = _load(repo)
+        entry = _entry_by_id(data["entries"], entry_id)
+        if entry is not None:
+            if _entry_status(entry) != "approved":
+                raise ValueError("only approved decisions can be armed")
+            entry["guard_check"] = guard_check
+            _save(repo, data)
+            return f"Armed {entry['id'][:8]} ({check_type})."
+
+    with _store_lock(GLOBAL_SLUG):
+        data = _load_global()
+        entry = _entry_by_id(data["entries"], entry_id)
+        if entry is not None:
+            if _entry_status(entry) != "approved":
+                raise ValueError("only approved decisions can be armed")
+            entry["guard_check"] = guard_check
+            _save_global(data)
+            return f"Armed {entry['id'][:8]} ({check_type})."
+
+    raise ValueError(f"Decision {entry_id!r} not found.")
+
+
+def disarm_guard(repo_path: str, entry_id: str) -> str:
+    """Remove a decision's guard_check (Tier-2 armed rule), repo store first then
+    global — same id-resolution order as arm_guard. MANAGEMENT path: under
+    _store_lock, raises ValueError when the id resolves in neither store. A
+    resolved entry that isn't currently armed is a no-op (not an error) —
+    disarming an already-unarmed decision is a harmless idempotent request."""
+    repo = _resolve_repo(repo_path)
+
+    with _store_lock(_slug(repo)):
+        data = _load(repo)
+        entry = _entry_by_id(data["entries"], entry_id)
+        if entry is not None:
+            had_check = entry.pop("guard_check", None) is not None
+            if had_check:
+                _save(repo, data)
+                return f"Disarmed {entry['id'][:8]}."
+            return f"{entry['id'][:8]} was not armed."
+
+    with _store_lock(GLOBAL_SLUG):
+        data = _load_global()
+        entry = _entry_by_id(data["entries"], entry_id)
+        if entry is not None:
+            had_check = entry.pop("guard_check", None) is not None
+            if had_check:
+                _save_global(data)
+                return f"Disarmed {entry['id'][:8]}."
+            return f"{entry['id'][:8]} was not armed."
+
+    raise ValueError(f"Decision {entry_id!r} not found.")
+
+
+def _armed_rules(entries: list[dict]) -> list[dict]:
+    """The subset of `entries` that are BOTH carrying a guard_check AND STILL
+    _entry_status == "approved" right now — status is re-checked at RUN time,
+    never trusted from arm time, so a decision later ignored or superseded
+    stops firing without an explicit disarm. Pure, no I/O; the caller gathers
+    from repo + global stores by calling this once per store and concatenating
+    (see guard_staged), so a global armed rule fires in every repo's run."""
+    return [e for e in entries if e.get("guard_check") and _entry_status(e) == "approved"]
+
+
+def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
+    """Evaluate every entry in `rules` (as returned by _armed_rules) against one
+    staged file's content. `path` must already be _guard_relpath's canonical
+    output. A rule whose guard_check["paths"] glob doesn't fnmatch `path` is
+    skipped entirely (empty paths = applies to every staged file).
+
+    `regex` rules match line-by-line (so a hit's reported line number is exact);
+    an unparseable pattern (defensive only — arm_guard already validates at arm
+    time) is skipped rather than raised. `secret` rules match any hit from
+    redact.HIGH_CONFIDENCE_PATTERNS against the WHOLE file content, not
+    per-line — the PEM private-key pattern spans multiple lines (BEGIN/…/END),
+    so per-line splitting would silently defeat it; the line number is then
+    derived from the match's character offset via a newline count.
+
+    Each hit: {path, line, decision_id, title, message}."""
+    out: list[dict] = []
+    for rule in rules:
+        gc = rule.get("guard_check") or {}
+        paths_glob = gc.get("paths") or ""
+        if paths_glob and not fnmatch.fnmatch(path, paths_glob):
+            continue
+        decision_id = rule.get("id", "")
+        title = rule.get("title") or _derive_title(_current_content(rule))
+        message = gc.get("message") or ""
+        check_type = gc.get("type")
+
+        if check_type == "regex":
+            flags = re.IGNORECASE if "i" in (gc.get("flags") or "") else 0
+            try:
+                compiled = re.compile(gc.get("pattern", ""), flags)
+            except re.error:
+                continue
+            for lineno, line in enumerate(content.splitlines(), start=1):
+                if compiled.search(line):
+                    out.append({"path": path, "line": lineno, "decision_id": decision_id,
+                                "title": title, "message": message})
+        elif check_type == "secret":
+            for pat in redact.HIGH_CONFIDENCE_PATTERNS:
+                for m in pat.finditer(content):
+                    lineno = content.count("\n", 0, m.start()) + 1
+                    out.append({"path": path, "line": lineno, "decision_id": decision_id,
+                                "title": title, "message": message})
+    return out
+
+
+def _guard_violations(repo: str, staged: list[str], deadline: float) -> tuple[list[dict], bool]:
+    """Run every armed rule (repo + global stores) against every staged file,
+    checked against `deadline` (an absolute time.time() value) between files AND
+    between rules — Python's `re` has no per-call timeout, so this is the only
+    budget enforcement possible; a single catastrophically backtracking regex
+    can still overrun mid-match, which is the documented, deliberate residual
+    risk (fail OPEN when that happens, never partial-block). Returns
+    (violations, budget_exceeded); on overrun the caller discards whatever
+    violations were gathered so far — an overrun run reports nothing, not a
+    partial scan, so a commit is never blocked on an incomplete evaluation."""
+    rules = (_armed_rules(_load(repo).get("entries") or [])
+             + _armed_rules(_load_global().get("entries") or []))
+    if not rules:
+        return [], False
+    violations: list[dict] = []
+    for relpath in staged:
+        if time.time() > deadline:
+            return [], True
+        content = _staged_content(repo, relpath)
+        if not content:
+            continue
+        for rule in rules:
+            if time.time() > deadline:
+                return [], True
+            violations.extend(_rule_violations([rule], relpath, content))
+    return violations, False
+
+
 def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
-    """The Tier-1 advisory engine's orchestrator — the CLI's commit-time entrypoint
-    (Task 4). Store-READ-ONLY (never calls _save/_save_global) and fail-soft: the
-    ENTIRE body is wrapped so any exception degrades to
+    """The commit-time entrypoint (Task 4's CLI hook) combining Tier-1's
+    advisory engine with Tier-2's armed blocking rules. Store-READ-ONLY (never
+    calls _save/_save_global) and fail-soft: the ENTIRE body is wrapped so any
+    exception — or a Tier-2 time-budget overrun — degrades to
     {"advisories": [], "violations": [], "error": True} rather than raising or
-    ever blocking a commit. `violations` is always present but always empty here
-    — Task 3 (armed blocking rules) is the only writer of that key.
+    ever blocking a commit on the guard's OWN failure.
 
     Order: CONTEXER_GUARD=0 short-circuits before any other work; then repo
-    resolution; then the staged-file list (empty -> empty result); then the
-    merge-in-progress check (advisory tier skipped, but the dict shape stays
-    intact for Task 3, which still runs during a merge); then pairing -> drop
-    dismissed -> drop throttled -> cap at _GUARD_MAX_ADVISORIES (the true count
-    is reported as "total_advisories" only when capping actually happened) ->
-    best-effort stamp the throttle for exactly the advisories that surfaced (a
-    pair pushed past the cap is NOT stamped, so it's free to surface next run
-    once something ahead of it clears)."""
+    resolution; then the staged-file list (empty -> empty result); then Tier-2
+    violations run FIRST, budgeted at _GUARD_TIME_BUDGET wall-clock seconds
+    (checked between files/rules) — on overrun, both advisories and violations
+    come back empty with error=True, since a hung run must fail open, never
+    half-block; then the merge-in-progress check (Tier-1's advisory pairing is
+    skipped during a merge, but Tier-2's violations already ran above and are
+    still reported — a merge conflict is not a license to skip a blocking
+    rule); then pairing -> drop dismissed -> drop throttled -> cap at
+    _GUARD_MAX_ADVISORIES (the true count is reported as "total_advisories"
+    only when capping actually happened) -> best-effort stamp the throttle for
+    exactly the advisories that surfaced (a pair pushed past the cap is NOT
+    stamped, so it's free to surface next run once something ahead of it
+    clears)."""
     try:
         if os.environ.get("CONTEXER_GUARD") == "0":
             return {"advisories": [], "violations": [], "skipped": "env"}
@@ -3831,13 +4035,19 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
         staged = _guard_staged_paths(repo, paths)
         if not staged:
             return {"advisories": [], "violations": []}
+
+        deadline = time.time() + _GUARD_TIME_BUDGET
+        violations, budget_exceeded = _guard_violations(repo, staged, deadline)
+        if budget_exceeded:
+            return {"advisories": [], "violations": [], "error": True}
+
         if _merge_in_progress(repo):
-            return {"advisories": [], "violations": [], "skipped": "merge"}
+            return {"advisories": [], "violations": violations, "skipped": "merge"}
 
         evaluated = _guard_evaluate(repo, staged)
         surfaced = [p for p in evaluated if p["emitted"]]
         capped = surfaced[:_GUARD_MAX_ADVISORIES]
-        result: dict = {"advisories": capped, "violations": []}
+        result: dict = {"advisories": capped, "violations": violations}
         if len(surfaced) > len(capped):
             result["total_advisories"] = len(surfaced)
         if capped:
