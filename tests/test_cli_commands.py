@@ -1032,10 +1032,32 @@ def _guard_hook_path(repo):
     return repo / ".git" / "hooks" / "pre-commit"
 
 
+def _stub_guard_bin(monkeypatch, path="/usr/local/bin/contexer"):
+    """Pretend `contexer` is on PATH at `path` AND that it supports `guard`.
+
+    The capability probe shells out to the resolved binary, which does not exist
+    for these synthetic paths — stubbing it keeps the hook-writing tests about
+    hook writing. The probe itself is covered by its own tests below, against a
+    real (throwaway) executable."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: path)
+    monkeypatch.setattr(cli, "_guard_bin_supports_guard", lambda p: True)
+
+
+def _fake_contexer_bin(tmp_path, name="contexer", usage="usage: contexer guard"):
+    """A real, executable throwaway script standing in for an installed contexer
+    binary — used to exercise the capability probe for real."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    path = bin_dir / name
+    path.write_text(f"#!/bin/sh\necho '{usage}'\n")
+    path.chmod(0o755)
+    return path
+
+
 class TestGuardInstallHook:
     def test_fresh_install_writes_executable_script_with_fence_and_abs_path(
             self, guard_repo, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        _stub_guard_bin(monkeypatch)
         _run_main(monkeypatch, "guard", "--install-hook")
         out = capsys.readouterr().out
 
@@ -1050,7 +1072,7 @@ class TestGuardInstallHook:
         assert "installed" in out.lower()
 
     def test_idempotent_reinstall_is_noop(self, guard_repo, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        _stub_guard_bin(monkeypatch)
         _run_main(monkeypatch, "guard", "--install-hook")
         first = _guard_hook_path(guard_repo).read_text()
         capsys.readouterr()
@@ -1062,7 +1084,7 @@ class TestGuardInstallHook:
 
     def test_foreign_hook_preserved_on_append_and_restored_on_uninstall(
             self, guard_repo, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        _stub_guard_bin(monkeypatch)
         hook = _guard_hook_path(guard_repo)
         hook.parent.mkdir(parents=True, exist_ok=True)
         foreign = "#!/bin/sh\necho 'foreign hook'\n"
@@ -1104,7 +1126,7 @@ class TestGuardInstallHook:
         assert hook.read_text() == original
 
     def test_uninstall_ours_only_removes_file(self, guard_repo, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        _stub_guard_bin(monkeypatch)
         _run_main(monkeypatch, "guard", "--install-hook")
         capsys.readouterr()
 
@@ -1118,10 +1140,61 @@ class TestGuardInstallHook:
 
     def test_install_falls_back_to_argv0_when_which_fails(self, guard_repo, monkeypatch):
         monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+        monkeypatch.setattr(cli, "_guard_bin_supports_guard", lambda p: True)
         monkeypatch.setattr(sys, "argv", ["/opt/venv/bin/contexer", "guard", "--install-hook"])
         cli.main()
         content = _guard_hook_path(guard_repo).read_text()
         assert "/opt/venv/bin/contexer" in content
+
+    def test_running_argv0_preferred_over_stale_path_binary(
+            self, guard_repo, tmp_path, monkeypatch):
+        """The running entry point wins over whatever `which` finds: a stale
+        global install earlier on PATH must never be baked into the hook."""
+        real_bin = _fake_contexer_bin(tmp_path)
+        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        monkeypatch.setattr(sys, "argv", [str(real_bin), "guard", "--install-hook"])
+        cli.main()
+        content = _guard_hook_path(guard_repo).read_text()
+        assert str(real_bin) in content
+        assert "/usr/local/bin/contexer" not in content
+
+    def test_source_argv0_is_not_treated_as_a_binary(self, guard_repo, tmp_path, monkeypatch):
+        """`python -m contexer` / `python server.py` leaves a .py file in argv[0];
+        it is not a console script, so `which` must still win."""
+        script = _fake_contexer_bin(tmp_path, name="contexer.py")
+        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        monkeypatch.setattr(cli, "_guard_bin_supports_guard", lambda p: True)
+        monkeypatch.setattr(sys, "argv", [str(script), "guard", "--install-hook"])
+        cli.main()
+        content = _guard_hook_path(guard_repo).read_text()
+        assert "/usr/local/bin/contexer" in content
+        assert str(script) not in content
+
+    def test_binary_without_guard_support_refuses_install(
+            self, guard_repo, tmp_path, monkeypatch, capsys):
+        """A pre-guard binary would produce a hook that exits 1 on every commit.
+        Probe it first and refuse rather than install a commit-blocking hook."""
+        stale = _fake_contexer_bin(tmp_path, usage="usage: contexer install|status")
+        monkeypatch.setattr(cli.shutil, "which", lambda name: str(stale))
+        monkeypatch.setattr(sys, "argv", ["contexer", "guard", "--install-hook"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert str(stale) in err
+        assert "upgrade" in err.lower()
+        assert not _guard_hook_path(guard_repo).exists()
+
+    def test_hook_shell_quotes_the_binary_path(self, guard_repo, monkeypatch):
+        """A path holding shell metacharacters must not expand (or break the
+        script) when the hook runs."""
+        weird = "/opt/my $tools/`x`/contexer"
+        monkeypatch.setattr(cli.shutil, "which", lambda name: weird)
+        monkeypatch.setattr(cli, "_guard_bin_supports_guard", lambda p: True)
+        _run_main(monkeypatch, "guard", "--install-hook")
+        content = _guard_hook_path(guard_repo).read_text()
+        assert "'/opt/my $tools/`x`/contexer'" in content
+        assert '"/opt/my $tools/`x`/contexer"' not in content
 
     def test_not_a_git_repo_refuses(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
@@ -1138,14 +1211,14 @@ class TestInstallStatusMentionGuardHook:
         assert "guard --install-hook" in out
 
     def test_status_reports_guard_hook_not_installed(self, guard_repo, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        _stub_guard_bin(monkeypatch)
         status()
         out = capsys.readouterr().out
         assert "guard hook" in out.lower()
         assert "not installed" in out.lower()
 
     def test_status_reports_guard_hook_installed(self, guard_repo, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/local/bin/contexer")
+        _stub_guard_bin(monkeypatch)
         _run_main(monkeypatch, "guard", "--install-hook")
         capsys.readouterr()
         status()
