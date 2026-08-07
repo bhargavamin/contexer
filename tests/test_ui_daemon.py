@@ -482,6 +482,25 @@ def test_a_version_upgrade_leaves_a_daemon_that_answers_the_printed_url(tmp_path
     EADDRINUSE, the corpse's own cleanup deleted the statefile the parent had just written, and
     three seconds later nothing was listening on the URL the hook had already printed."""
     monkeypatch.setenv("HOME", str(tmp_path))  # the children resolve ~/.contexer from this
+
+    # Pin the child's environment explicitly rather than trusting `subprocess.Popen`'s
+    # default (a fresh snapshot of `os.environ` at call time) to still carry the HOME
+    # override above: this is the one test in the whole suite that spawns a REAL,
+    # independent process running contexer.ui.server, which does its own fresh
+    # Path.home() resolution — the exact "resolve paths from Path.home()" case the
+    # leak-guard in conftest.py warns about. An explicit env= closes any window where
+    # os.environ could be read by the child before this monkeypatch is visible to it
+    # (e.g. under a slow/contended CI runner), so a real console can never bind against
+    # the developer's actual ~/.contexer even transiently.
+    pinned_env = dict(os.environ)
+    real_popen = subprocess.Popen
+
+    def _pinned_popen(*args, **kwargs):
+        kwargs.setdefault("env", pinned_env)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _pinned_popen)
+
     port = an_unused_port()
     pids = []
     try:
