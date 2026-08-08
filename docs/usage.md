@@ -148,7 +148,7 @@ Without `--list`, and with a TTY attached, `contexer guard anchors` walks the sa
 [Y] anchor all shown  [E] edit list (comma-separated)  [S] skip  [Q] quit
 ```
 
-`Y` accepts the candidates as shown, `E` lets you type your own comma-separated file list instead (validated against the working tree the same way — a file that doesn't exist is dropped, not silently accepted), `S` skips that decision for this run, `Q` stops early. Every accepted selection across the whole run is written in a single batch at the end (or on quit) — one save, not one per decision. Nothing is anchored twice: a decision that's already anchored by the time the batch writes (approved, or backfilled, by a concurrent session) is left alone.
+`Y` accepts the candidates as shown, `E` lets you type your own comma-separated file list instead (validated against the working tree the same way — a file that doesn't exist is dropped, not silently accepted), `S` skips that decision for this run, `Q` stops early. Every accepted selection across the whole run is written in a single batch at the end (or on quit) — one save, not one per decision. Ctrl-C (or EOF) is different from `Q`: it aborts outright and writes nothing at all, including anything you'd already accepted. `--list` is the only flag the command takes; any other argument is rejected rather than dropping you into the interactive loop. Nothing is anchored twice: a decision that's already anchored by the time the batch writes (approved, or backfilled, by a concurrent session) is left alone.
 
 ## Connecting to a team (Contexer Teams)
 

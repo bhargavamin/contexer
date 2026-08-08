@@ -1076,6 +1076,20 @@ def _input_sequence(monkeypatch, *answers):
     monkeypatch.setattr("builtins.input", lambda *_a: next(it))
 
 
+def _input_sequence_raising(monkeypatch, *answers):
+    """Like _input_sequence, but an exception CLASS in the sequence is raised at that
+    prompt instead of returned — how a Ctrl-C/EOF mid-loop actually reaches the caller."""
+    it = iter(answers)
+
+    def _next(*_a):
+        value = next(it)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr("builtins.input", _next)
+
+
 class TestGuardAnchors:
     def test_list_prints_candidates_and_mutates_nothing(self, guard_repo, monkeypatch, capsys):
         _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
@@ -1218,6 +1232,73 @@ class TestGuardAnchors:
         anchored_ids = {eid for eid, e in entries.items() if e.get("source_files")}
         assert len(anchored_ids) == 1
         assert anchored_ids <= {e1["id"], e2["id"]}
+
+    def _two_candidates(self, guard_repo):
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        _gwrite(guard_repo, "auth/oauth.py", "token = 0\n")
+        return (_gseed(guard_repo, "See auth/jwt.py for the JWT auth decision"),
+                _gseed(guard_repo, "See auth/oauth.py for the OAuth decision"))
+
+    def _anchored(self, guard_repo):
+        from contexer import store
+        return [e for e in store._load(str(guard_repo))["entries"] if e.get("source_files")]
+
+    def test_interrupt_at_the_choice_prompt_writes_nothing(self, guard_repo, monkeypatch,
+                                                            capsys):
+        """Ctrl-C/EOF is an abort, not a commit: selections ratified before the interrupt
+        must NOT be written. (A plain [Q]uit still writes them — that is documented.)"""
+        self._two_candidates(guard_repo)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        def _inputs(*_a):
+            if not calls:
+                calls.append(1)
+                return "Y"
+            raise KeyboardInterrupt
+        calls = []
+        monkeypatch.setattr("builtins.input", _inputs)
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+        assert "1 anchored" not in out
+        assert self._anchored(guard_repo) == []
+
+    def test_eof_at_the_edit_prompt_writes_nothing(self, guard_repo, monkeypatch, capsys):
+        self._two_candidates(guard_repo)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence_raising(monkeypatch, "Y", "E", EOFError)
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+        assert self._anchored(guard_repo) == []
+
+    def test_quit_still_writes_after_a_ratified_selection(self, guard_repo, monkeypatch,
+                                                          capsys):
+        # The documented contrast with an interrupt, pinned next to it.
+        self._two_candidates(guard_repo)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "Y", "Q")
+        _run_main(monkeypatch, "guard", "anchors")
+        assert "1 anchored" in capsys.readouterr().out
+        assert len(self._anchored(guard_repo)) == 1
+
+    def test_unknown_flag_is_rejected_instead_of_prompting(self, guard_repo, monkeypatch,
+                                                            capsys):
+        """`guard anchors --dry-run` used to fall through into the interactive loop —
+        a flag that reads as read-only silently starting a write flow."""
+        self._two_candidates(guard_repo)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input",
+                             lambda *_a: pytest.fail("must not prompt on an unknown flag"))
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "anchors", "--dry-run")
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--dry-run" in err
+        assert "--list" in err
+        assert self._anchored(guard_repo) == []
 
 
 class TestGuardUsage:

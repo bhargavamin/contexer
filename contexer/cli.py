@@ -1277,8 +1277,21 @@ def _guard_anchors(rest: list) -> None:
     interactive [Y]/[E]/[S]/[Q] loop requires a human at a keyboard and
     refuses outright otherwise. Ratified selections are applied in ONE batch
     at the end (or on [Q]uit) via store.apply_backfill_anchors, never one
-    save per decision."""
+    save per decision — but NOT on a Ctrl-C/EOF: an interrupt is an abort, and
+    writing the selections gathered before it would be exactly the surprise the
+    developer just tried to prevent (a plain [Q]uit still writes them, which is
+    what the loop's own prompt and the docs promise).
+
+    `--list` is the ONLY accepted argument: anything else exits 1 with a
+    message rather than falling through to the interactive loop, where a flag
+    that reads as read-only (`--dry-run`) would silently start a write flow."""
     from contexer import store, guard_engine
+
+    unknown = [a for a in rest if a != "--list"]
+    if unknown:
+        print(f"contexer guard anchors: unknown argument(s): {' '.join(unknown)} — "
+              "the only accepted flag is --list.", file=sys.stderr)
+        sys.exit(1)
 
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     candidates = guard_engine.anchor_candidates_for_backfill(repo)
@@ -1309,6 +1322,7 @@ def _guard_anchors(rest: list) -> None:
 
     selections: dict = {}
     skipped = 0
+    aborted = False
     for i, c in enumerate(candidates, 1):
         print("─" * 60)
         print(f"Decision {i} of {len(candidates)}\n")
@@ -1322,7 +1336,7 @@ def _guard_anchors(rest: list) -> None:
         try:
             choice = input("Choice: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
-            print("\nAborted.")
+            aborted = True
             break
 
         if choice in ("Y", "YES"):
@@ -1331,9 +1345,8 @@ def _guard_anchors(rest: list) -> None:
             try:
                 raw = input("Files (comma-separated): ").strip()
             except (KeyboardInterrupt, EOFError):
-                print("\nSkipped.")
-                skipped += 1
-                continue
+                aborted = True
+                break
             typed = [f.strip() for f in raw.split(",") if f.strip()]
             # Validated the same way the write layer will see it: resolved through
             # _guard_relpath (rejecting ../-escaping and absolute spellings, exactly
@@ -1360,6 +1373,11 @@ def _guard_anchors(rest: list) -> None:
         else:
             skipped += 1
             print("Skipped.")
+
+    if aborted:
+        # An interrupt writes NOTHING — not even selections ratified before it.
+        print("\nAborted — nothing was anchored.")
+        return
 
     applied = store.apply_backfill_anchors(repo, selections) if selections else 0
 
