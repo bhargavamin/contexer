@@ -37,6 +37,8 @@ contexer review
 
 For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
 
+Approving through the MCP tool (`approve_decision`) also accepts `source_files`: a list of repo-relative files that decision describes. Passing it anchors the decision to those files and the current commit — the same anchor the commit-time guard and staleness checks below rely on — so a decision can become guard-pairable the moment you approve it, not just when it was first captured. It only applies to a single decision id at a time (bulk approvals via `"all"` or a comma-list don't accept it).
+
 Prefer to see them all at once? `contexer ui` opens a local web console with the same review queue — plus every stored decision, its revision history, global rules, and cached team context, for every repo on the machine. Proposed changes are shown as before/after diffs, and you can edit, delete, and restore decisions there too. It is loopback-only and starts on demand; see **[the local console](ui.md)**.
 
 ## Update or remove
@@ -103,7 +105,7 @@ Not run automatically by `contexer install` — it's opt-in per repo. `--install
 contexer guard [path…] [--explain]
 ```
 
-Pairs staged files against approved decisions with a human, scan, or bootstrap origin — never an unreviewed AI guess. A pair fires when the staged file is one of the decision's recorded source files, or a file/module path mentioned in the decision's content matches the staged path (an exact path, a dotted module, or a `/`-bounded multi-segment suffix — a bare filename never matches on its own). Advisories print and exit 0; up to 5 print per run (more are reported as suppressed), and a pair stops repeating once you dismiss it, or automatically once its file's staged content stops changing. `--explain` lists every candidate pair for the staged files, including rejected ones, with the reason.
+Pairs staged files against approved decisions with a human, scan, bootstrap, or approved-plan origin — never an unreviewed AI guess. (A decision stored before Contexer tracked origin is judged by who originally created it, so older trusted decisions still qualify.) A pair fires when the staged file is one of the decision's recorded source files, or a file/module path mentioned in the decision's content matches the staged path (an exact path, a dotted module, or a `/`-bounded multi-segment suffix — a bare filename never matches on its own). Advisories print and exit 0; up to 5 print per run (more are reported as suppressed), and a pair stops repeating once you dismiss it, or automatically once its file's staged content stops changing. `--explain` lists every candidate pair for the staged files, including rejected ones, with the reason.
 
 ```bash
 contexer guard --dismiss <hash|n>
