@@ -133,6 +133,13 @@ def _guard_relpath(repo: str, path: str) -> str:
         return ""
 
 
+def _escapes_repo(relpath: str) -> bool:
+    """True iff `relpath` (assumed already run through _guard_relpath) cannot
+    denote a file inside the repo: empty, "..", "../"-prefixed, or absolute."""
+    return (not relpath or relpath == ".." or relpath.startswith("../")
+            or os.path.isabs(relpath))
+
+
 _GUARD_PATH_ARTIFACT_RE = re.compile(r"^[\w][\w./-]*\.\w+$")
 _GUARD_MODULE_ARTIFACT_RE = re.compile(r"^[a-z_]\w*(\.[a-z_]\w*)+$")
 
@@ -521,7 +528,7 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
 # _guard_anchors) ratifies selections per decision and applies them in one batch
 # via store.apply_backfill_anchors.
 
-def _backfill_candidate_paths(artifact: str) -> list[str]:
+def _artifact_path_spellings(artifact: str) -> list[str]:
     """Every repo-relative path spelling `artifact` could refer to, before an
     existence check. The literal artifact is always tried first — a two-segment
     filename like "config.yaml" also satisfies _GUARD_MODULE_ARTIFACT_RE's
@@ -539,31 +546,42 @@ def _backfill_candidate_paths(artifact: str) -> list[str]:
     return candidates
 
 
+def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list[str]:
+    """Existing-file anchor candidates for one decision's content: every
+    path-like artifact it mentions (_guard_content_artifacts), expanded to its
+    possible file spellings (_artifact_path_spellings), canonicalized, and kept
+    only if the file exists in the working tree. Deduped (first-seen order)
+    and capped at store._MAX_SOURCE_FILES — the same cap _anchor_sources
+    itself enforces on write."""
+    seen: set[str] = set()
+    results: list[str] = []
+    for artifact in _guard_content_artifacts(content):
+        for raw_path in _artifact_path_spellings(artifact):
+            resolved = _guard_relpath(repo, raw_path)
+            if resolved in seen or _escapes_repo(resolved):
+                continue
+            if not (repo_root / resolved).is_file():
+                continue
+            seen.add(resolved)
+            results.append(resolved)
+            if len(results) >= store._MAX_SOURCE_FILES:
+                return results
+    return results
+
+
 def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
-    """For every decision in the repo store that is BOTH _guard_trusted AND
-    currently unanchored (empty/absent source_files), derive candidate anchor
-    paths from its own content via the same path-like artifact extraction the
-    Tier-1 pairing engine already uses (_guard_content_artifacts /
-    _pathlike_artifact), map any dotted-module artifact onto its file
-    spelling(s) (_backfill_candidate_paths), and keep only candidates that
-    EXIST in the repo working tree right now — repo-relative, no rename
-    detection in v1: a decision whose file was since renamed silently yields no
-    candidate for that artifact rather than guessing at a replacement.
+    """For every trusted, unanchored decision in the repo store, derive
+    candidate anchor paths from its content (_candidate_paths_for_entry) and
+    skip decisions with no surviving candidates — no rename detection, so a
+    renamed file yields nothing rather than a guess.
 
-    Candidates are deduped (first-seen order preserved) and capped at
-    store._MAX_SOURCE_FILES — the same cap _anchor_sources itself enforces on
-    write, so this preview never promises more than a backfill would actually
-    store. A decision with zero surviving candidates is skipped entirely
-    (nothing to offer for it this run).
-
-    Each dict: {decision_id, title, candidates: [...]}. Read-only: never calls
-    _save. Fail-soft: any failure (corrupt store, unresolvable repo, ...)
-    returns []."""
+    Returns [{decision_id, title, candidates}, ...]. Read-only (never calls
+    _save) and fail-soft (any failure returns [])."""
     try:
         repo = store._resolve_repo(repo_path)
         entries = store._load(repo).get("entries") or []
         repo_root = Path(repo)
-        out: list[dict] = []
+        results: list[dict] = []
         for entry in entries:
             if entry.get("source_files"):
                 continue
@@ -572,28 +590,12 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
             rev = store._current_revision(entry)
             content = rev.get("content", "") if rev else entry.get("content", "")
             title = entry.get("title") or store._derive_title(content)
-
-            seen: set[str] = set()
-            candidates: list[str] = []
-            for artifact in _guard_content_artifacts(content):
-                for raw_path in _backfill_candidate_paths(artifact):
-                    resolved = _guard_relpath(repo, raw_path)
-                    if (not resolved or resolved in seen or resolved == ".."
-                            or resolved.startswith("../") or os.path.isabs(resolved)):
-                        continue
-                    if not (repo_root / resolved).is_file():
-                        continue
-                    seen.add(resolved)
-                    candidates.append(resolved)
-                    if len(candidates) >= store._MAX_SOURCE_FILES:
-                        break
-                if len(candidates) >= store._MAX_SOURCE_FILES:
-                    break
+            candidates = _candidate_paths_for_entry(repo, repo_root, content)
             if not candidates:
                 continue
-            out.append({"decision_id": entry.get("id", ""), "title": title,
-                        "candidates": candidates})
-        return out
+            results.append({"decision_id": entry.get("id", ""), "title": title,
+                             "candidates": candidates})
+        return results
     except Exception:
         return []
 

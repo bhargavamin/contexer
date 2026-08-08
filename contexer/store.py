@@ -1797,9 +1797,7 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     # repository-relative staged path (guard pairing silently dead) and git diff
     # rejects/ignores it (staleness silently dead) — reject it at the door rather
     # than storing a dead anchor.
-    files = [p for p in canon
-             if p and p != ".." and not p.startswith("../") and not os.path.isabs(p)
-             ][:_MAX_SOURCE_FILES]
+    files = [p for p in canon if not guard_engine._escapes_repo(p)][:_MAX_SOURCE_FILES]
     if not files:
         return
     entry["source_files"] = files
@@ -4793,7 +4791,7 @@ def record_edited_file(repo_path: str, file_path: str) -> None:
     try:
         from contexer import guard_engine
         relpath = guard_engine._guard_relpath(repo_path, file_path)
-        if not relpath or relpath == ".." or relpath.startswith("../") or os.path.isabs(relpath):
+        if guard_engine._escapes_repo(relpath):
             return
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         entries = [e for e in _load_edited_entries(repo_path) if e["path"] != relpath]

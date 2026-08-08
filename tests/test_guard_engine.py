@@ -1031,7 +1031,7 @@ class TestAnchorCandidatesForBackfill:
         # module file "contexer/store.py" — both existing spellings of the same
         # dotted artifact surface as separate candidates. Accepted behavior (the
         # literal-first, module-mapping-as-additional-guesses shape in
-        # _backfill_candidate_paths does not treat the two as exclusive), now
+        # _artifact_path_spellings does not treat the two as exclusive), now
         # pinned here rather than left implicit.
         _write(repo, "contexer.store", "legacy marker file\n")
         _write(repo, "contexer/store.py", "x = 1\n")
