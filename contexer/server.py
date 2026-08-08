@@ -99,7 +99,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
 
 @mcp.tool()
-def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "") -> str:
+def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "",
+                     source_files: list[str] | None = None) -> str:
     """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review — or
     retire an already-trusted (approved/suggested) decision with 'ignore'.
 
@@ -115,10 +116,14 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
               only status flips to 'ignored'). 'approve'/'edit'/'dismiss'/'skip' remain
               pending-only: an already-approved decision cannot be re-approved.
     content: required when action='edit' — the corrected decision text (single decision only)
+    source_files: repo-relative files this decision describes — anchors it for staleness
+                  tracking and the commit-time guard; single-id approvals only.
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
+    if source_files and (entry_id.strip().lower() in ("all", "*") or "," in entry_id):
+        raise ValueError("source_files requires a single decision id")
     hidden = 0
     if entry_id.strip().lower() in ("all", "*"):
         pending = store.get_pending_decisions(resolved)
@@ -135,7 +140,8 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
     if not ids:
         return "No decision id given."
     if len(ids) == 1 and not hidden:
-        return store.approve_decision(resolved, ids[0], action, content)[1]
+        return store.approve_decision(resolved, ids[0], action, content,
+                                      source_files=source_files)[1]
     # Bulk: 'edit' needs per-decision content, so it's single-only.
     if action == "edit":
         return "Bulk 'edit' isn't supported — edit decisions one at a time."

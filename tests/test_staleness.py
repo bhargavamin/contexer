@@ -295,3 +295,60 @@ def test_legacy_entry_without_fields_round_trips(repo):
     after = store._load(repo)["entries"]
     assert after == before
     assert "No matching" not in store.get_context(repo, query="auth")
+
+
+# ── approval-time anchoring (issue #172 Task 2) ─────────────────────────────────
+
+def test_approve_already_anchored_entry_refreshes_anchor_commit_and_clears_note(repo):
+    """A decision captured with source_files while still pending_approval is already
+    anchored. Approving it later (no source_files param — the param is independent of
+    this) is a human revalidation of the content: anchor_commit refreshes to current
+    HEAD, and a stale note picked up in between clears."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "constraint",
+                                   source_files=["auth.py"])
+    entry = _entry(repo)
+    assert entry["status"] == "pending_approval"
+    old_anchor = entry["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    ok, _msg = store.approve_decision(repo, eid, "approve")
+    assert ok
+    entry = _entry(repo)
+    assert entry["status"] == "approved"
+    assert entry["anchor_commit"] != old_anchor
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+
+def test_approve_with_source_files_param_anchors_and_clears_future_staleness(repo):
+    """approve_decision(source_files=...) anchors a not-yet-anchored entry (source_files
+    stored, anchor_commit set to current HEAD), and the anchor takes effect immediately —
+    a later change to that file surfaces the staleness note."""
+    stored, eid = store.update_decision(repo, "auth flow: login() verifies the token", "s1",
+                                        "constraint")
+    assert stored
+    entry = _entry(repo)
+    assert entry["status"] == "pending_approval"
+    assert "source_files" not in entry
+
+    ok, _msg = store.approve_decision(repo, eid, "approve", source_files=["auth.py", "other.py"])
+    assert ok
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py", "other.py"]
+    assert entry["anchor_commit"]
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+
+def test_share_projection_carries_no_anchor_fields_after_approval_anchor(repo):
+    """Wire-safety: approval-time anchoring must not leak source_files/anchor_commit
+    onto the push wire shape (mirrors the existing no-anchor-fields invariant)."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "constraint")
+    assert stored
+    store.approve_decision(repo, eid, "approve", source_files=["auth.py"])
+    entry = _entry(repo)
+    assert entry["source_files"] and entry["anchor_commit"]
+    projected = store._share_projection(entry, redact_on=False)
+    assert "source_files" not in projected and "anchor_commit" not in projected

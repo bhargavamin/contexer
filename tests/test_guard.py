@@ -792,6 +792,42 @@ class TestGuardStaged:
         assert len(result["advisories"]) == 1
 
 
+class TestApprovalTimeAnchorGuardPairing:
+    """End-to-end: this is the reason issue #172 exists — a decision anchored at
+    APPROVAL time (not just at capture time) must pair in guard_staged."""
+
+    def test_approve_with_source_files_pairs_in_guard_staged(self, repo):
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        _git(repo, "add", "auth/jwt.py")
+        _commit(repo, "init")
+
+        # created_by="plan" + subtype="constraint": lands pending_approval (needs a human
+        # look), but its revision source ("plan") is guard-trusted once approved — unlike
+        # "ai", which stays untrusted even after approval (see TestGuardTrusted).
+        stored, eid = store.update_decision(str(repo), "Always use JWT for session auth, "
+                                             "never plain cookies", "s1", "constraint",
+                                             created_by="plan")
+        assert stored
+        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        assert entry["status"] == "pending_approval"
+        assert "source_files" not in entry
+
+        ok, msg = store.approve_decision(str(repo), eid, "approve",
+                                         source_files=["auth/jwt.py"])
+        assert ok, msg
+        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert entry["anchor_commit"]
+
+        _write(repo, "auth/jwt.py", "token = 1  # rewritten\n")
+        _git(repo, "add", "auth/jwt.py")
+        result = store.guard_staged(str(repo))
+        assert len(result["advisories"]) == 1
+        assert result["advisories"][0]["decision_id"] == eid
+        assert result["advisories"][0]["reason"] == "source_files match"
+
+
 # ── guard_candidates ──────────────────────────────────────────────────────────
 
 class TestGuardCandidates:

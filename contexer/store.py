@@ -1966,7 +1966,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 
 
 def approve_decision(repo_path: str, entry_id: str, action: str,
-                     content: str = "") -> tuple[bool, str]:
+                     content: str = "", *, source_files: list | None = None) -> tuple[bool, str]:
     """Approve, edit, skip, ignore, or dismiss a decision awaiting the developer — or
     retire an already-trusted one.
 
@@ -1983,17 +1983,33 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
         an already-approved decision can't be re-approved through this path.
 
     content: the corrected decision text, required when action='edit'
+    source_files: repo-relative files this decision describes. Approval is the moment a
+        human ratifies the decision, so a non-empty list anchors it (via _anchor_sources —
+        anchor_commit = current HEAD, stale-flag clearing) once the approve/edit actually
+        applies. Single-decision id only, and only with action 'approve' or 'edit' — raises
+        ValueError on a comma-list/"all" target or any other action, since neither ratifies
+        anything to anchor.
     Returns (success, message).
     """
     if action not in ("approve", "ignore", "edit", "skip", "dismiss"):
         return False, f"Invalid action '{action}'. Use: approve, edit, skip, ignore, or dismiss."
     if action == "edit" and not content.strip():
         return False, "Action 'edit' requires content — provide the corrected decision text."
+    if source_files:
+        if entry_id.strip().lower() in ("all", "*") or "," in entry_id:
+            raise ValueError("source_files requires a single decision id")
+        if action not in ("approve", "edit"):
+            raise ValueError("source_files requires action 'approve' or 'edit'")
 
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
         ok, msg, changed = _apply_approval(
             data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path)
+        if ok and source_files:
+            entry = _entry_by_id(data["entries"], entry_id)
+            if entry is not None:
+                _anchor_sources(repo_path, entry, source_files)
+                changed = True
         if changed:
             _save(repo_path, data)
         return ok, msg
@@ -2025,7 +2041,14 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         entry["status"] = "approved"
         entry["approved_at"] = now
         entry["approved_by"] = "human"
+        prop_had_source_files = bool((entry.get("proposed_revision") or {}).get("source_files"))
         _promote_proposal(repo_path, entry, content if action == "edit" else None)
+        # Approval is a human revalidation of the content: an entry already anchored gets its
+        # anchor_commit refreshed to current HEAD, resetting staleness. Skipped when
+        # _promote_proposal just anchored via the proposal's own stashed source_files above —
+        # that already refreshed to the same HEAD, so this would be a redundant git call.
+        if not prop_had_source_files and entry.get("source_files"):
+            _anchor_sources(repo_path, entry, entry["source_files"])
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2071,6 +2094,10 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         cur["confidence_score"] = score
         cur["evidence"] = factors
     _sync_decision_cache(entry)
+    # Approval is a human revalidation of the content: an entry already anchored (e.g. it was
+    # captured with source_files while still pending) gets its anchor_commit refreshed here too.
+    if entry.get("source_files"):
+        _anchor_sources(repo_path, entry, entry["source_files"])
     stored_content = _current_content(entry)
     preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
