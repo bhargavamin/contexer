@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.31.0](https://github.com/bhargavamin/contexer/compare/v0.30.0...v0.31.0) (2026-08-08)
+
+
+### Features
+
+* **capture:** carry anchor candidates from edited files; bless at approval ([c11ecf2](https://github.com/bhargavamin/contexer/commit/c11ecf21e0f7a75c6aed266ad6d915203045e749))
+* **capture:** carry anchor candidates on constraint capture ([f098213](https://github.com/bhargavamin/contexer/commit/f098213a95d48d2e02273cc9cb29d1354d4cd326))
+* **capture:** record per-session edited files from write hooks ([a1ca4fa](https://github.com/bhargavamin/contexer/commit/a1ca4fac272e1868f83c4ab4ca78dc1a6afe1a9b))
+* **guard:** anchor accrual — assisted backfill and capture-time candidates ([305b6e4](https://github.com/bhargavamin/contexer/commit/305b6e44c9007eaaa0140490a47811e33e9664d4))
+* **guard:** anchor coverage — trust widening, approval-time anchoring, guard_engine extraction ([14cd854](https://github.com/bhargavamin/contexer/commit/14cd8548011b13b72526fbb8fbfe64906f4f7dbc))
+* **guard:** anchor decisions at approval time ([21574a3](https://github.com/bhargavamin/contexer/commit/21574a3d1b1795566d742e28cd16c60187c1adcb))
+* **guard:** assisted anchor backfill via contexer guard anchors ([0f9aa65](https://github.com/bhargavamin/contexer/commit/0f9aa65de889c04e297f97dfcd5f121762085fb0))
+* **guard:** trust explicitly human-approved decisions regardless of capture source ([5ee2cfb](https://github.com/bhargavamin/contexer/commit/5ee2cfbcea9050d76cbbb297dd644100e9b79c6d))
+* **guard:** trust explicitly human-approved decisions regardless of capture source ([36e3b5a](https://github.com/bhargavamin/contexer/commit/36e3b5a8bf13fca46fc2c36118a9bffe337a3d88))
+* **guard:** trust plan-sourced approved decisions; back-stamp legacy revision sources ([ad0bfdd](https://github.com/bhargavamin/contexer/commit/ad0bfddeeb1847e518d1643fe246fa8f5d553e06))
+
+
+### Bug Fixes
+
+* **capture:** fall back to hook cwd for edit recording in non-git projects ([3fde7aa](https://github.com/bhargavamin/contexer/commit/3fde7aa78e895b8a988d287a86884ad24188308d))
+* **capture:** gate anchor candidates on resulting status, pin three-way precedence ([8492874](https://github.com/bhargavamin/contexer/commit/8492874002ccd758276e501a26890d1744840d6f))
+* **capture:** isolate edited-file recording from the capture-reminder arm ([a154b23](https://github.com/bhargavamin/contexer/commit/a154b23fa60bf1b02a3ce1c66baa4f961a2d8d58))
+* **capture:** key edited-files sidecar per repo, bound by a freshness window ([298de03](https://github.com/bhargavamin/contexer/commit/298de035ee6076baf0a5709dcf4c15722adedfc0))
+* **capture:** resolve Gemini capture and recording from the same hook cwd ([b38313e](https://github.com/bhargavamin/contexer/commit/b38313ed4457faff91388e664343dd59859b16f1))
+* **guard:** abort skips backfill writes; reject unknown flags ([9539374](https://github.com/bhargavamin/contexer/commit/95393744223801d401cbf75cd5db51464db3be0f))
+* **guard:** guard backfill writes against concurrent anchors; align edit-path validation ([096d92d](https://github.com/bhargavamin/contexer/commit/096d92dcfcaf5f26e6ecfae63ef79050b1564496))
+* **guard:** invalidate the human-approval stamp when a non-human revision goes live ([7f8d64a](https://github.com/bhargavamin/contexer/commit/7f8d64a983e643a627e57c46c73b54bb9907f4ce))
+* **guard:** make store's guard re-exports lazy so import order cannot break ([faca016](https://github.com/bhargavamin/contexer/commit/faca016be6e1630f47f3ae8ee34876cb5b528595))
+* **guard:** trust legacy provenance at read time, not via storage back-stamp ([aa1a86b](https://github.com/bhargavamin/contexer/commit/aa1a86b75561c7f0fa64a73fa4c55770c31a82fe))
+* **plugin:** make hook parity two-directional and cover matcher/once ([dc8ffe9](https://github.com/bhargavamin/contexer/commit/dc8ffe99b6a7191c9d2ef7bdf3de7bfa50a4e716))
+* **plugin:** resync bundled hooks with adapter-generated commands; add parity test ([f80e16b](https://github.com/bhargavamin/contexer/commit/f80e16bae98bd89f19cbc848e13d7f74bf1b017d))
+* **plugin:** resync bundled hooks with adapter-generated commands; add two-directional parity test ([cbd78e2](https://github.com/bhargavamin/contexer/commit/cbd78e21b3ca5ff292c6b6cf420752b5bf567a5e))
+* **store:** canonicalize anchors, pair __dir__ with __getattr__, docstring + coverage debt ([f962b9b](https://github.com/bhargavamin/contexer/commit/f962b9b10a6ca089c12042e31ee7d2e32d442f50))
+* **store:** drop outside-repo anchors at canonicalization ([b96db10](https://github.com/bhargavamin/contexer/commit/b96db10abfe9384eb9c9ad17b9605d59c4fea33a))
+* **store:** recompute confidence after stamp invalidation, not before ([1514252](https://github.com/bhargavamin/contexer/commit/1514252e6825928d970e0011bb18f2f2812f408b))
+
+
+### Documentation
+
+* **guard:** correct tier-1 pairing claims for unanchored decisions ([3ba507a](https://github.com/bhargavamin/contexer/commit/3ba507a2c521a7ac29be73ef536a17ec0a8d10cb))
+* **guard:** document anchor accrual — backfill, edited-files signal, candidate lifecycle ([7fbcb7a](https://github.com/bhargavamin/contexer/commit/7fbcb7a7f78eaa05133c2dd5d79c0595a1a5c8e5))
+* **guard:** document trusted-source widening, approval anchoring, guard_engine layout ([c5681cf](https://github.com/bhargavamin/contexer/commit/c5681cfd45899043a6256d03692cec794b1fa909))
+* **guard:** rewrite user-facing guard docs for clarity ([afe665b](https://github.com/bhargavamin/contexer/commit/afe665b9bf00b4c3afa25db7c5f80b353f357070))
+* **guard:** scope approval-anchoring claims to paths that exist ([8bf1c79](https://github.com/bhargavamin/contexer/commit/8bf1c791a04436bf9639071ea3b64f594006cbcb))
+* **store:** scope the provenance ruling — synthesis derives, never fabricates ([b37c22b](https://github.com/bhargavamin/contexer/commit/b37c22b3de1a64bf1db063b318d03832a6ef9405))
+* **store:** scope the provenance ruling — synthesis derives, never fabricates ([#176](https://github.com/bhargavamin/contexer/issues/176)) ([3e925c5](https://github.com/bhargavamin/contexer/commit/3e925c58bc9854d3619304a0be54ca234961b780))
+
 ## [0.30.0](https://github.com/bhargavamin/contexer/compare/v0.29.1...v0.30.0) (2026-08-07)
 
 
