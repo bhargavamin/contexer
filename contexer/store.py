@@ -1805,10 +1805,17 @@ def apply_backfill_anchors(repo_path: str, selections: dict) -> int:
     A decision_id with no matching entry (concurrent session removed/ignored it
     between the CLI's read and this write) is silently skipped — same
     read-then-write race tolerance as every other batch mutation in this
-    module. The actual canonicalization + anchor_commit stamping is delegated
-    to _anchor_sources, so an empty or all-unresolvable file list for a
-    decision is a no-op for that decision (not counted as anchored). Returns
-    the count of decisions actually anchored."""
+    module. An entry that is ALREADY anchored by the time this batch runs
+    (a concurrent session anchored it — capture, approval, or a second
+    `guard anchors` run — while this one was mid-loop) is skipped outright,
+    never re-anchored: "never overwrite an existing anchor" is a write-layer
+    invariant here, not merely a candidate-generation filter (candidate
+    generation already excludes anchored decisions, but that read happened
+    before this write, so the check must be repeated at write time too). The
+    actual canonicalization + anchor_commit stamping is delegated to
+    _anchor_sources, so an empty or all-unresolvable file list for a decision
+    is a no-op for that decision (not counted as anchored). Returns the count
+    of decisions actually anchored."""
     if not selections:
         return 0
     repo = _resolve_repo(repo_path)
@@ -1818,11 +1825,10 @@ def apply_backfill_anchors(repo_path: str, selections: dict) -> int:
         changed = False
         for entry in data["entries"]:
             files = selections.get(entry.get("id", ""))
-            if not files:
+            if not files or entry.get("source_files"):
                 continue
-            had_anchor = bool(entry.get("source_files"))
             _anchor_sources(repo, entry, files)
-            if entry.get("source_files") and not had_anchor:
+            if entry.get("source_files"):
                 anchored += 1
                 changed = True
         if changed:

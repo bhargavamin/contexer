@@ -5,6 +5,7 @@ blocking violations) in contexer/guard_engine.py. `store` is still imported
 directly for the store-owned pieces the guard engine reads through it
 (STORE_DIR, _load, _save, ...) and for the five public entrypoints it
 re-exports at its own bottom for backward compatibility."""
+import copy
 import os
 import subprocess
 import sys
@@ -960,6 +961,21 @@ class TestAnchorCandidatesForBackfill:
         assert result[0]["decision_id"] == entry["id"]
         assert result[0]["candidates"] == ["config.yaml"]
 
+    def test_literal_and_module_spellings_coexist_as_separate_candidates(self, repo):
+        # A literal file named "contexer.store" (no extension) alongside the real
+        # module file "contexer/store.py" — both existing spellings of the same
+        # dotted artifact surface as separate candidates. Accepted behavior (the
+        # literal-first, module-mapping-as-additional-guesses shape in
+        # _backfill_candidate_paths does not treat the two as exclusive), now
+        # pinned here rather than left implicit.
+        _write(repo, "contexer.store", "legacy marker file\n")
+        _write(repo, "contexer/store.py", "x = 1\n")
+        entry = _seed_entry(repo, "The contexer.store module owns all read/write logic")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert result[0]["candidates"] == ["contexer.store", "contexer/store.py"]
+
     def test_dedupes_repeated_artifact(self, repo):
         _write(repo, "auth/jwt.py", "token = 0\n")
         entry = _seed_entry(
@@ -1052,6 +1068,37 @@ class TestApplyBackfillAnchors:
             str(repo), {e1["id"]: ["auth/jwt.py"], e2["id"]: ["auth/oauth.py"]})
         assert count == 2
         assert len(calls) == 1
+
+    def test_already_anchored_entry_is_never_overwritten(self, repo):
+        """Write-layer invariant: a decision already anchored by the time this batch
+        runs (e.g. a concurrent session anchored it while the developer was mid-loop
+        in `guard anchors`) must be left byte-identical — never re-anchored — even
+        though it was explicitly selected in this batch. Other selections in the
+        SAME batch still apply normally."""
+        _write(repo, "auth/jwt.py", "x\n")
+        _write(repo, "auth/oauth.py", "x\n")
+        _git(repo, "add", "auth/jwt.py", "auth/oauth.py")
+        _commit(repo)
+        already_anchored = _seed_entry(repo, "See auth/jwt.py for the JWT decision",
+                                        source_files=["auth/jwt.py"])
+        # No anchor_commit stamped by _seed_entry (it sets source_files directly,
+        # bypassing _anchor_sources) — a real pre-existing anchor snapshot to diff
+        # against for byte-identity.
+        before = copy.deepcopy(
+            next(e for e in store._load(str(repo))["entries"]
+                 if e["id"] == already_anchored["id"]))
+        fresh = _seed_entry(repo, "See auth/oauth.py for the OAuth decision")
+
+        count = store.apply_backfill_anchors(
+            str(repo),
+            {already_anchored["id"]: ["auth/oauth.py"],  # attempted re-anchor, must be ignored
+             fresh["id"]: ["auth/oauth.py"]})
+
+        assert count == 1  # only the fresh decision counts as newly anchored
+        after_entries = {e["id"]: e for e in store._load(str(repo))["entries"]}
+        assert after_entries[already_anchored["id"]] == before
+        assert after_entries[fresh["id"]]["source_files"] == ["auth/oauth.py"]
+        assert after_entries[fresh["id"]]["anchor_commit"]
 
 
 # ── end-to-end: backfilled decision pairs in guard_staged ────────────────────

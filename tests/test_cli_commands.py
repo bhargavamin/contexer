@@ -1120,6 +1120,31 @@ class TestGuardAnchors:
                       if e["id"] == entry["id"])
         assert loaded["source_files"] == ["auth/other.py"]
 
+    def test_edit_rejects_paths_escaping_the_repo(self, guard_repo, monkeypatch, capsys,
+                                                    tmp_path):
+        """The [E]dit validation must agree with the write layer (_anchor_sources):
+        a ../-escaping or absolute spelling of a file that exists ON DISK but
+        outside the repo must be rejected here, not accepted and then silently
+        dropped by _anchor_sources later (which would vanish the entry from the
+        tally without the CLI ever saying so)."""
+        from contexer import store
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        outside = tmp_path / "outside.py"
+        outside.write_text("secret = 1\n")
+        entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "E", f"../outside.py,{outside}")
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "No valid files given, skipping." in out
+        assert "Anchor backfill complete: 1 skipped." in out
+
+        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+                      if e["id"] == entry["id"])
+        assert not loaded.get("source_files")
+
     def test_skip_stores_nothing(self, guard_repo, monkeypatch, capsys):
         from contexer import store
         _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")

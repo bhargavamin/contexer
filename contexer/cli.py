@@ -1305,7 +1305,7 @@ def _guard_anchors(rest: list) -> None:
           f"{Path(repo).name}\n")
 
     selections: dict = {}
-    anchored = skipped = 0
+    skipped = 0
     for i, c in enumerate(candidates, 1):
         print("─" * 60)
         print(f"Decision {i} of {len(candidates)}\n")
@@ -1324,7 +1324,6 @@ def _guard_anchors(rest: list) -> None:
 
         if choice in ("Y", "YES"):
             selections[c["decision_id"]] = c["candidates"]
-            anchored += 1
         elif choice in ("E", "EDIT"):
             try:
                 raw = input("Files (comma-separated): ").strip()
@@ -1333,13 +1332,23 @@ def _guard_anchors(rest: list) -> None:
                 skipped += 1
                 continue
             typed = [f.strip() for f in raw.split(",") if f.strip()]
-            valid = [f for f in typed if (Path(repo) / f).is_file()]
-            invalid = [f for f in typed if f not in valid]
+            # Validated the same way the write layer will see it: resolved through
+            # _guard_relpath (rejecting ../-escaping and absolute spellings, exactly
+            # what _anchor_sources itself drops) THEN existence-checked — so a path
+            # the CLI calls "valid" is guaranteed to actually anchor, never silently
+            # vanish from the tally at the write layer.
+            valid, invalid = [], []
+            for f in typed:
+                resolved = guard_engine._guard_relpath(repo, f)
+                if (not resolved or resolved == ".." or resolved.startswith("../")
+                        or os.path.isabs(resolved) or not (Path(repo) / resolved).is_file()):
+                    invalid.append(f)
+                else:
+                    valid.append(resolved)
             if invalid:
                 print(f"Not found in working tree, dropped: {', '.join(invalid)}")
             if valid:
                 selections[c["decision_id"]] = valid
-                anchored += 1
             else:
                 print("No valid files given, skipping.")
                 skipped += 1
