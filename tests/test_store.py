@@ -3813,14 +3813,64 @@ class TestAnchorCandidates:
         assert candidates[0] == "f5.py" and candidates[-1] == "f14.py"
 
     def test_scan_sourced_capture_never_attaches_candidates(self, tmp_repo):
-        # update_decision isn't the scan-mining entrypoint, but the created_by scope guard
-        # must still reject a scan-labeled call rather than attach candidates to it.
+        # update_decision isn't the scan-mining entrypoint, and _classify_level always
+        # returns "auto" (born approved) for created_by="scan" in practice, so the status
+        # gate alone already excludes this. Confirms the explicit source exclusion doesn't
+        # accidentally let a real scan capture through either.
         store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
         stored, eid = store.update_decision(
             tmp_repo, "Functions use snake_case naming (98% of 412 functions)", "sess-1",
             "convention", created_by="scan")
         assert stored
         assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_scan_sourced_pending_entry_attaches_nothing_despite_status(self, tmp_repo, monkeypatch):
+        # _classify_level never actually routes created_by="scan" to pending_approval (it's
+        # always "auto"), so the status gate alone can never be exercised against a real scan
+        # capture — this forces that otherwise-unreachable case to prove the explicit
+        # scan/bootstrap/memory exclusion is doing real work, not just coasting on the status
+        # gate happening to agree with it.
+        monkeypatch.setattr(store, "_classify_level",
+                             lambda content, subtype, created_by: "approval_required")
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Some scan-mined fact about the repo", "sess-1", "convention",
+            created_by="scan")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "pending_approval"
+        assert "anchor_candidates" not in entry
+
+    def test_bootstrap_sourced_pending_constraint_attaches_nothing(self, tmp_repo):
+        # Unlike scan, a bootstrap constraint (or an L3-signal bootstrap architecture
+        # decision) DOES reach pending_approval for real via _classify_level — this is the
+        # case the review specifically flagged: without the explicit source exclusion, the
+        # status gate alone would wrongly let a mined/bootstrap capture earn candidates from
+        # a session's edited files it never actually touched.
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "All services must standardize on JWT for auth", "sess-1", "constraint",
+            created_by="bootstrap")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "pending_approval"  # precondition: status gate alone would pass
+        assert "anchor_candidates" not in entry
+
+    def test_human_sourced_born_approved_capture_attaches_nothing_by_status(self, tmp_repo):
+        # A human-sourced capture is born approved (_classify_level: human -> "auto"), never
+        # pending_approval. Before this fix, created_by="human" was in the allowed tuple
+        # regardless of the resulting status, so it WOULD have gotten anchor_candidates
+        # attached and stranded (approve_decision on an already-approved entry only permits
+        # 'ignore', so a pending->approved blessing transition can never happen for it). The
+        # status gate now excludes it correctly, by outcome rather than by luck.
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="human")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "approved"
+        assert "anchor_candidates" not in entry
 
     def test_recurrence_never_gains_candidates(self, tmp_repo):
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
@@ -3942,7 +3992,7 @@ class TestAnchorCandidates:
     def test_share_projection_never_carries_anchor_candidates(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
         stored, eid = store.update_decision(
-            tmp_repo, "Decided to use JWT for auth", "sess-1", "convention")
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert stored
         entry = self._entry(tmp_repo, eid)
         assert entry.get("anchor_candidates")  # precondition: candidates actually present
@@ -3959,6 +4009,38 @@ class TestAnchorCandidates:
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
         out = store.format_pending_review(tmp_repo)
         assert "would anchor" not in out
+
+    def test_three_way_precedence_caller_source_files_wins_over_stash_and_candidates(
+            self, tmp_repo):
+        """A single entry accrues all three anchor signals over its lifetime: capture-time
+        candidates from the edited-files session, then a Suggested Update correction with
+        its own stashed source_files, then an explicit source_files at approval time. The
+        caller-passed source_files must win outright — not merged with either of the
+        other two — pinning today's precedence so a future refactor of the outer
+        approve_decision override call can't silently regress it."""
+        store.record_edited_file(tmp_repo, "candidate.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="human")
+        assert stored
+        # A human capture is born approved (never earns real candidates by the status gate),
+        # so hand-seed anchor_candidates directly to exercise the promotion path in isolation
+        # — simulating an entry that already carried leftover candidates from some prior state.
+        data = store._load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["candidate.py"]
+        store._save(tmp_repo, data)
+
+        # A Suggested Update correction stashes its own source_files.
+        ok, _msg = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid, source_files=["stash.py"])
+        assert ok
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve", source_files=["caller.py"])
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["caller.py"]  # caller wins over stash AND candidates
+        assert "anchor_candidates" not in entry
 
 
 class TestLegacyFallback:

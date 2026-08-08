@@ -2025,10 +2025,21 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         # itself, the session's recently-edited files are a candidate anchor — NOT a real one.
         # `anchor_candidates` is a distinct field the guard's pairing engine never reads
         # (_guard_pairs only consumes `source_files`), so a candidate can never pair before a
-        # human blesses it via approval (see _apply_approval). Scoped to fresh ai/plan/human
-        # captures only — scan/bootstrap/memory entries carry their own repo-wide evidence and
-        # never touched a specific edited file this session.
-        if not entry.get("source_files") and created_by in ("ai", "plan", "human"):
+        # human blesses it via approval (see _apply_approval). Gated on the entry's ACTUAL
+        # resulting status (pending_approval), not on created_by alone: pending_approval is
+        # exactly the status _apply_approval's plain approve/edit flow blesses on a
+        # pending->approved transition, so gating on that outcome directly is self-enforcing —
+        # a future created_by value can't silently strand candidates on a born-approved or
+        # born-suggested entry the way an enumerated created_by tuple could (a "human" capture
+        # is always born approved via _classify_level, so the old created_by-only gate WAS
+        # stranding candidates on it). The status gate alone isn't quite enough, though: a
+        # mined/bootstrap capture (e.g. a bootstrap constraint, or an L3-signal bootstrap
+        # architecture decision) can also land pending_approval, but it never touched a
+        # specific file THIS session — the edited-files signal only correlates with a live
+        # conversational capture — so scan/bootstrap/memory are excluded explicitly too.
+        if (not entry.get("source_files")
+                and created_by not in ("scan", "bootstrap", "memory")
+                and _entry_status(entry) == "pending_approval"):
             candidates = _read_edited_files(repo_path, session_id, clear=False)
             if candidates:
                 entry["anchor_candidates"] = candidates[-_MAX_SOURCE_FILES:]
