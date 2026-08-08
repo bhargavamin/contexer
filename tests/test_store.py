@@ -2294,6 +2294,37 @@ class TestRevisionModel:
         assert second["current_revision_id"] == rid
         assert len(second["revisions"]) == 1
 
+    def test_legacy_entry_with_no_revisions_derives_source_from_created_by(self, tmp_repo):
+        """Ruling (issue #176): synthesis is derivation, not fabrication. A legacy entry
+        that never had revision objects at all (no `revisions` key) carries no revision-
+        level provenance to preserve, so `_migrate_decision` deriving the synthesized
+        revision's `source` from the entry's `created_by` is the truest available answer
+        - unlike the case pinned by `TestGuardTrustsLegacyRevisionsAtReadTime
+        .test_legacy_source_stays_none_through_load_and_share_projection` (test_guard_engine.py),
+        where a STORED revision already carries an explicit falsy `source` and must stay
+        None end-to-end. This is the derivation side of that boundary, not a contradiction
+        of it."""
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        legacy = {
+            "repo_path": tmp_repo,
+            "entries": [{
+                "id": "legacy-no-revs", "type": "decision", "subtype": "architecture",
+                "content": "Use the flat-list store.",
+                "session_id": "s1", "session_ids": ["s1"],
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "revision": 1, "status": "approved", "created_by": "human",
+                # deliberately no "revisions" key - nothing revision-level ever existed
+            }],
+        }
+        store._save(tmp_repo, legacy)
+
+        entry = store._load(tmp_repo)["entries"][0]
+        assert entry["current_revision_id"]
+        assert entry["revisions"][0]["source"] == "human"
+        projection = store._share_projection(entry)
+        assert projection["source"] == "human"
+
 
 class TestLegacyStamping:
     def _legacy_entry(self):

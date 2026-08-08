@@ -1504,7 +1504,16 @@ def _migrate_decision(entry: dict) -> bool:
     """Transparently upgrade a legacy decision entry to the revision model. Idempotent.
     Builds full revision objects from the legacy historical snapshots (`revisions[]`, which
     held only prior versions) plus the current head (legacy `content`/`revision`), and sets
-    `current_revision_id`. Returns True if the entry was changed."""
+    `current_revision_id`. Returns True if the entry was changed.
+
+    Ruling (issue #176): synthesis is derivation, not fabrication. When a legacy snapshot
+    or head carries no `source` of its own, deriving one from the entry's `created_by`
+    (below) is the truest available provenance - nothing revision-level ever existed to
+    preserve. This is scoped to synthesis only: an entry whose STORED revisions already
+    carry an explicit falsy `source` is a different case and is never touched here or
+    anywhere else - that value stays None end-to-end (see `_share_projection` /
+    `share._wire_source`, and the pinning test
+    `test_legacy_source_stays_none_through_load_and_share_projection`)."""
     if entry.get("type") != "decision":
         return False
     stamped = False
@@ -1544,6 +1553,8 @@ def _migrate_decision(entry: dict) -> bool:
             continue
         full.append(_new_revision(
             did, snap.get("revision", len(full) + 1), snap.get("content", ""),
+            # Synthesis, not fabrication (#176): this snapshot predates revision-level
+            # provenance, so `created_by` is the truest answer available for it.
             source=snap.get("source") or created_by,
             confidence_score=snap.get("confidence", 0),
             evidence=snap.get("evidence") or snap.get("confidence_factors") or [],
@@ -1555,6 +1566,7 @@ def _migrate_decision(entry: dict) -> bool:
     if not any(r.get("version_number") == current_version for r in full):
         full.append(_new_revision(
             did, current_version, entry.get("content", ""),
+            # Same derivation as above: this legacy head never had a `source` of its own.
             source=created_by,
             confidence_score=entry.get("confidence", 0),
             evidence=entry.get("confidence_factors") or [],
