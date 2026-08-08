@@ -7,6 +7,7 @@ directly for the store-owned pieces the guard engine reads through it
 re-exports at its own bottom for backward compatibility."""
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -1398,3 +1399,30 @@ class TestStoreReexportIdentity:
 
     def test_dismiss_guard_is_the_same_object(self):
         assert store.dismiss_guard is guard_engine.dismiss_guard
+
+
+class TestImportOrderRegression:
+    """store.py's guard re-export used to be an eager `from contexer.guard_engine
+    import ...` at the bottom of the file — a real cycle with guard_engine's own
+    top-level `from contexer import store`, which only resolved when store.py
+    happened to be the module that started loading first. `import
+    contexer.guard_engine` (or `from contexer import guard_engine`) as the very
+    first touch of the package used to raise ImportError: cannot import name
+    'guard_staged' from partially initialized module 'contexer.guard_engine'.
+    A fresh subprocess (pytest has already imported both modules in this
+    process, in the safe order, so an in-process check would prove nothing)
+    with guard_engine imported BEFORE store is the exact previously-broken
+    order; store.py's module `__getattr__` (PEP 562) fixes it by resolving the
+    re-export lazily instead of at store.py's own load time."""
+
+    def test_guard_engine_first_import_order_does_not_raise(self):
+        probe = (
+            "import contexer.guard_engine\n"
+            "import contexer.store\n"
+            "assert contexer.store.guard_staged is contexer.guard_engine.guard_staged\n"
+            "print('OK')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe],
+                                 capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OK"

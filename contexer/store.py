@@ -6021,11 +6021,23 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
 # ── Commit-time guard: backward-compat re-export ──────────────────────────────
 # The guard engine (staged-file plumbing, Tier-1 advisory pairing, Tier-2 armed
 # rules) lives in contexer/guard_engine.py; store.py stays the public facade.
-# Placement matters: guard_engine imports `store` at ITS top for the store-owned
-# helpers it needs (STORE_DIR, _load, _save, ...), so this import must be the
-# LAST thing in this file — everything above it must already be defined before
-# guard_engine.py's own `from contexer import store` resolves those names.
-# Nothing above this line may reference guard_engine.
-from contexer.guard_engine import (  # noqa: E402,F401 (re-exported for backward compat)
-    guard_staged, guard_candidates, arm_guard, disarm_guard, dismiss_guard,
-)
+# A PEP 562 module __getattr__, not an eager `from contexer.guard_engine import
+# ...`, on purpose: guard_engine imports `store` at ITS top for the store-owned
+# helpers it needs (STORE_DIR, _load, _save, ...), so an eager import here would
+# make store.py's own load depend on guard_engine, which depends on store.py
+# having already finished loading — a cycle that only resolves if store.py
+# happens to be the module that starts loading first. Resolving guard_engine
+# lazily, only when one of these names is actually looked up, means store.py
+# finishes loading without ever needing guard_engine, so guard_engine's own
+# `from contexer import store` is safe in ANY import order, including
+# `import contexer.guard_engine` as the very first touch of the package.
+_GUARD_EXPORTS = frozenset({
+    "guard_staged", "guard_candidates", "arm_guard", "disarm_guard", "dismiss_guard",
+})
+
+
+def __getattr__(name):
+    if name in _GUARD_EXPORTS:
+        from contexer import guard_engine
+        return getattr(guard_engine, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
