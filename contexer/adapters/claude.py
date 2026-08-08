@@ -27,14 +27,7 @@ NAME = "claude"
 # recognize and replace stale hooks (e.g. a dead from-source `uv run --directory`).
 _HOOK_SENTINEL = "contexer-managed-hook"
 
-# The `.pending_capture` touch, with its stderr silenced (#152). Doubles as the migration
-# fingerprint for that hook: the pre-#152 command used a bare `.pending_capture`, so an
-# installed hook lacking this exact substring is the old, sandbox-fragile form. Kept as one
-# constant so the generated command and the gate that replaces it can never drift apart.
-# Shared verbatim with the Codex adapter, which generates the same hook.
-_TOUCH_GUARD = ".pending_capture 2>/dev/null"
-
-# Likewise for the UserPromptSubmit anchor: the flag-clearing `rm` with stderr silenced is
+# For the UserPromptSubmit anchor: the flag-clearing `rm` with stderr silenced is
 # unique to that hook's command and absent from the pre-#152 form, so it identifies an
 # anchor hook that still writes ~/.contexer unguarded. Also shared with the Codex adapter.
 _ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
@@ -248,7 +241,13 @@ def post_write(repo_path: str, raw: str) -> str:
         tool_input = data.get("tool_input") if isinstance(data, dict) else None
         fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
         if isinstance(fp, str) and fp:
-            store.record_edited_file(repo, fp, sid)
+            # Own try/except: this signal must not share failure fate with the
+            # .pending_capture arm below — a non-OSError escaping record_edited_file
+            # (e.g. from guard_engine) must not also cost the capture reminder.
+            try:
+                store.record_edited_file(repo, fp, sid)
+            except Exception:
+                pass
         try:
             store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
             (store.STORE_DIR / ".pending_capture").touch()

@@ -234,6 +234,17 @@ class TestClaudePostWrite:
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"
 
+    def test_record_edited_file_failure_does_not_skip_the_pending_capture_arm(self, tmp_repo, monkeypatch):
+        # The two best-effort signals must fail independently: a non-OSError escaping
+        # record_edited_file (e.g. from guard_engine) must not also cost the deterministic
+        # capture-reminder flag — they are wrapped in separate try/except blocks.
+        monkeypatch.setattr(store, "record_edited_file",
+                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        assert not (store.STORE_DIR / ".pending_capture").exists()
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        assert (store.STORE_DIR / ".pending_capture").exists()
+
 
 class TestClaudePostWriteRepoResolutionParity:
     """The doc-drift hazard: post_write's shell wrapper must resolve $REPO IDENTICALLY to
