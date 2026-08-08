@@ -146,12 +146,11 @@ Contexer doesn't just hand your agent the rules — `contexer guard` checks stag
 contexer guard --install-hook   # wires .git/hooks/pre-commit for this repo (opt-in, not run by `install`)
 ```
 
-Two tiers:
+By default it only warns: an approved decision — never a bare AI guess — that mentions a staged file surfaces as a reminder before the commit lands, and the commit still goes through.
 
-- **Advisory (default).** An approved decision that's human-reviewed, scanned, or set up at bootstrap — never a bare AI guess — and mentions a staged file surfaces as a reminder before the commit lands. This is commit-time *visibility that reaches the committing agent's context*, not enforcement — the commit still goes through.
-- **Blocking, opt-in.** Arm any approved decision as a machine-checkable rule (`contexer guard arm <id> --regex '<pattern>'` or `--check secret`) and it fails the commit (exit 1) if violated. Only rules you explicitly arm can block anything.
+Want it to actually block a bad commit? Arm any approved decision as a machine-checkable rule (`contexer guard arm <id> --regex '<pattern>'` or `--check secret`) and it fails the commit if violated. Only rules you explicitly arm can block anything.
 
-GUI commit flows (VS Code, Cursor, and similar) run the hook but surface only the blocking tier's failure — the advisory reminders are terminal output a graphical commit panel won't show you.
+GUI commit flows (VS Code, Cursor, and similar) run the hook but only surface a blocked commit — the warning-only reminders are terminal output a graphical commit panel won't show you.
 
 The guard fails open (any internal error, or a run over budget, skips checks rather than blocking your commit) and can be bypassed per-commit with `CONTEXER_GUARD=0 git commit …`, same as any pre-commit hook is bypassed with `--no-verify`. It's a local nudge, not a substitute for CI — your pipeline's checks are the backstop that can't be skipped from a developer's machine.
 

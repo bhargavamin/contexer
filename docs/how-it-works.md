@@ -77,7 +77,7 @@ AI-proposed architecture and constraint decisions — and any change to a decisi
 
 Approved decisions are versioned: a change never overwrites the previous value — it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
 
-Approving a decision can also anchor it to the files it describes: pass `source_files` when you approve or edit a decision that's awaiting your review — a brand-new decision's first approval, or approving a Suggested Update on an existing one — and Contexer records those paths plus the current commit. That anchor is what lets the commit-time guard below recognize a staged file as one the decision covers, and lets Contexer flag the decision as possibly stale later if those files change without it. Anchoring applies to one decision at a time (bulk approvals don't anchor). There's no separate re-approve action on a decision that's already active (approved/suggested with no pending update) — approve/edit only apply while a decision is still awaiting review, and it's on that transition that an already-anchored entry gets `anchor_commit` refreshed to the current commit, clearing any stale flag.
+Approving a decision can also link it to the files it describes: pass `source_files` when you approve it, or accept the file suggestion Contexer shows you on the review screen. That link is what makes the commit-time guard's warnings precise, and lets Contexer tell you later if a decision might be outdated because its files changed without it.
 
 ## Commit-time guard
 
@@ -87,33 +87,27 @@ Contexer can also check your work at the moment it matters most: right before yo
 contexer guard --install-hook
 ```
 
-wires `contexer guard` into `.git/hooks/pre-commit` for the current repo — not run automatically by `contexer install`, this is opt-in. From there, every commit runs the guard against the staged files.
+wires the check into this repo's commits — not run automatically by `contexer install`, this is opt-in. From there, every commit is checked against your approved decisions.
 
-### Two tiers
+Most of the time this means a short warning naming the decisions related to what you staged, and the commit goes through. A commit is only ever blocked for a rule you've explicitly turned into a hard check (`contexer guard arm <id> --regex '<pattern>'` or `--check secret`) — nothing else can stop a commit.
 
-**Tier 1 — advisory, always exits 0.** The guard pairs each staged file against decisions that are approved *and* trusted-provenance — human-reviewed, measured by a scan, set up at bootstrap, or promoted from an approved plan, never an AI-proposed decision no one has looked at. (A decision stored before Contexer tracked provenance is judged by who originally created it, so older trusted decisions aren't excluded.) A pair fires on either of two signals: the staged file is one the decision was anchored to when it was captured (`source_files`), or a file path or dotted module name inside the decision's own content matches the staged path. That match has to be a real path: an exact relative path, a dotted module mapped onto its file (`contexer.store` → `contexer/store.py`), or a multi-segment suffix at a `/` boundary — a bare filename like `utils.py` never matches on its own, so a decision that happens to mention a common filename doesn't fire on every file in the repo sharing that name. Decisions stored globally (across repos) don't carry `source_files`, so they only pair through the content-match path. This is commit-time visibility, not a gate: advisories print and the commit proceeds.
+### Linking decisions to files
 
-**Tier 2 — blocking, exits 1.** Nothing blocks a commit unless you explicitly arm it: `contexer guard arm <id> --regex '<pattern>'` or `--check secret` turns an *already-approved* decision into a machine-checkable rule. A staged file matching the regex (or Contexer's own high-confidence secret patterns) fails the commit, printing the file, line, and decision it violates. Arming is deliberate and reviewed the same way approval is — you can't arm a decision nobody has looked at, and a decision later marked `ignored` stops blocking automatically, no separate disarm required.
+A decision's warnings get sharper once it's linked to the files it's about, and that link is what lets Contexer flag it as possibly outdated when those files change. Links come from two places:
 
-### Anchoring decisions after the fact
+- **A one-time pass** (`contexer guard anchors`) over decisions you approved before this existed — it suggests files from the decision's own text and you confirm, edit, or skip each one.
+- **Automatically, going forward.** When you approve a new decision, Contexer proposes the files you were just working on as its link (shown as `would anchor: …` on the review screen), and approving accepts it.
 
-An unanchored decision isn't invisible to Tier 1 — it can still pair through the file paths and module names written in its own text — but that's incidental: it only ever covers files the decision happens to mention, and staleness tracking (which needs to know both the files and the commit they were true at) can't work at all without a real anchor. Two things add that anchor after the fact, one for the decisions already sitting in your store and one for new ones going forward:
-
-- **The decisions you already have.** `contexer guard anchors --list` looks at every trusted, currently-unanchored decision in your store, reads its own stored text for file and module names it mentions, and shows you the ones that still exist in your working tree — a read-only preview, nothing written. Run `contexer guard anchors` without `--list` (needs a real terminal) to walk that list interactively and choose, per decision, whether to accept the suggested files, type your own, or skip it; your choices are applied in one batch when you're done. Since the suggestions are read out of the decision's own text, accepting them as-is mostly *firms up* pairing it was already doing, and switches on staleness tracking for it — typing your own list (`E`) is what anchors it to files its text never named. See the [CLI reference](usage.md#anchor-backfill) for the full walkthrough.
-- **The decisions you capture from here on.** When your agent stores a decision without telling Contexer which files it's about, Contexer quietly notes the files recently edited in that repo as a *candidate* anchor — not a real one. It sits inert: the guard never pairs against a candidate, only a confirmed anchor. The candidate surfaces the next time you review that decision (`contexer review` prints a `would anchor: …` line under it), so you see exactly what will happen before you approve. The moment you do approve it, the candidate becomes a real anchor, the same way `source_files` passed by hand would.
-
-Either way, the rule is the same: **no anchor ever becomes guard input without you having seen the file(s) it names at the moment you signed off on it.** A backfill candidate is shown and confirmed one decision at a time before anything is written; a capture-time candidate is shown alongside the decision you're already reviewing, before you approve it. A decision still awaiting your review is never anchored on its own — the candidate just waits.
+Either way, you always see the files before they're linked — nothing is linked to a decision you haven't reviewed.
 
 ### Keeping it quiet
 
-Two mechanisms keep the advisory tier from becoming noise:
+- `contexer guard --dismiss <hash>` silences one warning for a specific decision and file, permanently.
+- A warning that already fired doesn't repeat on the next commit unless that file's staged content changed again.
 
-- **A permanent dismissal.** `contexer guard --dismiss <hash>` retires one (decision, file) pair for good. The dismissal is keyed on the decision and the file, never the file's content or a line number, so ordinarily editing the file afterward doesn't resurrect it.
-- **A content-keyed throttle.** A pair that already surfaced doesn't surface again on the next commit unless the staged file's content actually changed since. The throttle hashes the whole staged file, so any edit to it counts — but committing it unchanged again never re-triggers the same advisory.
+### If it fails
 
-### Fail-open, always
-
-The guard is read-only against your decision store — it never writes or approves anything on its own — and is built so its own failure can never block your commit: a single wall-clock time budget covers the whole check — both the blocking rules and the advisory pairing, from the first staged file to the last decision considered — and any internal error, or a run that exceeds that budget in either half, returns nothing rather than raising, which the CLI turns into a single line on stderr and a clean exit. `CONTEXER_GUARD=0 git commit …` bypasses the guard for one commit; `git commit --no-verify` bypasses any pre-commit hook, guard included, same as it always has. Neither the guard nor any pre-commit hook is a substitute for CI — a developer's own machine is never the enforcement backstop.
+Three promises: nothing blocks your commit unless you explicitly armed a rule; if the guard itself breaks or takes too long, it prints one line and your commit goes through anyway; and nothing is sent anywhere — it runs entirely on your machine, the same as everything else in Contexer. `CONTEXER_GUARD=0 git commit …` skips the guard for one commit; `git commit --no-verify` skips it and every other pre-commit hook, same as always. It's a local nudge, not a substitute for CI.
 
 Already use the pre-commit framework? Add Contexer's check via `.pre-commit-config.yaml` instead of `--install-hook` — see the [CLI reference](usage.md#commit-time-guard).
 
