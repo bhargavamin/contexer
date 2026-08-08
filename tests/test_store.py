@@ -4092,6 +4092,62 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
 
+# ── Anchor candidates on the constraint-capture path (issue #175, review fix I3) ──
+
+class TestConstraintCaptureCandidates:
+    """`capture_user_constraint`'s deictic path builds pending_approval, created_by="human"
+    entries in the HOOK process. Those become guard-TRUSTED the moment they're approved —
+    the highest-value candidate carriers there are — so they accrue candidates too."""
+
+    DEICTIC = ("I'm not going to accept any performance degradation so ensure you clarify "
+               "and ensure this feature is actual improvement")
+
+    def _entry(self, tmp_repo, eid):
+        return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+
+    def test_deictic_constraint_capture_attaches_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        assert status == "pending_approval"
+        assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+
+    def test_clean_constraint_born_approved_attaches_nothing(self, tmp_repo):
+        # Same status gate as update_decision: a born-approved entry never sees the
+        # pending->approved transition that would bless candidates, so it gets none.
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, status = store.capture_user_constraint(
+            tmp_repo, "always use uv not pip", "s1")
+        assert status == "approved"
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_candidates_capped_like_every_other_anchor_list(self, tmp_repo):
+        for i in range(15):
+            store.record_edited_file(tmp_repo, f"f{i}.py")
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        candidates = self._entry(tmp_repo, eid)["anchor_candidates"]
+        assert len(candidates) == store._MAX_SOURCE_FILES == 10
+        assert candidates[-1] == "f14.py"
+
+    def test_capture_with_no_edited_files_attaches_nothing(self, tmp_repo):
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_candidates_render_in_the_review_surface(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        assert "would anchor: auth/jwt.py" in store.format_pending_review(tmp_repo)
+
+    def test_approval_blesses_them_into_a_real_anchor(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_commit" in entry
+        assert "anchor_candidates" not in entry
+
+
 class TestLegacyFallback:
     def test_rationale_hit_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
         store.update_decision(tmp_repo, "We chose postgres over mongo for ACID transactions", RV1_SESSION, "architecture")

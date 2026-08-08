@@ -1221,6 +1221,18 @@ def capture_user_constraint(
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
                                     created_by="human", status=status)
+        # Guard anchor accrual (issue #175): a deictic directive lands pending_approval and
+        # created_by="human" — the ONE provenance that is guard-TRUSTED the moment it is
+        # approved — so it is the highest-value candidate carrier there is. Same status gate
+        # as update_decision's: only a pending entry can ever see the pending->approved
+        # transition where _apply_approval blesses candidates into a real anchor; a clean
+        # directive is born approved and would just strand them. Same never-guard-input
+        # semantics too: _guard_pairs never reads `anchor_candidates`, and the review surface
+        # renders them as `would anchor:` before the developer signs off.
+        if status == "pending_approval":
+            candidates = _read_edited_files(repo_path)
+            if candidates:
+                entry["anchor_candidates"] = candidates[-_MAX_SOURCE_FILES:]
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)

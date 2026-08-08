@@ -706,6 +706,33 @@ class TestGuardStaged:
         assert result["advisories"] == []
         assert result["violations"] == []
 
+    def test_constraint_capture_to_advisory_end_to_end(self, repo):
+        """The full flow loop, finally guard-visible (issue #175, review fix I3): a deictic
+        user constraint captured in the HOOK process (pending_approval, created_by="human" —
+        guard-TRUSTED once approved, so the highest-value candidate carrier there is)
+        accrues the repo's edited files as candidates, pairs NOTHING while pending, and
+        surfaces a real advisory through guard_staged once the developer approves it."""
+        store.record_edited_file(str(repo), "auth/jwt.py")
+        eid, _content, status = store.capture_user_constraint(
+            str(repo),
+            "I'm not going to accept any performance degradation so ensure you clarify "
+            "and ensure this feature is actual improvement",
+            "s1")
+        assert status == "pending_approval"
+        assert store._entry_by_id(store._load(str(repo))["entries"], eid)[
+            "anchor_candidates"] == ["auth/jwt.py"]
+
+        _write(repo, "auth/jwt.py", "token = 1\n")
+        _git(repo, "add", "auth/jwt.py")
+        assert guard_engine.guard_staged(str(repo))["advisories"] == []
+
+        ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok
+        advisories = guard_engine.guard_staged(str(repo))["advisories"]
+        assert len(advisories) == 1
+        assert advisories[0]["decision_id"] == eid
+        assert advisories[0]["reason"] == "source_files match"
+
     def test_source_files_pair_surfaces_advisory(self, repo):
         entry = _seed_entry(repo, "Decided to use JWT for auth",
                              source_files=["auth/jwt.py"])
