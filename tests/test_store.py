@@ -2571,6 +2571,41 @@ class TestApproveDecisionSourceFiles:
         entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
         assert "source_files" not in entry
 
+    def test_promoted_proposal_with_source_files_anchors_exactly_once(self, tmp_repo, monkeypatch):
+        # M7b: when a Suggested Update's own proposal carries stashed source_files,
+        # _promote_proposal already anchors it — _apply_approval's trailing
+        # `prop_had_source_files` check must skip its own _anchor_sources call rather
+        # than firing a redundant second one for the same approval.
+        stored, eid = store.update_decision(tmp_repo, "We use RabbitMQ for the event bus",
+                                            "s1", "architecture", created_by="human")
+        assert stored
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+
+        # AI-sourced correction to a high-stakes subtype -> stashed on proposed_revision,
+        # not applied to the live entry yet.
+        stored2, returned_id = store.update_decision(
+            tmp_repo, "We use Kafka for the event bus instead of RabbitMQ", "s2",
+            "architecture", replace_id=eid, source_files=["messaging/kafka.py"])
+        assert stored2 and returned_id == eid
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry.get("proposed_revision", {}).get("source_files") == ["messaging/kafka.py"]
+
+        calls = []
+        real_anchor = store._anchor_sources
+
+        def _counting_anchor(*a, **k):
+            calls.append((a, k))
+            return real_anchor(*a, **k)
+        monkeypatch.setattr(store, "_anchor_sources", _counting_anchor)
+
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok, msg
+        assert len(calls) == 1
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["source_files"] == ["messaging/kafka.py"]
+        assert "anchor_commit" in entry  # tmp_repo isn't a real git repo, so this may be ""
+
 
 # ── get_pending_decisions ──────────────────────────────────────────────────────
 

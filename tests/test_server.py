@@ -10,6 +10,8 @@ import inspect
 import json
 import threading
 
+import pytest
+
 import contexer.share as share_mod
 from contexer import config as _config_mod
 from contexer import server, store
@@ -274,6 +276,32 @@ def test_approve_decision_all_nothing_pending(monkeypatch):
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server.store, "get_pending_decisions", lambda r: [])
     assert server.approve_decision("all", "approve") == "Nothing pending review."
+
+
+def test_approve_decision_all_with_source_files_raises_before_bulk_route(monkeypatch):
+    # M7a: store.approve_decisions has no source_files param and would silently drop
+    # the anchor, so server.approve_decision must reject an "all" target carrying
+    # source_files BEFORE ever routing to the bulk path.
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+
+    def _boom(*a, **k):
+        raise AssertionError("must not route to store.approve_decisions")
+    monkeypatch.setattr(server.store, "approve_decisions", _boom)
+    monkeypatch.setattr(server.store, "get_pending_decisions", _boom)
+
+    with pytest.raises(ValueError, match="single decision id"):
+        server.approve_decision("all", "approve", source_files=["a.py"])
+
+
+def test_approve_decision_comma_list_with_source_files_raises_before_bulk_route(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+
+    def _boom(*a, **k):
+        raise AssertionError("must not route to store.approve_decisions")
+    monkeypatch.setattr(server.store, "approve_decisions", _boom)
+
+    with pytest.raises(ValueError, match="single decision id"):
+        server.approve_decision("id1,id2", "approve", source_files=["a.py"])
 
 
 def test_list_shareable_returns_list(monkeypatch):

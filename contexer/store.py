@@ -1761,10 +1761,26 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     plus the repo's current HEAD, so a later injection can flag it as possibly stale (see
     _staleness_note). No-op when no usable file is given. Fail-soft: an unresolvable HEAD
     stores an empty anchor, never blocks capture. `source_files` must be a list/tuple — a
-    bare string is rejected rather than iterated character-by-character."""
+    bare string is rejected rather than iterated character-by-character.
+
+    Each entry is canonicalized to a repo-relative POSIX path via guard_engine's
+    _guard_relpath before storing — an absolute-path spelling must not be stored verbatim,
+    or _staleness_note's `git diff -- <path>` breaks the moment the repo moves, and the
+    guard's own pairing (which compares against _guard_relpath's own output) would never
+    match it. A path that fails to resolve is dropped rather than stored raw. Imported
+    locally (not at module top) for the same reason store.__getattr__ resolves the guard
+    re-exports lazily: guard_engine imports `store` at its own top, so an eager
+    module-level import here would recreate the load-order cycle documented at the bottom
+    of this file — by the time this function actually runs, both modules are already
+    fully loaded, so the local import is safe."""
     if not isinstance(source_files, (list, tuple)):
         source_files = []
-    files = [f for f in source_files if isinstance(f, str) and f.strip()][:_MAX_SOURCE_FILES]
+    raw = [f for f in source_files if isinstance(f, str) and f.strip()]
+    if not raw:
+        return
+    from contexer import guard_engine
+    files = [p for p in (guard_engine._guard_relpath(repo_path, f) for f in raw)
+             if p][:_MAX_SOURCE_FILES]
     if not files:
         return
     entry["source_files"] = files
@@ -2016,9 +2032,13 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
 def _apply_approval(data: dict, entry_id: str, action: str, content: str,
                     now: str, repo_path: str) -> tuple[bool, str, bool]:
-    """Apply ONE approval action to `data` in memory — no lock, no load, no save. Returns
-    (success, message, changed); `changed` lets the caller save only when something mutated, and
-    lets `approve_decisions` batch many actions into a single load+save. Resolves an exact id
+    """Apply ONE approval action to `data` in memory — no load, no save (the caller owns
+    those, batching many actions into one load+save via `approve_decisions`). NOT lock-free,
+    though: an approve/edit that anchors (`_anchor_sources`, via `_promote_proposal` or
+    directly below) shells out to `git rev-parse HEAD`, and every caller (`approve_decision`,
+    `approve_decisions`) invokes this only from inside its own `_store_lock(...)` block — so
+    that git subprocess runs under the store lock, not lock-free. Returns (success, message,
+    changed); `changed` lets the caller save only when something mutated. Resolves an exact id
     first, then an 8-char prefix (consistent with replace_id / get_shareable)."""
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
     if entry is None and entry_id:
@@ -6041,3 +6061,10 @@ def __getattr__(name):
         from contexer import guard_engine
         return getattr(guard_engine, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # Paired with the __getattr__ above (PEP 562): without this, dir(store) omits the
+    # five guard entrypoints entirely, since they're resolved lazily and never assigned
+    # into the module namespace.
+    return sorted([*globals(), *_GUARD_EXPORTS])

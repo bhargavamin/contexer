@@ -352,3 +352,65 @@ def test_share_projection_carries_no_anchor_fields_after_approval_anchor(repo):
     assert entry["source_files"] and entry["anchor_commit"]
     projected = store._share_projection(entry, redact_on=False)
     assert "source_files" not in projected and "anchor_commit" not in projected
+
+
+# ── _anchor_sources canonicalization (M6, issue #172 fix wave) ─────────────────
+
+def test_capture_time_absolute_path_canonicalized_to_repo_relative(repo):
+    """An absolute-path spelling passed to update_decision's source_files must be
+    canonicalized to the repo-relative POSIX form _anchor_sources stores — a raw
+    absolute path would break _staleness_note's `git diff -- <path>` once the repo
+    moves, and would never guard-pair against a staged (relative) path."""
+    abs_path = str(Path(repo) / "auth.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[abs_path])
+    assert stored
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py"]
+    assert entry["anchor_commit"]
+
+    # Staleness reads the canonicalized path correctly.
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+
+def test_approval_time_absolute_path_canonicalized_to_repo_relative(repo):
+    """Same canonicalization at the approve_decision(source_files=...) call site."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "constraint")
+    assert stored
+    abs_path = str(Path(repo) / "auth.py")
+    ok, msg = store.approve_decision(repo, eid, "approve", source_files=[abs_path])
+    assert ok, msg
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py"]
+    assert entry["anchor_commit"]
+
+
+def test_unresolvable_path_is_dropped_not_stored_raw(repo):
+    """A path that fails canonicalization (e.g. an embedded NUL byte) is dropped
+    rather than stored verbatim; if it's the only file given, the anchor is a no-op."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=["bad\x00path.py"])
+    assert stored
+    entry = _entry(repo)
+    assert "source_files" not in entry and "anchor_commit" not in entry
+
+
+def test_absolute_path_anchor_pairs_correctly_in_guard(repo):
+    """The canonicalized anchor must be exactly what the guard's own _guard_relpath
+    produces for a staged file, so a decision captured with an absolute-path spelling
+    still pairs at commit time."""
+    from contexer import guard_engine
+
+    abs_path = str(Path(repo) / "auth.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[abs_path], created_by="human")
+    assert stored
+    entry = _entry(repo)
+    assert entry["status"] == "approved"
+    assert entry["source_files"] == [guard_engine._guard_relpath(repo, abs_path)]
+
+    Path(repo, "auth.py").write_text("def login(): return 'rewritten'\n", encoding="utf-8")
+    subprocess.run(["git", "add", "auth.py"], cwd=repo, check=True)
+    result = guard_engine.guard_staged(repo)
+    assert any(a["decision_id"] == eid for a in result["advisories"])
