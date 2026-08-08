@@ -5345,8 +5345,18 @@ def _team_display_cap() -> int:
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
-                _active_only: bool = False) -> str:
+                files: list[str] | None = None, _active_only: bool = False) -> str:
     """Returns stored context for the given repo.
+
+    files: optional repo-relative or absolute files the caller is about to work on — when
+    given, only decisions that GOVERN them are considered (source_files anchors or
+    path-like content artifacts naming one of them; see `guard_engine.decisions_for_files`,
+    which both the repo store AND the global store participate in), each rendered with its
+    real `[scope=personal]`/`[scope=global]` tag instead of the usual hardcoded personal
+    tag. Combines with `entry_type` as an intersection (both filters must pass) and with
+    `query` as files-first: the file-governed set is computed first, then `query` narrows
+    it by keyword — exactly the existing entry_type -> query filter order, with `files`
+    threaded in ahead of both.
 
     _active_only: internal flag — when True, exclude pending_approval and ignored entries
     (used by auto-injection paths so only trusted decisions reach the AI automatically).
@@ -5356,23 +5366,43 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     """
     data = _load(repo_path)
     entries = data.get("entries", [])
+
+    # file_hits: decision_id -> the guard_engine hit dict (carries the real scope tag and
+    # reverse-tracing files_matched). Local import — see _anchor_sources's docstring for why
+    # a module-level `from contexer import guard_engine` here would recreate the store <->
+    # guard_engine load-order cycle guard_engine.py's own docstring describes.
+    file_hits: dict[str, dict] = {}
+    if files:
+        from contexer import guard_engine
+        file_hits = {h["decision_id"]: h
+                     for h in guard_engine.decisions_for_files(repo_path, files)}
+
     # Only forward `limit` to the team section on a targeted entry_type fetch (the same
     # "explicit type = JIT fetch, not a bulk render" rule _team_section's defer bypass
     # already follows) - an unfiltered get_context() must keep the plain _TEAM_DISPLAY cap.
     team_section = _team_section(repo_path, query, entry_type,
                                  limit=(limit if entry_type else 0))
-    if not entries and not team_section:
+    if not entries and not team_section and not file_hits:
         return "No context stored for this repository."
 
     lines = [f"# Context for {repo_path}\n"]
 
-    decisions = [e for e in entries if e["type"] == "decision"]
-    # Always exclude ignored decisions — they are permanently suppressed.
-    decisions = [d for d in decisions if _entry_status(d) != "ignored"]
+    if files:
+        # file_hits already excludes `ignored` (guard_engine.decisions_for_files' own
+        # filter) — pull the matching full entries from BOTH stores by id so global-scope
+        # hits render too, not just repo-local ones.
+        global_entries = _load_global().get("entries", [])
+        by_id = {e.get("id"): e for e in entries if e.get("type") == "decision"}
+        by_id.update({e.get("id"): e for e in global_entries if e.get("type") == "decision"})
+        decisions = [by_id[did] for did in file_hits if did in by_id]
+    else:
+        decisions = [e for e in entries if e["type"] == "decision"]
+        # Always exclude ignored decisions — they are permanently suppressed.
+        decisions = [d for d in decisions if _entry_status(d) != "ignored"]
     if _active_only:
         decisions = [d for d in decisions if _entry_status(d) in ("approved", "suggested")]
 
-    is_filtered = bool(query or entry_type)
+    is_filtered = bool(query or entry_type or files)
     if entry_type:
         decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
 
@@ -5400,6 +5430,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 parts.append(f"query='{query}'")
             if entry_type:
                 parts.append(f"type='{entry_type}'")
+            if files:
+                parts.append(f"files={len(files)}")
             filter_note = f" (filtered: {', '.join(parts)})"
         total = len(decisions)
         shown = _keep_top(decisions, display_limit)
@@ -5415,7 +5447,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
             title, body = _title_and_body(d)
-            lines.append(f"- [scope=personal] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
+            hit = file_hits.get(d.get("id")) if files else None
+            scope = hit["scope"] if hit else "personal"
+            lines.append(f"- [scope={scope}] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
                          f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
                 lines.append(f"    {body}")
@@ -5430,6 +5464,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             parts.append(f"query='{query}'")
         if entry_type:
             parts.append(f"type='{entry_type}'")
+        if files:
+            parts.append(f"files={len(files)}")
         lines.append(f"No matching decisions found ({', '.join(parts)}).")
 
     if team_section:

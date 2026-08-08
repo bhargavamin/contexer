@@ -374,6 +374,16 @@ def test_get_context_no_followup_without_prior_pointer(tmp_repo):
     assert not path.exists()
 
 
+def test_get_context_passes_files_through(tmp_repo):
+    store.update_decision(
+        tmp_repo, "Decided to use JWT for stateless auth tokens", "s1", "architecture",
+        created_by="human", source_files=["auth/jwt.py"],
+    )
+    result = server.get_context(tmp_repo, files=["auth/jwt.py"])
+    assert "JWT" in result
+    assert result == store.get_context(tmp_repo, files=["auth/jwt.py"])
+
+
 def test_bootstrap_context_attaches_ask_shape_only_when_gaps_exist(monkeypatch):
     """The gap-question ask shape rides the tool result, not the session-start injection:
     it is unusable without gaps, while the injected block is paid on every context-less

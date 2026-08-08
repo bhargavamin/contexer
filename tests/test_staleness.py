@@ -64,6 +64,16 @@ def test_changed_file_renders_note_in_both_sites(repo):
     assert "[may be stale: auth.py changed since capture]" in rendered
 
 
+def test_files_hit_renders_staleness_note(repo):
+    """get_context(files=...) (issue #174 Task 1) is the THIRD render site that must run
+    a source_files hit through the same staleness-note machinery as query/id lookup."""
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+
+    out = store.get_context(repo, files=["auth.py"])
+    assert "[may be stale: auth.py changed since capture]" in out
+
+
 def test_uncommitted_edit_renders_note(repo):
     """The dominant case: the session is editing the file right now, nothing committed yet."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
