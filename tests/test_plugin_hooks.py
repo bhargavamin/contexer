@@ -81,8 +81,10 @@ def test_capture_hooks_present(plugin_hooks):
 # the bundle can carry a SessionStart/PostToolUse/etc. hook that "exists" while its
 # command text is stale (pre-#152 unguarded forms) or missing an entrypoint entirely
 # (post_write, team_poll, review_nudge). This section drives the REAL claude.install()
-# into an isolated temp home and diffs its generated command strings against the
-# bundle's, one hook at a time, so drift in command CONTENT fails loudly.
+# into an isolated temp home and diffs its generated command/matcher/once against the
+# bundle's, one hook at a time, so drift in ANY of those three fields fails loudly —
+# in both directions: a marker missing from the adapter (test_command_matches_adapter)
+# and an adapter hook / bundle hook missing a marker (the two orphan tests below).
 #
 # Two differences are legitimate and documented in hooks/hooks.json's _comment:
 #   1. invocation: the plugin runs `uv run --directory "${CLAUDE_PLUGIN_ROOT}" python`
@@ -92,6 +94,7 @@ def test_capture_hooks_present(plugin_hooks):
 #      and migrate their own previously-written hooks on reinstall) — the static
 #      bundle never self-migrates, so it carries no sentinel.
 # Both are normalized away below before comparing; anything else that differs is drift.
+# Normalization applies to `command` only — `matcher` and `once` are compared as-is.
 _SENTINEL_RE = re.compile(r" # contexer-managed-hook.*$")
 
 
@@ -103,30 +106,61 @@ def _normalize_adapter_command(cmd: str, python: str) -> str:
 
 @pytest.fixture
 def adapter_hooks(tmp_path):
-    """{event: [command, ...]} exactly as claude.install() generates today — the
-    source of truth the bundle must mirror. Driven into an isolated temp home so
-    this never touches the real ~/.claude config."""
+    """[(event, command, matcher, once), ...] exactly as claude.install() generates
+    today — the source of truth the bundle must mirror. Driven into an isolated temp
+    home so this never touches the real ~/.claude config."""
     claude.install(tmp_path)
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
-    return {
-        event: [h["command"] for grp in groups for h in grp.get("hooks", []) if "command" in h]
+    return [
+        (event, h["command"], grp.get("matcher"), h.get("once", False))
         for event, groups in settings["hooks"].items()
-    }
+        for grp in groups
+        for h in grp.get("hooks", [])
+        if "command" in h
+    ]
 
 
-def _plugin_command_for(plugin_hooks: dict, event: str, marker: str) -> str:
-    for grp in plugin_hooks.get(event, []):
-        for h in grp.get("hooks", []):
-            if marker in h.get("command", ""):
-                return h["command"]
-    raise AssertionError(f"plugin bundle has no {event} hook matching {marker!r}")
+def _one_adapter_hook(adapter_hooks: list, event: str, marker: str) -> tuple:
+    """(command, matcher, once) for the single adapter hook matching (event, marker).
+    Asserts exactly one match — zero means the adapter no longer installs this hook
+    (or the marker is stale), more than one means the marker is ambiguous and must
+    be tightened, either way silently comparing against the wrong hook is worse
+    than failing loudly here."""
+    matches = [(cmd, matcher, once) for ev, cmd, matcher, once in adapter_hooks
+               if ev == event and marker in cmd]
+    assert len(matches) == 1, (
+        f"expected exactly one adapter {event} hook matching {marker!r}, found "
+        f"{len(matches)} — 0 means the adapter no longer installs this hook (update "
+        "_ADAPTER_HOOK_MARKERS), >1 means the marker is ambiguous (pick a more "
+        "specific substring)")
+    return matches[0]
+
+
+def _one_plugin_hook(plugin_hooks: dict, event: str, marker: str) -> tuple:
+    """(command, matcher, once) for the single bundle hook matching (event, marker).
+    Same uniqueness guarantee as _one_adapter_hook."""
+    matches = [
+        (h["command"], grp.get("matcher"), h.get("once", False))
+        for grp in plugin_hooks.get(event, [])
+        for h in grp.get("hooks", [])
+        if marker in h.get("command", "")
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one plugin {event} hook matching {marker!r}, found "
+        f"{len(matches)} — 0 means the bundle is missing this hook, >1 means the "
+        "marker is ambiguous (pick a more specific substring)")
+    return matches[0]
 
 
 # (event, substring identifying one hook within that event) for every hook the
 # adapter installs today. A marker present here but missing from the bundle means
 # the plugin needs the hook (or a reconciled equivalent); a bundle hook matching no
 # marker here means the adapter no longer installs it and the bundle should drop it
-# too (see test_bundle_carries_no_hooks_the_adapter_no_longer_installs).
+# too (see test_bundle_carries_no_hooks_the_adapter_no_longer_installs). An adapter
+# hook matching no marker here means _ADAPTER_HOOK_MARKERS itself is stale (see
+# test_adapter_markers_cover_every_installed_hook) — this list must stay exhaustive
+# in BOTH directions, or a new adapter hook could ship with no bundle coverage and
+# every check here would stay green.
 _ADAPTER_HOOK_MARKERS = [
     ("SessionStart", "get_session_start_context"),
     ("SessionEnd", "sync_memory"),
@@ -144,13 +178,16 @@ _ADAPTER_HOOK_MARKERS = [
 
 @pytest.mark.parametrize("event,marker", _ADAPTER_HOOK_MARKERS)
 def test_command_matches_adapter(adapter_hooks, plugin_hooks, event, marker):
-    adapter_cmd = next((c for c in adapter_hooks.get(event, []) if marker in c), None)
-    assert adapter_cmd is not None, (
-        f"adapter no longer installs a {event} hook matching {marker!r} — "
-        "update _ADAPTER_HOOK_MARKERS")
-    plugin_cmd = _plugin_command_for(plugin_hooks, event, marker)
+    adapter_cmd, adapter_matcher, adapter_once = _one_adapter_hook(adapter_hooks, event, marker)
+    plugin_cmd, plugin_matcher, plugin_once = _one_plugin_hook(plugin_hooks, event, marker)
     assert _normalize_adapter_command(adapter_cmd, sys.executable) == plugin_cmd, (
-        f"{event} hook ({marker}) has drifted from the adapter-generated command")
+        f"{event} hook ({marker}) command has drifted from the adapter-generated command")
+    assert adapter_matcher == plugin_matcher, (
+        f"{event} hook ({marker}) matcher drifted: "
+        f"adapter={adapter_matcher!r} bundle={plugin_matcher!r}")
+    assert adapter_once == plugin_once, (
+        f"{event} hook ({marker}) 'once' flag drifted: "
+        f"adapter={adapter_once!r} bundle={plugin_once!r}")
 
 
 def test_bundle_carries_no_hooks_the_adapter_no_longer_installs(plugin_hooks):
@@ -165,3 +202,15 @@ def test_bundle_carries_no_hooks_the_adapter_no_longer_installs(plugin_hooks):
                 assert any(marker in cmd for marker in known_markers), (
                     f"{event} hook has no matching adapter marker — "
                     f"orphaned or needs a new entry in _ADAPTER_HOOK_MARKERS: {cmd[:80]}")
+
+
+def test_adapter_markers_cover_every_installed_hook(adapter_hooks):
+    """Mirror of the test above, in the other direction: every hook claude.install()
+    generates today must be covered by _ADAPTER_HOOK_MARKERS. Without this, a new
+    hook added to install() with no marker row (and no bundle entry) would pass
+    every other check here silently — exactly the class of drift this file exists
+    to catch, just introduced from the adapter side instead of the bundle side."""
+    for event, cmd, _matcher, _once in adapter_hooks:
+        assert any(ev == event and marker in cmd for ev, marker in _ADAPTER_HOOK_MARKERS), (
+            f"{event} hook has no _ADAPTER_HOOK_MARKERS entry — add a marker row here "
+            f"AND the corresponding hooks/hooks.json bundle entry: {cmd[:80]}")
