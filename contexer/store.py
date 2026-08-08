@@ -2021,6 +2021,17 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             return False, None          # discarded silently, like any other filtered capture
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
         _anchor_sources(repo_path, entry, source_files)
+        # Guard anchor accrual (issue #175 Task 3): when the model didn't name source_files
+        # itself, the session's recently-edited files are a candidate anchor — NOT a real one.
+        # `anchor_candidates` is a distinct field the guard's pairing engine never reads
+        # (_guard_pairs only consumes `source_files`), so a candidate can never pair before a
+        # human blesses it via approval (see _apply_approval). Scoped to fresh ai/plan/human
+        # captures only — scan/bootstrap/memory entries carry their own repo-wide evidence and
+        # never touched a specific edited file this session.
+        if not entry.get("source_files") and created_by in ("ai", "plan", "human"):
+            candidates = _read_edited_files(repo_path, session_id, clear=False)
+            if candidates:
+                entry["anchor_candidates"] = candidates[-_MAX_SOURCE_FILES:]
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -2068,11 +2079,16 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
         ok, msg, changed = _apply_approval(
-            data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path)
+            data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path,
+            has_caller_source_files=bool(source_files))
         if ok and source_files:
             entry = _entry_by_id(data["entries"], entry_id)
             if entry is not None:
                 _anchor_sources(repo_path, entry, source_files)
+                # Caller-named source_files win outright — any candidates accrued from the
+                # session's edited files described a guess that's now moot, cleared rather
+                # than left dangling on an already-anchored entry.
+                entry.pop("anchor_candidates", None)
                 changed = True
         if changed:
             _save(repo_path, data)
@@ -2080,7 +2096,8 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
 
 def _apply_approval(data: dict, entry_id: str, action: str, content: str,
-                    now: str, repo_path: str) -> tuple[bool, str, bool]:
+                    now: str, repo_path: str, *,
+                    has_caller_source_files: bool = False) -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory — no load, no save (the caller owns
     those, batching many actions into one load+save via `approve_decisions`). NOT lock-free,
     though: an approve/edit that anchors (`_anchor_sources`, via `_promote_proposal` or
@@ -2088,7 +2105,12 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     `approve_decisions`) invokes this only from inside its own `_store_lock(...)` block — so
     that git subprocess runs under the store lock, not lock-free. Returns (success, message,
     changed); `changed` lets the caller save only when something mutated. Resolves an exact id
-    first, then an 8-char prefix (consistent with replace_id / get_shareable)."""
+    first, then an 8-char prefix (consistent with replace_id / get_shareable).
+
+    `has_caller_source_files`: True when `approve_decision` was itself given `source_files` —
+    it applies those (and clears any `anchor_candidates`) AFTER this returns, so this function
+    must not waste a git call promoting candidates that are about to be overridden anyway (see
+    the candidate-blessing branches below, issue #175 Task 3)."""
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
     if entry is None and entry_id:
         entry = next((e for e in data["entries"] if e.get("id", "").startswith(entry_id)), None)
@@ -2117,6 +2139,17 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         # that already refreshed to the same HEAD, so this would be a redundant git call.
         if not prop_had_source_files and entry.get("source_files"):
             _anchor_sources(repo_path, entry, entry["source_files"])
+        elif (not prop_had_source_files and not has_caller_source_files
+                and entry.get("anchor_candidates")):
+            # Nothing else anchors this entry — the Suggested Update's own stashed
+            # source_files wins when present (above), and a caller-passed source_files
+            # is about to override anyway; only then do the accrued candidates fill the gap.
+            _anchor_sources(repo_path, entry, entry["anchor_candidates"])
+        # A real anchor (however it got here — the proposal's own stash, a refreshed prior
+        # anchor, or the candidates promoted just above) makes any leftover candidate guess
+        # moot; drop it rather than leave stale data dangling on an already-anchored entry.
+        if entry.get("source_files"):
+            entry.pop("anchor_candidates", None)
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2166,6 +2199,12 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     # captured with source_files while still pending) gets its anchor_commit refreshed here too.
     if entry.get("source_files"):
         _anchor_sources(repo_path, entry, entry["source_files"])
+    elif not has_caller_source_files and entry.get("anchor_candidates"):
+        # The pending->approved transition IS the human signature the candidates were waiting
+        # on: bless them into a real anchor now, via the one anchoring path (_anchor_sources),
+        # and drop the candidate field — it has served its purpose.
+        _anchor_sources(repo_path, entry, entry["anchor_candidates"])
+        entry.pop("anchor_candidates", None)
     stored_content = _current_content(entry)
     preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2236,6 +2275,8 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
             lines.append(f'    detected: "{detected}"')
+            if d.get("anchor_candidates"):
+                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
         else:
             title, body = _title_and_body(d)
@@ -2244,6 +2285,8 @@ def format_pending_review(repo_path: str) -> str:
                 clipped_body = _clip_body(body)
                 clipped = clipped or clipped_body != body
                 lines.append(f'    "{clipped_body}"')
+            if d.get("anchor_candidates"):
+                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
     lines.append("\nReview each with the developer before approving. To clear several at once, "
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '

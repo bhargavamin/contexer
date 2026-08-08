@@ -565,6 +565,44 @@ class TestGuardPairs:
         assert len(pairs) == 1
         assert pairs[0]["file"] == "auth/jwt.py"
 
+    def test_anchor_candidates_never_pair_but_pair_after_approval(self, repo):
+        """THE invariant test for issue #175 Task 3: a decision captured without
+        source_files, whose session edited auth/jwt.py, accrues that file only as an
+        `anchor_candidates` guess — never real `source_files` — so it must pair NOTHING
+        with the guard while pending. Only the human's approval blesses the candidate
+        into a real anchor via _anchor_sources, at which point it pairs normally.
+
+        created_by="plan" (not the "ai" default) so the entry both lands pending_approval
+        (constraint subtype forces approval_required for plan too, same as ai) AND is a
+        _guard_trusted-eligible source once approved — an "ai"-sourced entry stays
+        guard-untrusted forever regardless of approval, which would make this test unable
+        to observe the "pairs after approval" half of the invariant."""
+        store.record_edited_file(str(repo), "auth/jwt.py", "sess-1")
+        stored, eid = store.update_decision(
+            str(repo), "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="plan")
+        assert stored
+        entry = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert entry["anchor_candidates"] == ["auth/jwt.py"]
+        assert "source_files" not in entry
+        assert entry["status"] == "pending_approval"
+
+        # Pending: candidates carry zero pairing signal — not even an untrusted candidate.
+        pairs = guard_engine._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert pairs == []
+
+        ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok
+        entry = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+        pairs = guard_engine._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert len(pairs) == 1
+        assert pairs[0]["decision_id"] == eid
+        assert pairs[0]["reason"] == "source_files match"
+        assert pairs[0]["emitted"] is True
+
 
 # ── legacy revision source back-stamp (guard integration) ─────────────────────
 

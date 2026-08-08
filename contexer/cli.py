@@ -304,6 +304,9 @@ def review() -> None:
             print("Evidence:")
             for f in factors:
                 print(f"  - {f}")
+        candidates = entry.get("anchor_candidates")
+        if candidates:
+            print(f"Would anchor: {', '.join(candidates)}")
         print()
         if prop:
             print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip")

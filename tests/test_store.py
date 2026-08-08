@@ -3770,6 +3770,197 @@ class TestEditedFilesSignal:
         assert path.exists()
 
 
+# ── Anchor candidates: capture-time accrual + approval blessing (issue #175 Task 3) ──
+
+class TestAnchorCandidates:
+    def _entry(self, tmp_repo, eid):
+        return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+
+    def test_capture_without_source_files_attaches_edited_files_as_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/other.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["anchor_candidates"] == ["auth/jwt.py", "auth/other.py"]
+        assert "source_files" not in entry
+
+    def test_capture_with_source_files_never_attaches_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "unrelated.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            source_files=["auth/jwt.py"])
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_capture_with_no_edited_files_attaches_nothing(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_candidates_capped_at_ten_most_recent(self, tmp_repo):
+        for i in range(15):
+            store.record_edited_file(tmp_repo, f"f{i}.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        candidates = self._entry(tmp_repo, eid)["anchor_candidates"]
+        assert len(candidates) == store._MAX_SOURCE_FILES == 10
+        assert candidates[0] == "f5.py" and candidates[-1] == "f14.py"
+
+    def test_scan_sourced_capture_never_attaches_candidates(self, tmp_repo):
+        # update_decision isn't the scan-mining entrypoint, but the created_by scope guard
+        # must still reject a scan-labeled call rather than attach candidates to it.
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Functions use snake_case naming (98% of 412 functions)", "sess-1",
+            "convention", created_by="scan")
+        assert stored
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_recurrence_never_gains_candidates(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-2")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-2", "constraint")
+        assert not stored  # recurrence, not a new entry
+        entry = store._load(tmp_repo)["entries"][0]
+        assert "anchor_candidates" not in entry
+
+    def test_approval_blesses_candidates_into_a_real_anchor(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_commit" in entry
+        assert "anchor_candidates" not in entry
+
+    def test_approval_edit_also_blesses_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "edit", "Use JWT with RS256")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_approval_with_explicit_source_files_overrides_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(
+            tmp_repo, eid, "approve", source_files=["auth/real.py"])
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/real.py"]  # caller wins, not merged
+        assert "anchor_candidates" not in entry
+
+    def test_dismiss_leaves_candidates_untouched(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "ignore")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "ignored"
+        assert entry["anchor_candidates"] == ["auth/jwt.py"]  # dies with the entry, untouched
+        assert "source_files" not in entry
+
+    def test_skip_leaves_candidates_untouched_and_still_pending(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "skip")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "pending_approval"
+        assert entry["anchor_candidates"] == ["auth/jwt.py"]
+
+    def test_suggested_update_promotion_fills_gap_with_candidates(self, tmp_repo):
+        # A trivial (human-sourced) capture is born approved with no anchor. A later AI-inferred
+        # correction to a high-stakes subtype attaches a Suggested Update instead of applying
+        # immediately; the correction session's edited files become candidates on the base entry.
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint", created_by="human")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "approved" and "source_files" not in entry
+        data = store._load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["auth/jwt.py"]
+        store._save(tmp_repo, data)
+
+        ok, _msg = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid)
+        assert ok
+        assert self._entry(tmp_repo, eid).get("proposed_revision")
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_suggested_update_stashed_source_files_wins_over_candidates(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint", created_by="human")
+        assert stored
+        data = store._load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["stale_candidate.py"]
+        store._save(tmp_repo, data)
+
+        store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid, source_files=["auth/jwt.py"])
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]  # proposal's own stash wins
+        assert "anchor_candidates" not in entry
+
+    def test_bulk_approve_also_blesses_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        results = store.approve_decisions(tmp_repo, [eid], "approve")
+        assert len(results) == 1
+        assert results[0][0] == eid and results[0][1] is True
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_share_projection_never_carries_anchor_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "convention")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry.get("anchor_candidates")  # precondition: candidates actually present
+        projected = store._share_projection(entry, redact_on=False)
+        assert "anchor_candidates" not in projected
+
+    def test_review_surfaces_would_anchor_line_for_new_pending_decision(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.update_decision(tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        assert "would anchor: auth/jwt.py" in out
+
+    def test_review_omits_would_anchor_line_when_no_candidates(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        assert "would anchor" not in out
+
+
 class TestLegacyFallback:
     def test_rationale_hit_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
         store.update_decision(tmp_repo, "We chose postgres over mongo for ACID transactions", RV1_SESSION, "architecture")

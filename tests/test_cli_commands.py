@@ -697,6 +697,42 @@ class TestReviewTitleHeadline:
         assert head_idx < body_idx
 
 
+class TestReviewAnchorCandidates:
+    def test_pending_decision_with_candidates_shows_would_anchor_line(
+            self, tmp_repo, monkeypatch, capsys):
+        """A pending decision carrying anchor_candidates (issue #175 Task 3) surfaces a
+        one-line 'Would anchor: ...' hint before the approve/edit/ignore/skip prompt, so the
+        human's approval signature is informed about what it will bless."""
+        from contexer import store
+
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        stored, _entry_id = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")  # skip past the prompt
+        cli.review()
+
+        out = capsys.readouterr().out
+        assert "Would anchor: auth/jwt.py" in out
+
+    def test_pending_decision_without_candidates_omits_would_anchor_line(
+            self, tmp_repo, monkeypatch, capsys):
+        from contexer import store
+
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        stored, _entry_id = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
+        assert stored
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")
+        cli.review()
+
+        out = capsys.readouterr().out
+        assert "Would anchor" not in out
+
+
 # ── guard ────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
