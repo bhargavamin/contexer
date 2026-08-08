@@ -1020,7 +1020,7 @@ def _print_ui_status(info: dict) -> None:
 def _safe_print(text: str = "", **kwargs) -> None:
     """print(), but never raises on a surrogate-bearing string — a staged
     filename that wasn't valid UTF-8, carried through as a surrogate-escaped
-    path (see store._staged_files). Some terminal/locale combinations encode
+    path (see guard_engine._staged_files). Some terminal/locale combinations encode
     stdout in strict mode, where printing a lone surrogate raises
     UnicodeEncodeError; guard rendering must degrade to a lossy-but-visible
     rendering instead, never let a print failure turn a real violation into a
@@ -1083,7 +1083,7 @@ def _guard_run(rest: list) -> None:
     commit, so any exception, or the engine's own `error: True`, degrades to a
     single stderr line and exit 0 rather than a traceback or a nonzero exit."""
     try:
-        from contexer import store
+        from contexer import store, guard_engine
 
         if os.environ.get("CONTEXER_GUARD") == "0":
             sys.exit(0)
@@ -1093,10 +1093,10 @@ def _guard_run(rest: list) -> None:
         repo = store._git_root(os.getcwd()) or store._resolve_repo("")
 
         if explain:
-            _print_guard_explain(store.guard_candidates(repo, paths, explain=True))
+            _print_guard_explain(guard_engine.guard_candidates(repo, paths, explain=True))
             sys.exit(0)
 
-        result = store.guard_staged(repo, paths)
+        result = guard_engine.guard_staged(repo, paths)
         if result.get("error"):
             print("contexer guard: internal error, skipping checks", file=sys.stderr)
             sys.exit(0)
@@ -1127,7 +1127,7 @@ def _guard_dismiss(rest: list) -> None:
     numeric form re-derives the current candidate listing and requires an
     explicit y/N confirmation, since an index can silently mean something
     different on a later run."""
-    from contexer import store
+    from contexer import store, guard_engine
 
     i = rest.index("--dismiss")
     if i + 1 >= len(rest):
@@ -1143,7 +1143,7 @@ def _guard_dismiss(rest: list) -> None:
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
 
     if arg.isdigit():
-        candidates = store.guard_candidates(repo, paths, explain=False)
+        candidates = guard_engine.guard_candidates(repo, paths, explain=False)
         idx = int(arg)
         if idx < 1 or idx > len(candidates):
             print(f"contexer guard --dismiss: no candidate at index {idx} "
@@ -1160,21 +1160,21 @@ def _guard_dismiss(rest: list) -> None:
             print("Cancelled.")
             return
     else:
-        candidates = store.guard_candidates(repo, paths, explain=True)
+        candidates = guard_engine.guard_candidates(repo, paths, explain=True)
         cand = next((c for c in candidates if c.get("hash") == arg), None)
         if cand is None:
             print(f"contexer guard --dismiss: hash {arg!r} not found among "
                   f"current candidates", file=sys.stderr)
             sys.exit(1)
 
-    store.dismiss_guard(repo, cand["decision_id"], cand["file"])
+    guard_engine.dismiss_guard(repo, cand["decision_id"], cand["file"])
     print(f"Dismissed [{cand['decision_id'][:8]}] for {cand['file']}.")
 
 
 def _guard_arm(rest: list) -> None:
     """`contexer guard arm <id> --regex '<pattern>' [--flags i] [--paths <glob>]
     [--message <hint>]` or `contexer guard arm <id> --check secret`. Delegates
-    entirely to `store.arm_guard`.
+    entirely to `guard_engine.arm_guard`.
 
     Its ValueError refusals ("machine-checkable", "only approved decisions can
     be armed") are a documented CONTRACT — a rejected request, not a broken
@@ -1182,7 +1182,7 @@ def _guard_arm(rest: list) -> None:
     Left to `_run_guarded`'s generic ValueError arm they came out prefixed
     "Corrupt config:" and followed by advice to fix or remove a config file,
     which is both wrong and destructive to act on."""
-    from contexer import store
+    from contexer import store, guard_engine
 
     if not rest:
         print("contexer guard arm: requires a decision id", file=sys.stderr)
@@ -1209,9 +1209,9 @@ def _guard_arm(rest: list) -> None:
 
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     try:
-        msg = store.arm_guard(repo, entry_id, check_type, pattern=pattern,
-                               flags=_opt("--flags") or "", paths=_opt("--paths") or "",
-                               message=_opt("--message") or "")
+        msg = guard_engine.arm_guard(repo, entry_id, check_type, pattern=pattern,
+                                      flags=_opt("--flags") or "", paths=_opt("--paths") or "",
+                                      message=_opt("--message") or "")
     except ValueError as e:
         print(f"contexer guard arm: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1223,14 +1223,14 @@ def _guard_disarm(rest: list) -> None:
     ValueError refusal (unknown id) is a contract refusal, reported under this
     command's own name — see `_guard_arm` for why it must not fall through to
     `_run_guarded`'s "Corrupt config:" arm."""
-    from contexer import store
+    from contexer import store, guard_engine
 
     if not rest:
         print("contexer guard disarm: requires a decision id", file=sys.stderr)
         sys.exit(1)
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
     try:
-        print(store.disarm_guard(repo, rest[0]))
+        print(guard_engine.disarm_guard(repo, rest[0]))
     except ValueError as e:
         print(f"contexer guard disarm: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1238,11 +1238,11 @@ def _guard_disarm(rest: list) -> None:
 
 def _guard_list() -> None:
     """`contexer guard list` — show every currently armed rule, repo + global."""
-    from contexer import store
+    from contexer import store, guard_engine
 
     repo = store._git_root(os.getcwd()) or store._resolve_repo("")
-    personal = store._armed_rules(store._load(repo).get("entries") or []) if repo else []
-    glob = store._armed_rules(store._load_global().get("entries") or [])
+    personal = guard_engine._armed_rules(store._load(repo).get("entries") or []) if repo else []
+    glob = guard_engine._armed_rules(store._load_global().get("entries") or [])
     rows = [(e, "personal") for e in personal] + [(e, "global") for e in glob]
     if not rows:
         print("No armed guard rules.")
