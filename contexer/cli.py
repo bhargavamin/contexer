@@ -51,6 +51,12 @@ Guard (contexer guard):
   guard disarm <id>
                 Remove an armed rule.
   guard list    Show every currently armed rule.
+  guard anchors [--list]
+                Assisted anchor backfill: interactively derive candidate source_files
+                anchors from each trusted, currently-unanchored decision's own content
+                and ratify them per decision. --list previews candidates read-only
+                (also the non-interactive/agent-facing surface — the interactive loop
+                refuses when stdin isn't a TTY).
   guard --install-hook
                 Wire the guard into .git/hooks/pre-commit for the cwd's repo (not run
                 automatically by `install`). Refuses with guidance if core.hooksPath is
@@ -1259,6 +1265,101 @@ def _guard_list() -> None:
         print(f"      pattern={detail!r}  paths={paths}")
 
 
+def _guard_anchors(rest: list) -> None:
+    """`contexer guard anchors [--list]` — the assisted anchor backfill: an
+    interactive review-style pass over trusted, currently-unanchored decisions
+    (guard_engine.anchor_candidates_for_backfill), patterned on `review()`'s
+    loop shape. `--list` prints the candidate table read-only and changes
+    NOTHING — it is also the non-TTY/agent-facing surface, since the
+    interactive [Y]/[E]/[S]/[Q] loop requires a human at a keyboard and
+    refuses outright otherwise. Ratified selections are applied in ONE batch
+    at the end (or on [Q]uit) via store.apply_backfill_anchors, never one
+    save per decision."""
+    from contexer import store, guard_engine
+
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    candidates = guard_engine.anchor_candidates_for_backfill(repo)
+
+    if "--list" in rest:
+        if not candidates:
+            print("No trusted, unanchored decisions with derivable anchor candidates.")
+            return
+        print(f"{len(candidates)} decision(s) with anchor candidates:\n")
+        for c in candidates:
+            print(f"  [{c['decision_id'][:8]}] {c['title']}")
+            for f in c["candidates"]:
+                print(f"      {f}")
+        return
+
+    if not candidates:
+        print("No trusted, unanchored decisions with derivable anchor candidates.")
+        return
+
+    if not sys.stdin.isatty():
+        print("contexer guard anchors: requires an interactive terminal — use "
+              "`contexer guard anchors --list` to preview candidates without prompting.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n{len(candidates)} decision(s) with anchor candidates for "
+          f"{Path(repo).name}\n")
+
+    selections: dict = {}
+    anchored = skipped = 0
+    for i, c in enumerate(candidates, 1):
+        print("─" * 60)
+        print(f"Decision {i} of {len(candidates)}\n")
+        print(f"[{c['decision_id'][:8]}] {c['title']}")
+        print("Candidate anchors:")
+        for f in c["candidates"]:
+            print(f"  {f}")
+        print()
+        print("[Y] anchor all shown  [E] edit list (comma-separated)  [S] skip  [Q] quit")
+
+        try:
+            choice = input("Choice: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            break
+
+        if choice in ("Y", "YES"):
+            selections[c["decision_id"]] = c["candidates"]
+            anchored += 1
+        elif choice in ("E", "EDIT"):
+            try:
+                raw = input("Files (comma-separated): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nSkipped.")
+                skipped += 1
+                continue
+            typed = [f.strip() for f in raw.split(",") if f.strip()]
+            valid = [f for f in typed if (Path(repo) / f).is_file()]
+            invalid = [f for f in typed if f not in valid]
+            if invalid:
+                print(f"Not found in working tree, dropped: {', '.join(invalid)}")
+            if valid:
+                selections[c["decision_id"]] = valid
+                anchored += 1
+            else:
+                print("No valid files given, skipping.")
+                skipped += 1
+        elif choice in ("Q", "QUIT"):
+            break
+        else:
+            skipped += 1
+            print("Skipped.")
+
+    applied = store.apply_backfill_anchors(repo, selections) if selections else 0
+
+    print("\n" + "─" * 60)
+    parts = []
+    if applied:
+        parts.append(f"{applied} anchored")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    print(f"Anchor backfill complete: {', '.join(parts) if parts else 'nothing changed'}.")
+
+
 _GUARD_FENCE_START = "# >>> contexer guard >>>"
 _GUARD_FENCE_END = "# <<< contexer guard <<<"
 # Substrings the pre-commit framework (https://pre-commit.com) writes into every
@@ -1526,6 +1627,8 @@ def guard(rest: list | None = None) -> None:
         _run_guarded(lambda: _guard_disarm(rest[1:]))
     elif rest and rest[0] == "list":
         _run_guarded(_guard_list)
+    elif rest and rest[0] == "anchors":
+        _run_guarded(lambda: _guard_anchors(rest[1:]))
     elif "--dismiss" in rest:
         _run_guarded(lambda: _guard_dismiss(rest))
     elif "--install-hook" in rest:

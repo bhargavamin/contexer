@@ -1033,11 +1033,138 @@ class TestGuardArmDisarmList:
         assert "No armed guard rules" in capsys.readouterr().out
 
 
+def _input_sequence(monkeypatch, *answers):
+    """Feed successive `input()` calls from a fixed sequence — the anchors loop can
+    prompt more than once per decision (choice, then an [E]dit sub-prompt)."""
+    it = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda *_a: next(it))
+
+
+class TestGuardAnchors:
+    def test_list_prints_candidates_and_mutates_nothing(self, guard_repo, monkeypatch, capsys):
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+        _run_main(monkeypatch, "guard", "anchors", "--list")
+        out = capsys.readouterr().out
+        assert entry["id"][:8] in out
+        assert "auth/jwt.py" in out
+        from contexer import store
+        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+                      if e["id"] == entry["id"])
+        assert not loaded.get("source_files")
+
+    def test_list_empty_when_no_candidates(self, guard_repo, monkeypatch, capsys):
+        _run_main(monkeypatch, "guard", "anchors", "--list")
+        out = capsys.readouterr().out
+        assert "No trusted, unanchored decisions" in out
+
+    def test_non_tty_refuses_with_candidates(self, guard_repo, monkeypatch, capsys):
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "anchors")
+        assert exc.value.code == 1
+        assert "--list" in capsys.readouterr().err
+
+    def test_non_tty_with_no_candidates_prints_message_and_exits_0(
+            self, guard_repo, monkeypatch, capsys):
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        _run_main(monkeypatch, "guard", "anchors")
+        assert "No trusted, unanchored decisions" in capsys.readouterr().out
+
+    def test_yes_anchors_via_apply_backfill_anchors_one_save(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        _ggit(guard_repo, "commit", "-m", "init")
+        entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+
+        calls = []
+        real_save = store._save
+
+        def _counting_save(repo_path, data):
+            calls.append(1)
+            real_save(repo_path, data)
+
+        monkeypatch.setattr(store, "_save", _counting_save)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "Y")
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "1 anchored" in out
+        assert len(calls) == 1
+
+        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+                      if e["id"] == entry["id"])
+        assert loaded["source_files"] == ["auth/jwt.py"]
+        assert loaded["anchor_commit"]
+
+    def test_edit_validates_paths_against_working_tree(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        _gwrite(guard_repo, "auth/other.py", "x = 0\n")
+        entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "E", "auth/other.py,bogus/missing.py")
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "Not found in working tree, dropped: bogus/missing.py" in out
+        assert "1 anchored" in out
+
+        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+                      if e["id"] == entry["id"])
+        assert loaded["source_files"] == ["auth/other.py"]
+
+    def test_skip_stores_nothing(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "S")
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "Anchor backfill complete: 1 skipped." in out
+
+        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+                      if e["id"] == entry["id"])
+        assert not loaded.get("source_files")
+        # Reappears next run — skip stores nothing.
+        from contexer import guard_engine
+        assert len(guard_engine.anchor_candidates_for_backfill(str(guard_repo))) == 1
+
+    def test_quit_applies_selections_gathered_so_far(self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        _gwrite(guard_repo, "auth/oauth.py", "token = 0\n")
+        e1 = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+        e2 = _gseed(guard_repo, "See auth/oauth.py for the OAuth decision")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "Y", "Q")
+
+        _run_main(monkeypatch, "guard", "anchors")
+        out = capsys.readouterr().out
+        assert "1 anchored" in out
+
+        entries = {e["id"]: e for e in store._load(str(guard_repo))["entries"]}
+        anchored_ids = {eid for eid, e in entries.items() if e.get("source_files")}
+        assert len(anchored_ids) == 1
+        assert anchored_ids <= {e1["id"], e2["id"]}
+
+
 class TestGuardUsage:
     def test_usage_documents_guard(self):
         assert "guard" in cli.USAGE
         assert "CONTEXER_GUARD=0" in cli.USAGE
         assert "arm" in cli.USAGE
+        assert "anchors" in cli.USAGE
         assert "disarm" in cli.USAGE
 
     def test_usage_documents_install_hook(self):

@@ -898,6 +898,191 @@ class TestGuardCandidates:
         assert guard_engine.guard_candidates(str(repo), explain=True) == []
 
 
+# ── anchor_candidates_for_backfill (Task 1 of #175) ───────────────────────────
+
+class TestAnchorCandidatesForBackfill:
+    def test_trusted_unanchored_content_path_candidate(self, repo):
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        entry = _seed_entry(repo, "Decided to use auth/jwt.py for JWT-based session auth")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert result[0]["candidates"] == ["auth/jwt.py"]
+
+    def test_already_anchored_decision_excluded(self, repo):
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        _seed_entry(repo, "See auth/jwt.py for the JWT auth decision",
+                    source_files=["auth/jwt.py"])
+        assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []
+
+    @pytest.mark.parametrize("created_by,status", [
+        ("ai", "approved"),
+        ("memory", "approved"),
+        ("human", "pending_approval"),
+        ("human", "suggested"),
+        ("human", "ignored"),
+    ])
+    def test_untrusted_or_unapproved_decision_excluded(self, repo, created_by, status):
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        _seed_entry(repo, "See auth/jwt.py for the JWT auth decision",
+                    created_by=created_by, status=status)
+        assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []
+
+    def test_nonexistent_candidate_dropped_and_decision_skipped(self, repo):
+        # auth/jwt.py is never written to the working tree.
+        _seed_entry(repo, "See auth/jwt.py for the JWT auth decision")
+        assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []
+
+    def test_dotted_module_maps_to_py_file(self, repo):
+        _write(repo, "contexer/store.py", "x = 1\n")
+        entry = _seed_entry(repo, "The contexer.store module owns all read/write logic")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert result[0]["candidates"] == ["contexer/store.py"]
+
+    def test_dotted_module_maps_to_init_variant(self, repo):
+        _write(repo, "pkg/mod/__init__.py", "x = 1\n")
+        entry = _seed_entry(repo, "The pkg.mod module owns the widget logic")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert result[0]["candidates"] == ["pkg/mod/__init__.py"]
+
+    def test_two_segment_literal_filename_not_mistaken_for_module(self, repo):
+        # "config.yaml" also satisfies the dotted-module shape (two lowercase
+        # segments) — it must still resolve to the literal file, not a bogus
+        # "config/yaml.py" module guess.
+        _write(repo, "config.yaml", "key: value\n")
+        entry = _seed_entry(repo, "See config.yaml for the tool's default settings")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert result[0]["candidates"] == ["config.yaml"]
+
+    def test_dedupes_repeated_artifact(self, repo):
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        entry = _seed_entry(
+            repo, "See auth/jwt.py for JWT auth; auth/jwt.py has the full implementation.")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert result[0]["candidates"] == ["auth/jwt.py"]
+
+    def test_capped_at_max_source_files(self, repo):
+        files = [f"pkg/mod{i}.py" for i in range(15)]
+        for f in files:
+            _write(repo, f, "x = 1\n")
+        content = "Consolidated module map: " + "; ".join(files)
+        entry = _seed_entry(repo, content)
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(result) == 1
+        assert result[0]["decision_id"] == entry["id"]
+        assert len(result[0]["candidates"]) == store._MAX_SOURCE_FILES
+
+    def test_zero_candidates_decision_skipped_entirely(self, repo):
+        _seed_entry(repo, "We use bcrypt for password hashing")
+        assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []
+
+    def test_multiple_decisions_each_reported(self, repo):
+        _write(repo, "auth/jwt.py", "x\n")
+        _write(repo, "auth/oauth.py", "x\n")
+        e1 = _seed_entry(repo, "See auth/jwt.py for the JWT decision")
+        e2 = _seed_entry(repo, "See auth/oauth.py for the OAuth decision")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        ids = {r["decision_id"] for r in result}
+        assert ids == {e1["id"], e2["id"]}
+
+    def test_title_present_in_result(self, repo):
+        _write(repo, "auth/jwt.py", "x\n")
+        entry = _seed_entry(repo, "See auth/jwt.py for JWT auth decisions and rationale",
+                             title="Use JWT for session auth")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert result[0]["title"] == "Use JWT for session auth"
+        assert entry["title"] == "Use JWT for session auth"
+
+    def test_read_only_never_mutates_store(self, repo):
+        _write(repo, "auth/jwt.py", "x\n")
+        _seed_entry(repo, "See auth/jwt.py for the JWT decision")
+        guard_engine.anchor_candidates_for_backfill(str(repo))
+        entry = store._load(str(repo))["entries"][0]
+        assert not entry.get("source_files")
+
+    def test_corrupt_store_fails_soft(self, repo):
+        store_path = store._store_path(str(repo))
+        store_path.write_text("not json{{{")
+        assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []
+
+
+# ── store.apply_backfill_anchors ──────────────────────────────────────────────
+
+class TestApplyBackfillAnchors:
+    def test_applies_selection_and_stamps_anchor(self, repo):
+        _write(repo, "auth/jwt.py", "x\n")
+        _git(repo, "add", "auth/jwt.py")
+        _commit(repo)
+        entry = _seed_entry(repo, "See auth/jwt.py for the JWT decision")
+        count = store.apply_backfill_anchors(str(repo), {entry["id"]: ["auth/jwt.py"]})
+        assert count == 1
+        loaded = next(e for e in store._load(str(repo))["entries"] if e["id"] == entry["id"])
+        assert loaded["source_files"] == ["auth/jwt.py"]
+        assert loaded["anchor_commit"]
+
+    def test_unknown_decision_id_skipped(self, repo):
+        count = store.apply_backfill_anchors(str(repo), {"nonexistent-id": ["auth/jwt.py"]})
+        assert count == 0
+
+    def test_empty_selections_no_op(self, repo):
+        assert store.apply_backfill_anchors(str(repo), {}) == 0
+
+    def test_one_save_for_whole_batch(self, repo, monkeypatch):
+        e1 = _seed_entry(repo, "See auth/jwt.py for the JWT decision")
+        e2 = _seed_entry(repo, "See auth/oauth.py for the OAuth decision")
+        _write(repo, "auth/jwt.py", "x\n")
+        _write(repo, "auth/oauth.py", "x\n")
+        calls = []
+        real_save = store._save
+
+        def _counting_save(repo_path, data):
+            calls.append(1)
+            real_save(repo_path, data)
+
+        monkeypatch.setattr(store, "_save", _counting_save)
+        count = store.apply_backfill_anchors(
+            str(repo), {e1["id"]: ["auth/jwt.py"], e2["id"]: ["auth/oauth.py"]})
+        assert count == 2
+        assert len(calls) == 1
+
+
+# ── end-to-end: backfilled decision pairs in guard_staged ────────────────────
+
+class TestAnchorBackfillEndToEnd:
+    def test_backfilled_decision_pairs_when_file_staged(self, repo):
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        _git(repo, "add", "auth/jwt.py")
+        _commit(repo, "init")
+
+        entry = _seed_entry(repo, "See auth/jwt.py for the JWT-based session auth decision")
+        candidates = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert len(candidates) == 1
+        assert candidates[0]["decision_id"] == entry["id"]
+        assert candidates[0]["candidates"] == ["auth/jwt.py"]
+
+        applied = store.apply_backfill_anchors(
+            str(repo), {entry["id"]: candidates[0]["candidates"]})
+        assert applied == 1
+
+        _write(repo, "auth/jwt.py", "token = 1  # rotated\n")
+        _git(repo, "add", "auth/jwt.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert len(result["advisories"]) == 1
+        assert result["advisories"][0]["decision_id"] == entry["id"]
+        assert result["advisories"][0]["reason"] == "source_files match"
+
+        # A backfilled decision no longer surfaces as a further backfill candidate.
+        assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []
+
+
 # ── Task 3: arm_guard / disarm_guard (management path) ───────────────────────
 
 class TestArmGuard:

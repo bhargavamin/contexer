@@ -1794,6 +1794,42 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     entry["anchor_commit"] = _git(repo_path, "rev-parse", "HEAD", timeout=_GIT_FAST_TIMEOUT) or ""
 
 
+def apply_backfill_anchors(repo_path: str, selections: dict) -> int:
+    """Batch-apply CLI-ratified anchor selections from `contexer guard anchors`
+    (guard_engine.anchor_candidates_for_backfill's interactive counterpart):
+    `selections` is {decision_id: [file, ...]}, one entry per decision the
+    developer chose to anchor this run. ONE load + lock + save for the whole
+    batch — mirrors bootstrap_apply's one-load-one-save shape rather than a
+    save per decision, so a multi-decision backfill run costs one write, not N.
+
+    A decision_id with no matching entry (concurrent session removed/ignored it
+    between the CLI's read and this write) is silently skipped — same
+    read-then-write race tolerance as every other batch mutation in this
+    module. The actual canonicalization + anchor_commit stamping is delegated
+    to _anchor_sources, so an empty or all-unresolvable file list for a
+    decision is a no-op for that decision (not counted as anchored). Returns
+    the count of decisions actually anchored."""
+    if not selections:
+        return 0
+    repo = _resolve_repo(repo_path)
+    with _store_lock(_slug(repo)):
+        data = _load(repo)
+        anchored = 0
+        changed = False
+        for entry in data["entries"]:
+            files = selections.get(entry.get("id", ""))
+            if not files:
+                continue
+            had_anchor = bool(entry.get("source_files"))
+            _anchor_sources(repo, entry, files)
+            if entry.get("source_files") and not had_anchor:
+                anchored += 1
+                changed = True
+        if changed:
+            _save(repo, data)
+    return anchored
+
+
 def _staleness_note(repo_path: str, entry: dict) -> str:
     """`""` unless the entry is anchored (source_files + anchor_commit) AND git reports at
     least one of those files changed since the anchor. Fail-soft: an unknown commit, a
