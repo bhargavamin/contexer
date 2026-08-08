@@ -77,7 +77,7 @@ AI-proposed architecture and constraint decisions — and any change to a decisi
 
 Approved decisions are versioned: a change never overwrites the previous value — it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
 
-Approving a decision can also anchor it to the files it describes: pass `source_files` when you approve (or re-approve) it, and Contexer records those paths plus the current commit. That anchor is what lets the commit-time guard below recognize a staged file as one the decision covers, and lets Contexer flag the decision as possibly stale later if those files change without it. Anchoring applies to one decision at a time (bulk approvals don't anchor), and re-approving an already-anchored decision refreshes it to the current commit.
+Approving a decision can also anchor it to the files it describes: pass `source_files` when you approve or edit a decision that's awaiting your review — a brand-new decision's first approval, or approving a Suggested Update on an existing one — and Contexer records those paths plus the current commit. That anchor is what lets the commit-time guard below recognize a staged file as one the decision covers, and lets Contexer flag the decision as possibly stale later if those files change without it. Anchoring applies to one decision at a time (bulk approvals don't anchor). There's no separate re-approve action on a decision that's already active (approved/suggested with no pending update) — approve/edit only apply while a decision is still awaiting review, and it's on that transition that an already-anchored entry gets `anchor_commit` refreshed to the current commit, clearing any stale flag.
 
 ## Commit-time guard
 
