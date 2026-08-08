@@ -1067,6 +1067,116 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
         assert guard_engine._guard_trusted(entry) is False
 
 
+# ── Greptile P1: approved_by invalidated when a non-human revision goes live ──
+
+class TestApprovedByStampInvalidatedByNonHumanRevision:
+    """`approved_by` is an ENTRY-level stamp, but pattern/convention trivial updates via
+    `update_context(replace_id=...)` (and memory-sync refreshes) apply IN PLACE as a new
+    current revision (`_append_revision`) — before this fix the entry kept its 'human' stamp
+    while the live content became unreviewed AI/tool text, so the guard trusted (and advised
+    with) content the developer never actually saw. `_append_revision` now pops `approved_by`
+    whenever the new revision's `source` isn't 'human'; a genuine ratification site
+    (`_apply_approval` promoting a Suggested Update) restamps AFTER appending."""
+
+    def test_trivial_ai_update_invalidates_stamp_the_regression(self, repo):
+        """THE Greptile scenario, end-to-end: a human-approved ai-captured pattern decision,
+        corrected in place by another AI turn, must stop being guard-trusted and stop
+        pairing as an advisory."""
+        entry = _seed_entry(repo, "Log files live under logs/<date>.log", created_by="ai",
+                             subtype="pattern", status="approved", approved_by="human",
+                             source_files=["logging/setup.py"])
+        eid = entry["id"]
+        assert guard_engine._guard_trusted(entry) is True
+
+        ok, rid = store.update_decision(
+            str(repo), "Log files live under var/log/<date>.log", "s2", "pattern",
+            replace_id=eid, created_by="ai")
+        assert ok and rid == eid
+
+        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert updated["revision"] == 2
+        assert "approved_by" not in updated
+        assert guard_engine._guard_trusted(updated) is False
+
+        _write(repo, "logging/setup.py", "# rewritten\n")
+        _git(repo, "add", "logging/setup.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert result["advisories"] == []
+
+    def test_developer_approving_the_change_restores_trust(self, repo):
+        """A significant (architecture/constraint) AI change to a human-approved entry
+        lands as a Suggested Update instead of applying silently — the live entry (and its
+        stamp) stays untouched until the developer actually approves it, at which point
+        trust is restored on the new content."""
+        entry = _seed_entry(repo, "Rollback endpoint is /api/v1/rollback", created_by="ai",
+                             subtype="architecture", status="approved", approved_by="human",
+                             source_files=["api/rollback.py"])
+        eid = entry["id"]
+
+        ok, rid = store.update_decision(
+            str(repo), "Rollback endpoint is /api/v2/rollback", "s2", "architecture",
+            replace_id=eid, created_by="ai")
+        assert ok and rid == eid
+        pending = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert pending.get("proposed_revision") is not None
+        # Unreviewed proposal: the live content (and its stamp) is untouched so far.
+        assert pending["revision"] == 1
+        assert pending.get("approved_by") == "human"
+        assert guard_engine._guard_trusted(pending) is True
+
+        ok, msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok, msg
+        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert approved["revision"] == 2
+        assert approved["content"] == "Rollback endpoint is /api/v2/rollback"
+        assert approved["approved_by"] == "human"
+        assert guard_engine._guard_trusted(approved) is True
+
+    def test_suggested_update_promotion_ordering_pin(self, repo):
+        """Ordering pin: `_apply_approval` stamps `approved_by` AFTER `_promote_proposal`
+        (which calls `_append_revision` with the proposal's own source — 'ai' by default,
+        NOT 'human'). If a future change stamped BEFORE promoting again, the chokepoint's
+        invalidation would immediately erase the stamp the approval action just set, and
+        this assertion would catch it. The promoted revision's own `source` field stays
+        'ai' (provenance of the content is unchanged); only `approved_by` reflects the
+        human ratification."""
+        entry = _seed_entry(repo, "Rollback endpoint is /api/v1/rollback", created_by="ai",
+                             subtype="architecture", status="approved", approved_by="human",
+                             source_files=["api/rollback.py"])
+        eid = entry["id"]
+        store.update_decision(str(repo), "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid, created_by="ai")
+
+        ok, msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok, msg
+        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert store._current_revision(approved)["source"] == "ai"
+        assert approved["approved_by"] == "human"
+        assert guard_engine._guard_trusted(approved) is True
+
+    def test_memory_sync_in_place_update_invalidates_stamp(self, repo):
+        """A memory-imported fact refreshed in place (source='memory') is tool-written, not
+        human-reviewed — the same invalidation must apply."""
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="memory",
+                             status="approved", approved_by="human",
+                             source_files=["auth/hash.py"])
+        eid = entry["id"]
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], eid)
+        stored["memory_key"] = "mem-1"
+        store._save(str(repo), data)
+        assert guard_engine._guard_trusted(stored) is True
+
+        status = store.upsert_memory_decision(
+            str(repo), "Use argon2 for password hashing", "s2", "convention", "mem-1")
+        assert status == "updated"
+
+        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        assert updated["revision"] == 2
+        assert "approved_by" not in updated
+        assert guard_engine._guard_trusted(updated) is False
+
+
 # ── guard_candidates ──────────────────────────────────────────────────────────
 
 class TestGuardCandidates:

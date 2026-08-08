@@ -1469,7 +1469,11 @@ def _append_revision(entry: dict, content: str, source: str,
     """Create the next revision for a decision, make it current, and resync the cache.
     Confidence is computed from the decision's aggregate evidence at this moment and
     snapshotted onto the revision. `title` wins when given; otherwise it is re-derived
-    from `content` via `_normalize_title`/`_derive_title`. Returns the new revision."""
+    from `content` via `_normalize_title`/`_derive_title`. `approved_by == "human"` means
+    "the CURRENT revision was human-vouched" — so a non-human `source` here invalidates any
+    existing stamp (the content just changed under it, unseen by a human); a caller that IS
+    itself the human ratification (e.g. `_apply_approval` promoting a Suggested Update) must
+    (re)stamp `approved_by` AFTER calling this, not before. Returns the new revision."""
     revs = entry.setdefault("revisions", [])
     next_version = (revs[-1]["version_number"] + 1) if revs else 1
     score, factors = _compute_confidence(entry)
@@ -1482,6 +1486,8 @@ def _append_revision(entry: dict, content: str, source: str,
     revs.append(rev)
     entry["current_revision_id"] = rev["revision_id"]
     entry["updated_at"] = rev["created_at"]
+    if source != "human":
+        entry.pop("approved_by", None)
     _sync_decision_cache(entry)
     return rev
 
@@ -2159,13 +2165,24 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
             entry.pop("proposed_revision", None)
             return True, f"Dismissed - kept current revision {rev}.", True
         # approve or edit → promote the proposal to a new revision (history preserved).
-        # Set the approval fields FIRST so the new revision's snapshotted confidence
-        # reflects the developer approval; _promote_proposal computes + syncs the cache.
         entry["status"] = "approved"
         entry["approved_at"] = now
-        entry["approved_by"] = "human"
         prop_had_source_files = bool((entry.get("proposed_revision") or {}).get("source_files"))
         _promote_proposal(repo_path, entry, content if action == "edit" else None)
+        # Stamp approved_by AFTER promoting, not before: _append_revision (called inside
+        # _promote_proposal) invalidates approved_by whenever the new revision's source isn't
+        # "human" (see its docstring) — a Suggested Update's source is usually the ORIGINAL
+        # proposer ("ai"/"scan"), not the human now approving it, so stamping first would be
+        # popped by the very append it precedes. Recompute confidence now that the stamp is
+        # visible (mirroring the plain pending_approval flow below) so this revision still
+        # reflects the "Approved by developer" bonus.
+        entry["approved_by"] = "human"
+        cur = _current_revision(entry)
+        if cur is not None:
+            score, factors = _compute_confidence(entry)
+            cur["confidence_score"] = score
+            cur["evidence"] = factors
+            _sync_decision_cache(entry)
         # Approval is a human revalidation of the content: an entry already anchored gets its
         # anchor_commit refreshed to current HEAD, resetting staleness. Skipped when
         # _promote_proposal just anchored via the proposal's own stashed source_files above —
