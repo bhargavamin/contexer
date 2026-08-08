@@ -430,12 +430,16 @@ class TestBookkeepingWritesAreFailSoft:
         # The raw write is what raised PermissionError and killed the hook.
         assert not any(".current_repo').write_text" in c for c in cmds)
 
-    def test_post_tool_use_emits_its_json_even_if_touch_fails(self, installed_home):
+    def test_post_tool_use_is_the_python_post_write_entrypoint(self, installed_home):
+        # #175 Task 2: the shell-only `touch` was replaced by claude.post_write, which
+        # records edited files AND touches .pending_capture itself — best-effort inside a
+        # Python try/except (store.STORE_DIR.mkdir + .touch()), not a shelled-out `touch`.
+        # See TestClaudePostWrite.test_pending_capture_write_failure_is_fail_soft for the
+        # Python-side fail-soft proof.
         cmds = self._cmds(installed_home, "PostToolUse")
-        touch = next(c for c in cmds if "touch" in c)
-        # `;` not `&&`: the flag is best-effort, the JSON output is mandatory.
-        assert "touch ~/.contexer/.pending_capture 2>/dev/null; echo" in touch
-        assert "&&" not in touch
+        post_write = next(c for c in cmds if "claude.post_write" in c)
+        assert "touch" not in post_write
+        assert ".pending_capture" in post_write  # marker kept for migration/uninstall detection
 
     def test_anchor_hook_guards_the_pointer_write_and_the_flag_removal(self, installed_home):
         anchor = next(c for c in self._cmds(installed_home, "UserPromptSubmit")
@@ -471,8 +475,26 @@ class TestBookkeepingWritesAreFailSoft:
              "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]}]}}))
         install()
         cmds = self._cmds(clean_home, "PostToolUse")
-        assert not any("&&" in c for c in cmds if "touch" in c)
-        assert sum("touch ~/.contexer" in c for c in cmds) == 1, "must replace, not duplicate"
+        assert not any("touch ~/.contexer" in c for c in cmds), \
+            "the old shell touch must not survive a reinstall"
+        assert sum("claude.post_write" in c for c in cmds) == 1, "must replace, not duplicate"
+
+    def test_reinstall_replaces_a_post_write_hook_missing_git_toplevel_resolution(self, clean_home):
+        # The doc-drift hazard: an installed post_write hook that resolves the repo from raw
+        # process cwd (no `git rev-parse --show-toplevel`) diverges from record_edited_file's
+        # reader in a monorepo subdirectory. Must be replaced, not left in place.
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        old = ('"python3" -c "from contexer.adapters import claude; import sys; '
+               'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$(pwd)" '
+               '# contexer-managed-hook .pending_capture')
+        settings_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": old}]}]}}))
+        install()
+        cmds = self._cmds(clean_home, "PostToolUse")
+        post_write_cmds = [c for c in cmds if "claude.post_write" in c]
+        assert len(post_write_cmds) == 1, "must replace, not duplicate"
+        assert "show-toplevel" in post_write_cmds[0]
 
     def test_reinstall_replaces_an_unguarded_anchor_hook(self, clean_home):
         settings_path = clean_home / ".claude" / "settings.json"

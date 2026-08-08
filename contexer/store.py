@@ -4681,6 +4681,78 @@ def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
         pass
 
 
+# ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
+# Records WHICH files each session's turns edited, so a later capture call can propose
+# anchor candidates (Task 3) without asking the model to name source_files itself. Ported
+# from the shelved feat/doc-drift branch (same sidecar shape, cap, and session-keying
+# idiom as _ws_path) and adapted to canonicalize through guard_engine._guard_relpath, the
+# single chokepoint every other guard/anchor path already goes through.
+_EDITED_FILES_CAP = 50  # most recent edits kept; a capture candidate list only needs these
+
+
+def _edited_files_path(repo_path: str, session_id: str) -> Path:
+    """Per-repo, PER-SESSION sidecar. Keyed per session (not just per repo): a repo-only
+    key would make a destructive read a single-claimant race — two Claude Code windows on
+    the same repo, or Claude and Codex concurrently, would steal and clear each other's
+    edit list. The session id is hashed (not embedded raw) — same filename-safety/
+    collision idiom as _ws_path."""
+    safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
+    return STORE_DIR / f".edited_{_slug(repo_path)}_{safe}.json"
+
+
+def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> None:
+    """Append file_path to this session's edited-files sidecar. Dedup: a path already
+    present is moved to the end (most recent). Capped at _EDITED_FILES_CAP most recent
+    paths. Silent no-op on a falsy file_path OR an empty session_id (mirrors
+    working_set_ids/_ws_add: no session id means the signal is off, no file is written).
+
+    Canonicalized via guard_engine._guard_relpath — the same chokepoint _anchor_sources
+    uses — so `src/f.py`, `./src/f.py`, and an absolute spelling of the SAME file dedup to
+    one entry, and a path outside the repo (which _guard_relpath maps to a "../"-prefixed
+    string rather than failing) is dropped rather than wasting a cap slot on a candidate
+    that could never pair against a guard-staged repo-relative path. Imported locally, not
+    at module top, for the same load-order reason _anchor_sources does: guard_engine
+    imports store at ITS top, so an eager import here would recreate that cycle.
+
+    Fail-soft: a write error must never break the calling hook."""
+    if not file_path or not session_id:
+        return
+    try:
+        from contexer import guard_engine
+        relpath = guard_engine._guard_relpath(repo_path, file_path)
+        if not relpath or relpath == ".." or relpath.startswith("../") or os.path.isabs(relpath):
+            return
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        files = _read_edited_files(repo_path, session_id, clear=False)
+        files = [f for f in files if f != relpath]
+        files.append(relpath)
+        files = files[-_EDITED_FILES_CAP:]
+        _atomic_write(_edited_files_path(repo_path, session_id), json.dumps(files))
+    except OSError:
+        pass
+
+
+def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True) -> list[str]:
+    """Files recorded as edited this session, oldest to newest. [] immediately when
+    session_id is empty (same rule as working_set_ids) — never touches another session's
+    sidecar. Fail-soft: a missing or corrupt sidecar reads as []. clear=True (the default)
+    deletes this session's sidecar after reading, so a later read in the same turn returns
+    [] while every other session's list stays untouched; Task 3's capture-time read passes
+    clear=False so more than one decision captured in a turn can each see the same list."""
+    if not session_id:
+        return []
+    path = _edited_files_path(repo_path, session_id)
+    try:
+        files = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(files, list):
+            files = []
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        files = []
+    if clear:
+        path.unlink(missing_ok=True)
+    return files
+
+
 def _retrieval_log(repo_path: str, event: dict) -> None:
     """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
     path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
@@ -4843,14 +4915,18 @@ def migrate_worktree_strays(repo_path: str) -> int:
 
 
 def _gc_stale_session_files() -> None:
-    """At non-resume session start: drop working-set dedup files and retrieval logs whose
-    session is well over — old enough that dedup/history no longer matters. Fail-soft,
-    a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2)."""
+    """At non-resume session start: drop working-set dedup files, retrieval logs, and
+    edited-files sidecars whose session is well over — old enough that dedup/history no
+    longer matters. Fail-soft, a quick glob+mtime check; never touches the retrieval index
+    sidecar (owned by A2)."""
     try:
         cutoff = time.time() - _WS_GC_AGE_SECONDS
         # .bootstrap_offered_* is normally cleared by its own repo's next session start;
         # this catches flags for repos that are never opened again, so they don't accumulate.
-        for pattern in (".ws_*.json", ".retrieval_*.jsonl", ".bootstrap_offered_*"):
+        # .edited_*.json is normally cleared by its own consumer's read (Task 3's capture-
+        # time read, clear=False, leaves it for the sweep — or a session that never reads
+        # it at all); this catches those so they don't accumulate either.
+        for pattern in (".ws_*.json", ".retrieval_*.jsonl", ".bootstrap_offered_*", ".edited_*.json"):
             for p in STORE_DIR.glob(pattern):
                 try:
                     if p.stat().st_mtime < cutoff:

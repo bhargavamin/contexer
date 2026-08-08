@@ -3685,6 +3685,91 @@ class TestWorkingSet:
         assert store.working_set_ids(tmp_repo, "") == []
 
 
+# ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
+
+class TestEditedFilesSignal:
+    def test_record_and_read_round_trip(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py", "sess-1")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["src/a.py"]
+
+    def test_default_read_clears_the_sidecar(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py", "sess-1")
+        assert store._read_edited_files(tmp_repo, "sess-1") == ["src/a.py"]
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
+        assert not store._edited_files_path(tmp_repo, "sess-1").exists()
+
+    def test_nonclearing_read_leaves_the_sidecar_for_a_second_reader(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py", "sess-1")
+        store._read_edited_files(tmp_repo, "sess-1", clear=False)
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["src/a.py"]
+
+    def test_dedup_moves_repeated_path_to_the_end(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "sess-1")
+        store.record_edited_file(tmp_repo, "b.py", "sess-1")
+        store.record_edited_file(tmp_repo, "a.py", "sess-1")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["b.py", "a.py"]
+
+    def test_capped_at_fifty_most_recent(self, tmp_repo):
+        for i in range(60):
+            store.record_edited_file(tmp_repo, f"f{i}.py", "sess-1")
+        files = store._read_edited_files(tmp_repo, "sess-1", clear=False)
+        assert len(files) == 50
+        assert files[0] == "f10.py"
+        assert files[-1] == "f59.py"
+
+    def test_absolute_and_dotted_spellings_canonicalize_to_one_entry(self, tmp_repo):
+        store.record_edited_file(tmp_repo, str(Path(tmp_repo) / "src" / "a.py"), "sess-1")
+        store.record_edited_file(tmp_repo, "./src/a.py", "sess-1")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["src/a.py"]
+
+    def test_outside_repo_path_is_dropped(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "../outside.py", "sess-1")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
+        assert not store._edited_files_path(tmp_repo, "sess-1").exists()
+
+    def test_empty_session_id_is_a_silent_noop(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "")
+        assert store._read_edited_files(tmp_repo, "") == []
+        assert not store._edited_files_path(tmp_repo, "").exists()
+
+    def test_empty_file_path_is_a_silent_noop(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "", "sess-1")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
+
+    def test_sessions_are_isolated(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "sess-1")
+        store.record_edited_file(tmp_repo, "b.py", "sess-2")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["a.py"]
+        assert store._read_edited_files(tmp_repo, "sess-2", clear=False) == ["b.py"]
+
+    def test_corrupt_sidecar_reads_as_empty(self, tmp_repo):
+        path = store._edited_files_path(tmp_repo, "sess-1")
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text("not json", encoding="utf-8")
+        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
+
+    def test_write_error_is_fail_soft(self, tmp_repo, monkeypatch):
+        def _boom(*a):
+            raise OSError("disk full")
+        monkeypatch.setattr(store, "_atomic_write", _boom)
+        store.record_edited_file(tmp_repo, "a.py", "sess-1")  # must not raise
+
+    def test_gc_sweep_drops_stale_edited_files_sidecar(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "sess-1")
+        path = store._edited_files_path(tmp_repo, "sess-1")
+        assert path.exists()
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(path, (old, old))
+        store._gc_stale_session_files()
+        assert not path.exists()
+
+    def test_gc_sweep_keeps_fresh_edited_files_sidecar(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py", "sess-1")
+        path = store._edited_files_path(tmp_repo, "sess-1")
+        store._gc_stale_session_files()
+        assert path.exists()
+
+
 class TestLegacyFallback:
     def test_rationale_hit_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
         store.update_decision(tmp_repo, "We chose postgres over mongo for ACID transactions", RV1_SESSION, "architecture")

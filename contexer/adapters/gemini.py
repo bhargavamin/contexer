@@ -164,8 +164,24 @@ def before_agent(repo_path: str, raw: str) -> str:
 
 
 def after_write(repo_path: str, raw: str) -> str:
-    """AfterTool(write_file|replace): immediately remind the AI to surface and store any decision."""
+    """AfterTool(write_file|replace): immediately remind the AI to surface and store any
+    decision, AND record the edited file into the per-session sidecar (issue #175 Task 2)
+    so a later capture call can propose anchor candidates without asking the model to name
+    source_files itself — same signal Claude/Codex's post_write records via PostToolUse.
+
+    The recording half is wrapped in its own try/except: a missing/garbage tool_input, or
+    an unresolvable repo, must never cost the reminder this hook exists to deliver."""
     _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
+    try:
+        repo = store._resolve_repo(repo_path)
+        if repo:
+            data = json.loads(raw)
+            tool_input = data.get("tool_input") if isinstance(data, dict) else None
+            fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+            if isinstance(fp, str) and fp:
+                store.record_edited_file(repo, fp, store.session_from_hook_stdin(raw))
+    except Exception:
+        pass
     return json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "AfterTool",

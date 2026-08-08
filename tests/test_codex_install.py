@@ -313,11 +313,15 @@ class TestCodexBookkeepingWritesAreFailSoft:
         assert any("store.anchor_repo(repo)" in c for c in cmds)
         assert not any(".current_repo').write_text" in c for c in cmds)
 
-    def test_post_tool_use_emits_its_json_even_if_touch_fails(self, home):
+    def test_post_tool_use_is_the_python_post_write_entrypoint(self, home):
+        # #175 Task 2: reuses claude.post_write verbatim — it records edited files and
+        # touches .pending_capture itself, best-effort inside a Python try/except, not a
+        # shelled-out `touch`.
         codex.install(home)
-        touch = next(c for c in self._cmds(home, "PostToolUse") if "touch" in c)
-        assert "touch ~/.contexer/.pending_capture 2>/dev/null; echo" in touch
-        assert "&&" not in touch
+        cmds = self._cmds(home, "PostToolUse")
+        post_write = next(c for c in cmds if "claude.post_write" in c)
+        assert "touch" not in post_write
+        assert ".pending_capture" in post_write
 
     def test_anchor_hook_guards_the_pointer_write_and_the_flag_removal(self, home):
         codex.install(home)
@@ -350,8 +354,23 @@ class TestCodexBookkeepingWritesAreFailSoft:
              "command": "touch ~/.contexer/.pending_capture && echo '{}'"}]}]}}))
         codex.install(home)
         cmds = self._cmds(home, "PostToolUse")
-        assert not any("&&" in c for c in cmds if "touch" in c)
-        assert sum("touch ~/.contexer" in c for c in cmds) == 1, "must replace, not duplicate"
+        assert not any("touch ~/.contexer" in c for c in cmds), \
+            "the old shell touch must not survive a reinstall"
+        assert sum("claude.post_write" in c for c in cmds) == 1, "must replace, not duplicate"
+
+    def test_reinstall_replaces_a_post_write_hook_missing_git_toplevel_resolution(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('"python3" -c "from contexer.adapters import claude; import sys; '
+               'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$(pwd)" '
+               '# .pending_capture')
+        hooks_path.write_text(json.dumps({"hooks": {"PostToolUse": [
+            {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        cmds = self._cmds(home, "PostToolUse")
+        post_write_cmds = [c for c in cmds if "claude.post_write" in c]
+        assert len(post_write_cmds) == 1, "must replace, not duplicate"
+        assert "show-toplevel" in post_write_cmds[0]
 
     def test_reinstall_replaces_the_unguarded_anchor_hook(self, home):
         hooks_path = home / ".codex" / "hooks.json"
@@ -481,6 +500,36 @@ class TestCodexUninstall:
         ups = _hooks(home)["hooks"].get("UserPromptSubmit", [])
         cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])]
         assert not any("claude.team_poll" in c for c in cmds)
+
+
+class TestCodexPostWriteRepoResolutionParity:
+    """issue #175 Task 2: Codex reuses claude.post_write VERBATIM, and its $REPO
+    resolution must be copied character-for-character from claude.py's own post_write_cmd —
+    not from this file's usual `|| pwd` sibling fallback. A cwd-vs-toplevel mismatch here
+    would silently key record_edited_file's write under a different sidecar slug than
+    Task 3's capture-time read (the doc-drift hazard)."""
+
+    def test_prefix_matches_claude_post_write_verbatim(self, home):
+        from contexer.adapters import claude as claude_adapter
+
+        codex.install(home)
+        cmds = [h["command"] for g in _hooks(home)["hooks"]["PostToolUse"] for h in g["hooks"]]
+        codex_post_write = next(c for c in cmds if "claude.post_write" in c)
+        codex_prefix = codex_post_write.split("&&")[0] + "&&"
+
+        # claude.py's own post_write_cmd is generated the same way — reconstruct it via a
+        # real claude.install() and compare prefixes rather than duplicating the literal.
+        claude_home = home.parent / "claude_home_for_parity"
+        (claude_home / ".claude").mkdir(parents=True)
+        claude_adapter.install(claude_home)
+        claude_settings = json.loads((claude_home / ".claude" / "settings.json").read_text())
+        claude_cmds = [h["command"] for g in claude_settings["hooks"]["PostToolUse"]
+                       for h in g.get("hooks", []) if "command" in h]
+        claude_post_write = next(c for c in claude_cmds if "claude.post_write" in c)
+        claude_prefix = claude_post_write.split("&&")[0] + "&&"
+
+        assert codex_prefix == claude_prefix
+        assert "show-toplevel" in codex_prefix
 
 
 class TestCodexStatus:

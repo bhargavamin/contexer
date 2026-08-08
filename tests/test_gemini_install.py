@@ -107,6 +107,29 @@ class TestGeminiRuntime:
         assert "wrote or edited files" in context
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
 
+    def test_after_write_records_edited_file(self, home, tmp_path):
+        # issue #175 Task 2: the same edited-files signal Claude/Codex record via
+        # PostToolUse — Gemini records it from AfterTool(write_file|replace) instead.
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(tmp_path / "repo" / "src" / "a.py")},
+        })
+        gemini.after_write(repo, raw)
+        assert store._read_edited_files(repo, "s1", clear=False) == ["src/a.py"]
+
+    def test_after_write_fail_soft_on_missing_tool_input(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        out = json.loads(gemini.after_write(repo, raw))  # must not raise
+        assert "hookSpecificOutput" in out
+        assert store._read_edited_files(repo, "s1", clear=False) == []
+
+    def test_after_write_fail_soft_on_garbage_stdin(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        out = json.loads(gemini.after_write(repo, "not json"))  # must not raise
+        assert "hookSpecificOutput" in out
+
     def test_compress_flag_reloads_context_without_edit_reminder(self, home, tmp_path):
         repo = str(tmp_path / "repo")
         store.update_decision(repo, "always run tests before committing", "s1", "constraint")
