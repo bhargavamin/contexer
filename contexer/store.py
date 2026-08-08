@@ -1476,6 +1476,13 @@ def _append_revision(entry: dict, content: str, source: str,
     (re)stamp `approved_by` AFTER calling this, not before. Returns the new revision."""
     revs = entry.setdefault("revisions", [])
     next_version = (revs[-1]["version_number"] + 1) if revs else 1
+    # Invalidate the stamp BEFORE computing confidence: a non-human source means the
+    # content about to be snapshotted was never seen by a human, so the new revision
+    # (and the resynced head cache) must not carry the approval bonus or its "Approved
+    # by developer" factor. Popping after the snapshot (the original bug) left both on
+    # the freshly-created revision even though `approved_by` was gone from the entry.
+    if source != "human":
+        entry.pop("approved_by", None)
     score, factors = _compute_confidence(entry)
     effective_title = _normalize_title(title) or _derive_title(content)
     rev = _new_revision(
@@ -1486,8 +1493,6 @@ def _append_revision(entry: dict, content: str, source: str,
     revs.append(rev)
     entry["current_revision_id"] = rev["revision_id"]
     entry["updated_at"] = rev["created_at"]
-    if source != "human":
-        entry.pop("approved_by", None)
     _sync_decision_cache(entry)
     return rev
 

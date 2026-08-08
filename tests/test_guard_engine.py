@@ -1177,6 +1177,93 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
         assert guard_engine._guard_trusted(updated) is False
 
 
+# ── Greptile P1 #2: confidence recomputed AFTER stamp invalidation, not before ─────────
+
+class TestConfidenceRecomputedAfterStampInvalidation:
+    """`_append_revision` used to snapshot confidence (`_compute_confidence`) BEFORE
+    popping `approved_by` — so a non-human revision replacing human-approved content still
+    carried the ~40-point approval bonus and the "Approved by developer" evidence factor on
+    the freshly-created revision (and the resynced head cache), even though `approved_by`
+    itself was gone from the entry a moment later. The fix pops the stamp first, then
+    computes confidence from the now-unstamped entry."""
+
+    def test_ai_inplace_update_strips_confidence_bonus_and_factor(self, repo):
+        entry = _seed_entry(repo, "Log files live under logs/<date>.log", created_by="ai",
+                             subtype="pattern", status="approved", approved_by="human",
+                             source_files=["logging/setup.py"])
+        eid = entry["id"]
+
+        ok, rid = store.update_decision(
+            str(repo), "Log files live under var/log/<date>.log", "s2", "pattern",
+            replace_id=eid, created_by="ai")
+        assert ok and rid == eid
+
+        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        cur = store._current_revision(updated)
+        assert "approved_by" not in updated
+        assert "Approved by developer" not in cur["evidence"]
+        assert "Approved by developer" not in updated.get("confidence_factors", [])
+        # created_by="ai" contributes no factor either, so nothing but the base score remains.
+        assert cur["confidence_score"] == 30
+        assert updated["confidence"] == 30
+
+    def test_memory_sync_inplace_update_strips_confidence_bonus_and_factor(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="memory",
+                             status="approved", approved_by="human",
+                             source_files=["auth/hash.py"])
+        eid = entry["id"]
+        data = store._load(str(repo))
+        stored = store._entry_by_id(data["entries"], eid)
+        stored["memory_key"] = "mem-1"
+        store._save(str(repo), data)
+
+        status = store.upsert_memory_decision(
+            str(repo), "Use argon2 for password hashing", "s2", "convention", "mem-1")
+        assert status == "updated"
+
+        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        cur = store._current_revision(updated)
+        assert "approved_by" not in updated
+        assert "Approved by developer" not in cur["evidence"]
+        assert "Approved by developer" not in updated.get("confidence_factors", [])
+
+    def test_approval_path_still_yields_bonus_and_factor(self, repo):
+        """Pin: the legitimate pending->approved blessing (no stamp invalidation involved)
+        must keep computing the approval bonus + factor on the newly-blessed revision."""
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
+                             subtype="convention", status="pending_approval")
+        eid = entry["id"]
+
+        ok, msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok, msg
+        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        cur = store._current_revision(approved)
+        assert approved["approved_by"] == "human"
+        assert "Approved by developer" in cur["evidence"]
+        assert "Approved by developer" in approved.get("confidence_factors", [])
+        assert cur["confidence_score"] >= 40
+        assert approved["confidence"] == cur["confidence_score"]
+
+    def test_suggested_update_promotion_still_yields_bonus_and_factor(self, repo):
+        """Pin: `_apply_approval`'s Suggested-Update promotion branch (stamp-then-recompute,
+        fixed earlier on this branch) still ends with the approval bonus on the promoted
+        revision, unaffected by the `_append_revision` reorder."""
+        entry = _seed_entry(repo, "Rollback endpoint is /api/v1/rollback", created_by="ai",
+                             subtype="architecture", status="approved", approved_by="human",
+                             source_files=["api/rollback.py"])
+        eid = entry["id"]
+        store.update_decision(str(repo), "Rollback endpoint is /api/v2/rollback", "s2",
+                              "architecture", replace_id=eid, created_by="ai")
+
+        ok, msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok, msg
+        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        cur = store._current_revision(approved)
+        assert approved["approved_by"] == "human"
+        assert "Approved by developer" in cur["evidence"]
+        assert cur["confidence_score"] >= 40
+
+
 # ── guard_candidates ──────────────────────────────────────────────────────────
 
 class TestGuardCandidates:
