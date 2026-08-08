@@ -51,6 +51,12 @@ Guard (contexer guard):
   guard disarm <id>
                 Remove an armed rule.
   guard list    Show every currently armed rule.
+  guard anchors [--list]
+                Assisted anchor backfill: interactively derive candidate source_files
+                anchors from each trusted, currently-unanchored decision's own content
+                and ratify them per decision. --list previews candidates read-only
+                (also the non-interactive/agent-facing surface — the interactive loop
+                refuses when stdin isn't a TTY).
   guard --install-hook
                 Wire the guard into .git/hooks/pre-commit for the cwd's repo (not run
                 automatically by `install`). Refuses with guidance if core.hooksPath is
@@ -298,6 +304,9 @@ def review() -> None:
             print("Evidence:")
             for f in factors:
                 print(f"  - {f}")
+        candidates = entry.get("anchor_candidates")
+        if candidates:
+            print(f"Would anchor: {', '.join(candidates)}")
         print()
         if prop:
             print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip")
@@ -1076,6 +1085,14 @@ def _print_guard_explain(candidates: list) -> None:
                     f"({c.get('reason')})  hash={c.get('hash')}")
 
 
+def _cli_repo() -> str:
+    """Same repo-resolution idiom as pull()/share_cmd() (git root, else the
+    shared last-resort pointer) — factored out after a dismiss-path divergence
+    once sent guard commands to a different store than the rest of the CLI."""
+    from contexer import store
+    return store._git_root(os.getcwd()) or store._resolve_repo("")
+
+
 def _guard_run(rest: list) -> None:
     """`contexer guard [path…] [--explain]` — the commit-time run path.
 
@@ -1083,14 +1100,14 @@ def _guard_run(rest: list) -> None:
     commit, so any exception, or the engine's own `error: True`, degrades to a
     single stderr line and exit 0 rather than a traceback or a nonzero exit."""
     try:
-        from contexer import store, guard_engine
+        from contexer import guard_engine
 
         if os.environ.get("CONTEXER_GUARD") == "0":
             sys.exit(0)
 
         explain = "--explain" in rest
         paths = [a for a in rest if not a.startswith("--")] or None
-        repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+        repo = _cli_repo()
 
         if explain:
             _print_guard_explain(guard_engine.guard_candidates(repo, paths, explain=True))
@@ -1127,7 +1144,7 @@ def _guard_dismiss(rest: list) -> None:
     numeric form re-derives the current candidate listing and requires an
     explicit y/N confirmation, since an index can silently mean something
     different on a later run."""
-    from contexer import store, guard_engine
+    from contexer import guard_engine
 
     i = rest.index("--dismiss")
     if i + 1 >= len(rest):
@@ -1140,7 +1157,7 @@ def _guard_dismiss(rest: list) -> None:
     # (it writes straight to the sidecar keyed on whatever path it's given), so passing
     # it something different from what guard_candidates just searched would dismiss a
     # pair found under one repo against a completely different sidecar file.
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    repo = _cli_repo()
 
     if arg.isdigit():
         candidates = guard_engine.guard_candidates(repo, paths, explain=False)
@@ -1182,7 +1199,7 @@ def _guard_arm(rest: list) -> None:
     Left to `_run_guarded`'s generic ValueError arm they came out prefixed
     "Corrupt config:" and followed by advice to fix or remove a config file,
     which is both wrong and destructive to act on."""
-    from contexer import store, guard_engine
+    from contexer import guard_engine
 
     if not rest:
         print("contexer guard arm: requires a decision id", file=sys.stderr)
@@ -1207,7 +1224,7 @@ def _guard_arm(rest: list) -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    repo = _cli_repo()
     try:
         msg = guard_engine.arm_guard(repo, entry_id, check_type, pattern=pattern,
                                       flags=_opt("--flags") or "", paths=_opt("--paths") or "",
@@ -1223,12 +1240,12 @@ def _guard_disarm(rest: list) -> None:
     ValueError refusal (unknown id) is a contract refusal, reported under this
     command's own name — see `_guard_arm` for why it must not fall through to
     `_run_guarded`'s "Corrupt config:" arm."""
-    from contexer import store, guard_engine
+    from contexer import guard_engine
 
     if not rest:
         print("contexer guard disarm: requires a decision id", file=sys.stderr)
         sys.exit(1)
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    repo = _cli_repo()
     try:
         print(guard_engine.disarm_guard(repo, rest[0]))
     except ValueError as e:
@@ -1240,7 +1257,7 @@ def _guard_list() -> None:
     """`contexer guard list` — show every currently armed rule, repo + global."""
     from contexer import store, guard_engine
 
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    repo = _cli_repo()
     personal = guard_engine._armed_rules(store._load(repo).get("entries") or []) if repo else []
     glob = guard_engine._armed_rules(store._load_global().get("entries") or [])
     rows = [(e, "personal") for e in personal] + [(e, "global") for e in glob]
@@ -1257,6 +1274,136 @@ def _guard_list() -> None:
         paths = gc.get("paths") or "*"
         print(f"  [{id8}] ({scope}, {check_type}) {title}")
         print(f"      pattern={detail!r}  paths={paths}")
+
+
+def _print_candidate_card(index: int, total: int, item: dict) -> None:
+    """Render one anchor-backfill review card: the decision, its candidate
+    paths, and the Y/E/S/Q prompt legend."""
+    print("─" * 60)
+    print(f"Decision {index} of {total}\n")
+    print(f"[{item['decision_id'][:8]}] {item['title']}")
+    print("Candidate anchors:")
+    for path in item["candidates"]:
+        print(f"  {path}")
+    print()
+    print("[Y] anchor all shown  [E] edit list (comma-separated)  [S] skip  [Q] quit")
+
+
+def _prompt_edited_paths(repo: str) -> list[str] | None:
+    """The [E]dit sub-flow: prompt for a comma-separated file list and
+    validate each entry the same way the write layer will see it — resolved
+    through _guard_relpath (rejecting ../-escaping and absolute spellings,
+    exactly what _anchor_sources itself drops) THEN existence-checked, so a
+    path this calls valid is guaranteed to actually anchor. Prints the
+    dropped (invalid) entries. Returns the valid paths (possibly empty), or
+    None on Ctrl-C/EOF."""
+    from contexer import guard_engine
+
+    try:
+        raw = input("Files (comma-separated): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+    typed = [path.strip() for path in raw.split(",") if path.strip()]
+    valid, invalid = [], []
+    for path in typed:
+        resolved = guard_engine._guard_relpath(repo, path)
+        if guard_engine._escapes_repo(resolved) or not (Path(repo) / resolved).is_file():
+            invalid.append(path)
+        else:
+            valid.append(resolved)
+    if invalid:
+        print(f"Not found in working tree, dropped: {', '.join(invalid)}")
+    return valid
+
+
+def _guard_anchors(rest: list) -> None:
+    """`contexer guard anchors [--list]` — interactive review over trusted,
+    unanchored decisions (guard_engine.anchor_candidates_for_backfill).
+    Ratified selections apply in ONE batch via store.apply_backfill_anchors,
+    on [Q]uit too — but an interrupt (Ctrl-C/EOF) aborts and writes nothing.
+
+    `--list` is the only accepted argument: it prints the candidate table
+    read-only, and is also the non-TTY/agent-facing surface, since the
+    interactive loop needs a keyboard and refuses otherwise."""
+    from contexer import store, guard_engine
+
+    unknown = [a for a in rest if a != "--list"]
+    if unknown:
+        print(f"contexer guard anchors: unknown argument(s): {' '.join(unknown)} — "
+              "the only accepted flag is --list.", file=sys.stderr)
+        sys.exit(1)
+
+    repo = _cli_repo()
+    candidates = guard_engine.anchor_candidates_for_backfill(repo)
+
+    if "--list" in rest:
+        if not candidates:
+            print("No trusted, unanchored decisions with derivable anchor candidates.")
+            return
+        print(f"{len(candidates)} decision(s) with anchor candidates:\n")
+        for decision in candidates:
+            print(f"  [{decision['decision_id'][:8]}] {decision['title']}")
+            for path in decision["candidates"]:
+                print(f"      {path}")
+        return
+
+    if not candidates:
+        print("No trusted, unanchored decisions with derivable anchor candidates.")
+        return
+
+    if not sys.stdin.isatty():
+        print("contexer guard anchors: requires an interactive terminal — use "
+              "`contexer guard anchors --list` to preview candidates without prompting.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n{len(candidates)} decision(s) with anchor candidates for "
+          f"{Path(repo).name}\n")
+
+    selections: dict = {}
+    skipped = 0
+    aborted = False
+    for i, item in enumerate(candidates, 1):
+        _print_candidate_card(i, len(candidates), item)
+
+        try:
+            choice = input("Choice: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            aborted = True
+            break
+
+        if choice in ("Y", "YES"):
+            selections[item["decision_id"]] = item["candidates"]
+        elif choice in ("E", "EDIT"):
+            valid = _prompt_edited_paths(repo)
+            if valid is None:
+                aborted = True
+                break
+            if valid:
+                selections[item["decision_id"]] = valid
+            else:
+                print("No valid files given, skipping.")
+                skipped += 1
+        elif choice in ("Q", "QUIT"):
+            break
+        else:
+            skipped += 1
+            print("Skipped.")
+
+    if aborted:
+        # An interrupt writes NOTHING — not even selections ratified before it.
+        print("\nAborted — nothing was anchored.")
+        return
+
+    applied = store.apply_backfill_anchors(repo, selections) if selections else 0
+
+    print("\n" + "─" * 60)
+    parts = []
+    if applied:
+        parts.append(f"{applied} anchored")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    print(f"Anchor backfill complete: {', '.join(parts) if parts else 'nothing changed'}.")
 
 
 _GUARD_FENCE_START = "# >>> contexer guard >>>"
@@ -1526,6 +1673,8 @@ def guard(rest: list | None = None) -> None:
         _run_guarded(lambda: _guard_disarm(rest[1:]))
     elif rest and rest[0] == "list":
         _run_guarded(_guard_list)
+    elif rest and rest[0] == "anchors":
+        _run_guarded(lambda: _guard_anchors(rest[1:]))
     elif "--dismiss" in rest:
         _run_guarded(lambda: _guard_dismiss(rest))
     elif "--install-hook" in rest:

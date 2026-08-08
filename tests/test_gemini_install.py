@@ -107,6 +107,29 @@ class TestGeminiRuntime:
         assert "wrote or edited files" in context
         assert not (store.STORE_DIR / ".gemini_pending_capture").exists()
 
+    def test_after_write_records_edited_file(self, home, tmp_path):
+        # issue #175 Task 2: the same edited-files signal Claude/Codex record via
+        # PostToolUse — Gemini records it from AfterTool(write_file|replace) instead.
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(tmp_path / "repo" / "src" / "a.py")},
+        })
+        gemini.after_write(repo, raw)
+        assert store._read_edited_files(repo) == ["src/a.py"]
+
+    def test_after_write_fail_soft_on_missing_tool_input(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        raw = json.dumps({"session_id": "s1", "prompt": "continue"})
+        out = json.loads(gemini.after_write(repo, raw))  # must not raise
+        assert "hookSpecificOutput" in out
+        assert store._read_edited_files(repo) == []
+
+    def test_after_write_fail_soft_on_garbage_stdin(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        out = json.loads(gemini.after_write(repo, "not json"))  # must not raise
+        assert "hookSpecificOutput" in out
+
     def test_compress_flag_reloads_context_without_edit_reminder(self, home, tmp_path):
         repo = str(tmp_path / "repo")
         store.update_decision(repo, "always run tests before committing", "s1", "constraint")
@@ -194,6 +217,125 @@ class TestGeminiRuntime:
     ])
     def test_entrypoints_never_raise_on_bad_stdin(self, home, entry):
         assert isinstance(entry("", "garbage"), str)
+
+
+class TestGeminiAfterWriteHookCwdFallback:
+    """Greptile P1, PR #181: in a non-git project the installed AfterTool hook's shell
+    wrapper computes an empty $REPO (`git rev-parse --show-toplevel || true`), and
+    after_write used to resolve that via `store._resolve_repo`, which — in this
+    hook-invoked process (not the MCP server, so `_SESSION_REPO` is always empty) —
+    falls through to the shared `.current_repo` pointer, recording the edit under
+    whatever OTHER repo that pointer names (or discarding it). Fixed by falling back to
+    the hook's own cwd (`store._hook_cwd_repo`), matching claude.post_write."""
+
+    def test_empty_repo_records_under_hook_cwd_in_non_git_project(self, home, tmp_path, monkeypatch):
+        project = tmp_path / "non_git_project"
+        (project / "src").mkdir(parents=True)
+        monkeypatch.chdir(project)
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(project / "src" / "a.py")},
+        })
+        out = json.loads(gemini.after_write("", raw))
+        assert "hookSpecificOutput" in out
+        assert store._read_edited_files(str(project)) == ["src/a.py"]
+
+    def test_empty_repo_never_misroutes_to_current_repo_pointer(self, home, tmp_path, monkeypatch):
+        other_repo = tmp_path / "other_repo"
+        other_repo.mkdir()
+        store.anchor_repo(str(other_repo))  # some earlier session pointed .current_repo here
+        project = tmp_path / "non_git_project"
+        (project / "src").mkdir(parents=True)
+        monkeypatch.chdir(project)
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(project / "src" / "a.py")},
+        })
+        gemini.after_write("", raw)
+        assert store._read_edited_files(str(other_repo)) == [], \
+            "edit must not be recorded under the unrelated .current_repo pointer target"
+        assert store._read_edited_files(str(project)) == ["src/a.py"]
+
+    def test_empty_repo_in_home_dir_records_nothing_and_does_not_crash(self, home, monkeypatch):
+        # _is_sane_repo rejects the home dir itself: no cwd fallback, no recording, no crash.
+        monkeypatch.chdir(home)
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(home / "a.py")},
+        })
+        out = json.loads(gemini.after_write("", raw))
+        assert "hookSpecificOutput" in out
+        assert store._read_edited_files(str(home)) == []
+
+
+class TestGeminiBeforeAgentHookCwdFallback:
+    """Greptile P1 #2, PR #181, follow-up to 3fde7aa: after_write records the edited-file
+    signal under `store._hook_cwd_repo`, but `before_agent` — where CAPTURE actually runs
+    (`capture_user_constraint`, plus the pending-review nudge and context payloads) — used
+    to resolve its repo via bare `store._resolve_repo`, which in this hook-invoked process
+    (not the MCP server, so `_SESSION_REPO` is always empty) falls through to the shared
+    `.current_repo` pointer on an empty hook-supplied repo. In a non-git project, if another
+    session moved the pointer between hook events, the edit was recorded under the
+    cwd-keyed store while capture read anchor candidates from the pointer-keyed store — a
+    writer/reader repo-key split, the same shape as the session-id bug covered by
+    TestAnchorCandidates.test_hook_written_signal_reaches_a_different_server_session in
+    test_store.py, now at the repo-key level. Fixed by resolving through
+    `store._hook_cwd_repo` in before_agent (and session_start) too, matching after_write."""
+
+    _DEICTIC_DIRECTIVE = "always validate this feature before shipping"
+
+    def test_before_agent_capture_attaches_candidates_recorded_at_the_same_cwd(
+            self, home, tmp_path, monkeypatch):
+        project = tmp_path / "non_git_project"
+        (project / "src").mkdir(parents=True)
+        monkeypatch.chdir(project)
+
+        # Writer: after_write records the edit under the cwd-keyed store.
+        write_raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(project / "src" / "a.py")},
+        })
+        gemini.after_write("", write_raw)
+        assert store._read_edited_files(str(project)) == ["src/a.py"]
+
+        # Reader: before_agent-driven capture on the SAME cwd must see that recording.
+        prompt_raw = json.dumps({"session_id": "s2", "prompt": self._DEICTIC_DIRECTIVE})
+        gemini.before_agent("", prompt_raw)
+
+        entries = [e for e in store._load(str(project))["entries"] if e["type"] == "decision"]
+        assert entries, "before_agent must have captured the deictic directive"
+        assert entries[0]["status"] == "pending_approval"
+        assert entries[0].get("anchor_candidates") == ["src/a.py"], (
+            "capture must read anchor candidates from the SAME cwd-keyed store after_write "
+            "recorded the edit into — this is the writer/reader agreement regression test"
+        )
+
+    def test_pointer_never_hijacks_either_side(self, home, tmp_path, monkeypatch):
+        other_repo = tmp_path / "other_repo"
+        other_repo.mkdir()
+        store.anchor_repo(str(other_repo))  # an earlier session pointed .current_repo here
+        project = tmp_path / "non_git_project"
+        (project / "src").mkdir(parents=True)
+        monkeypatch.chdir(project)
+
+        write_raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(project / "src" / "a.py")},
+        })
+        gemini.after_write("", write_raw)
+
+        prompt_raw = json.dumps({"session_id": "s2", "prompt": self._DEICTIC_DIRECTIVE})
+        gemini.before_agent("", prompt_raw)
+
+        other_decisions = [e for e in store._load(str(other_repo))["entries"]
+                            if e["type"] == "decision"]
+        assert other_decisions == [], \
+            "capture must not land under the unrelated .current_repo pointer target"
+        assert store._read_edited_files(str(other_repo)) == []
+
+        project_decisions = [e for e in store._load(str(project))["entries"]
+                              if e["type"] == "decision"]
+        assert project_decisions and project_decisions[0].get("anchor_candidates") == ["src/a.py"]
 
 
 class TestGeminiUninstallAndStatus:

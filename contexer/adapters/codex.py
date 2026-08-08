@@ -199,6 +199,17 @@ def install(home: Path) -> list[str]:
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
+    # PostToolUse (issue #175 Task 2): reuse claude.post_write VERBATIM — Codex shares
+    # Claude's PostToolUse hookSpecificOutput schema, so the same Python entrypoint records
+    # edited files into the per-session sidecar and arms .pending_capture. The $REPO prefix
+    # is copied character-for-character from claude.py's own post_write_cmd (`|| true`, not
+    # this file's usual `|| pwd` fallback) — verbatim reuse, established by the shelved
+    # feat/doc-drift branch. See claude.post_write's docstring for the hazard this guards
+    # against: a cwd-vs-toplevel mismatch would silently key a different sidecar.
+    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
+                      '# .pending_capture')
 
     # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
@@ -243,18 +254,25 @@ def install(home: Path) -> list[str]:
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...", "command": _py(ss_code)}]})
 
-    # PostToolUse sets the deterministic .pending_capture flag; the next UserPromptSubmit
-    # (anchor_cmd) consumes it and injects the capture reminder. No Stop hook - end-of-turn
-    # prompting added latency/tokens with no functional gain over the next-prompt anchor.
+    # PostToolUse: claude.post_write (reused verbatim) records edited files into the
+    # per-session sidecar (issue #175 Task 2) AND still arms the deterministic
+    # .pending_capture flag; the next UserPromptSubmit (anchor_cmd) consumes it and injects
+    # the capture reminder. No Stop hook - end-of-turn prompting added latency/tokens with
+    # no functional gain over the next-prompt anchor.
     put = hooks.setdefault("PostToolUse", [])
-    # Migrate (#152): the old `touch ... && echo '{}'` lost the hook's required JSON output
-    # whenever the touch failed on an unwritable ~/.contexer. Same gate as claude.py.
-    if base._in_groups(put, ".pending_capture") and not base._in_groups(put, claude._TOUCH_GUARD):
+    # Migrate: replace the old shell-only `.pending_capture` touch (pre- or post-#152) with
+    # claude.post_write. Detected by the `.pending_capture` marker without `claude.post_write`.
+    if base._in_groups(put, ".pending_capture") and not base._in_groups(put, "claude.post_write"):
         put = base._filter_groups(put, [".pending_capture"])
         hooks["PostToolUse"] = put
-    if not base._in_groups(put, ".pending_capture"):
+    # Migrate: an installed post_write hook resolving the repo from raw cwd (no $REPO
+    # threading) — mirrors claude.py's migration gate for the same doc-drift hazard.
+    if base._in_groups(put, "claude.post_write") and not base._in_groups(put, "show-toplevel"):
+        put = base._filter_groups(put, ["claude.post_write"])
+        hooks["PostToolUse"] = put
+    if not base._in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": f"touch ~/.contexer/{claude._TOUCH_GUARD}; echo '{{}}'"}]})
+            "command": post_write_cmd}]})
 
     # Retire any previously-installed Stop hook. The Stop entry stays in _EVENT_MARKERS so
     # uninstall/reinstall strips an old Stop hook from hooks.json.
@@ -341,7 +359,7 @@ def install(home: Path) -> list[str]:
 
 _EVENT_MARKERS = {
     "SessionStart":     ["get_session_start_context"],
-    "PostToolUse":      [".pending_capture"],
+    "PostToolUse":      [".pending_capture", "claude.post_write"],
     "Stop":             [".pending_capture"],
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],

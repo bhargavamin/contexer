@@ -3685,6 +3685,469 @@ class TestWorkingSet:
         assert store.working_set_ids(tmp_repo, "") == []
 
 
+# ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
+
+class TestEditedFilesSignal:
+    def _entries(self, tmp_repo):
+        return json.loads(store._edited_files_path(tmp_repo).read_text(encoding="utf-8"))
+
+    def _age(self, tmp_repo, path, seconds):
+        """Backdate one recorded path's mtime by `seconds`."""
+        entries = self._entries(tmp_repo)
+        for e in entries:
+            if e["path"] == path:
+                e["mtime"] -= seconds
+        store._edited_files_path(tmp_repo).write_text(json.dumps(entries), encoding="utf-8")
+
+    def test_record_and_read_round_trip(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+
+    def test_read_is_nondestructive(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+        assert store._edited_files_path(tmp_repo).exists()
+
+    def test_sidecar_is_keyed_per_repo_only(self, tmp_repo):
+        # The C1 bug: a session-keyed filename made the writer (host session id, from hook
+        # stdin) and the reader (server.SESSION_ID, a uuid4 minted in another process) look
+        # at different files, always. The key is now the repo slug alone.
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._edited_files_path(tmp_repo).name == f".edited_{store._slug(tmp_repo)}.json"
+
+    def test_dedup_refreshes_the_slot_to_most_recent(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        store.record_edited_file(tmp_repo, "b.py")
+        self._age(tmp_repo, "a.py", 60)
+        store.record_edited_file(tmp_repo, "a.py")
+        assert store._read_edited_files(tmp_repo) == ["b.py", "a.py"]
+        assert len(self._entries(tmp_repo)) == 2  # refreshed in place, never duplicated
+
+    def test_capped_at_fifty_evicting_oldest_by_mtime(self, tmp_repo):
+        for i in range(60):
+            store.record_edited_file(tmp_repo, f"f{i}.py")
+            self._age(tmp_repo, f"f{i}.py", 60 - i)  # f0 oldest ... f59 newest
+        files = store._read_edited_files(tmp_repo)
+        assert len(files) == 50
+        assert files[0] == "f10.py"
+        assert files[-1] == "f59.py"
+
+    def test_absolute_and_dotted_spellings_canonicalize_to_one_entry(self, tmp_repo):
+        store.record_edited_file(tmp_repo, str(Path(tmp_repo) / "src" / "a.py"))
+        store.record_edited_file(tmp_repo, "./src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+
+    def test_outside_repo_path_is_dropped(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "../outside.py")
+        assert store._read_edited_files(tmp_repo) == []
+        assert not store._edited_files_path(tmp_repo).exists()
+
+    def test_empty_file_path_is_a_silent_noop(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "")
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_entry_older_than_the_freshness_window_is_not_returned(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "stale.py")
+        store.record_edited_file(tmp_repo, "fresh.py")
+        self._age(tmp_repo, "stale.py", store._EDITED_FILES_WINDOW + 60)
+        assert store._read_edited_files(tmp_repo) == ["fresh.py"]
+
+    def test_window_is_overridable(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        self._age(tmp_repo, "a.py", 120)
+        assert store._read_edited_files(tmp_repo, window=60) == []
+        assert store._read_edited_files(tmp_repo, window=600) == ["a.py"]
+
+    def test_corrupt_sidecar_reads_as_empty(self, tmp_repo):
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        store._edited_files_path(tmp_repo).write_text("not json", encoding="utf-8")
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_legacy_string_list_sidecar_reads_as_empty(self, tmp_repo):
+        # Pre-fix sidecars held bare path strings with no timestamp — unusable for the
+        # freshness window, and their session-keyed filenames are swept by the GC anyway.
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        store._edited_files_path(tmp_repo).write_text('["a.py"]', encoding="utf-8")
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_write_error_is_fail_soft(self, tmp_repo, monkeypatch):
+        def _boom(*a):
+            raise OSError("disk full")
+        monkeypatch.setattr(store, "_atomic_write", _boom)
+        store.record_edited_file(tmp_repo, "a.py")  # must not raise
+
+    def test_gc_sweep_drops_stale_edited_files_sidecar(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        path = store._edited_files_path(tmp_repo)
+        assert path.exists()
+        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        os.utime(path, (old, old))
+        store._gc_stale_session_files()
+        assert not path.exists()
+
+    def test_gc_sweep_keeps_fresh_edited_files_sidecar(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        path = store._edited_files_path(tmp_repo)
+        store._gc_stale_session_files()
+        assert path.exists()
+
+
+# ── Anchor candidates: capture-time accrual + approval blessing (issue #175 Task 3) ──
+
+class TestAnchorCandidates:
+    def _entry(self, tmp_repo, eid):
+        return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+
+    def test_hook_written_signal_reaches_a_different_server_session(self, tmp_repo):
+        """C1 regression, end to end across the process boundary: the WRITER is the hook
+        process (host session id, straight from Claude Code's stdin) and the READER is the
+        MCP server process (server.SESSION_ID — a uuid4 minted at server start). The two ids
+        are different by construction, always; keying the sidecar on either one made this
+        feature inert in production while every same-literal-id test passed."""
+        from contexer.adapters import claude
+        raw = json.dumps({"session_id": "host-abc",
+                          "tool_input": {"file_path": str(Path(tmp_repo) / "auth" / "jwt.py")}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "3f9c2b1e-server-uuid4", "constraint")
+        assert stored
+        assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+
+    def test_candidates_older_than_the_freshness_window_are_not_attached(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        path = store._edited_files_path(tmp_repo)
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        entries[0]["mtime"] -= store._EDITED_FILES_WINDOW + 60
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_capture_without_source_files_attaches_edited_files_as_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        store.record_edited_file(tmp_repo, "auth/other.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["anchor_candidates"] == ["auth/jwt.py", "auth/other.py"]
+        assert "source_files" not in entry
+
+    def test_capture_with_source_files_never_attaches_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "unrelated.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            source_files=["auth/jwt.py"])
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_capture_with_no_edited_files_attaches_nothing(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_candidates_capped_at_ten_most_recent(self, tmp_repo):
+        for i in range(15):
+            store.record_edited_file(tmp_repo, f"f{i}.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        candidates = self._entry(tmp_repo, eid)["anchor_candidates"]
+        assert len(candidates) == store._MAX_SOURCE_FILES == 10
+        assert candidates[0] == "f5.py" and candidates[-1] == "f14.py"
+
+    def test_scan_sourced_capture_never_attaches_candidates(self, tmp_repo):
+        # update_decision isn't the scan-mining entrypoint, and _classify_level always
+        # returns "auto" (born approved) for created_by="scan" in practice, so the status
+        # gate alone already excludes this. Confirms the explicit source exclusion doesn't
+        # accidentally let a real scan capture through either.
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Functions use snake_case naming (98% of 412 functions)", "sess-1",
+            "convention", created_by="scan")
+        assert stored
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_scan_sourced_pending_entry_attaches_nothing_despite_status(self, tmp_repo, monkeypatch):
+        # _classify_level never actually routes created_by="scan" to pending_approval (it's
+        # always "auto"), so the status gate alone can never be exercised against a real scan
+        # capture — this forces that otherwise-unreachable case to prove the explicit
+        # scan/bootstrap/memory exclusion is doing real work, not just coasting on the status
+        # gate happening to agree with it.
+        monkeypatch.setattr(store, "_classify_level",
+                             lambda content, subtype, created_by: "approval_required")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Some scan-mined fact about the repo", "sess-1", "convention",
+            created_by="scan")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "pending_approval"
+        assert "anchor_candidates" not in entry
+
+    def test_bootstrap_sourced_pending_constraint_attaches_nothing(self, tmp_repo):
+        # Unlike scan, a bootstrap constraint (or an L3-signal bootstrap architecture
+        # decision) DOES reach pending_approval for real via _classify_level — this is the
+        # case the review specifically flagged: without the explicit source exclusion, the
+        # status gate alone would wrongly let a mined/bootstrap capture earn candidates from
+        # a session's edited files it never actually touched.
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "All services must standardize on JWT for auth", "sess-1", "constraint",
+            created_by="bootstrap")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "pending_approval"  # precondition: status gate alone would pass
+        assert "anchor_candidates" not in entry
+
+    def test_human_sourced_born_approved_capture_attaches_nothing_by_status(self, tmp_repo):
+        # A human-sourced capture is born approved (_classify_level: human -> "auto"), never
+        # pending_approval. Before this fix, created_by="human" was in the allowed tuple
+        # regardless of the resulting status, so it WOULD have gotten anchor_candidates
+        # attached and stranded (approve_decision on an already-approved entry only permits
+        # 'ignore', so a pending->approved blessing transition can never happen for it). The
+        # status gate now excludes it correctly, by outcome rather than by luck.
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="human")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "approved"
+        assert "anchor_candidates" not in entry
+
+    def test_recurrence_never_gains_candidates(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-2", "constraint")
+        assert not stored  # recurrence, not a new entry
+        entry = store._load(tmp_repo)["entries"][0]
+        assert "anchor_candidates" not in entry
+
+    def test_approval_blesses_candidates_into_a_real_anchor(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_commit" in entry
+        assert "anchor_candidates" not in entry
+
+    def test_approval_edit_also_blesses_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "edit", "Use JWT with RS256")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_approval_with_explicit_source_files_overrides_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(
+            tmp_repo, eid, "approve", source_files=["auth/real.py"])
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/real.py"]  # caller wins, not merged
+        assert "anchor_candidates" not in entry
+
+    def test_dismiss_leaves_candidates_untouched(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "ignore")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "ignored"
+        assert entry["anchor_candidates"] == ["auth/jwt.py"]  # dies with the entry, untouched
+        assert "source_files" not in entry
+
+    def test_skip_leaves_candidates_untouched_and_still_pending(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "skip")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "pending_approval"
+        assert entry["anchor_candidates"] == ["auth/jwt.py"]
+
+    def test_suggested_update_promotion_fills_gap_with_candidates(self, tmp_repo):
+        # A trivial (human-sourced) capture is born approved with no anchor. A later AI-inferred
+        # correction to a high-stakes subtype attaches a Suggested Update instead of applying
+        # immediately; the correction session's edited files become candidates on the base entry.
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint", created_by="human")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry["status"] == "approved" and "source_files" not in entry
+        data = store._load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["auth/jwt.py"]
+        store._save(tmp_repo, data)
+
+        ok, _msg = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid)
+        assert ok
+        assert self._entry(tmp_repo, eid).get("proposed_revision")
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_suggested_update_stashed_source_files_wins_over_candidates(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint", created_by="human")
+        assert stored
+        data = store._load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["stale_candidate.py"]
+        store._save(tmp_repo, data)
+
+        store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid, source_files=["auth/jwt.py"])
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]  # proposal's own stash wins
+        assert "anchor_candidates" not in entry
+
+    def test_bulk_approve_also_blesses_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        results = store.approve_decisions(tmp_repo, [eid], "approve")
+        assert len(results) == 1
+        assert results[0][0] == eid and results[0][1] is True
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_candidates" not in entry
+
+    def test_share_projection_never_carries_anchor_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        entry = self._entry(tmp_repo, eid)
+        assert entry.get("anchor_candidates")  # precondition: candidates actually present
+        projected = store._share_projection(entry, redact_on=False)
+        assert "anchor_candidates" not in projected
+
+    def test_review_surfaces_would_anchor_line_for_new_pending_decision(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        store.update_decision(tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        assert "would anchor: auth/jwt.py" in out
+
+    def test_review_omits_would_anchor_line_when_no_candidates(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
+        out = store.format_pending_review(tmp_repo)
+        assert "would anchor" not in out
+
+    def test_three_way_precedence_caller_source_files_wins_over_stash_and_candidates(
+            self, tmp_repo):
+        """A single entry accrues all three anchor signals over its lifetime: capture-time
+        candidates from the edited-files session, then a Suggested Update correction with
+        its own stashed source_files, then an explicit source_files at approval time. The
+        caller-passed source_files must win outright — not merged with either of the
+        other two — pinning today's precedence so a future refactor of the outer
+        approve_decision override call can't silently regress it."""
+        store.record_edited_file(tmp_repo, "candidate.py")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="human")
+        assert stored
+        # A human capture is born approved (never earns real candidates by the status gate),
+        # so hand-seed anchor_candidates directly to exercise the promotion path in isolation
+        # — simulating an entry that already carried leftover candidates from some prior state.
+        data = store._load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["candidate.py"]
+        store._save(tmp_repo, data)
+
+        # A Suggested Update correction stashes its own source_files.
+        ok, _msg = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid, source_files=["stash.py"])
+        assert ok
+
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve", source_files=["caller.py"])
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["caller.py"]  # caller wins over stash AND candidates
+        assert "anchor_candidates" not in entry
+
+
+# ── Anchor candidates on the constraint-capture path (issue #175, review fix I3) ──
+
+class TestConstraintCaptureCandidates:
+    """`capture_user_constraint`'s deictic path builds pending_approval, created_by="human"
+    entries in the HOOK process. Those become guard-TRUSTED the moment they're approved —
+    the highest-value candidate carriers there are — so they accrue candidates too."""
+
+    DEICTIC = ("I'm not going to accept any performance degradation so ensure you clarify "
+               "and ensure this feature is actual improvement")
+
+    def _entry(self, tmp_repo, eid):
+        return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+
+    def test_deictic_constraint_capture_attaches_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        assert status == "pending_approval"
+        assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+
+    def test_clean_constraint_born_approved_attaches_nothing(self, tmp_repo):
+        # Same status gate as update_decision: a born-approved entry never sees the
+        # pending->approved transition that would bless candidates, so it gets none.
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, status = store.capture_user_constraint(
+            tmp_repo, "always use uv not pip", "s1")
+        assert status == "approved"
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_candidates_capped_like_every_other_anchor_list(self, tmp_repo):
+        for i in range(15):
+            store.record_edited_file(tmp_repo, f"f{i}.py")
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        candidates = self._entry(tmp_repo, eid)["anchor_candidates"]
+        assert len(candidates) == store._MAX_SOURCE_FILES == 10
+        assert candidates[-1] == "f14.py"
+
+    def test_capture_with_no_edited_files_attaches_nothing(self, tmp_repo):
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
+    def test_candidates_render_in_the_review_surface(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        assert "would anchor: auth/jwt.py" in store.format_pending_review(tmp_repo)
+
+    def test_approval_blesses_them_into_a_real_anchor(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_commit" in entry
+        assert "anchor_candidates" not in entry
+
+
 class TestLegacyFallback:
     def test_rationale_hit_byte_identical_to_legacy(self, tmp_repo, monkeypatch):
         store.update_decision(tmp_repo, "We chose postgres over mongo for ACID transactions", RV1_SESSION, "architecture")

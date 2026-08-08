@@ -175,6 +175,115 @@ class TestClaudeCaptureEntrypoints:
         assert claude.rationale(tmp_repo, "garbage") == "{}"
 
 
+class TestClaudePostWrite:
+    """PostToolUse (Write|Edit) entrypoint (issue #175 Task 2): records the edited file
+    into the per-repo sidecar AND arms .pending_capture. Replaces the old shell-only
+    `touch ~/.contexer/.pending_capture` hook."""
+
+    def test_payload_round_trip_records_edited_file(self, tmp_repo):
+        raw = _json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(Path(tmp_repo) / "src" / "a.py")},
+        })
+        out = claude.post_write(tmp_repo, raw)
+        assert out == "{}"
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+
+    def test_arms_pending_capture_flag(self, tmp_repo):
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        assert not (store.STORE_DIR / ".pending_capture").exists()
+        claude.post_write(tmp_repo, raw)
+        assert (store.STORE_DIR / ".pending_capture").exists()
+
+    def test_always_returns_empty_json(self, tmp_repo):
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+
+    def test_fail_soft_on_garbage_stdin(self, tmp_repo):
+        assert claude.post_write(tmp_repo, "not json") == "{}"
+        # Still arms the flag — a malformed payload must not cost the deterministic
+        # capture-reminder signal, only the edited-file recording (which has nothing to record).
+        assert (store.STORE_DIR / ".pending_capture").exists()
+
+    def test_fail_soft_on_missing_tool_input(self, tmp_repo):
+        raw = _json.dumps({"session_id": "s1"})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_fail_soft_on_non_string_file_path(self, tmp_repo):
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": 42}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_records_even_when_the_payload_carries_no_session_id(self, tmp_repo):
+        # The sidecar is keyed per repo, so the host's session id is irrelevant to it (C1):
+        # a payload without one must still record, not silently drop the signal.
+        raw = _json.dumps({"tool_input": {"file_path": "a.py"}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        assert store._read_edited_files(tmp_repo) == ["a.py"]
+
+    def test_pending_capture_write_failure_is_fail_soft(self, tmp_repo, monkeypatch):
+        # The flag write is best-effort (#152): an unwritable STORE_DIR must not break the
+        # hook's mandatory JSON output, mirroring the shell hook's `touch ... 2>/dev/null`.
+        def _boom(self, *a, **k):
+            raise OSError("nope")
+        monkeypatch.setattr(Path, "mkdir", _boom)
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+
+    def test_record_edited_file_failure_is_fail_soft(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(store, "record_edited_file",
+                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+
+    def test_record_edited_file_failure_does_not_skip_the_pending_capture_arm(self, tmp_repo, monkeypatch):
+        # The two best-effort signals must fail independently: a non-OSError escaping
+        # record_edited_file (e.g. from guard_engine) must not also cost the deterministic
+        # capture-reminder flag — they are wrapped in separate try/except blocks.
+        monkeypatch.setattr(store, "record_edited_file",
+                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        assert not (store.STORE_DIR / ".pending_capture").exists()
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        assert (store.STORE_DIR / ".pending_capture").exists()
+
+
+class TestClaudePostWriteRepoResolutionParity:
+    """The doc-drift hazard: post_write's shell wrapper must resolve $REPO IDENTICALLY to
+    every sibling UserPromptSubmit hook (git-toplevel, never raw cwd) — a mismatch would
+    key record_edited_file's write and Task 3's capture-time read under different sidecar
+    slugs, silently killing the feature for any project not opened at its git root."""
+
+    def _post_toolusecmd(self, home):
+        settings = _json.loads((home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for grp in settings["hooks"]["PostToolUse"]
+                for h in grp.get("hooks", []) if "command" in h]
+        return next(c for c in cmds if "claude.post_write" in c)
+
+    def _sibling_prefix(self, home):
+        settings = _json.loads((home / ".claude" / "settings.json").read_text())
+        cmds = [h["command"] for grp in settings["hooks"]["UserPromptSubmit"]
+                for h in grp.get("hooks", []) if "command" in h]
+        rationale_cmd = next(c for c in cmds if "claude.rationale" in c)
+        # Repo-resolution prefix: everything up to and including the `&&` that starts
+        # the python invocation.
+        return rationale_cmd.split("&&")[0] + "&&"
+
+    def test_post_write_prefix_matches_sibling_user_prompt_submit_hooks(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from contexer.cli import install
+        install()
+        post_write_cmd = self._post_toolusecmd(tmp_path)
+        sibling_prefix = self._sibling_prefix(tmp_path)
+        assert post_write_cmd.startswith(sibling_prefix), (
+            f"post_write's $REPO resolution {post_write_cmd!r} must match the sibling "
+            f"UserPromptSubmit hooks' prefix {sibling_prefix!r}"
+        )
+        assert "show-toplevel" in sibling_prefix  # guard: the prefix we compared against
+                                                     # actually uses git-toplevel resolution
+
+
 class TestCursorFormatters:
     def test_session_start_injects_additional_context_with_nudge(self):
         d = cursor.format_session_start({"status": "ignored on cursor", "context": "RULES"})

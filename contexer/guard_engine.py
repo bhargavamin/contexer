@@ -133,6 +133,13 @@ def _guard_relpath(repo: str, path: str) -> str:
         return ""
 
 
+def _escapes_repo(relpath: str) -> bool:
+    """True iff `relpath` (assumed already run through _guard_relpath) cannot
+    denote a file inside the repo: empty, "..", "../"-prefixed, or absolute."""
+    return (not relpath or relpath == ".." or relpath.startswith("../")
+            or os.path.isabs(relpath))
+
+
 _GUARD_PATH_ARTIFACT_RE = re.compile(r"^[\w][\w./-]*\.\w+$")
 _GUARD_MODULE_ARTIFACT_RE = re.compile(r"^[a-z_]\w*(\.[a-z_]\w*)+$")
 
@@ -511,6 +518,86 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
     else:
         raw = _staged_files(repo_path)
     return [p for p in (_guard_relpath(repo_path, s) for s in raw) if p]
+
+
+# ── Assisted anchor backfill (Task 1 of #175) — read-only candidate derivation ─
+# for `contexer guard anchors`. The stock converter: the existing corpus is
+# unanchored (trusted+anchored == 0 on real stores), so this mines each trusted
+# decision's OWN content for candidate anchors instead of waiting for a future
+# capture/approval to anchor it. Read-only (never calls _save); the CLI (cli.py's
+# _guard_anchors) ratifies selections per decision and applies them in one batch
+# via store.apply_backfill_anchors.
+
+def _artifact_path_spellings(artifact: str) -> list[str]:
+    """Every repo-relative path spelling `artifact` could refer to, before an
+    existence check. The literal artifact is always tried first — a two-segment
+    filename like "config.yaml" also satisfies _GUARD_MODULE_ARTIFACT_RE's
+    lowercase-dotted-segments shape, so treating module-mapping as exclusive of
+    the literal spelling would mistake it for a "config/yaml.py" module and
+    never try the real file. When the artifact is ALSO dotted-module-shaped
+    (mirrors _artifact_path_match's / _guard_artifact_matches's module-mapping),
+    its two possible file spellings are appended as further guesses. The caller's
+    existence check is what actually decides which spelling (if any) is real."""
+    candidates = [artifact]
+    if "/" not in artifact and _GUARD_MODULE_ARTIFACT_RE.match(artifact):
+        as_path = artifact.replace(".", "/")
+        candidates.append(f"{as_path}.py")
+        candidates.append(f"{as_path}/__init__.py")
+    return candidates
+
+
+def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list[str]:
+    """Existing-file anchor candidates for one decision's content: every
+    path-like artifact it mentions (_guard_content_artifacts), expanded to its
+    possible file spellings (_artifact_path_spellings), canonicalized, and kept
+    only if the file exists in the working tree. Deduped (first-seen order)
+    and capped at store._MAX_SOURCE_FILES — the same cap _anchor_sources
+    itself enforces on write."""
+    seen: set[str] = set()
+    results: list[str] = []
+    for artifact in _guard_content_artifacts(content):
+        for raw_path in _artifact_path_spellings(artifact):
+            resolved = _guard_relpath(repo, raw_path)
+            if resolved in seen or _escapes_repo(resolved):
+                continue
+            if not (repo_root / resolved).is_file():
+                continue
+            seen.add(resolved)
+            results.append(resolved)
+            if len(results) >= store._MAX_SOURCE_FILES:
+                return results
+    return results
+
+
+def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
+    """For every trusted, unanchored decision in the repo store, derive
+    candidate anchor paths from its content (_candidate_paths_for_entry) and
+    skip decisions with no surviving candidates — no rename detection, so a
+    renamed file yields nothing rather than a guess.
+
+    Returns [{decision_id, title, candidates}, ...]. Read-only (never calls
+    _save) and fail-soft (any failure returns [])."""
+    try:
+        repo = store._resolve_repo(repo_path)
+        entries = store._load(repo).get("entries") or []
+        repo_root = Path(repo)
+        results: list[dict] = []
+        for entry in entries:
+            if entry.get("source_files"):
+                continue
+            if not _guard_trusted(entry):
+                continue
+            rev = store._current_revision(entry)
+            content = rev.get("content", "") if rev else entry.get("content", "")
+            title = entry.get("title") or store._derive_title(content)
+            candidates = _candidate_paths_for_entry(repo, repo_root, content)
+            if not candidates:
+                continue
+            results.append({"decision_id": entry.get("id", ""), "title": title,
+                             "candidates": candidates})
+        return results
+    except Exception:
+        return []
 
 
 # ── Commit-time guard: Tier-2 armed rules (Task 3) — machine-checkable, ──────

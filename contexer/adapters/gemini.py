@@ -85,9 +85,17 @@ def _flag_set(path: Path) -> None:
 
 
 def session_start(repo_path: str, raw: str) -> str:
-    """Inject stored rules on startup, resume, and /clear without user-facing noise."""
+    """Inject stored rules on startup, resume, and /clear without user-facing noise.
+
+    Repo resolution is `_hook_cwd_repo`, NOT `_resolve_repo` (Greptile P1 #2, PR #181,
+    follow-up to 3fde7aa): this is a hook-invoked process, so `_SESSION_REPO` is always
+    empty here and bare `_resolve_repo` would fall through to the shared `.current_repo`
+    pointer on an empty hook-supplied repo — which another session can have pointed at a
+    DIFFERENT repo between hook events. See `after_write`'s docstring for the full
+    rationale; this mirrors it so SessionStart keys the same store `before_agent` and
+    `after_write` do."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store._hook_cwd_repo(repo_path)
         if not repo:
             return _output("SessionStart", [])
         _anchor(repo)
@@ -106,9 +114,21 @@ def session_start(repo_path: str, raw: str) -> str:
 
 
 def before_agent(repo_path: str, raw: str) -> str:
-    """Run per-prompt capture, retrieval, and deferred post-compression reinjection."""
+    """Run per-prompt capture, retrieval, and deferred post-compression reinjection.
+
+    Repo resolution is `_hook_cwd_repo`, NOT `_resolve_repo` (Greptile P1 #2, PR #181,
+    follow-up to 3fde7aa): CAPTURE runs here (capture_user_constraint, the pending-review
+    nudge, context payloads), so this must key the SAME store `after_write` records edits
+    into. Before this fix, an empty hook-supplied repo (non-git project) fell through
+    `_resolve_repo` to the shared `.current_repo` pointer, which another session can move
+    between hook events — a writer/reader repo-key split identical in shape to the
+    session-id bug: `after_write` recorded the edit under the cwd-keyed store while capture
+    read anchor candidates from the pointer-keyed store, so pending captures in non-git
+    Gemini projects got no anchor candidates. `_hook_cwd_repo` is guarded by `_is_sane_repo`,
+    so a hook firing in the home/config dir still resolves to nothing rather than a junk
+    store."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store._hook_cwd_repo(repo_path)
         if not repo:
             return _output("BeforeAgent", [])
         _anchor(repo)
@@ -164,8 +184,36 @@ def before_agent(repo_path: str, raw: str) -> str:
 
 
 def after_write(repo_path: str, raw: str) -> str:
-    """AfterTool(write_file|replace): immediately remind the AI to surface and store any decision."""
+    """AfterTool(write_file|replace): immediately remind the AI to surface and store any
+    decision, AND record the edited file into the per-session sidecar (issue #175 Task 2)
+    so a later capture call can propose anchor candidates without asking the model to name
+    source_files itself — same signal Claude/Codex's post_write records via PostToolUse.
+
+    The recording half is wrapped in its own try/except: a missing/garbage tool_input, or
+    an unresolvable repo, must never cost the reminder this hook exists to deliver.
+
+    Repo resolution is `_hook_cwd_repo`, NOT `_resolve_repo` (Greptile P1, PR #181): this
+    is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
+    and `_resolve_repo` would fall through to the shared `.current_repo` pointer — which can
+    name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
+    var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
+    are first-class stores keyed by absolute path, so silently recording under whatever repo
+    the pointer happens to hold (or discarding the edit if it holds nothing sane) starves the
+    real project's pending captures of anchor candidates. `_hook_cwd_repo` falls back to this
+    process's own cwd instead — which IS the project directory for a hook — guarded by
+    `_is_sane_repo` so a session opened in the home/config dir still records nothing. Matches
+    claude.post_write's identical fallback for the sibling PostToolUse recording path."""
     _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
+    try:
+        repo = store._hook_cwd_repo(repo_path)
+        if repo:
+            data = json.loads(raw)
+            tool_input = data.get("tool_input") if isinstance(data, dict) else None
+            fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+            if isinstance(fp, str) and fp:
+                store.record_edited_file(repo, fp)
+    except Exception:
+        pass
     return json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "AfterTool",

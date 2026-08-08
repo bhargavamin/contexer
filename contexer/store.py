@@ -1221,6 +1221,18 @@ def capture_user_constraint(
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
                                     created_by="human", status=status)
+        # Guard anchor accrual (issue #175): a deictic directive lands pending_approval and
+        # created_by="human" — the ONE provenance that is guard-TRUSTED the moment it is
+        # approved — so it is the highest-value candidate carrier there is. Same status gate
+        # as update_decision's: only a pending entry can ever see the pending->approved
+        # transition where _apply_approval blesses candidates into a real anchor; a clean
+        # directive is born approved and would just strand them. Same never-guard-input
+        # semantics too: _guard_pairs never reads `anchor_candidates`, and the review surface
+        # renders them as `would anchor:` before the developer signs off.
+        if status == "pending_approval":
+            candidates = _read_edited_files(repo_path)
+            if candidates:
+                entry["anchor_candidates"] = candidates[-_MAX_SOURCE_FILES:]
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -1785,13 +1797,53 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     # repository-relative staged path (guard pairing silently dead) and git diff
     # rejects/ignores it (staleness silently dead) — reject it at the door rather
     # than storing a dead anchor.
-    files = [p for p in canon
-             if p and p != ".." and not p.startswith("../") and not os.path.isabs(p)
-             ][:_MAX_SOURCE_FILES]
+    files = [p for p in canon if not guard_engine._escapes_repo(p)][:_MAX_SOURCE_FILES]
     if not files:
         return
     entry["source_files"] = files
     entry["anchor_commit"] = _git(repo_path, "rev-parse", "HEAD", timeout=_GIT_FAST_TIMEOUT) or ""
+
+
+def apply_backfill_anchors(repo_path: str, selections: dict) -> int:
+    """Batch-apply CLI-ratified anchor selections from `contexer guard anchors`
+    (guard_engine.anchor_candidates_for_backfill's interactive counterpart):
+    `selections` is {decision_id: [file, ...]}, one entry per decision the
+    developer chose to anchor this run. ONE load + lock + save for the whole
+    batch — mirrors bootstrap_apply's one-load-one-save shape rather than a
+    save per decision, so a multi-decision backfill run costs one write, not N.
+
+    A decision_id with no matching entry (concurrent session removed/ignored it
+    between the CLI's read and this write) is silently skipped — same
+    read-then-write race tolerance as every other batch mutation in this
+    module. An entry that is ALREADY anchored by the time this batch runs
+    (a concurrent session anchored it — capture, approval, or a second
+    `guard anchors` run — while this one was mid-loop) is skipped outright,
+    never re-anchored: "never overwrite an existing anchor" is a write-layer
+    invariant here, not merely a candidate-generation filter (candidate
+    generation already excludes anchored decisions, but that read happened
+    before this write, so the check must be repeated at write time too). The
+    actual canonicalization + anchor_commit stamping is delegated to
+    _anchor_sources, so an empty or all-unresolvable file list for a decision
+    is a no-op for that decision (not counted as anchored). Returns the count
+    of decisions actually anchored."""
+    if not selections:
+        return 0
+    repo = _resolve_repo(repo_path)
+    with _store_lock(_slug(repo)):
+        data = _load(repo)
+        anchored = 0
+        changed = False
+        for entry in data["entries"]:
+            files = selections.get(entry.get("id", ""))
+            if not files or entry.get("source_files"):
+                continue
+            _anchor_sources(repo, entry, files)
+            if entry.get("source_files"):
+                anchored += 1
+                changed = True
+        if changed:
+            _save(repo, data)
+    return anchored
 
 
 def _staleness_note(repo_path: str, entry: dict) -> str:
@@ -1979,6 +2031,28 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
             return False, None          # discarded silently, like any other filtered capture
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
         _anchor_sources(repo_path, entry, source_files)
+        # Guard anchor accrual (issue #175 Task 3): when the model didn't name source_files
+        # itself, the session's recently-edited files are a candidate anchor — NOT a real one.
+        # `anchor_candidates` is a distinct field the guard's pairing engine never reads
+        # (_guard_pairs only consumes `source_files`), so a candidate can never pair before a
+        # human blesses it via approval (see _apply_approval). Gated on the entry's ACTUAL
+        # resulting status (pending_approval), not on created_by alone: pending_approval is
+        # exactly the status _apply_approval's plain approve/edit flow blesses on a
+        # pending->approved transition, so gating on that outcome directly is self-enforcing —
+        # a future created_by value can't silently strand candidates on a born-approved or
+        # born-suggested entry the way an enumerated created_by tuple could (a "human" capture
+        # is always born approved via _classify_level, so the old created_by-only gate WAS
+        # stranding candidates on it). The status gate alone isn't quite enough, though: a
+        # mined/bootstrap capture (e.g. a bootstrap constraint, or an L3-signal bootstrap
+        # architecture decision) can also land pending_approval, but it never touched a
+        # specific file THIS session — the edited-files signal only correlates with a live
+        # conversational capture — so scan/bootstrap/memory are excluded explicitly too.
+        if (not entry.get("source_files")
+                and created_by not in ("scan", "bootstrap", "memory")
+                and _entry_status(entry) == "pending_approval"):
+            candidates = _read_edited_files(repo_path)
+            if candidates:
+                entry["anchor_candidates"] = candidates[-_MAX_SOURCE_FILES:]
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         _save(repo_path, data)
@@ -2026,11 +2100,16 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
         ok, msg, changed = _apply_approval(
-            data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path)
+            data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path,
+            has_caller_source_files=bool(source_files))
         if ok and source_files:
             entry = _entry_by_id(data["entries"], entry_id)
             if entry is not None:
                 _anchor_sources(repo_path, entry, source_files)
+                # Caller-named source_files win outright — any candidates accrued from the
+                # session's edited files described a guess that's now moot, cleared rather
+                # than left dangling on an already-anchored entry.
+                entry.pop("anchor_candidates", None)
                 changed = True
         if changed:
             _save(repo_path, data)
@@ -2038,7 +2117,8 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
 
 def _apply_approval(data: dict, entry_id: str, action: str, content: str,
-                    now: str, repo_path: str) -> tuple[bool, str, bool]:
+                    now: str, repo_path: str, *,
+                    has_caller_source_files: bool = False) -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory — no load, no save (the caller owns
     those, batching many actions into one load+save via `approve_decisions`). NOT lock-free,
     though: an approve/edit that anchors (`_anchor_sources`, via `_promote_proposal` or
@@ -2046,7 +2126,12 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     `approve_decisions`) invokes this only from inside its own `_store_lock(...)` block — so
     that git subprocess runs under the store lock, not lock-free. Returns (success, message,
     changed); `changed` lets the caller save only when something mutated. Resolves an exact id
-    first, then an 8-char prefix (consistent with replace_id / get_shareable)."""
+    first, then an 8-char prefix (consistent with replace_id / get_shareable).
+
+    `has_caller_source_files`: True when `approve_decision` was itself given `source_files` —
+    it applies those (and clears any `anchor_candidates`) AFTER this returns, so this function
+    must not waste a git call promoting candidates that are about to be overridden anyway (see
+    the candidate-blessing branches below, issue #175 Task 3)."""
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
     if entry is None and entry_id:
         entry = next((e for e in data["entries"] if e.get("id", "").startswith(entry_id)), None)
@@ -2075,6 +2160,17 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         # that already refreshed to the same HEAD, so this would be a redundant git call.
         if not prop_had_source_files and entry.get("source_files"):
             _anchor_sources(repo_path, entry, entry["source_files"])
+        elif (not prop_had_source_files and not has_caller_source_files
+                and entry.get("anchor_candidates")):
+            # Nothing else anchors this entry — the Suggested Update's own stashed
+            # source_files wins when present (above), and a caller-passed source_files
+            # is about to override anyway; only then do the accrued candidates fill the gap.
+            _anchor_sources(repo_path, entry, entry["anchor_candidates"])
+        # A real anchor (however it got here — the proposal's own stash, a refreshed prior
+        # anchor, or the candidates promoted just above) makes any leftover candidate guess
+        # moot; drop it rather than leave stale data dangling on an already-anchored entry.
+        if entry.get("source_files"):
+            entry.pop("anchor_candidates", None)
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2124,6 +2220,12 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     # captured with source_files while still pending) gets its anchor_commit refreshed here too.
     if entry.get("source_files"):
         _anchor_sources(repo_path, entry, entry["source_files"])
+    elif not has_caller_source_files and entry.get("anchor_candidates"):
+        # The pending->approved transition IS the human signature the candidates were waiting
+        # on: bless them into a real anchor now, via the one anchoring path (_anchor_sources),
+        # and drop the candidate field — it has served its purpose.
+        _anchor_sources(repo_path, entry, entry["anchor_candidates"])
+        entry.pop("anchor_candidates", None)
     stored_content = _current_content(entry)
     preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2194,6 +2296,8 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
             lines.append(f'    detected: "{detected}"')
+            if d.get("anchor_candidates"):
+                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
         else:
             title, body = _title_and_body(d)
@@ -2202,6 +2306,8 @@ def format_pending_review(repo_path: str) -> str:
                 clipped_body = _clip_body(body)
                 clipped = clipped or clipped_body != body
                 lines.append(f'    "{clipped_body}"')
+            if d.get("anchor_candidates"):
+                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
     lines.append("\nReview each with the developer before approving. To clear several at once, "
                  'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
@@ -4639,6 +4745,88 @@ def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
         pass
 
 
+# ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
+# Records WHICH files the repo's recent turns edited, so a later capture call can propose
+# anchor candidates (Task 3) without asking the model to name source_files itself.
+# Canonicalized through guard_engine._guard_relpath, the single chokepoint every other
+# guard/anchor path already goes through.
+#
+# KEYED PER REPO, NOT PER SESSION — and that is load-bearing. The writer is a HOOK process
+# (claude.post_write / gemini.after_write), whose session id comes from the host's hook
+# stdin; the reader is the MCP SERVER process, whose session id is a uuid4 minted at server
+# start. Those two ids are different by construction, in every real install, so a
+# session-keyed filename meant the writer and reader never once looked at the same file —
+# the feature was inert in production while every test (which handed both sides the same
+# literal id) passed. Repo-keying removes the identity mismatch entirely; freshness is
+# bounded by each entry's own timestamp instead (see _EDITED_FILES_WINDOW), which also
+# caps how stale a proposed candidate can be. Concurrent writers (two windows on one repo)
+# race last-writer-wins on an atomic whole-file write: at worst one edit record is lost,
+# which costs a candidate suggestion and nothing else.
+_EDITED_FILES_CAP = 50       # most recent edits kept; a candidate list only needs these
+_EDITED_FILES_WINDOW = 1800  # seconds: an edit older than this no longer correlates
+
+
+def _edited_files_path(repo_path: str) -> Path:
+    """Per-repo edited-files sidecar. Still matches the `.edited_*.json` GC pattern."""
+    return STORE_DIR / f".edited_{_slug(repo_path)}.json"
+
+
+def record_edited_file(repo_path: str, file_path: str) -> None:
+    """Record file_path as edited in this repo, stamped with the current time. Dedup: a
+    path already present has its timestamp refreshed in place (never duplicated). Capped at
+    _EDITED_FILES_CAP entries, evicting the oldest by timestamp. Silent no-op on a falsy
+    file_path.
+
+    Canonicalized via guard_engine._guard_relpath — the same chokepoint _anchor_sources
+    uses — so `src/f.py`, `./src/f.py`, and an absolute spelling of the SAME file dedup to
+    one entry, and a path outside the repo (which _guard_relpath maps to a "../"-prefixed
+    string rather than failing) is dropped rather than wasting a cap slot on a candidate
+    that could never pair against a guard-staged repo-relative path. Imported locally, not
+    at module top, for the same load-order reason _anchor_sources does: guard_engine
+    imports store at ITS top, so an eager import here would recreate that cycle.
+
+    Fail-soft: a write error must never break the calling hook."""
+    if not file_path:
+        return
+    try:
+        from contexer import guard_engine
+        relpath = guard_engine._guard_relpath(repo_path, file_path)
+        if guard_engine._escapes_repo(relpath):
+            return
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        entries = [e for e in _load_edited_entries(repo_path) if e["path"] != relpath]
+        entries.append({"path": relpath, "mtime": time.time()})
+        entries.sort(key=lambda e: e["mtime"])
+        entries = entries[-_EDITED_FILES_CAP:]
+        _atomic_write(_edited_files_path(repo_path), json.dumps(entries))
+    except OSError:
+        pass
+
+
+def _load_edited_entries(repo_path: str) -> list[dict]:
+    """Raw {path, mtime} records, oldest first. Fail-soft: a missing, corrupt, or
+    pre-fix (bare string list) sidecar reads as []."""
+    try:
+        raw = json.loads(_edited_files_path(repo_path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    out = [e for e in raw
+           if isinstance(e, dict) and isinstance(e.get("path"), str) and e["path"]
+           and isinstance(e.get("mtime"), (int, float))]
+    out.sort(key=lambda e: e["mtime"])
+    return out
+
+
+def _read_edited_files(repo_path: str, window: float = _EDITED_FILES_WINDOW) -> list[str]:
+    """Files edited in this repo within the last `window` seconds, oldest to newest.
+    Non-destructive (several decisions captured in one turn each see the same list) —
+    the window, not a clearing read, is what keeps a candidate from going stale."""
+    cutoff = time.time() - window
+    return [e["path"] for e in _load_edited_entries(repo_path) if e["mtime"] >= cutoff]
+
+
 def _retrieval_log(repo_path: str, event: dict) -> None:
     """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
     path = STORE_DIR / f".retrieval_{_slug(repo_path)}.jsonl"
@@ -4801,14 +4989,18 @@ def migrate_worktree_strays(repo_path: str) -> int:
 
 
 def _gc_stale_session_files() -> None:
-    """At non-resume session start: drop working-set dedup files and retrieval logs whose
-    session is well over — old enough that dedup/history no longer matters. Fail-soft,
-    a quick glob+mtime check; never touches the retrieval index sidecar (owned by A2)."""
+    """At non-resume session start: drop working-set dedup files, retrieval logs, and
+    edited-files sidecars whose session is well over — old enough that dedup/history no
+    longer matters. Fail-soft, a quick glob+mtime check; never touches the retrieval index
+    sidecar (owned by A2)."""
     try:
         cutoff = time.time() - _WS_GC_AGE_SECONDS
         # .bootstrap_offered_* is normally cleared by its own repo's next session start;
         # this catches flags for repos that are never opened again, so they don't accumulate.
-        for pattern in (".ws_*.json", ".retrieval_*.jsonl", ".bootstrap_offered_*"):
+        # .edited_*.json is normally cleared by its own consumer's read (Task 3's capture-
+        # time read, clear=False, leaves it for the sweep — or a session that never reads
+        # it at all); this catches those so they don't accumulate either.
+        for pattern in (".ws_*.json", ".retrieval_*.jsonl", ".bootstrap_offered_*", ".edited_*.json"):
             for p in STORE_DIR.glob(pattern):
                 try:
                     if p.stat().st_mtime < cutoff:

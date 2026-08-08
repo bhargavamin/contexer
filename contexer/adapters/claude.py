@@ -27,14 +27,7 @@ NAME = "claude"
 # recognize and replace stale hooks (e.g. a dead from-source `uv run --directory`).
 _HOOK_SENTINEL = "contexer-managed-hook"
 
-# The `.pending_capture` touch, with its stderr silenced (#152). Doubles as the migration
-# fingerprint for that hook: the pre-#152 command used a bare `.pending_capture`, so an
-# installed hook lacking this exact substring is the old, sandbox-fragile form. Kept as one
-# constant so the generated command and the gate that replaces it can never drift apart.
-# Shared verbatim with the Codex adapter, which generates the same hook.
-_TOUCH_GUARD = ".pending_capture 2>/dev/null"
-
-# Likewise for the UserPromptSubmit anchor: the flag-clearing `rm` with stderr silenced is
+# For the UserPromptSubmit anchor: the flag-clearing `rm` with stderr silenced is
 # unique to that hook's command and absent from the pre-#152 form, so it identifies an
 # anchor hook that still writes ~/.contexer unguarded. Also shared with the Codex adapter.
 _ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
@@ -208,6 +201,62 @@ def rationale(repo_path: str, raw: str) -> str:
             "systemMessage": msg,
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+    except Exception:
+        return "{}"
+
+
+def post_write(repo_path: str, raw: str) -> str:
+    """PostToolUse (Write|Edit): record the file(s) this turn edited into the PER-REPO
+    edited-files sidecar (issue #175 Task 2 — a deterministic flow signal capture can later
+    propose anchor candidates from) AND arm the .pending_capture flag. Silent, fail-soft,
+    never raises; always returns "{}".
+
+    The host session id in `raw` is deliberately NOT used to key that sidecar: this hook is
+    a different process from the MCP server that later reads it, and the two never share a
+    session id (see store.record_edited_file). `raw` is still parsed for `tool_input`.
+
+    Replaces the old shell-only `touch .pending_capture` PostToolUse hook: this Python
+    entrypoint does both jobs so the file-edit signal and the capture-reminder flag stay
+    in one hook, exactly as the shelved feat/doc-drift branch shipped it.
+
+    THE HAZARD THIS MUST NOT REPEAT: doc-drift's post_write shell wrapper resolved the repo
+    via raw cwd while its sibling UserPromptSubmit hooks resolved it via `git rev-parse
+    --show-toplevel` — a mismatch that silently keyed a DIFFERENT sidecar slug (record_
+    edited_file wrote under one repo identity, the reader looked under another) and killed
+    the feature for any project not opened at its git root. The installed wrapper for THIS
+    hook (see install()'s post_write_cmd) copies the exact `REPO=$(git rev-parse
+    --show-toplevel 2>/dev/null || true) &&` prefix every other UserPromptSubmit hook here
+    uses (cap_con/cap_rat/cap_poll/review_cmd), so record_edited_file's write and Task 3's
+    capture-time read key the identical sidecar. store._hook_cwd_repo is still the fallback
+    for a non-git project (first-class stores keyed by absolute path), matching every other
+    hook-invoked entrypoint in this module.
+
+    Touching ~/.contexer/.pending_capture (via store.STORE_DIR, not a hardcoded home path,
+    so tests that redirect STORE_DIR never touch the real store — #152's best-effort
+    invariant) preserves the capture-reminder signal the shell hook this replaces used to
+    set (consumed by the next UserPromptSubmit anchor)."""
+    try:
+        repo = store._hook_cwd_repo(repo_path)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+        tool_input = data.get("tool_input") if isinstance(data, dict) else None
+        fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        if isinstance(fp, str) and fp:
+            # Own try/except: this signal must not share failure fate with the
+            # .pending_capture arm below — a non-OSError escaping record_edited_file
+            # (e.g. from guard_engine) must not also cost the capture reminder.
+            try:
+                store.record_edited_file(repo, fp)
+            except Exception:
+                pass
+        try:
+            store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            (store.STORE_DIR / ".pending_capture").touch()
+        except OSError:
+            pass
+        return "{}"
     except Exception:
         return "{}"
 
@@ -492,6 +541,16 @@ def install(home: Path) -> list[str]:
                   f'"{python}" -c "from contexer.adapters import claude; import sys; '
                   f'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
+    # PostToolUse (Write|Edit): records edited files into the per-session sidecar (issue
+    # #175 Task 2) AND still arms .pending_capture — replaces the old pure-shell touch.
+    # $REPO resolution is copied VERBATIM from the sibling UserPromptSubmit hooks above
+    # (cap_con/cap_rat/cap_poll/review_cmd) — see post_write's docstring for why a
+    # cwd-vs-toplevel mismatch here would silently kill the feature.
+    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      f'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
+                      f'# {_HOOK_SENTINEL} .pending_capture')
+
     contexer_bin = shutil.which("contexer") or "contexer"
 
     # MCP server (~/.claude.json)
@@ -537,22 +596,32 @@ def install(home: Path) -> list[str]:
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
 
-    # PostToolUse: set the .pending_capture flag after any Write/Edit. This is the single
-    # deterministic "files changed this turn" signal. It is consumed by the next
-    # UserPromptSubmit (anchor_cmd), which injects the capture reminder at the start of the
-    # next prompt - a non-interrupting moment. No Stop hook: end-of-turn prompting added
-    # latency + tokens and depended on model behavior for no functional gain (the anchor
-    # already delivers the same reminder deterministically).
+    # PostToolUse: claude.post_write records edited files into the per-session sidecar
+    # (issue #175 Task 2) AND still arms the .pending_capture flag. The flag is consumed by
+    # the next UserPromptSubmit (anchor_cmd), which injects the capture reminder at the
+    # start of the next prompt - a non-interrupting moment. No Stop hook: end-of-turn
+    # prompting added latency + tokens and depended on model behavior for no functional
+    # gain (the anchor already delivers the same reminder deterministically).
     put = hooks.setdefault("PostToolUse", [])
-    # Migrate: the pre-#152 form was `touch ... && echo '{}'` — an unwritable ~/.contexer
-    # made touch fail, so the `&&` swallowed the hook's required JSON output and the hook
-    # exited non-zero. `;` + silenced stderr: the flag is best-effort, the echo is not.
-    if _in_groups(put, ".pending_capture") and not _in_groups(put, _TOUCH_GUARD):
+    # Migrate: replace the old shell-only `.pending_capture` touch (pre- or post-#152) with
+    # the Python post_write hook — it records edited files AND still touches
+    # .pending_capture. Detected by the `.pending_capture` marker without `claude.post_write`
+    # (which the migrated hook also carries via its trailing comment token), so this is a
+    # one-time swap and idempotent thereafter.
+    if _in_groups(put, ".pending_capture") and not _in_groups(put, "claude.post_write"):
         put = _filter_groups(put, [".pending_capture"])
         hooks["PostToolUse"] = put
-    if not _in_groups(put, ".pending_capture"):
+    # Migrate: an installed post_write hook that resolves the repo from raw process cwd (no
+    # $REPO threading via `git rev-parse --show-toplevel`) diverges from record_edited_file's
+    # reader whenever cwd is a monorepo subdirectory — see post_write's docstring for the
+    # doc-drift hazard this guards against. Detected by the absence of "show-toplevel"
+    # alongside "claude.post_write".
+    if _in_groups(put, "claude.post_write") and not _in_groups(put, "show-toplevel"):
+        put = _filter_groups(put, ["claude.post_write"])
+        hooks["PostToolUse"] = put
+    if not _in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
-            "command": f"touch ~/.contexer/{_TOUCH_GUARD}; echo '{{}}' # {_HOOK_SENTINEL}"}]})
+            "command": post_write_cmd}]})
     # Plan-approval capture: separate matcher on ExitPlanMode, injects the reminder directly.
     if not _in_groups(put, "plan approved"):
         put.append({"matcher": "ExitPlanMode", "hooks": [{"type": "command",
@@ -778,7 +847,7 @@ def uninstall(home: Path) -> list[str]:
         event_markers = {
             "SessionStart":     ["get_session_start_context", _HOOK_SENTINEL],
             "SessionEnd":       ["sync_memory", _HOOK_SENTINEL],
-            "PostToolUse":      [".pending_capture", "plan approved", _HOOK_SENTINEL],
+            "PostToolUse":      [".pending_capture", "claude.post_write", "plan approved", _HOOK_SENTINEL],
             "Stop":             [".pending_capture", _HOOK_SENTINEL],
             "PreCompact":       ["compaction starting", _HOOK_SENTINEL],
             "PostCompact":      ["reloaded after compaction", "get_post_compact_context",
