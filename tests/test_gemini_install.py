@@ -219,6 +219,55 @@ class TestGeminiRuntime:
         assert isinstance(entry("", "garbage"), str)
 
 
+class TestGeminiAfterWriteHookCwdFallback:
+    """Greptile P1, PR #181: in a non-git project the installed AfterTool hook's shell
+    wrapper computes an empty $REPO (`git rev-parse --show-toplevel || true`), and
+    after_write used to resolve that via `store._resolve_repo`, which — in this
+    hook-invoked process (not the MCP server, so `_SESSION_REPO` is always empty) —
+    falls through to the shared `.current_repo` pointer, recording the edit under
+    whatever OTHER repo that pointer names (or discarding it). Fixed by falling back to
+    the hook's own cwd (`store._hook_cwd_repo`), matching claude.post_write."""
+
+    def test_empty_repo_records_under_hook_cwd_in_non_git_project(self, home, tmp_path, monkeypatch):
+        project = tmp_path / "non_git_project"
+        (project / "src").mkdir(parents=True)
+        monkeypatch.chdir(project)
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(project / "src" / "a.py")},
+        })
+        out = json.loads(gemini.after_write("", raw))
+        assert "hookSpecificOutput" in out
+        assert store._read_edited_files(str(project)) == ["src/a.py"]
+
+    def test_empty_repo_never_misroutes_to_current_repo_pointer(self, home, tmp_path, monkeypatch):
+        other_repo = tmp_path / "other_repo"
+        other_repo.mkdir()
+        store.anchor_repo(str(other_repo))  # some earlier session pointed .current_repo here
+        project = tmp_path / "non_git_project"
+        (project / "src").mkdir(parents=True)
+        monkeypatch.chdir(project)
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(project / "src" / "a.py")},
+        })
+        gemini.after_write("", raw)
+        assert store._read_edited_files(str(other_repo)) == [], \
+            "edit must not be recorded under the unrelated .current_repo pointer target"
+        assert store._read_edited_files(str(project)) == ["src/a.py"]
+
+    def test_empty_repo_in_home_dir_records_nothing_and_does_not_crash(self, home, monkeypatch):
+        # _is_sane_repo rejects the home dir itself: no cwd fallback, no recording, no crash.
+        monkeypatch.chdir(home)
+        raw = json.dumps({
+            "session_id": "s1",
+            "tool_input": {"file_path": str(home / "a.py")},
+        })
+        out = json.loads(gemini.after_write("", raw))
+        assert "hookSpecificOutput" in out
+        assert store._read_edited_files(str(home)) == []
+
+
 class TestGeminiUninstallAndStatus:
     def test_uninstall_removes_only_managed_entries(self, home):
         path = home / ".gemini" / "settings.json"

@@ -170,10 +170,22 @@ def after_write(repo_path: str, raw: str) -> str:
     source_files itself — same signal Claude/Codex's post_write records via PostToolUse.
 
     The recording half is wrapped in its own try/except: a missing/garbage tool_input, or
-    an unresolvable repo, must never cost the reminder this hook exists to deliver."""
+    an unresolvable repo, must never cost the reminder this hook exists to deliver.
+
+    Repo resolution is `_hook_cwd_repo`, NOT `_resolve_repo` (Greptile P1, PR #181): this
+    is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
+    and `_resolve_repo` would fall through to the shared `.current_repo` pointer — which can
+    name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
+    var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
+    are first-class stores keyed by absolute path, so silently recording under whatever repo
+    the pointer happens to hold (or discarding the edit if it holds nothing sane) starves the
+    real project's pending captures of anchor candidates. `_hook_cwd_repo` falls back to this
+    process's own cwd instead — which IS the project directory for a hook — guarded by
+    `_is_sane_repo` so a session opened in the home/config dir still records nothing. Matches
+    claude.post_write's identical fallback for the sibling PostToolUse recording path."""
     _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store._hook_cwd_repo(repo_path)
         if repo:
             data = json.loads(raw)
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
