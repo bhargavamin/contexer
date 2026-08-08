@@ -1,12 +1,12 @@
 {
-  "_comment": "Claude Code plugin hook wiring. MUST stay behaviourally in sync with contexer/adapters/claude.py (the console-script installer) — same code paths, same guards. Only the invocation differs: the plugin runs `uv run --directory ${CLAUDE_PLUGIN_ROOT}` (durable plugin dir) instead of sys.executable. tests/test_plugin_hooks.py asserts this file carries no superseded anti-patterns.",
+  "_comment": "Claude Code plugin hook wiring. MUST stay behaviourally in sync with contexer/adapters/claude.py (the console-script installer) — same code paths, same guards. Only the invocation differs: the plugin runs `uv run --directory ${CLAUDE_PLUGIN_ROOT}` (durable plugin dir) instead of sys.executable, and carries no trailing `# contexer-managed-hook` sentinel comment — that sentinel exists only so the console-script installer can recognize and migrate its own previously-installed hooks on reinstall; this static bundle never self-migrates. tests/test_plugin_hooks.py asserts this file carries no superseded anti-patterns AND drives the real installer to diff generated command content against it.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; from contexer.adapters import claude as _c; import json,sys; repo=sys.argv[1]; store.STORE_DIR.mkdir(exist_ok=True); store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); _c.sync_memory(repo); print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(sys.stdin.read()))))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; from contexer.adapters import claude as _c; import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); store.anchor_repo(repo); _c.sync_memory(repo); _c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw))))\" \"$REPO\"",
             "statusMessage": "Loading session context..."
           }
         ]
@@ -29,7 +29,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "touch ~/.contexer/.pending_capture && echo '{}'"
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.post_write(sys.argv[1], sys.stdin.read()))\" \"$REPO\""
+          }
+        ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", \"additionalContext\": \"Contexer: plan approved. Capture each key decision in the plan now via update_context with created_by=plan - architecture choices, constraints, conventions, including the REASONING not just the conclusion. They are stored as PROVISIONAL (suggested), not authoritative, until implementation validates them; you will reconcile them (approve / update / ignore) at the next prompt. If update_context appears as a deferred tool, first call ToolSearch(query=select:mcp__contexer__update_context).\"}}'"
           }
         ]
       }
@@ -39,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; claude.sync_memory(sys.argv[1])\" \"$REPO\"; echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; claude.sync_memory(sys.argv[1])\" \"$REPO\"; echo '{\"systemMessage\": \"Contexer: context compaction starting \\u2014 call update_context for any decisions not yet stored. If update_context appears as a deferred tool, first call: ToolSearch(query='select:mcp__contexer__update_context')\"}'",
             "statusMessage": "Saving decisions before compact..."
           }
         ]
@@ -50,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); if [ -n \"$REPO\" ]; then printf '%s' \"$REPO\" > ~/.contexer/.current_repo; fi; FLAG=\"$HOME/.contexer/.pending_capture\"; if [ -f \"$FLAG\" ]; then rm -f \"$FLAG\"; echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"Contexer: you wrote or edited files last turn — call update_context for any unsaved decisions.\"}}'; else echo '{}'; fi",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); if [ -n \"$REPO\" ]; then { printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } 2>/dev/null || true; fi; FLAG=\"$HOME/.contexer/.pending_capture\"; if [ -f \"$FLAG\" ]; then rm -f \"$FLAG\" 2>/dev/null || true; echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing. (1) NEW decisions that STUCK: call update_context with the full reasoning. (2) A PROVISIONAL decision from earlier this session (e.g. from an approved plan) that HELD: approve it; that CHANGED during implementation: call update_context with the new value (it supersedes the old revision); that was ABANDONED: mark it ignored via approve_decision. (3) Do NOT store approaches you tried and reverted, and keep your own unratified proposals provisional (created_by=ai) rather than storing them as settled fact. The server deduplicates and tracks repetition. If update_context appears as a deferred tool, first call ToolSearch(query=select:mcp__contexer__update_context).\"}}'; else echo '{}'; fi",
             "statusMessage": "Anchoring repo context..."
           }
         ]
@@ -60,7 +69,7 @@
           {
             "type": "command",
             "once": true,
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; import json,sys; print(json.dumps(store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read()))))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; import json,sys; result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); print(json.dumps(result))\" \"$REPO\"",
             "statusMessage": "Checking bootstrap context..."
           }
         ]
@@ -80,6 +89,24 @@
             "type": "command",
             "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.rationale(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
             "statusMessage": "Checking for relevant decisions..."
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.team_poll(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
+            "statusMessage": "Checking for new team decisions..."
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.review_nudge(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
+            "statusMessage": "Checking for decisions pending review..."
           }
         ]
       }
