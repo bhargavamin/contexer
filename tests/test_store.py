@@ -2490,6 +2490,123 @@ class TestApproveDecision:
         assert entry["status"] == "approved"
 
 
+# ── approve_decision(source_files=...) — anchor at approval time (issue #172 Task 2) ──────
+
+class TestApproveDecisionSourceFiles:
+    def _store_pending(self, repo: str, content: str = "We use RabbitMQ instead of Kafka") -> str:
+        store.update_decision(repo, content, "s1", subtype="architecture")
+        data = store._load(repo)
+        entry = next(
+            e for e in data["entries"]
+            if e.get("type") == "decision" and e.get("status") == "pending_approval"
+        )
+        return entry["id"]
+
+    def test_approve_with_source_files_anchors_entry(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve", source_files=["auth/jwt.py"])
+        assert ok, msg
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert "anchor_commit" in entry
+
+    def test_edit_with_source_files_anchors_entry(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "edit", content="We use Kafka for throughput",
+                                         source_files=["messaging/kafka.py"])
+        assert ok, msg
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["source_files"] == ["messaging/kafka.py"]
+
+    def test_source_files_with_all_target_raises(self, tmp_repo):
+        self._store_pending(tmp_repo)
+        with pytest.raises(ValueError, match="single decision id"):
+            store.approve_decision(tmp_repo, "all", "approve", source_files=["x.py"])
+
+    def test_source_files_with_star_target_raises(self, tmp_repo):
+        self._store_pending(tmp_repo)
+        with pytest.raises(ValueError, match="single decision id"):
+            store.approve_decision(tmp_repo, "*", "approve", source_files=["x.py"])
+
+    def test_source_files_with_comma_list_raises(self, tmp_repo):
+        eid1 = self._store_pending(tmp_repo, "We use RabbitMQ instead of Kafka")
+        eid2 = self._store_pending(tmp_repo, "We use Postgres instead of MySQL")
+        with pytest.raises(ValueError, match="single decision id"):
+            store.approve_decision(tmp_repo, f"{eid1},{eid2}", "approve", source_files=["x.py"])
+
+    def test_source_files_with_skip_action_raises(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        with pytest.raises(ValueError):
+            store.approve_decision(tmp_repo, eid, "skip", source_files=["x.py"])
+
+    def test_source_files_with_ignore_action_raises(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        with pytest.raises(ValueError):
+            store.approve_decision(tmp_repo, eid, "ignore", source_files=["x.py"])
+
+    def test_source_files_with_dismiss_action_raises(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        with pytest.raises(ValueError):
+            store.approve_decision(tmp_repo, eid, "dismiss", source_files=["x.py"])
+
+    def test_plain_approve_without_source_files_stays_unanchored(self, tmp_repo):
+        # Pin: byte-identical behavior to today when the param is omitted.
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok, msg
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert "source_files" not in entry and "anchor_commit" not in entry
+
+    def test_source_files_none_default_is_noop(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve", source_files=None)
+        assert ok, msg
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert "source_files" not in entry
+
+    def test_source_files_empty_list_is_noop(self, tmp_repo):
+        eid = self._store_pending(tmp_repo)
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve", source_files=[])
+        assert ok, msg
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert "source_files" not in entry
+
+    def test_promoted_proposal_with_source_files_anchors_exactly_once(self, tmp_repo, monkeypatch):
+        # M7b: when a Suggested Update's own proposal carries stashed source_files,
+        # _promote_proposal already anchors it — _apply_approval's trailing
+        # `prop_had_source_files` check must skip its own _anchor_sources call rather
+        # than firing a redundant second one for the same approval.
+        stored, eid = store.update_decision(tmp_repo, "We use RabbitMQ for the event bus",
+                                            "s1", "architecture", created_by="human")
+        assert stored
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+
+        # AI-sourced correction to a high-stakes subtype -> stashed on proposed_revision,
+        # not applied to the live entry yet.
+        stored2, returned_id = store.update_decision(
+            tmp_repo, "We use Kafka for the event bus instead of RabbitMQ", "s2",
+            "architecture", replace_id=eid, source_files=["messaging/kafka.py"])
+        assert stored2 and returned_id == eid
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry.get("proposed_revision", {}).get("source_files") == ["messaging/kafka.py"]
+
+        calls = []
+        real_anchor = store._anchor_sources
+
+        def _counting_anchor(*a, **k):
+            calls.append((a, k))
+            return real_anchor(*a, **k)
+        monkeypatch.setattr(store, "_anchor_sources", _counting_anchor)
+
+        ok, msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok, msg
+        assert len(calls) == 1
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert entry["source_files"] == ["messaging/kafka.py"]
+        assert "anchor_commit" in entry  # tmp_repo isn't a real git repo, so this may be ""
+
+
 # ── get_pending_decisions ──────────────────────────────────────────────────────
 
 class TestGetPendingDecisions:

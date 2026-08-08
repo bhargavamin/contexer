@@ -818,11 +818,11 @@ class TestGuardDispatchAndExitCodes:
 
     def test_internal_exception_exits_0_with_exact_stderr_line(
             self, guard_repo, monkeypatch, capsys):
-        from contexer import store
+        from contexer import guard_engine
 
         def boom(*_a, **_k):
             raise RuntimeError("boom")
-        monkeypatch.setattr(store, "guard_staged", boom)
+        monkeypatch.setattr(guard_engine, "guard_staged", boom)
         with pytest.raises(SystemExit) as exc:
             _run_main(monkeypatch, "guard")
         assert exc.value.code == 0
@@ -831,8 +831,8 @@ class TestGuardDispatchAndExitCodes:
 
     def test_engine_error_result_exits_0_with_exact_stderr_line(
             self, guard_repo, monkeypatch, capsys):
-        from contexer import store
-        monkeypatch.setattr(store, "guard_staged",
+        from contexer import guard_engine
+        monkeypatch.setattr(guard_engine, "guard_staged",
                              lambda *a, **k: {"advisories": [], "violations": [], "error": True})
         with pytest.raises(SystemExit) as exc:
             _run_main(monkeypatch, "guard")
@@ -855,7 +855,7 @@ class TestGuardDispatchAndExitCodes:
 
 class TestGuardDismiss:
     def test_hash_form_acts_directly_without_prompting(self, guard_repo, monkeypatch, capsys):
-        from contexer import store
+        from contexer import store, guard_engine
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
@@ -865,7 +865,7 @@ class TestGuardDismiss:
                              lambda *_a: pytest.fail("hash form must not prompt"))
         _run_main(monkeypatch, "guard", "--dismiss", h)
         assert "Dismissed" in capsys.readouterr().out
-        assert store._dismissed_guard(str(guard_repo)) == {h}
+        assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
 
     def test_dismiss_uses_same_resolved_repo_as_candidates_lookup(
             self, guard_repo, monkeypatch, capsys):
@@ -877,7 +877,7 @@ class TestGuardDismiss:
         fine here since both calls fall back identically, but a naive
         implementation that passed the raw (unresolved) git-root result straight
         to dismiss_guard would silently dismiss into the wrong sidecar file."""
-        from contexer import store
+        from contexer import store, guard_engine
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
@@ -891,10 +891,10 @@ class TestGuardDismiss:
 
         _run_main(monkeypatch, "guard", "--dismiss", h)
         assert "Dismissed" in capsys.readouterr().out
-        assert store._dismissed_guard(str(guard_repo)) == {h}
+        assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
 
     def test_numeric_form_prompts_and_confirms(self, guard_repo, monkeypatch, capsys):
-        from contexer import store
+        from contexer import guard_engine
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
@@ -902,10 +902,10 @@ class TestGuardDismiss:
         monkeypatch.setattr("builtins.input", lambda *_a: "y")
         _run_main(monkeypatch, "guard", "--dismiss", "1")
         assert "Dismissed" in capsys.readouterr().out
-        assert len(store._dismissed_guard(str(guard_repo))) == 1
+        assert len(guard_engine._dismissed_guard(str(guard_repo))) == 1
 
     def test_numeric_form_declined_dismisses_nothing(self, guard_repo, monkeypatch, capsys):
-        from contexer import store
+        from contexer import guard_engine
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
@@ -913,7 +913,7 @@ class TestGuardDismiss:
         monkeypatch.setattr("builtins.input", lambda *_a: "n")
         _run_main(monkeypatch, "guard", "--dismiss", "1")
         assert "Cancelled" in capsys.readouterr().out
-        assert store._dismissed_guard(str(guard_repo)) == set()
+        assert guard_engine._dismissed_guard(str(guard_repo)) == set()
 
     def test_numeric_form_out_of_range_exits_1(self, guard_repo, monkeypatch, capsys):
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])

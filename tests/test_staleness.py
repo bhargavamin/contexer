@@ -295,3 +295,158 @@ def test_legacy_entry_without_fields_round_trips(repo):
     after = store._load(repo)["entries"]
     assert after == before
     assert "No matching" not in store.get_context(repo, query="auth")
+
+
+# ── approval-time anchoring (issue #172 Task 2) ─────────────────────────────────
+
+def test_approve_already_anchored_entry_refreshes_anchor_commit_and_clears_note(repo):
+    """A decision captured with source_files while still pending_approval is already
+    anchored. Approving it later (no source_files param — the param is independent of
+    this) is a human revalidation of the content: anchor_commit refreshes to current
+    HEAD, and a stale note picked up in between clears."""
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "constraint",
+                                   source_files=["auth.py"])
+    entry = _entry(repo)
+    assert entry["status"] == "pending_approval"
+    old_anchor = entry["anchor_commit"]
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+    ok, _msg = store.approve_decision(repo, eid, "approve")
+    assert ok
+    entry = _entry(repo)
+    assert entry["status"] == "approved"
+    assert entry["anchor_commit"] != old_anchor
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+
+def test_approve_with_source_files_param_anchors_and_clears_future_staleness(repo):
+    """approve_decision(source_files=...) anchors a not-yet-anchored entry (source_files
+    stored, anchor_commit set to current HEAD), and the anchor takes effect immediately —
+    a later change to that file surfaces the staleness note."""
+    stored, eid = store.update_decision(repo, "auth flow: login() verifies the token", "s1",
+                                        "constraint")
+    assert stored
+    entry = _entry(repo)
+    assert entry["status"] == "pending_approval"
+    assert "source_files" not in entry
+
+    ok, _msg = store.approve_decision(repo, eid, "approve", source_files=["auth.py", "other.py"])
+    assert ok
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py", "other.py"]
+    assert entry["anchor_commit"]
+    assert " [may be stale" not in store.get_context(repo, query="auth")
+
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+
+def test_share_projection_carries_no_anchor_fields_after_approval_anchor(repo):
+    """Wire-safety: approval-time anchoring must not leak source_files/anchor_commit
+    onto the push wire shape (mirrors the existing no-anchor-fields invariant)."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "constraint")
+    assert stored
+    store.approve_decision(repo, eid, "approve", source_files=["auth.py"])
+    entry = _entry(repo)
+    assert entry["source_files"] and entry["anchor_commit"]
+    projected = store._share_projection(entry, redact_on=False)
+    assert "source_files" not in projected and "anchor_commit" not in projected
+
+
+# ── _anchor_sources canonicalization (M6, issue #172 fix wave) ─────────────────
+
+def test_capture_time_absolute_path_canonicalized_to_repo_relative(repo):
+    """An absolute-path spelling passed to update_decision's source_files must be
+    canonicalized to the repo-relative POSIX form _anchor_sources stores — a raw
+    absolute path would break _staleness_note's `git diff -- <path>` once the repo
+    moves, and would never guard-pair against a staged (relative) path."""
+    abs_path = str(Path(repo) / "auth.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[abs_path])
+    assert stored
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py"]
+    assert entry["anchor_commit"]
+
+    # Staleness reads the canonicalized path correctly.
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    assert " [may be stale" in store.get_context(repo, query="auth")
+
+
+def test_approval_time_absolute_path_canonicalized_to_repo_relative(repo):
+    """Same canonicalization at the approve_decision(source_files=...) call site."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "constraint")
+    assert stored
+    abs_path = str(Path(repo) / "auth.py")
+    ok, msg = store.approve_decision(repo, eid, "approve", source_files=[abs_path])
+    assert ok, msg
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py"]
+    assert entry["anchor_commit"]
+
+
+def test_unresolvable_path_is_dropped_not_stored_raw(repo):
+    """A path that fails canonicalization (e.g. an embedded NUL byte) is dropped
+    rather than stored verbatim; if it's the only file given, the anchor is a no-op."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=["bad\x00path.py"])
+    assert stored
+    entry = _entry(repo)
+    assert "source_files" not in entry and "anchor_commit" not in entry
+
+
+def test_absolute_path_anchor_pairs_correctly_in_guard(repo):
+    """The canonicalized anchor must be exactly what the guard's own _guard_relpath
+    produces for a staged file, so a decision captured with an absolute-path spelling
+    still pairs at commit time."""
+    from contexer import guard_engine
+
+    abs_path = str(Path(repo) / "auth.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[abs_path], created_by="human")
+    assert stored
+    entry = _entry(repo)
+    assert entry["status"] == "approved"
+    assert entry["source_files"] == [guard_engine._guard_relpath(repo, abs_path)]
+
+    Path(repo, "auth.py").write_text("def login(): return 'rewritten'\n", encoding="utf-8")
+    subprocess.run(["git", "add", "auth.py"], cwd=repo, check=True)
+    result = guard_engine.guard_staged(repo)
+    assert any(a["decision_id"] == eid for a in result["advisories"])
+
+
+def test_outside_repo_absolute_path_dropped_not_stored_as_dotdot(repo):
+    """An absolute path outside the repo canonicalizes (via os.path.relpath) to a
+    "../"-prefixed string, which can never match a repo-relative staged path (guard
+    pairing dead) and which git diff rejects/ignores (staleness dead). It must be
+    dropped, not stored — same empty-anchor outcome as an unresolvable path."""
+    outside = str(Path(repo).parent / "outside.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[outside])
+    assert stored
+    entry = _entry(repo)
+    assert "source_files" not in entry and "anchor_commit" not in entry
+
+
+def test_relative_escape_spelling_dropped_not_stored(repo):
+    """A "../escape" relative spelling that resolves outside the repo is dropped the
+    same way as an absolute outside-repo path."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=["../outside.py"])
+    assert stored
+    entry = _entry(repo)
+    assert "source_files" not in entry and "anchor_commit" not in entry
+
+
+def test_outside_repo_path_dropped_but_in_repo_siblings_still_anchor(repo):
+    """When one source_files entry escapes the repo and another is in-repo, only the
+    escaping one is dropped — the in-repo file still anchors normally (mirrors the
+    existing "drop unresolvable, keep the rest" behavior)."""
+    outside = str(Path(repo).parent / "outside.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[outside, "auth.py"])
+    assert stored
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py"]
+    assert entry["anchor_commit"]
