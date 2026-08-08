@@ -195,12 +195,26 @@ _GUARD_THROTTLE_CAP = 500
 
 def _guard_trusted(entry: dict) -> bool:
     """A decision may only pair as an advisory if it is BOTH developer-approved
-    (status) and born from a trusted provenance (current revision's source) — an
-    AI-inferred or memory-imported entry never nags at commit time, no matter how
-    confident, until a human has actually looked at it. `plan` is trusted too: a
-    plan-sourced decision that survived reconciliation AND developer approval is
-    more vetted than `scan`; the status check above still keeps an unapproved plan
-    suggestion untrusted.
+    (status) and EITHER born from a trusted provenance (current revision's source)
+    OR explicitly ratified by a human (`approved_by == "human"`) — an AI-inferred
+    or memory-imported entry never nags at commit time on its own confidence, no
+    matter how strong, until a human has actually looked at it. `plan` is trusted
+    too: a plan-sourced decision that survived reconciliation AND developer
+    approval is more vetted than `scan`; the status check above still keeps an
+    unapproved plan suggestion untrusted.
+
+    The `approved_by` clause (issue #180) is the refinement: the gate's real job
+    is excluding entries that reached `approved` WITHOUT a human ever looking —
+    not entries a human explicitly looked at and blessed. `approved_by` is set
+    ONLY at genuine ratification points (`_apply_approval`'s approve/edit paths,
+    including bulk `approve_decision("all")`/comma-list approvals — reviewing a
+    shown list and approving it is a real ratification gesture — and the
+    constraint-restatement promotions in `capture_user_constraint`), never on any
+    auto-approval route (born-`approved` scan/bootstrap/memory/legacy-migration
+    entries, or an `ai`-captured entry whose content happens to match a scan-fact
+    pattern). So an `ai`-captured decision a developer explicitly approved is now
+    guard-trusted even though its revision `source` stays `ai`; an auto-approved
+    entry a human never reviewed stays untrusted regardless of status.
 
     A falsy revision `source` (legacy entries that predate provenance tracking)
     falls back to the decision's `created_by` for this check ONLY — a read-time
@@ -212,6 +226,8 @@ def _guard_trusted(entry: dict) -> bool:
     still resolves to untrusted."""
     if store._entry_status(entry) != "approved":
         return False
+    if entry.get("approved_by") == "human":
+        return True
     rev = store._current_revision(entry)
     if rev is None:
         return False

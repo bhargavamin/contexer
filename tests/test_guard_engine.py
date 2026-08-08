@@ -70,7 +70,7 @@ def repo(git_repo, monkeypatch):
 
 def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
                  status="approved", source_files=None, global_store=False,
-                 title="", session_id="test-session"):
+                 title="", session_id="test-session", approved_by=None):
     """Build a decision entry via the real entry constructor (so revisions/
     current_revision_id/status/source all come out shaped exactly like production
     data) and append it directly to the (repo or global) store — bypassing the
@@ -79,6 +79,8 @@ def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
                                        created_by=created_by, status=status, title=title)
     if source_files is not None:
         entry["source_files"] = source_files
+    if approved_by is not None:
+        entry["approved_by"] = approved_by
     if global_store:
         data = store._load_global()
         data["entries"].append(entry)
@@ -378,6 +380,39 @@ class TestGuardTrusted:
                              status="ignored")
         assert guard_engine._guard_trusted(entry) is False
 
+    # ── issue #180: explicit human approval as its own trust discriminator ──
+
+    def test_ai_created_explicitly_approved_by_human_is_trusted(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
+                             status="approved", approved_by="human")
+        assert guard_engine._guard_trusted(entry) is True
+
+    def test_memory_imported_explicitly_approved_by_human_is_trusted(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="memory",
+                             status="approved", approved_by="human")
+        assert guard_engine._guard_trusted(entry) is True
+
+    def test_ai_created_without_approved_by_stays_untrusted(self, repo):
+        # Regression pin: approved status alone (no approved_by) must NOT be
+        # enough for an ai-sourced entry — this is the pre-#180 behavior and
+        # must still hold for entries no human ever explicitly ratified.
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
+                             status="approved")
+        assert "approved_by" not in entry
+        assert guard_engine._guard_trusted(entry) is False
+
+    def test_approved_by_human_without_approved_status_stays_untrusted(self, repo):
+        # The status gate is still checked FIRST — approved_by alone can't
+        # short-circuit a pending/suggested/ignored entry.
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
+                             status="pending_approval", approved_by="human")
+        assert guard_engine._guard_trusted(entry) is False
+
+    def test_approved_by_non_human_value_stays_untrusted(self, repo):
+        entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
+                             status="approved", approved_by="ai")
+        assert guard_engine._guard_trusted(entry) is False
+
 
 # ── _guard_hash ───────────────────────────────────────────────────────────────
 
@@ -526,6 +561,19 @@ class TestGuardPairs:
         assert len(pairs) == 1
         assert pairs[0]["emitted"] is False
         assert pairs[0]["reason"] == "rejected: untrusted provenance"
+
+    def test_explicitly_human_approved_ai_capture_pairs_as_emitted(self, repo):
+        """Issue #180: an ai-sourced entry the developer explicitly approved must
+        pair like any other trusted decision, even though its revision `source`
+        stays 'ai'."""
+        entry = _seed_entry(repo, "Decided to use JWT for auth", created_by="ai",
+                             status="approved", approved_by="human",
+                             source_files=["auth/jwt.py"])
+        pairs = guard_engine._guard_pairs(str(repo), ["auth/jwt.py"])
+        assert len(pairs) == 1
+        assert pairs[0]["decision_id"] == entry["id"]
+        assert pairs[0]["emitted"] is True
+        assert pairs[0]["reason"] == "source_files match"
 
     def test_global_decision_pairs_via_artifact_only(self, repo):
         entry = _seed_entry(repo, "The contexer.store module owns all read/write logic",
@@ -896,6 +944,127 @@ class TestApprovalTimeAnchorGuardPairing:
         assert len(result["advisories"]) == 1
         assert result["advisories"][0]["decision_id"] == eid
         assert result["advisories"][0]["reason"] == "source_files match"
+
+    def test_approve_ai_captured_pairs_in_guard_staged_180(self, repo):
+        """Issue #180: an ai-captured decision (the dominant capture path) that a
+        developer EXPLICITLY approves must clear the guard's provenance gate via
+        `approved_by == "human"`, even though its revision `source` stays 'ai' —
+        never itself a member of `_GUARD_TRUSTED_SOURCES`. Before #180 this entry
+        stayed guard-inert forever; only `plan`-sourced captures gained
+        guard-visible anchors at approval time."""
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        _git(repo, "add", "auth/jwt.py")
+        _commit(repo, "init")
+
+        # created_by left at its default ("ai"); subtype="constraint" forces
+        # pending_approval regardless of created_by.
+        stored, eid = store.update_decision(str(repo), "Always use JWT for session auth, "
+                                             "never plain cookies", "s1", "constraint")
+        assert stored
+        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        assert entry["status"] == "pending_approval"
+        assert entry["created_by"] == "ai"
+        assert "source_files" not in entry
+
+        ok, msg = store.approve_decision(str(repo), eid, "approve",
+                                         source_files=["auth/jwt.py"])
+        assert ok, msg
+        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert entry["approved_by"] == "human"
+        assert entry["source_files"] == ["auth/jwt.py"]
+        assert store._current_revision(entry)["source"] == "ai"
+        assert guard_engine._guard_trusted(entry) is True
+
+        _write(repo, "auth/jwt.py", "token = 1  # rewritten\n")
+        _git(repo, "add", "auth/jwt.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert len(result["advisories"]) == 1
+        assert result["advisories"][0]["decision_id"] == eid
+        assert result["advisories"][0]["reason"] == "source_files match"
+
+    def test_bulk_approve_all_ai_captured_pairs_in_guard_staged_180(self, repo):
+        """Bulk approval via approve_decisions (the store side of `approve_decision
+        "all"`/comma-lists) is a genuine ratification gesture too — the developer
+        reviewed the shown pending list before clearing it — so it must count."""
+        _write(repo, "auth/jwt.py", "token = 0\n")
+        _git(repo, "add", "auth/jwt.py")
+        _commit(repo, "init")
+
+        stored, eid = store.update_decision(str(repo), "Always use JWT for session auth, "
+                                             "never plain cookies", "s1", "constraint")
+        assert stored
+        results = store.approve_decisions(str(repo), [eid], "approve")
+        assert results == [(eid, True, results[0][2])]
+
+        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert entry["approved_by"] == "human"
+        assert guard_engine._guard_trusted(entry) is True
+
+
+# ── issue #180 audit: every real auto-approval path never sets approved_by ────
+
+class TestAutoApprovalNeverSetsApprovedByHuman:
+    """Pins the invariant `_guard_trusted`'s `approved_by == "human"` clause
+    relies on: every path that lands an entry in status='approved' WITHOUT a
+    genuine `_apply_approval` ratification must never itself set `approved_by`.
+    One case per real auto-approval route found in the #180 audit."""
+
+    def test_memory_import_never_sets_approved_by(self, repo):
+        status = store.upsert_memory_decision(
+            str(repo), "Use bcrypt for password hashing", "s1", "convention", "mem-1")
+        assert status == "created"
+        entry = next(e for e in store._load(str(repo))["entries"]
+                     if e.get("memory_key") == "mem-1")
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "memory"
+        assert "approved_by" not in entry
+        assert guard_engine._guard_trusted(entry) is False
+
+    def test_scan_fact_pattern_ai_capture_never_sets_approved_by(self, repo):
+        # _classify_level's Level-1 auto route matches _SCAN_FACT_PATTERNS
+        # regardless of created_by, so a plain ai capture whose content happens
+        # to start with a scan-fact prefix is born approved without any human
+        # ever looking at it.
+        stored, eid = store.update_decision(str(repo), "Package manager: uv", "s1",
+                                             "architecture")
+        assert stored
+        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "ai"
+        assert "approved_by" not in entry
+        assert guard_engine._guard_trusted(entry) is False
+
+    def test_legacy_migration_never_sets_approved_by(self, repo):
+        legacy = {
+            "id": "legacy-1", "type": "decision", "subtype": "architecture",
+            "content": "Decided to use JWT for auth",
+            "session_id": "s1", "session_ids": ["s1"],
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "revision": 1,
+            # status/created_by deliberately absent — pre-provenance entry.
+        }
+        store._save(str(repo), {"entries": [legacy]})
+        entry = store._load(str(repo))["entries"][0]
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "ai"
+        assert "approved_by" not in entry
+        assert guard_engine._guard_trusted(entry) is False
+
+    def test_global_ai_capture_never_sets_approved_by(self, repo):
+        # update_global_decision's MCP path (update_global_context) leaves
+        # created_by at its "ai" default and stores status="approved" directly —
+        # no _apply_approval involvement, so approved_by is never set.
+        ok, eid = store.update_global_decision("Never log raw request bodies", "s1",
+                                                "constraint")
+        assert ok
+        entry = next(e for e in store._load_global()["entries"] if e["id"] == eid)
+        assert entry["status"] == "approved"
+        assert entry["created_by"] == "ai"
+        assert "approved_by" not in entry
+        assert guard_engine._guard_trusted(entry) is False
 
 
 # ── guard_candidates ──────────────────────────────────────────────────────────

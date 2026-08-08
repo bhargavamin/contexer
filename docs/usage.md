@@ -74,7 +74,7 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 
 ## Commit-time guard
 
-`contexer guard` checks your staged changes against your saved decisions when you commit.
+`contexer guard` checks your staged changes against your saved decisions when you commit — decisions you approved (or that came from a repo scan) count; an idea Contexer captured but you haven't looked at yet stays silent.
 
 ### Turn it on or off
 

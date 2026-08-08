@@ -87,7 +87,7 @@ Contexer can also check your work at the moment it matters most: right before yo
 contexer guard --install-hook
 ```
 
-wires the check into this repo's commits — not run automatically by `contexer install`, this is opt-in. From there, every commit is checked against your approved decisions.
+wires the check into this repo's commits — not run automatically by `contexer install`, this is opt-in. From there, every commit is checked against your approved decisions — decisions you approved (or that came from a repo scan) count; an idea Contexer captured but you haven't looked at yet stays silent, no matter how confident it sounds.
 
 Most of the time this means a short warning naming the decisions related to what you staged, and the commit goes through. A commit is only ever blocked for a rule you've explicitly turned into a hard check (`contexer guard arm <id> --regex '<pattern>'` or `--check secret`) — nothing else can stop a commit.
 
