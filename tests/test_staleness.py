@@ -414,3 +414,39 @@ def test_absolute_path_anchor_pairs_correctly_in_guard(repo):
     subprocess.run(["git", "add", "auth.py"], cwd=repo, check=True)
     result = guard_engine.guard_staged(repo)
     assert any(a["decision_id"] == eid for a in result["advisories"])
+
+
+def test_outside_repo_absolute_path_dropped_not_stored_as_dotdot(repo):
+    """An absolute path outside the repo canonicalizes (via os.path.relpath) to a
+    "../"-prefixed string, which can never match a repo-relative staged path (guard
+    pairing dead) and which git diff rejects/ignores (staleness dead). It must be
+    dropped, not stored — same empty-anchor outcome as an unresolvable path."""
+    outside = str(Path(repo).parent / "outside.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[outside])
+    assert stored
+    entry = _entry(repo)
+    assert "source_files" not in entry and "anchor_commit" not in entry
+
+
+def test_relative_escape_spelling_dropped_not_stored(repo):
+    """A "../escape" relative spelling that resolves outside the repo is dropped the
+    same way as an absolute outside-repo path."""
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=["../outside.py"])
+    assert stored
+    entry = _entry(repo)
+    assert "source_files" not in entry and "anchor_commit" not in entry
+
+
+def test_outside_repo_path_dropped_but_in_repo_siblings_still_anchor(repo):
+    """When one source_files entry escapes the repo and another is in-repo, only the
+    escaping one is dropped — the in-repo file still anchors normally (mirrors the
+    existing "drop unresolvable, keep the rest" behavior)."""
+    outside = str(Path(repo).parent / "outside.py")
+    stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                        source_files=[outside, "auth.py"])
+    assert stored
+    entry = _entry(repo)
+    assert entry["source_files"] == ["auth.py"]
+    assert entry["anchor_commit"]

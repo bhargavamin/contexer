@@ -1779,8 +1779,15 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     if not raw:
         return
     from contexer import guard_engine
-    files = [p for p in (guard_engine._guard_relpath(repo_path, f) for f in raw)
-             if p][:_MAX_SOURCE_FILES]
+    canon = (guard_engine._guard_relpath(repo_path, f) for f in raw)
+    # _guard_relpath uses os.path.relpath, which maps an outside-repo path to a
+    # "../"-prefixed string instead of failing. Such an anchor can never match a
+    # repository-relative staged path (guard pairing silently dead) and git diff
+    # rejects/ignores it (staleness silently dead) — reject it at the door rather
+    # than storing a dead anchor.
+    files = [p for p in canon
+             if p and p != ".." and not p.startswith("../") and not os.path.isabs(p)
+             ][:_MAX_SOURCE_FILES]
     if not files:
         return
     entry["source_files"] = files
