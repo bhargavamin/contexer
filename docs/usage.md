@@ -64,6 +64,7 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |
 | `contexer guard [path…] [--explain]` | Check staged files against approved decisions at commit time — see [commit-time guard](#commit-time-guard) |
+| `contexer guard anchors [--list]` | Assisted anchor backfill for trusted decisions that predate anchoring — see [anchor backfill](#anchor-backfill) |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
@@ -129,6 +130,25 @@ Arms an *already-approved* decision as a machine-checkable rule; arming an unapp
 ### If it fails
 
 The guard fails open by design: any internal error, or a run over its internal time budget, prints one line to stderr and exits 0 rather than blocking your commit. `git commit --no-verify` skips it entirely, same as any pre-commit hook — it's a local nudge, not a substitute for your CI/PR gates.
+
+### Anchor backfill
+
+The advisory tier can only pair a staged file against a decision that's *anchored* to it (`source_files`). New decisions pick up an anchor automatically as you capture and approve them, but older, already-trusted decisions in your store predate that and sit permanently invisible to Tier 1 until something anchors them after the fact.
+
+```bash
+contexer guard anchors --list   # preview candidates, read-only, no prompts
+contexer guard anchors          # interactive: review and ratify per decision
+```
+
+`--list` scans every trusted, currently-unanchored decision, mines its own content for file paths and module names it mentions, and prints the ones that still exist in your working tree — nothing is written. It doubles as the non-interactive surface: run it in CI, a script, or from an agent, since the interactive loop below refuses outright when stdin isn't a TTY.
+
+Without `--list`, and with a TTY attached, `contexer guard anchors` walks the same candidate list one decision at a time:
+
+```
+[Y] anchor all shown  [E] edit list (comma-separated)  [S] skip  [Q] quit
+```
+
+`Y` accepts the candidates as shown, `E` lets you type your own comma-separated file list instead (validated against the working tree the same way — a file that doesn't exist is dropped, not silently accepted), `S` skips that decision for this run, `Q` stops early. Every accepted selection across the whole run is written in a single batch at the end (or on quit) — one save, not one per decision. Nothing is anchored twice: a decision that's already anchored by the time the batch writes (approved, or backfilled, by a concurrent session) is left alone.
 
 ## Connecting to a team (Contexer Teams)
 

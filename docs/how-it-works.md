@@ -95,6 +95,15 @@ wires `contexer guard` into `.git/hooks/pre-commit` for the current repo — not
 
 **Tier 2 — blocking, exits 1.** Nothing blocks a commit unless you explicitly arm it: `contexer guard arm <id> --regex '<pattern>'` or `--check secret` turns an *already-approved* decision into a machine-checkable rule. A staged file matching the regex (or Contexer's own high-confidence secret patterns) fails the commit, printing the file, line, and decision it violates. Arming is deliberate and reviewed the same way approval is — you can't arm a decision nobody has looked at, and a decision later marked `ignored` stops blocking automatically, no separate disarm required.
 
+### Anchoring decisions after the fact
+
+Tier 1 can only pair a staged file against a decision that's anchored to it. A decision approved with `source_files` (above) picks up that anchor the moment it's trusted — but decisions that predate anchoring, or were captured before you named any files, sit permanently invisible to the guard until something anchors them. Two things close that gap, one for the decisions already sitting in your store and one for new ones going forward:
+
+- **The decisions you already have.** `contexer guard anchors --list` looks at every trusted, currently-unanchored decision in your store, reads its own stored text for file and module names it mentions, and shows you the ones that still exist in your working tree — a read-only preview, nothing written. Run `contexer guard anchors` without `--list` (needs a real terminal) to walk that list interactively and choose, per decision, whether to accept the suggested files, type your own, or skip it; your choices are applied in one batch when you're done. See the [CLI reference](usage.md#anchor-backfill) for the full walkthrough.
+- **The decisions you capture from here on.** When your agent stores a decision without telling Contexer which files it's about, Contexer quietly notes the files you were actually editing in that session as a *candidate* anchor — not a real one. It sits inert: the guard never pairs against a candidate, only a confirmed anchor. The candidate surfaces the next time you review that decision (`contexer review` prints a `would anchor: …` line under it), so you see exactly what will happen before you approve. The moment you do approve it, the candidate becomes a real anchor, the same way `source_files` passed by hand would.
+
+Either way, the rule is the same: **no anchor ever becomes guard input without you having seen the file(s) it names at the moment you signed off on it.** A backfill candidate is shown and confirmed one decision at a time before anything is written; a capture-time candidate is shown alongside the decision you're already reviewing, before you approve it. A decision still awaiting your review is never anchored on its own — the candidate just waits.
+
 ### Keeping it quiet
 
 Two mechanisms keep the advisory tier from becoming noise:
