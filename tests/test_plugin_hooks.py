@@ -2,12 +2,14 @@
 superseded wiring (review finding C2): no pointer-poisoning fallbacks, no legacy
 mcp_tool capture, and it must run the same code paths as the console-script installer."""
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 import pytest
 
+from contexer import store
 from contexer.adapters import claude
 
 HOOKS_PATH = Path(__file__).resolve().parent.parent / "hooks" / "hooks.json"
@@ -105,11 +107,35 @@ def _normalize_adapter_command(cmd: str, python: str) -> str:
 
 
 @pytest.fixture
-def adapter_hooks(tmp_path):
+def adapter_hooks(tmp_path, monkeypatch):
     """[(event, command, matcher, once), ...] exactly as claude.install() generates
     today — the source of truth the bundle must mirror. Driven into an isolated temp
-    home so this never touches the real ~/.claude config."""
+    home so this never touches the real ~/.claude config.
+
+    Isolating the home dir alone is NOT enough: claude.install() also runs
+    clean_legacy_repo_settings against store._git_root(os.getcwd()) — the PROCESS cwd's
+    git root, not the injected home — to clean up a pre-CLI installer's repo-level
+    hooks. Left unpatched, a test run from a checkout whose <repo>/.claude/settings.json
+    still carries legacy Contexer hook markers would get silently rewritten (the same
+    class of test-state escaping the ui.log leak fixture above exists to catch, just for
+    a different real file). monkeypatch.chdir(tmp_path) contains that structurally: cwd's
+    git root becomes tmp_path (untracked, no .claude/settings.json), so
+    clean_legacy_repo_settings has nothing of ours to touch. The explicit byte-identical
+    assertion below is belt-and-suspenders — the session's leak-guard fixture
+    (no_real_store_writes) only watches ~/.contexer, not <repo>/.claude/settings.json."""
+    real_repo = store._git_root(os.getcwd())
+    real_settings = Path(real_repo) / ".claude" / "settings.json" if real_repo else None
+    before = real_settings.read_bytes() if real_settings and real_settings.is_file() else None
+
+    monkeypatch.chdir(tmp_path)
     claude.install(tmp_path)
+
+    if real_settings is not None:
+        after = real_settings.read_bytes() if real_settings.is_file() else None
+        assert after == before, (
+            f"claude.install() must never touch the real {real_settings} — "
+            "cwd isolation leaked")
+
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     return [
         (event, h["command"], grp.get("matcher"), h.get("once", False))
