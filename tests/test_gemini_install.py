@@ -116,14 +116,14 @@ class TestGeminiRuntime:
             "tool_input": {"file_path": str(tmp_path / "repo" / "src" / "a.py")},
         })
         gemini.after_write(repo, raw)
-        assert store._read_edited_files(repo, "s1", clear=False) == ["src/a.py"]
+        assert store._read_edited_files(repo) == ["src/a.py"]
 
     def test_after_write_fail_soft_on_missing_tool_input(self, home, tmp_path):
         repo = str(tmp_path / "repo")
         raw = json.dumps({"session_id": "s1", "prompt": "continue"})
         out = json.loads(gemini.after_write(repo, raw))  # must not raise
         assert "hookSpecificOutput" in out
-        assert store._read_edited_files(repo, "s1", clear=False) == []
+        assert store._read_edited_files(repo) == []
 
     def test_after_write_fail_soft_on_garbage_stdin(self, home, tmp_path):
         repo = str(tmp_path / "repo")

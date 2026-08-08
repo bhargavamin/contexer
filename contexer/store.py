@@ -2040,7 +2040,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         if (not entry.get("source_files")
                 and created_by not in ("scan", "bootstrap", "memory")
                 and _entry_status(entry) == "pending_approval"):
-            candidates = _read_edited_files(repo_path, session_id, clear=False)
+            candidates = _read_edited_files(repo_path)
             if candidates:
                 entry["anchor_candidates"] = candidates[-_MAX_SOURCE_FILES:]
         data["entries"].append(entry)
@@ -4736,29 +4736,36 @@ def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
 
 
 # ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
-# Records WHICH files each session's turns edited, so a later capture call can propose
-# anchor candidates (Task 3) without asking the model to name source_files itself. Ported
-# from the shelved feat/doc-drift branch (same sidecar shape, cap, and session-keying
-# idiom as _ws_path) and adapted to canonicalize through guard_engine._guard_relpath, the
-# single chokepoint every other guard/anchor path already goes through.
-_EDITED_FILES_CAP = 50  # most recent edits kept; a capture candidate list only needs these
+# Records WHICH files the repo's recent turns edited, so a later capture call can propose
+# anchor candidates (Task 3) without asking the model to name source_files itself.
+# Canonicalized through guard_engine._guard_relpath, the single chokepoint every other
+# guard/anchor path already goes through.
+#
+# KEYED PER REPO, NOT PER SESSION — and that is load-bearing. The writer is a HOOK process
+# (claude.post_write / gemini.after_write), whose session id comes from the host's hook
+# stdin; the reader is the MCP SERVER process, whose session id is a uuid4 minted at server
+# start. Those two ids are different by construction, in every real install, so a
+# session-keyed filename meant the writer and reader never once looked at the same file —
+# the feature was inert in production while every test (which handed both sides the same
+# literal id) passed. Repo-keying removes the identity mismatch entirely; freshness is
+# bounded by each entry's own timestamp instead (see _EDITED_FILES_WINDOW), which also
+# caps how stale a proposed candidate can be. Concurrent writers (two windows on one repo)
+# race last-writer-wins on an atomic whole-file write: at worst one edit record is lost,
+# which costs a candidate suggestion and nothing else.
+_EDITED_FILES_CAP = 50       # most recent edits kept; a candidate list only needs these
+_EDITED_FILES_WINDOW = 1800  # seconds: an edit older than this no longer correlates
 
 
-def _edited_files_path(repo_path: str, session_id: str) -> Path:
-    """Per-repo, PER-SESSION sidecar. Keyed per session (not just per repo): a repo-only
-    key would make a destructive read a single-claimant race — two Claude Code windows on
-    the same repo, or Claude and Codex concurrently, would steal and clear each other's
-    edit list. The session id is hashed (not embedded raw) — same filename-safety/
-    collision idiom as _ws_path."""
-    safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
-    return STORE_DIR / f".edited_{_slug(repo_path)}_{safe}.json"
+def _edited_files_path(repo_path: str) -> Path:
+    """Per-repo edited-files sidecar. Still matches the `.edited_*.json` GC pattern."""
+    return STORE_DIR / f".edited_{_slug(repo_path)}.json"
 
 
-def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> None:
-    """Append file_path to this session's edited-files sidecar. Dedup: a path already
-    present is moved to the end (most recent). Capped at _EDITED_FILES_CAP most recent
-    paths. Silent no-op on a falsy file_path OR an empty session_id (mirrors
-    working_set_ids/_ws_add: no session id means the signal is off, no file is written).
+def record_edited_file(repo_path: str, file_path: str) -> None:
+    """Record file_path as edited in this repo, stamped with the current time. Dedup: a
+    path already present has its timestamp refreshed in place (never duplicated). Capped at
+    _EDITED_FILES_CAP entries, evicting the oldest by timestamp. Silent no-op on a falsy
+    file_path.
 
     Canonicalized via guard_engine._guard_relpath — the same chokepoint _anchor_sources
     uses — so `src/f.py`, `./src/f.py`, and an absolute spelling of the SAME file dedup to
@@ -4769,7 +4776,7 @@ def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> 
     imports store at ITS top, so an eager import here would recreate that cycle.
 
     Fail-soft: a write error must never break the calling hook."""
-    if not file_path or not session_id:
+    if not file_path:
         return
     try:
         from contexer import guard_engine
@@ -4777,34 +4784,37 @@ def record_edited_file(repo_path: str, file_path: str, session_id: str = "") -> 
         if not relpath or relpath == ".." or relpath.startswith("../") or os.path.isabs(relpath):
             return
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        files = _read_edited_files(repo_path, session_id, clear=False)
-        files = [f for f in files if f != relpath]
-        files.append(relpath)
-        files = files[-_EDITED_FILES_CAP:]
-        _atomic_write(_edited_files_path(repo_path, session_id), json.dumps(files))
+        entries = [e for e in _load_edited_entries(repo_path) if e["path"] != relpath]
+        entries.append({"path": relpath, "mtime": time.time()})
+        entries.sort(key=lambda e: e["mtime"])
+        entries = entries[-_EDITED_FILES_CAP:]
+        _atomic_write(_edited_files_path(repo_path), json.dumps(entries))
     except OSError:
         pass
 
 
-def _read_edited_files(repo_path: str, session_id: str = "", clear: bool = True) -> list[str]:
-    """Files recorded as edited this session, oldest to newest. [] immediately when
-    session_id is empty (same rule as working_set_ids) — never touches another session's
-    sidecar. Fail-soft: a missing or corrupt sidecar reads as []. clear=True (the default)
-    deletes this session's sidecar after reading, so a later read in the same turn returns
-    [] while every other session's list stays untouched; Task 3's capture-time read passes
-    clear=False so more than one decision captured in a turn can each see the same list."""
-    if not session_id:
-        return []
-    path = _edited_files_path(repo_path, session_id)
+def _load_edited_entries(repo_path: str) -> list[dict]:
+    """Raw {path, mtime} records, oldest first. Fail-soft: a missing, corrupt, or
+    pre-fix (bare string list) sidecar reads as []."""
     try:
-        files = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(files, list):
-            files = []
+        raw = json.loads(_edited_files_path(repo_path).read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        files = []
-    if clear:
-        path.unlink(missing_ok=True)
-    return files
+        return []
+    if not isinstance(raw, list):
+        return []
+    out = [e for e in raw
+           if isinstance(e, dict) and isinstance(e.get("path"), str) and e["path"]
+           and isinstance(e.get("mtime"), (int, float))]
+    out.sort(key=lambda e: e["mtime"])
+    return out
+
+
+def _read_edited_files(repo_path: str, window: float = _EDITED_FILES_WINDOW) -> list[str]:
+    """Files edited in this repo within the last `window` seconds, oldest to newest.
+    Non-destructive (several decisions captured in one turn each see the same list) —
+    the window, not a clearing read, is what keeps a candidate from going stale."""
+    cutoff = time.time() - window
+    return [e["path"] for e in _load_edited_entries(repo_path) if e["mtime"] >= cutoff]
 
 
 def _retrieval_log(repo_path: str, event: dict) -> None:

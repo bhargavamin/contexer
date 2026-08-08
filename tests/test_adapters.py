@@ -177,7 +177,7 @@ class TestClaudeCaptureEntrypoints:
 
 class TestClaudePostWrite:
     """PostToolUse (Write|Edit) entrypoint (issue #175 Task 2): records the edited file
-    into the per-session sidecar AND arms .pending_capture. Replaces the old shell-only
+    into the per-repo sidecar AND arms .pending_capture. Replaces the old shell-only
     `touch ~/.contexer/.pending_capture` hook."""
 
     def test_payload_round_trip_records_edited_file(self, tmp_repo):
@@ -187,7 +187,7 @@ class TestClaudePostWrite:
         })
         out = claude.post_write(tmp_repo, raw)
         assert out == "{}"
-        assert store._read_edited_files(tmp_repo, "s1", clear=False) == ["src/a.py"]
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
 
     def test_arms_pending_capture_flag(self, tmp_repo):
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
@@ -208,16 +208,19 @@ class TestClaudePostWrite:
     def test_fail_soft_on_missing_tool_input(self, tmp_repo):
         raw = _json.dumps({"session_id": "s1"})
         assert claude.post_write(tmp_repo, raw) == "{}"
-        assert store._read_edited_files(tmp_repo, "s1", clear=False) == []
+        assert store._read_edited_files(tmp_repo) == []
 
     def test_fail_soft_on_non_string_file_path(self, tmp_repo):
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": 42}})
         assert claude.post_write(tmp_repo, raw) == "{}"
-        assert store._read_edited_files(tmp_repo, "s1", clear=False) == []
+        assert store._read_edited_files(tmp_repo) == []
 
-    def test_no_session_id_records_nothing_but_still_returns_empty_json(self, tmp_repo):
+    def test_records_even_when_the_payload_carries_no_session_id(self, tmp_repo):
+        # The sidecar is keyed per repo, so the host's session id is irrelevant to it (C1):
+        # a payload without one must still record, not silently drop the signal.
         raw = _json.dumps({"tool_input": {"file_path": "a.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"
+        assert store._read_edited_files(tmp_repo) == ["a.py"]
 
     def test_pending_capture_write_failure_is_fail_soft(self, tmp_repo, monkeypatch):
         # The flag write is best-effort (#152): an unwritable STORE_DIR must not break the

@@ -3688,75 +3688,98 @@ class TestWorkingSet:
 # ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
 
 class TestEditedFilesSignal:
+    def _entries(self, tmp_repo):
+        return json.loads(store._edited_files_path(tmp_repo).read_text(encoding="utf-8"))
+
+    def _age(self, tmp_repo, path, seconds):
+        """Backdate one recorded path's mtime by `seconds`."""
+        entries = self._entries(tmp_repo)
+        for e in entries:
+            if e["path"] == path:
+                e["mtime"] -= seconds
+        store._edited_files_path(tmp_repo).write_text(json.dumps(entries), encoding="utf-8")
+
     def test_record_and_read_round_trip(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "src/a.py", "sess-1")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["src/a.py"]
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
 
-    def test_default_read_clears_the_sidecar(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "src/a.py", "sess-1")
-        assert store._read_edited_files(tmp_repo, "sess-1") == ["src/a.py"]
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
-        assert not store._edited_files_path(tmp_repo, "sess-1").exists()
+    def test_read_is_nondestructive(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
+        assert store._edited_files_path(tmp_repo).exists()
 
-    def test_nonclearing_read_leaves_the_sidecar_for_a_second_reader(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "src/a.py", "sess-1")
-        store._read_edited_files(tmp_repo, "sess-1", clear=False)
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["src/a.py"]
+    def test_sidecar_is_keyed_per_repo_only(self, tmp_repo):
+        # The C1 bug: a session-keyed filename made the writer (host session id, from hook
+        # stdin) and the reader (server.SESSION_ID, a uuid4 minted in another process) look
+        # at different files, always. The key is now the repo slug alone.
+        store.record_edited_file(tmp_repo, "src/a.py")
+        assert store._edited_files_path(tmp_repo).name == f".edited_{store._slug(tmp_repo)}.json"
 
-    def test_dedup_moves_repeated_path_to_the_end(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py", "sess-1")
-        store.record_edited_file(tmp_repo, "b.py", "sess-1")
-        store.record_edited_file(tmp_repo, "a.py", "sess-1")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["b.py", "a.py"]
+    def test_dedup_refreshes_the_slot_to_most_recent(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        store.record_edited_file(tmp_repo, "b.py")
+        self._age(tmp_repo, "a.py", 60)
+        store.record_edited_file(tmp_repo, "a.py")
+        assert store._read_edited_files(tmp_repo) == ["b.py", "a.py"]
+        assert len(self._entries(tmp_repo)) == 2  # refreshed in place, never duplicated
 
-    def test_capped_at_fifty_most_recent(self, tmp_repo):
+    def test_capped_at_fifty_evicting_oldest_by_mtime(self, tmp_repo):
         for i in range(60):
-            store.record_edited_file(tmp_repo, f"f{i}.py", "sess-1")
-        files = store._read_edited_files(tmp_repo, "sess-1", clear=False)
+            store.record_edited_file(tmp_repo, f"f{i}.py")
+            self._age(tmp_repo, f"f{i}.py", 60 - i)  # f0 oldest ... f59 newest
+        files = store._read_edited_files(tmp_repo)
         assert len(files) == 50
         assert files[0] == "f10.py"
         assert files[-1] == "f59.py"
 
     def test_absolute_and_dotted_spellings_canonicalize_to_one_entry(self, tmp_repo):
-        store.record_edited_file(tmp_repo, str(Path(tmp_repo) / "src" / "a.py"), "sess-1")
-        store.record_edited_file(tmp_repo, "./src/a.py", "sess-1")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["src/a.py"]
+        store.record_edited_file(tmp_repo, str(Path(tmp_repo) / "src" / "a.py"))
+        store.record_edited_file(tmp_repo, "./src/a.py")
+        assert store._read_edited_files(tmp_repo) == ["src/a.py"]
 
     def test_outside_repo_path_is_dropped(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "../outside.py", "sess-1")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
-        assert not store._edited_files_path(tmp_repo, "sess-1").exists()
-
-    def test_empty_session_id_is_a_silent_noop(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py", "")
-        assert store._read_edited_files(tmp_repo, "") == []
-        assert not store._edited_files_path(tmp_repo, "").exists()
+        store.record_edited_file(tmp_repo, "../outside.py")
+        assert store._read_edited_files(tmp_repo) == []
+        assert not store._edited_files_path(tmp_repo).exists()
 
     def test_empty_file_path_is_a_silent_noop(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "", "sess-1")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
+        store.record_edited_file(tmp_repo, "")
+        assert store._read_edited_files(tmp_repo) == []
 
-    def test_sessions_are_isolated(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py", "sess-1")
-        store.record_edited_file(tmp_repo, "b.py", "sess-2")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == ["a.py"]
-        assert store._read_edited_files(tmp_repo, "sess-2", clear=False) == ["b.py"]
+    def test_entry_older_than_the_freshness_window_is_not_returned(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "stale.py")
+        store.record_edited_file(tmp_repo, "fresh.py")
+        self._age(tmp_repo, "stale.py", store._EDITED_FILES_WINDOW + 60)
+        assert store._read_edited_files(tmp_repo) == ["fresh.py"]
+
+    def test_window_is_overridable(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "a.py")
+        self._age(tmp_repo, "a.py", 120)
+        assert store._read_edited_files(tmp_repo, window=60) == []
+        assert store._read_edited_files(tmp_repo, window=600) == ["a.py"]
 
     def test_corrupt_sidecar_reads_as_empty(self, tmp_repo):
-        path = store._edited_files_path(tmp_repo, "sess-1")
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text("not json", encoding="utf-8")
-        assert store._read_edited_files(tmp_repo, "sess-1", clear=False) == []
+        store._edited_files_path(tmp_repo).write_text("not json", encoding="utf-8")
+        assert store._read_edited_files(tmp_repo) == []
+
+    def test_legacy_string_list_sidecar_reads_as_empty(self, tmp_repo):
+        # Pre-fix sidecars held bare path strings with no timestamp — unusable for the
+        # freshness window, and their session-keyed filenames are swept by the GC anyway.
+        store.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        store._edited_files_path(tmp_repo).write_text('["a.py"]', encoding="utf-8")
+        assert store._read_edited_files(tmp_repo) == []
 
     def test_write_error_is_fail_soft(self, tmp_repo, monkeypatch):
         def _boom(*a):
             raise OSError("disk full")
         monkeypatch.setattr(store, "_atomic_write", _boom)
-        store.record_edited_file(tmp_repo, "a.py", "sess-1")  # must not raise
+        store.record_edited_file(tmp_repo, "a.py")  # must not raise
 
     def test_gc_sweep_drops_stale_edited_files_sidecar(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py", "sess-1")
-        path = store._edited_files_path(tmp_repo, "sess-1")
+        store.record_edited_file(tmp_repo, "a.py")
+        path = store._edited_files_path(tmp_repo)
         assert path.exists()
         old = time.time() - store._WS_GC_AGE_SECONDS - 3600
         os.utime(path, (old, old))
@@ -3764,8 +3787,8 @@ class TestEditedFilesSignal:
         assert not path.exists()
 
     def test_gc_sweep_keeps_fresh_edited_files_sidecar(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "a.py", "sess-1")
-        path = store._edited_files_path(tmp_repo, "sess-1")
+        store.record_edited_file(tmp_repo, "a.py")
+        path = store._edited_files_path(tmp_repo)
         store._gc_stale_session_files()
         assert path.exists()
 
@@ -3776,9 +3799,35 @@ class TestAnchorCandidates:
     def _entry(self, tmp_repo, eid):
         return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
 
+    def test_hook_written_signal_reaches_a_different_server_session(self, tmp_repo):
+        """C1 regression, end to end across the process boundary: the WRITER is the hook
+        process (host session id, straight from Claude Code's stdin) and the READER is the
+        MCP server process (server.SESSION_ID — a uuid4 minted at server start). The two ids
+        are different by construction, always; keying the sidecar on either one made this
+        feature inert in production while every same-literal-id test passed."""
+        from contexer.adapters import claude
+        raw = json.dumps({"session_id": "host-abc",
+                          "tool_input": {"file_path": str(Path(tmp_repo) / "auth" / "jwt.py")}})
+        assert claude.post_write(tmp_repo, raw) == "{}"
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "3f9c2b1e-server-uuid4", "constraint")
+        assert stored
+        assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+
+    def test_candidates_older_than_the_freshness_window_are_not_attached(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        path = store._edited_files_path(tmp_repo)
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        entries[0]["mtime"] -= store._EDITED_FILES_WINDOW + 60
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        assert stored
+        assert "anchor_candidates" not in self._entry(tmp_repo, eid)
+
     def test_capture_without_source_files_attaches_edited_files_as_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
-        store.record_edited_file(tmp_repo, "auth/other.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        store.record_edited_file(tmp_repo, "auth/other.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert stored
@@ -3787,7 +3836,7 @@ class TestAnchorCandidates:
         assert "source_files" not in entry
 
     def test_capture_with_source_files_never_attaches_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "unrelated.py", "sess-1")
+        store.record_edited_file(tmp_repo, "unrelated.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
             source_files=["auth/jwt.py"])
@@ -3804,7 +3853,7 @@ class TestAnchorCandidates:
 
     def test_candidates_capped_at_ten_most_recent(self, tmp_repo):
         for i in range(15):
-            store.record_edited_file(tmp_repo, f"f{i}.py", "sess-1")
+            store.record_edited_file(tmp_repo, f"f{i}.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert stored
@@ -3817,7 +3866,7 @@ class TestAnchorCandidates:
         # returns "auto" (born approved) for created_by="scan" in practice, so the status
         # gate alone already excludes this. Confirms the explicit source exclusion doesn't
         # accidentally let a real scan capture through either.
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, eid = store.update_decision(
             tmp_repo, "Functions use snake_case naming (98% of 412 functions)", "sess-1",
             "convention", created_by="scan")
@@ -3832,7 +3881,7 @@ class TestAnchorCandidates:
         # gate happening to agree with it.
         monkeypatch.setattr(store, "_classify_level",
                              lambda content, subtype, created_by: "approval_required")
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, eid = store.update_decision(
             tmp_repo, "Some scan-mined fact about the repo", "sess-1", "convention",
             created_by="scan")
@@ -3847,7 +3896,7 @@ class TestAnchorCandidates:
         # case the review specifically flagged: without the explicit source exclusion, the
         # status gate alone would wrongly let a mined/bootstrap capture earn candidates from
         # a session's edited files it never actually touched.
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, eid = store.update_decision(
             tmp_repo, "All services must standardize on JWT for auth", "sess-1", "constraint",
             created_by="bootstrap")
@@ -3863,7 +3912,7 @@ class TestAnchorCandidates:
         # attached and stranded (approve_decision on an already-approved entry only permits
         # 'ignore', so a pending->approved blessing transition can never happen for it). The
         # status gate now excludes it correctly, by outcome rather than by luck.
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
             created_by="human")
@@ -3874,7 +3923,7 @@ class TestAnchorCandidates:
 
     def test_recurrence_never_gains_candidates(self, tmp_repo):
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-2")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-2", "constraint")
         assert not stored  # recurrence, not a new entry
@@ -3882,7 +3931,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
     def test_approval_blesses_candidates_into_a_real_anchor(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
@@ -3895,7 +3944,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
     def test_approval_edit_also_blesses_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         ok, _msg = store.approve_decision(tmp_repo, eid, "edit", "Use JWT with RS256")
@@ -3905,7 +3954,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
     def test_approval_with_explicit_source_files_overrides_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         ok, _msg = store.approve_decision(
@@ -3916,7 +3965,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
     def test_dismiss_leaves_candidates_untouched(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         ok, _msg = store.approve_decision(tmp_repo, eid, "ignore")
@@ -3927,7 +3976,7 @@ class TestAnchorCandidates:
         assert "source_files" not in entry
 
     def test_skip_leaves_candidates_untouched_and_still_pending(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         ok, _msg = store.approve_decision(tmp_repo, eid, "skip")
@@ -3979,7 +4028,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
     def test_bulk_approve_also_blesses_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         results = store.approve_decisions(tmp_repo, [eid], "approve")
@@ -3990,7 +4039,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in entry
 
     def test_share_projection_never_carries_anchor_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert stored
@@ -4000,7 +4049,7 @@ class TestAnchorCandidates:
         assert "anchor_candidates" not in projected
 
     def test_review_surfaces_would_anchor_line_for_new_pending_decision(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         out = store.format_pending_review(tmp_repo)
         assert "would anchor: auth/jwt.py" in out
@@ -4018,7 +4067,7 @@ class TestAnchorCandidates:
         caller-passed source_files must win outright — not merged with either of the
         other two — pinning today's precedence so a future refactor of the outer
         approve_decision override call can't silently regress it."""
-        store.record_edited_file(tmp_repo, "candidate.py", "sess-1")
+        store.record_edited_file(tmp_repo, "candidate.py")
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
             created_by="human")

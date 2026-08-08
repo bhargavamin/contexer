@@ -706,7 +706,7 @@ class TestReviewAnchorCandidates:
         from contexer import store
 
         monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
-        store.record_edited_file(tmp_repo, "auth/jwt.py", "sess-1")
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, _entry_id = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert stored

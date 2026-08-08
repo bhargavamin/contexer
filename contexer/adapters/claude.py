@@ -206,10 +206,14 @@ def rationale(repo_path: str, raw: str) -> str:
 
 
 def post_write(repo_path: str, raw: str) -> str:
-    """PostToolUse (Write|Edit): record the file(s) this turn edited into the per-(repo,
-    session) edited-files sidecar (issue #175 Task 2 — a deterministic flow signal capture
-    can later propose anchor candidates from) AND arm the .pending_capture flag. Silent,
-    fail-soft, never raises; always returns "{}".
+    """PostToolUse (Write|Edit): record the file(s) this turn edited into the PER-REPO
+    edited-files sidecar (issue #175 Task 2 — a deterministic flow signal capture can later
+    propose anchor candidates from) AND arm the .pending_capture flag. Silent, fail-soft,
+    never raises; always returns "{}".
+
+    The host session id in `raw` is deliberately NOT used to key that sidecar: this hook is
+    a different process from the MCP server that later reads it, and the two never share a
+    session id (see store.record_edited_file). `raw` is still parsed for `tool_input`.
 
     Replaces the old shell-only `touch .pending_capture` PostToolUse hook: this Python
     entrypoint does both jobs so the file-edit signal and the capture-reminder flag stay
@@ -232,7 +236,6 @@ def post_write(repo_path: str, raw: str) -> str:
     invariant) preserves the capture-reminder signal the shell hook this replaces used to
     set (consumed by the next UserPromptSubmit anchor)."""
     try:
-        sid = store.session_from_hook_stdin(raw)
         repo = store._hook_cwd_repo(repo_path)
         try:
             data = json.loads(raw)
@@ -245,7 +248,7 @@ def post_write(repo_path: str, raw: str) -> str:
             # .pending_capture arm below — a non-OSError escaping record_edited_file
             # (e.g. from guard_engine) must not also cost the capture reminder.
             try:
-                store.record_edited_file(repo, fp, sid)
+                store.record_edited_file(repo, fp)
             except Exception:
                 pass
         try:

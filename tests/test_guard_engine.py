@@ -577,7 +577,7 @@ class TestGuardPairs:
         _guard_trusted-eligible source once approved — an "ai"-sourced entry stays
         guard-untrusted forever regardless of approval, which would make this test unable
         to observe the "pairs after approval" half of the invariant."""
-        store.record_edited_file(str(repo), "auth/jwt.py", "sess-1")
+        store.record_edited_file(str(repo), "auth/jwt.py")
         stored, eid = store.update_decision(
             str(repo), "Decided to use JWT for auth", "sess-1", "constraint",
             created_by="plan")

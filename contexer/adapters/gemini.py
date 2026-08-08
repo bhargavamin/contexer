@@ -179,7 +179,7 @@ def after_write(repo_path: str, raw: str) -> str:
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
             fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             if isinstance(fp, str) and fp:
-                store.record_edited_file(repo, fp, store.session_from_hook_stdin(raw))
+                store.record_edited_file(repo, fp)
     except Exception:
         pass
     return json.dumps({
