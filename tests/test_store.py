@@ -2327,106 +2327,6 @@ class TestLegacyStamping:
         assert e["created_by"] == "human"
 
 
-class TestRevisionSourceBackstamp:
-    """Task 1 of guard-anchor-coverage: `_migrate_decision` back-stamps any revision whose
-    `source` is falsy (None/""/absent), in both the already-migrated heal branch and the
-    fresh-migration branch — mirroring the schema-v4 status/created_by stamping."""
-
-    def _legacy_full_revision_entry(self, created_by="human", rev_source=None):
-        """Already shaped like a v4 revision-model entry (current_revision_id + full
-        revision objects) but with an explicit falsy revision source — the
-        already-migrated 'heal' branch's target."""
-        return {
-            "id": "legacy-src-1", "type": "decision", "subtype": "architecture",
-            "content": "Use the flat-list store.", "title": "Use the flat-list store.",
-            "revision": 1, "status": "approved", "created_by": created_by,
-            "timestamp": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
-            "current_revision_id": "rev-src-1",
-            "revisions": [{
-                "revision_id": "rev-src-1", "decision_id": "legacy-src-1", "version_number": 1,
-                "content": "Use the flat-list store.", "title": "Use the flat-list store.",
-                "confidence_score": 0, "evidence": [], "created_at": "2026-01-01T00:00:00+00:00",
-                "approved_at": "2026-01-01T00:00:00+00:00", "source": rev_source,
-            }],
-        }
-
-    def test_already_migrated_heal_branch_backstamps_falsy_source(self):
-        e = self._legacy_full_revision_entry(created_by="human", rev_source=None)
-        changed = store._migrate_decision(e)
-        assert changed is True
-        assert e["revisions"][0]["source"] == "human"
-
-    def test_already_migrated_falls_back_to_ai_when_created_by_falsy(self):
-        e = self._legacy_full_revision_entry(created_by="", rev_source="")
-        changed = store._migrate_decision(e)
-        assert changed is True
-        assert e["created_by"] == "ai"
-        assert e["revisions"][0]["source"] == "ai"
-
-    def test_non_empty_revision_source_never_overwritten(self):
-        e = self._legacy_full_revision_entry(created_by="human", rev_source="scan")
-        before = json.loads(json.dumps(e))
-        changed = store._migrate_decision(e)
-        assert changed is False
-        assert e == before
-
-    def test_double_migrate_idempotent(self):
-        e = self._legacy_full_revision_entry(created_by="human", rev_source=None)
-        store._migrate_decision(e)
-        snapshot = json.loads(json.dumps(e))
-        changed_again = store._migrate_decision(e)
-        assert changed_again is False
-        assert e == snapshot
-
-    def _legacy_pre_revision_entry_with_preshaped_snapshot(self, created_by="human", rev_source=None):
-        """A pre-revision-model legacy entry (no current_revision_id yet) whose historical
-        `revisions[]` already holds ONE full revision-shaped object (has `revision_id`) with
-        an explicit falsy source. The fresh-migration branch's pass-through
-        (`if "revision_id" in snap: full.append(snap); continue`) skips `_new_revision`'s
-        `source or created_by` fallback entirely — this is that gap."""
-        return {
-            "id": "legacy-src-2", "type": "decision", "subtype": "architecture",
-            "content": "Use the flat-list store.", "revision": 1,
-            "status": "approved", "created_by": created_by,
-            "timestamp": "2026-01-01T00:00:00+00:00",
-            "revisions": [{
-                "revision_id": "rev-src-2", "decision_id": "legacy-src-2", "version_number": 1,
-                "content": "Use the flat-list store.", "title": "Use the flat-list store.",
-                "confidence_score": 0, "evidence": [], "created_at": "2026-01-01T00:00:00+00:00",
-                "approved_at": "2026-01-01T00:00:00+00:00", "source": rev_source,
-            }],
-        }
-
-    def test_fresh_migration_backstamps_falsy_source_on_preshaped_snapshot(self):
-        e = self._legacy_pre_revision_entry_with_preshaped_snapshot(created_by="human", rev_source=None)
-        changed = store._migrate_decision(e)
-        assert changed is True
-        assert e["current_revision_id"] == "rev-src-2"
-        assert e["revisions"][0]["source"] == "human"
-
-    def test_fresh_migration_falsy_source_stays_ai_when_created_by_ai(self):
-        e = self._legacy_pre_revision_entry_with_preshaped_snapshot(created_by="ai", rev_source=None)
-        store._migrate_decision(e)
-        assert e["revisions"][0]["source"] == "ai"
-
-
-class TestSchemaVersionBumpForRevisionBackstamp:
-    def test_schema_version_bumps_exactly_once(self, tmp_repo):
-        store.update_decision(tmp_repo, "Use uv for deps", "s1", "convention")
-        data = store._load(tmp_repo)
-        data["schema_version"] = 4  # simulate a store migrated under the pre-Task-1 schema
-        store._save(tmp_repo, data)
-
-        reloaded = store._load(tmp_repo)
-        assert reloaded.get("schema_version") == 5
-
-        # A second load must not re-run the migration pass (schema_version already current).
-        rev_id_before = reloaded["entries"][0]["current_revision_id"]
-        reloaded_again = store._load(tmp_repo)
-        assert reloaded_again.get("schema_version") == 5
-        assert reloaded_again["entries"][0]["current_revision_id"] == rev_id_before
-
-
 # ── approve_decision ──────────────────────────────────────────────────────────
 
 class TestApproveDecision:
@@ -4374,7 +4274,7 @@ class TestTitleBackfill:
         e = reloaded["entries"][0]
         assert e["title"] == "Legacy decision body kept verbatim."
         assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
-        assert reloaded.get("schema_version") == 5
+        assert reloaded.get("schema_version") == 4
 
 
 class TestServerTitleParam:

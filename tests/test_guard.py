@@ -563,11 +563,13 @@ class TestGuardPairs:
 
 # ── legacy revision source back-stamp (guard integration) ─────────────────────
 
-class TestGuardTrustsBackstampedLegacyRevisions:
-    """A legacy store entry whose revision was persisted with an explicit falsy `source`
-    (predates the source back-stamp) becomes trust-eligible after `_load` migrates it, but
-    only when `created_by` names a trusted provenance — an ai-authored legacy entry stays
-    untrusted through the same back-stamp."""
+class TestGuardTrustsLegacyRevisionsAtReadTime:
+    """A legacy store entry whose revision carries an explicit falsy `source` (predates
+    provenance tracking) becomes trust-eligible via `_guard_trusted`'s read-time fallback
+    to `created_by` — NOT via any storage rewrite. Binding ruling: the stored `source`
+    must stay exactly as persisted (None stays None) because `share.py`'s `_wire_source`
+    deliberately preserves `source: None` end-to-end as honest unknown provenance on the
+    push wire; back-stamping it in storage would fabricate a false provenance there."""
 
     def _legacy_data(self, created_by, rev_source):
         return {
@@ -593,7 +595,8 @@ class TestGuardTrustsBackstampedLegacyRevisions:
     def test_human_created_becomes_trusted_and_pairs_after_load(self, repo):
         store._save(str(repo), self._legacy_data(created_by="human", rev_source=None))
         entry = store._load(str(repo))["entries"][0]
-        assert entry["revisions"][0]["source"] == "human"
+        # No storage rewrite: the falsy source persists exactly as stored.
+        assert entry["revisions"][0]["source"] is None
         assert store._guard_trusted(entry) is True
         pairs = store._guard_pairs(str(repo), ["auth/jwt.py"])
         assert len(pairs) == 1
@@ -602,12 +605,29 @@ class TestGuardTrustsBackstampedLegacyRevisions:
     def test_ai_created_stays_untrusted_after_load(self, repo):
         store._save(str(repo), self._legacy_data(created_by="ai", rev_source=None))
         entry = store._load(str(repo))["entries"][0]
-        assert entry["revisions"][0]["source"] == "ai"
+        assert entry["revisions"][0]["source"] is None
         assert store._guard_trusted(entry) is False
         pairs = store._guard_pairs(str(repo), ["auth/jwt.py"])
         assert len(pairs) == 1
         assert pairs[0]["emitted"] is False
         assert pairs[0]["reason"] == "rejected: untrusted provenance"
+
+    def test_falsy_created_by_also_stays_untrusted(self, repo):
+        store._save(str(repo), self._legacy_data(created_by="", rev_source=None))
+        entry = store._load(str(repo))["entries"][0]
+        assert store._guard_trusted(entry) is False
+
+    def test_legacy_source_stays_none_through_load_and_share_projection(self, repo):
+        """Regression pin for the binding ruling: `_load` must never fabricate a
+        provenance value onto a legacy revision's falsy `source`, and the share wire
+        projection built from that loaded entry must still carry `source: None` —
+        `share._wire_source` relies on this to pass None through as honest unknown
+        provenance rather than coercing it to a false "ai"."""
+        store._save(str(repo), self._legacy_data(created_by="human", rev_source=None))
+        entry = store._load(str(repo))["entries"][0]
+        assert entry["revisions"][0]["source"] is None
+        projection = store._share_projection(entry)
+        assert projection["source"] is None
 
 
 # ── guard_staged ──────────────────────────────────────────────────────────────
