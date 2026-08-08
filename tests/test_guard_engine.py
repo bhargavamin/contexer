@@ -1170,11 +1170,27 @@ class TestApplyBackfillAnchors:
 
 class TestAnchorBackfillEndToEnd:
     def test_backfilled_decision_pairs_when_file_staged(self, repo):
+        """What backfill actually buys, stated discriminatingly: every backfill candidate is
+        mined from the decision's own content by the SAME extraction _guard_pairs uses, so
+        the decision ALREADY pairs before backfill — via `path artifact ...`. Backfill turns
+        that into a real `source_files` anchor: the pairing reason firms up to `source_files
+        match`, and (the real prize) the entry gains the anchor_commit that _staleness_note
+        needs. It does NOT add new Tier-1 advisories."""
         _write(repo, "auth/jwt.py", "token = 0\n")
         _git(repo, "add", "auth/jwt.py")
         _commit(repo, "init")
 
         entry = _seed_entry(repo, "See auth/jwt.py for the JWT-based session auth decision")
+
+        # BEFORE: already an advisory, on the content-artifact signal alone.
+        _write(repo, "auth/jwt.py", "token = 1  # rotated\n")
+        _git(repo, "add", "auth/jwt.py")
+        before = guard_engine.guard_staged(str(repo))
+        assert len(before["advisories"]) == 1
+        assert before["advisories"][0]["decision_id"] == entry["id"]
+        assert before["advisories"][0]["reason"].startswith("path artifact")
+        assert "source_files" not in entry and "anchor_commit" not in entry
+
         candidates = guard_engine.anchor_candidates_for_backfill(str(repo))
         assert len(candidates) == 1
         assert candidates[0]["decision_id"] == entry["id"]
@@ -1184,12 +1200,19 @@ class TestAnchorBackfillEndToEnd:
             str(repo), {entry["id"]: candidates[0]["candidates"]})
         assert applied == 1
 
-        _write(repo, "auth/jwt.py", "token = 1  # rotated\n")
+        # AFTER: the SAME single advisory, now on the firmer signal — plus the anchor
+        # (source_files + anchor_commit) staleness tracking requires. The staged content is
+        # changed first: the throttle is content-keyed, so re-running against the identical
+        # blob would surface nothing regardless of the anchor.
+        _write(repo, "auth/jwt.py", "token = 2  # rotated again\n")
         _git(repo, "add", "auth/jwt.py")
         result = guard_engine.guard_staged(str(repo))
         assert len(result["advisories"]) == 1
         assert result["advisories"][0]["decision_id"] == entry["id"]
         assert result["advisories"][0]["reason"] == "source_files match"
+        anchored = store._entry_by_id(store._load(str(repo))["entries"], entry["id"])
+        assert anchored["source_files"] == ["auth/jwt.py"]
+        assert anchored["anchor_commit"]
 
         # A backfilled decision no longer surfaces as a further backfill candidate.
         assert guard_engine.anchor_candidates_for_backfill(str(repo)) == []

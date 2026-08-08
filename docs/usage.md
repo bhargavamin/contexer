@@ -133,14 +133,14 @@ The guard fails open by design: any internal error, or a run over its internal t
 
 ### Anchor backfill
 
-The advisory tier can only pair a staged file against a decision that's *anchored* to it (`source_files`). New decisions pick up an anchor automatically as you capture and approve them, but older, already-trusted decisions in your store predate that and sit permanently invisible to Tier 1 until something anchors them after the fact.
+New decisions pick up an anchor (`source_files`) automatically as you capture and approve them; older, already-trusted decisions in your store predate that. They still pair through file paths and module names written in their own text, but only for the files they happen to mention — and staleness tracking, which needs both the files and the commit they were true at, doesn't work for them at all. Backfilling an anchor fixes both.
 
 ```bash
 contexer guard anchors --list   # preview candidates, read-only, no prompts
 contexer guard anchors          # interactive: review and ratify per decision
 ```
 
-`--list` scans every trusted, currently-unanchored decision, mines its own content for file paths and module names it mentions, and prints the ones that still exist in your working tree — nothing is written. It doubles as the non-interactive surface: run it in CI, a script, or from an agent, since the interactive loop below refuses outright when stdin isn't a TTY.
+`--list` scans every trusted, currently-unanchored decision, mines its own content for file paths and module names it mentions, and prints the ones that still exist in your working tree — nothing is written. Because those suggestions come out of the decision's own text, accepting them as-is firms up pairing the guard was already doing (the advisory now reads as an explicit anchor match) and switches on staleness tracking for that decision; use `E` to anchor it to files its text never named. It doubles as the non-interactive surface: run it in CI, a script, or from an agent, since the interactive loop below refuses outright when stdin isn't a TTY.
 
 Without `--list`, and with a TTY attached, `contexer guard anchors` walks the same candidate list one decision at a time:
 
