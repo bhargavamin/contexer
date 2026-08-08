@@ -509,7 +509,8 @@ class TestCodexPostWriteRepoResolutionParity:
     would silently key record_edited_file's write under a different sidecar slug than
     Task 3's capture-time read (the doc-drift hazard)."""
 
-    def test_prefix_matches_claude_post_write_verbatim(self, home):
+    def test_prefix_matches_claude_post_write_verbatim(self, home, monkeypatch):
+        from contexer import store
         from contexer.adapters import claude as claude_adapter
 
         codex.install(home)
@@ -519,9 +520,26 @@ class TestCodexPostWriteRepoResolutionParity:
 
         # claude.py's own post_write_cmd is generated the same way — reconstruct it via a
         # real claude.install() and compare prefixes rather than duplicating the literal.
+        # claude_adapter.install() also runs clean_legacy_repo_settings against
+        # store._git_root(os.getcwd()) — the PROCESS cwd's git root, unaffected by
+        # claude_home — so chdir into an untracked temp dir before calling it, exactly
+        # like the parity fixtures in test_plugin_hooks.py / test_adapters.py; otherwise
+        # this could silently rewrite the real checkout's <repo>/.claude/settings.json.
         claude_home = home.parent / "claude_home_for_parity"
         (claude_home / ".claude").mkdir(parents=True)
+
+        real_repo = store._git_root(str(Path.cwd()))
+        real_settings = Path(real_repo) / ".claude" / "settings.json" if real_repo else None
+        before = real_settings.read_bytes() if real_settings and real_settings.is_file() else None
+
+        monkeypatch.chdir(home)
         claude_adapter.install(claude_home)
+
+        if real_settings is not None:
+            after = real_settings.read_bytes() if real_settings.is_file() else None
+            assert after == before, (
+                f"claude.install() must never touch the real {real_settings} — "
+                "cwd isolation leaked")
         claude_settings = json.loads((claude_home / ".claude" / "settings.json").read_text())
         claude_cmds = [h["command"] for g in claude_settings["hooks"]["PostToolUse"]
                        for h in g.get("hooks", []) if "command" in h]
