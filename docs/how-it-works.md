@@ -69,7 +69,7 @@ At session start, a hook injects your stored constraints and conventions before 
 for questions about architecture, design, or rationale.
 ```
 
-Ask about a past decision or rationale ("why did we pick REST?") and Contexer fetches the matching entries automatically, before the agent responds — and shows you a one-line receipt of what it recalled ("Contexer: recalled 2 decisions (db)"), so retrieval is observable, never spooky. Mention a file in your request and the decisions that govern it come along automatically too — even a plain task like "fix the pairing bug in guard_engine.py" pulls in whatever's linked to that file, with no need to ask.
+Ask about a past decision or rationale ("why did we pick REST?") and Contexer fetches the matching entries automatically, before the agent responds — and shows you a one-line receipt of what it recalled ("Contexer: recalled 2 decisions (db)"), so retrieval is observable, never spooky. Mention a file in your request and the decisions linked to it come along automatically too — even a plain task like "fix the pairing bug in guard_engine.py" pulls in whatever's linked to that file, with no need to ask. If a decision only mentions the file in passing rather than being explicitly linked to it, you get a short pointer instead of the full decision — enough to know it's there without loading everything.
 
 Before editing a file, an assistant can also ask Contexer which of your decisions govern it — decisions linked to that file, or that mention it by name — and get back only those, instead of everything stored. This works for one file or several at once.
 

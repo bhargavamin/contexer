@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -3792,7 +3794,7 @@ class TestRetrievalIndex:
         store.update_decision(tmp_repo, "We chose postgres for the orders schema", RV1_SESSION, "architecture")
         idx = store._read_retrieval_index(tmp_repo)
         assert idx is not None
-        assert idx["v"] == 1 and idx["n_docs"] == 1
+        assert idx["v"] == 2 and idx["n_docs"] == 1
         (doc,) = idx["docs"].values()
         assert "db" in doc["topics"]
         assert "postgres" in doc["tf"]
@@ -3820,7 +3822,24 @@ class TestRetrievalIndex:
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         p = store._index_path(tmp_repo)
         payload = json.loads(p.read_text())
-        payload["v"] = 2
+        payload["v"] = 3
+        p.write_text(json.dumps(payload))
+        assert store._read_retrieval_index(tmp_repo) is None
+
+    def test_pre_187_v1_index_rejected_not_half_served(self, tmp_repo):
+        # A v1 index predates source_files/path_artifacts/title per doc (issue #187 fix
+        # round 1). It must be rejected outright — not accepted and half-served against docs
+        # missing the new fields — so the whole per-prompt path falls back to legacy until
+        # the repo's next _save rebuilds the index at v2.
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        p = store._index_path(tmp_repo)
+        payload = json.loads(p.read_text())
+        assert payload["v"] == 2
+        payload["v"] = 1
+        for doc in payload["docs"].values():
+            doc.pop("source_files", None)
+            doc.pop("path_artifacts", None)
+            doc.pop("title", None)
         p.write_text(json.dumps(payload))
         assert store._read_retrieval_index(tmp_repo) is None
 
@@ -4632,11 +4651,17 @@ class TestArtifactRouteGate:
 class TestFileRoute:
     """#187 — a prompt naming a path/module-shaped file routes through
     guard_engine.decisions_for_files deterministically, ahead of BM25, at the prompt seam.
-    No get_context(files=...) call required."""
+    No get_context(files=...) call required.
 
-    def test_qualified_path_in_task_prompt_injects_governing_decision(self, tmp_repo):
+    Fix round 1 — tiered by signal strength (the ratified risk-asymmetry principle: a wrong
+    STRONG injection plants false context as if human-approved, a wrong pointer costs one
+    line): a `source_files` anchor (a human explicitly linked the file) earns full-content
+    STRONG treatment; a bare content-artifact mention earns only the WEAK pointer lane."""
+
+    def test_anchor_hit_in_task_prompt_injects_full_content(self, tmp_repo):
         # Task-shaped prompt: no rationale/project word, no question lead — the ONLY signal
-        # is the file path itself. Anchored via source_files, the realistic #172/#174 case.
+        # is the file path itself. Anchored via source_files (a human governance signal), the
+        # realistic #172/#174 case — STRONG tier, full content.
         store.update_decision(
             tmp_repo,
             "The commit-time guard's pairing engine lives in contexer/guard_engine.py and "
@@ -4648,18 +4673,56 @@ class TestFileRoute:
         assert result.startswith("[Contexer: auto-fetched for this question]")
         assert "pairing engine" in result
 
-    def test_content_artifact_match_without_source_files(self, tmp_repo):
-        # No source_files anchor — pairing falls back to a path-shaped artifact extracted
-        # from the decision's own content (mirrors guard_engine's own _guard_pairs signal).
+    def test_mention_only_hit_is_a_pointer_not_full_content(self, tmp_repo):
+        # No source_files anchor — pairing only via a path-shaped artifact extracted from the
+        # decision's own content (mirrors guard_engine's own _guard_pairs signal). A prose
+        # mention is not a governance signal: pointer only, never full content.
+        #
+        # "billing.py" (single meaningful subtoken, not a topic alias — unlike "guard_engine.py"
+        # or "config.py") is deliberately chosen: BM25 independently requires >= 2 DISTINCT
+        # query-term hits for its OWN strong-content promotion (_STRONG_MIN_HITS), and this
+        # test's whole point is proving the file route's mention tier alone — with NO other
+        # word overlap between prompt and content — stays capped at a pointer. A two-subtoken
+        # filename (or a topic-alias word) would let BM25's separate, already-shipped
+        # artifact-double-weighting mechanism ALSO promote the same decision on its own merits
+        # (see the note above `ranked = _bm25_rank(...)` in _get_context_for_prompt) —
+        # irrelevant to what this test is pinning.
         store.update_decision(
             tmp_repo,
-            "The store <-> contexer/guard_engine.py module boundary must stay a "
-            "function-level import to avoid a load cycle",
+            "Discount calculations live in billing.py and must round half up",
             RV1_SESSION, "architecture",
         )
+        result = store.get_context_for_prompt(tmp_repo, "check billing.py logic")
+        assert result.startswith("[Contexer] Related stored decisions")
+        assert not result.startswith("[Contexer: auto-fetched for this question]")
+        # The pointer names the decision (its title, here == content since it's short) but
+        # never renders it in the two-line STRONG shape (bullet + indented body line).
+        assert "Discount calculations" in result
+        assert "\n    " not in result
+
+    def test_mixed_prompt_anchor_full_no_duplicate_mention_pointer(self, tmp_repo):
+        # Two files in one prompt: one anchored (STRONG governance signal), one only
+        # mentioned in a DIFFERENT decision's prose (weak signal, single-subtoken filename —
+        # see test_mention_only_hit_is_a_pointer_not_full_content for why). The anchor renders
+        # full content; the mention-tier hit is simply dropped from this response rather than
+        # tacking on a duplicate pointer line alongside a STRONG render.
+        store.update_decision(
+            tmp_repo,
+            "The commit-time guard's pairing engine lives in contexer/guard_engine.py",
+            RV1_SESSION, "architecture", source_files=["contexer/guard_engine.py"],
+        )
+        store.update_decision(
+            tmp_repo,
+            "Discount calculations live in billing.py and must round half up",
+            RV1_SESSION, "convention",
+        )
         result = store.get_context_for_prompt(
-            tmp_repo, "update the imports in contexer/guard_engine.py")
-        assert "function-level import" in result
+            tmp_repo,
+            "fix the pairing bug in contexer/guard_engine.py and check billing.py too")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "pairing engine" in result
+        assert "[Contexer] Related stored decisions" not in result
+        assert "Discount calculations" not in result
 
     def test_file_hit_leads_and_bm25_fills_remaining_slots(self, tmp_repo):
         store.update_decision(tmp_repo,
@@ -4674,11 +4737,11 @@ class TestFileRoute:
 
         result = store.get_context_for_prompt(
             tmp_repo, "why does contexer/config.py break the jwt refresh cookie flow?")
-        # File-route hit (config.py) renders BEFORE the BM25-ranked hit (jwt) — "ahead of
-        # BM25 scores", not just present somewhere in a merged/deduped set.
+        # File-route hit (config.py, anchored -> STRONG) renders BEFORE the BM25-ranked hit
+        # (jwt) — "ahead of BM25 scores", not just present somewhere in a merged/deduped set.
         assert 0 <= result.find("Settings load") < result.find("JWT refresh tokens")
 
-    def test_working_set_dedup_applies_to_file_hits(self, tmp_repo):
+    def test_working_set_dedup_applies_to_anchor_hits(self, tmp_repo):
         store.update_decision(
             tmp_repo, "guard_engine.py pairs decisions against staged files",
             RV1_SESSION, "architecture", source_files=["guard_engine.py"])
@@ -4690,11 +4753,27 @@ class TestFileRoute:
             tmp_repo, "fix the pairing bug in guard_engine.py", sid)
         assert second == ""   # already in the working set — no re-injection, no fallback
 
+    def test_mention_pointer_not_working_set_deduped(self, tmp_repo):
+        # Mirrors the EXISTING topic-overlap WEAK pointer precedent (never _ws_add'd, see
+        # test_pointer_prompts_stay_weak in test_benchmark.py) — a pointer is cheap and
+        # repeatable, unlike a full STRONG content injection, so it is deliberately NOT added
+        # to the working set. Only anchor-tier (STRONG) hits get that treatment.
+        store.update_decision(
+            tmp_repo, "Discount calculations live in billing.py and must round half up",
+            RV1_SESSION, "architecture")
+        sid = "sess-mention-ws"
+        first = store.get_context_for_prompt(tmp_repo, "check billing.py logic", sid)
+        assert first.startswith("[Contexer] Related stored decisions")
+        second = store.get_context_for_prompt(tmp_repo, "check billing.py logic", sid)
+        assert second.startswith("[Contexer] Related stored decisions")
+
     def test_bare_topic_word_not_pathlike_no_file_route(self, tmp_repo):
         store.update_decision(tmp_repo, "We use PostgreSQL as the primary datastore",
                               RV1_SESSION, "architecture")
-        ws: set = set()
-        assert store._prompt_file_ids(tmp_repo, "what about postgres?", ws) == []
+        index = store._read_retrieval_index(tmp_repo)
+        anchor_ids, mention_hits, file_artifacts = store._prompt_file_hits(
+            tmp_repo, "what about postgres?", set(), index)
+        assert (anchor_ids, mention_hits, file_artifacts) == ([], [], [])
 
     def test_bare_basename_with_no_matching_decision_stays_silent(self, tmp_repo):
         # "utils.py" IS pathlike (has an extension), but nothing in either store references
@@ -4705,9 +4784,29 @@ class TestFileRoute:
                                      RV1_SESSION, "convention")
         assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
 
-    def test_global_scope_file_hit_renders(self, tmp_repo):
-        # decisions_for_files spans both stores; _render_prompt_decisions must resolve a
-        # global-scope id too (it only used to look in the repo store).
+    def test_global_scope_anchor_hit_renders_full_content(self, tmp_repo):
+        # Global-store decisions never carry source_files (docs elsewhere), so a global-scope
+        # STRONG hit can only happen via the `decisions=` override path in tests / a future
+        # global anchor feature — exercised here directly to prove _render_prompt_decisions'
+        # global-store fallback still applies when a file-route anchor hit is global-scope.
+        store.update_decision(tmp_repo, "The cart service owns checkout totals",
+                              RV1_SESSION, "architecture")   # forces a repo index to exist
+        _, gid = store.update_global_decision(
+            "Secrets loading happens in contexer/config.py at import time",
+            RV1_SESSION, "constraint")
+        data = store._load_global()
+        for e in data["entries"]:
+            if e.get("id") == gid:
+                e["source_files"] = ["contexer/config.py"]
+        store._save_global(data)
+        result = store.get_context_for_prompt(
+            tmp_repo, "update contexer/config.py loading order")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "Secrets loading" in result
+
+    def test_global_scope_mention_hit_is_a_pointer(self, tmp_repo):
+        # decisions_for_files spans both stores; a global-scope content-artifact mention (no
+        # source_files — global entries never carry one) is mention-tier, so it's a pointer.
         store.update_decision(tmp_repo, "The cart service owns checkout totals",
                               RV1_SESSION, "architecture")   # forces a repo index to exist
         store.update_global_decision(
@@ -4715,9 +4814,10 @@ class TestFileRoute:
             RV1_SESSION, "constraint")
         result = store.get_context_for_prompt(
             tmp_repo, "update contexer/config.py loading order")
+        assert result.startswith("[Contexer] Related stored decisions")
         assert "Secrets loading" in result
 
-    def test_meta_reflects_file_driven_hit(self, tmp_repo):
+    def test_meta_reflects_anchor_hit(self, tmp_repo):
         store.update_decision(
             tmp_repo, "guard_engine.py pairs decisions against staged files",
             RV1_SESSION, "architecture", source_files=["guard_engine.py"])
@@ -4725,6 +4825,16 @@ class TestFileRoute:
             tmp_repo, "fix the bug in guard_engine.py")
         assert meta["kind"] == "strong"
         assert meta["count"] == 1
+
+    def test_meta_reflects_mention_hit(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Discount calculations live in billing.py and must round half up",
+            RV1_SESSION, "architecture")
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "check billing.py logic")
+        assert meta["kind"] == "pointer"
+        assert meta["count"] == 1
+        assert "billing.py" in meta["topics"]
 
     def test_no_index_path_never_calls_file_route(self, tmp_repo, monkeypatch):
         # Fail-soft / unchanged-legacy-path guarantee: with no repo-local decisions there is
@@ -4753,13 +4863,75 @@ class TestFileRoute:
         monkeypatch.setattr(guard_engine, "decisions_for_files", _boom)
         assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
 
-    def test_prompt_file_ids_fail_soft_on_exception(self, tmp_repo, monkeypatch):
+    def test_prompt_file_hits_fail_soft_on_exception(self, tmp_repo, monkeypatch):
         from contexer import guard_engine
 
         def _boom(*a, **k):
             raise RuntimeError("boom")
         monkeypatch.setattr(guard_engine, "decisions_for_files", _boom)
-        assert store._prompt_file_ids(tmp_repo, "fix contexer/guard_engine.py", set()) == []
+        index = store._read_retrieval_index(tmp_repo)   # None here — no decisions stored yet
+        assert store._prompt_file_hits(
+            tmp_repo, "fix contexer/guard_engine.py", set(), index) == ([], [], [])
+
+    def test_index_missing_falls_back_to_live_scan_for_file_route(self, tmp_repo, monkeypatch):
+        # index=None -> _prompt_file_hits takes the live decisions_for_files path over BOTH
+        # stores (the pre-fast-path behavior), not the index-served fast path.
+        store.update_decision(
+            tmp_repo, "guard_engine.py pairs decisions against staged files",
+            RV1_SESSION, "architecture", source_files=["guard_engine.py"])
+        called = {}
+        from contexer import guard_engine
+        original = guard_engine.decisions_for_files
+
+        def _spy(*a, **k):
+            called["hit"] = True
+            return original(*a, **k)
+        monkeypatch.setattr(guard_engine, "decisions_for_files", _spy)
+        anchor_ids, mention_hits, file_artifacts = store._prompt_file_hits(
+            tmp_repo, "fix the bug in guard_engine.py", set(), None)
+        assert called.get("hit") is True
+        assert anchor_ids
+
+    @pytest.mark.perf
+    def test_index_lookup_meets_latency_budget(self, tmp_repo):
+        """Fix round 1's latency contract: measure the file-route lookup on a 500-entry
+        synthetic store (content-artifact-bearing, one in five also source_files-anchored —
+        the same shape `_write_direct`-style perf tests in test_benchmark_extended.py use).
+        The index-served fast path must stay comfortably under the ~5ms per-prompt budget the
+        live decisions_for_files scan breaches at this scale (measured ~7.7ms p50 / ~8.6ms
+        p95 for the live scan vs. ~0.91ms p50 / ~0.93ms p95 for the index-served lookup, ~8x
+        faster — see _index_file_lookup's docstring for the numbers this pins)."""
+        data = store._load(tmp_repo)
+        for i in range(500):
+            data["entries"].append({
+                "id": str(uuid.uuid4()), "type": "decision", "subtype": "architecture",
+                "content": (f"Module contexer/mod_{i:04d}.py handles feature {i:04d} and "
+                           f"depends on contexer/shared_{i % 20:02d}.py"),
+                "session_id": "bench", "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source_files": [f"contexer/mod_{i:04d}.py"] if i % 5 == 0 else [],
+            })
+        store._migrate_entries(data)
+        store._save(tmp_repo, data)
+
+        index = store._read_retrieval_index(tmp_repo)
+        assert index is not None and index["v"] == 2
+
+        prompt = "fix the bug in contexer/mod_0250.py that touches contexer/shared_05.py"
+        store._prompt_file_hits(tmp_repo, prompt, set(), index)   # warm up
+
+        times = []
+        for _ in range(30):
+            t0 = time.perf_counter()
+            store._prompt_file_hits(tmp_repo, prompt, set(), index)
+            times.append((time.perf_counter() - t0) * 1000)
+        times.sort()
+        p50 = times[len(times) // 2]
+        print(f"\n  index-served file-route lookup at 500 entries: "
+              f"p50={p50:.3f}ms max={times[-1]:.3f}ms "
+              f"(budget ~5ms; live-scan fallback measured ~7.7ms p50)")
+        # Generous margin over the measured ~0.9ms for shared/noisy CI runners while still
+        # catching a real regression back toward the live-scan's ~7.7ms.
+        assert p50 < 5.0, f"index-served file-route lookup too slow: p50={p50:.3f}ms"
 
 
 class TestTopicAliasRetry:
