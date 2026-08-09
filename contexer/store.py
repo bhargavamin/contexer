@@ -4703,7 +4703,24 @@ def _index_path(repo_path: str) -> Path:
 
 def _build_retrieval_index(data: dict) -> dict:
     """Build the BM25 index payload from a loaded store. Indexes only `decision` entries,
-    over their CURRENT content."""
+    over their CURRENT content.
+
+    Each doc also carries `source_files` (the entry's own anchor — already canonicalized
+    repo-relative POSIX paths, see `_anchor_sources`, so no re-canonicalization needed here),
+    `path_artifacts` (path/module-shaped artifacts extracted from the CURRENT content via
+    `guard_engine._guard_content_artifacts` — the same extraction the commit-time guard runs),
+    and `title` (the entry's own title, or the same derived fallback `get_context` uses) —
+    issue #187's file-route fast path: `_index_file_lookup` matches a prompt-named file
+    against the precomputed `source_files`/`path_artifacts` (dict/set lookups, `title` along
+    for the WEAK pointer lane's decision-naming) instead of decisions_for_files' live per-call
+    regex re-extraction over every stored decision — measured ~7.7ms p50 / ~8.6ms p95 at 500
+    entries (over the ~5ms budget) for the live scan vs. ~0.91ms p50 / ~0.93ms p95 for this
+    index-backed lookup at the same scale, ~8x faster (both numbers: `_index_file_lookup`'s
+    own docstring). No extra I/O — rebuilt
+    only at `_save`, same as every other index field. Function-level import for the same
+    store<->guard_engine load-order reason documented throughout this file (e.g.
+    `_anchor_sources`, `get_context`)."""
+    from contexer import guard_engine
     docs: dict[str, dict] = {}
     df: dict[str, int] = {}
     total_len = 0
@@ -4732,10 +4749,19 @@ def _build_retrieval_index(data: dict) -> dict:
         docs[did] = {
             "tf": tf, "len": len(toks), "topics": _derive_topics(content),
             "subtype": e.get("subtype", ""), "status": status,
+            "source_files": list(e.get("source_files") or []),
+            "path_artifacts": guard_engine._guard_content_artifacts(content),
+            "title": e.get("title") or _derive_title(content),
         }
     n_docs = len(docs)
     avgdl = (total_len / n_docs) if n_docs else 0.0
-    return {"v": 1, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
+    # v2 (issue #187 fix round 1): docs gained source_files/path_artifacts/title. Bumped
+    # (not left at v1 with new optional keys) so a pre-#187 v1 index on disk is rejected by
+    # _read_retrieval_index as "wrong version" and the WHOLE per-prompt path falls back to
+    # legacy — not just the file route half-served against docs missing the new fields. The
+    # established pattern (see _read_retrieval_index's docstring): never rebuild inline, self-
+    # heals on the repo's next _save (every write rebuilds every doc's fields from scratch).
+    return {"v": 2, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
 
 
 def _write_retrieval_index(repo_path: str, data: dict) -> None:
@@ -4758,7 +4784,7 @@ def _read_retrieval_index(repo_path: str) -> dict | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
-    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("docs"), dict):
+    if not isinstance(data, dict) or data.get("v") != 2 or not isinstance(data.get("docs"), dict):
         return None
     return data
 
@@ -5188,9 +5214,22 @@ def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> 
 def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     """Render the given decisions in the same two-line format `get_context` uses: a bullet
     line ending in the title, then a `    `-indented line with the current content. Skips
-    ignored / missing entries; empty string when nothing renders."""
+    ignored / missing entries; empty string when nothing renders.
+
+    `ids` normally come from the repo's own BM25 index (repo-store-only by construction), but
+    the file route's anchor tier (#187, `_prompt_file_hits`) can hand back a
+    `decisions_for_files` hit scoped "global" — a decision that lives in the GLOBAL store, not
+    this repo's. So any id not found
+    in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
+    `files=` two-store merge. A no-op extra read for the pure-BM25 case (nothing is ever
+    missing there)."""
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    missing = [d for d in ids if d not in by_id]
+    if missing:
+        global_data = _load_global()
+        by_id.update({e.get("id"): e for e in global_data.get("entries", [])
+                     if e.get("type") == "decision" and e.get("id") in missing})
     stale = _staleness_notes(repo_path, [by_id[d] for d in ids
                                          if d in by_id and _entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
@@ -5262,6 +5301,127 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
     return _global_prompt_lookup(ordered_kws)
 
 
+def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -> list[dict]:
+    """The FAST repo-scope half of issue #187's file route: matches `file_artifacts` (already
+    `_guard_content_artifacts`-filtered path/module shapes pulled from the prompt) against each
+    indexed decision's PRECOMPUTED `source_files` / `path_artifacts` (see
+    `_build_retrieval_index`) instead of decisions_for_files' live per-call regex re-extraction
+    over every stored decision's content. Same matching semantics as
+    `guard_engine._guard_pairs`/`decisions_for_files` (canonical equality, dotted-module
+    mapping, path-boundary suffix match via `guard_engine._guard_artifact_matches`), just
+    served from the already-loaded BM25 index — no extra I/O, no extra content scan.
+
+    Measured at 500 synthetic decisions (content-artifact-bearing, direct-write style, one
+    decision in five carrying a `source_files` anchor — `tests/test_store.py::TestFileRoute::
+    test_index_lookup_meets_latency_budget`): the live `decisions_for_files` scan this
+    replaces ran ~7.7ms p50 / ~8.6ms p95 (over the ~5ms per-prompt budget) — this index-backed
+    lookup measured ~0.91ms p50 / ~0.93ms p95 at the same scale, ~8x faster.
+
+    Returns hit dicts shaped like a `decisions_for_files` hit (`decision_id`, `reason`,
+    `title`) — no `scope`/`status`/`files_matched`, since `_prompt_file_hits` never reads
+    those fields. Repo-scope only: the retrieval index only ever covers this repo's own
+    decisions (exactly like the rest of the BM25 ladder) — `_prompt_file_hits` layers a small
+    LIVE scan over the global store on top, mirroring how the global store is always a
+    separate, smaller-scale fallback path everywhere else in this router too."""
+    from contexer import guard_engine
+    canon = [p for p in (guard_engine._guard_relpath(repo_path, f) for f in file_artifacts)
+             if p and not guard_engine._escapes_repo(p)]
+    if not canon:
+        return []
+    canon_set = set(canon)
+    canon_by_base: dict[str, list[str]] = {}
+    for relpath in canon:
+        canon_by_base.setdefault(relpath.rsplit("/", 1)[-1], []).append(relpath)
+
+    hits: list[dict] = []
+    for did, doc in index.get("docs", {}).items():
+        source_files = set(doc.get("source_files") or [])
+        if source_files & canon_set:
+            hits.append({"decision_id": did, "reason": "source_files match",
+                        "title": doc.get("title", "")})
+            continue
+        for artifact in doc.get("path_artifacts") or []:
+            if guard_engine._guard_artifact_matches(artifact, canon_set, canon_by_base):
+                hits.append({"decision_id": did,
+                            "reason": guard_engine._guard_artifact_reason(artifact),
+                            "title": doc.get("title", "")})
+                break
+    return hits
+
+
+def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str],
+                       index: dict | None) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+    """Path/module-shaped files named IN THE PROMPT itself (issue #187 — "fix the pairing bug
+    in contexer/guard_engine.py"), routed deterministically through the same anchor/content-
+    reference matching the commit-time guard uses, no voluntary `get_context(files=...)` call
+    required. Returns `(anchor_ids, mention_hits, file_artifacts)`.
+
+    **Tiered by signal strength (fix round 1 — the ratified risk-asymmetry principle: a wrong
+    STRONG injection plants false context as if human-approved, a wrong pointer costs one
+    line).** `anchor_ids`: decisions matched via `source_files` — a human explicitly linked
+    this file to this decision (via `contexer guard anchors`, an approval-time link, or a
+    `source_files=` capture) — genuine governance signal, STRONG-tier (full content). `mention_
+    hits`: decisions matched only via a path-shaped artifact found IN THE DECISION'S OWN
+    CONTENT (`(decision_id, title)` pairs) — a prose mention is not a governance signal, so
+    these are downgraded to the WEAK pointer lane by the caller, never full content.
+
+    Reuses `guard_engine._guard_content_artifacts` — the identical _pathlike_artifact-filtered
+    raw-regex extraction the guard already applies to DECISION content — on the prompt text
+    instead. A bare topic word, a symbol artifact ("FooError"), or a route-shaped string never
+    qualifies, and a bare basename only pairs on an exact match — never a directory-suffix
+    match — so "utils.py" alone doesn't accidentally pull in a decision that only mentions
+    "some/other/utils.py".
+
+    Two lookup paths: `index` present -> `_index_file_lookup` serves the repo-scope half from
+    precomputed per-doc fields (the FAST path — see that function's docstring for the measured
+    latency), plus a small LIVE `decisions_for_files` scan restricted to just the loaded global
+    entries (`decisions=`) for the global-scope half. `index` missing/corrupt -> the full LIVE
+    `decisions_for_files` scan against both stores, exactly as before this fast path existed —
+    the established fallback pattern (never rebuild the index inline to serve one prompt).
+
+    Both tiers: working-set ids dropped up front (never re-surface something already injected
+    this session), ordered by hit order, deduped by decision id (a decision matching via BOTH
+    a source_files anchor for one file and a content mention for another still lands in
+    anchor_ids only — `source_files match` always wins the reason for that decision, same as
+    `decisions_for_files`' own per-decision reason resolution). Fail-soft throughout: any
+    exception here (corrupt store, unreadable index, ...) degrades to ([], [], []) so the rest
+    of the ladder runs exactly as if no file signal existed — never raises into the per-prompt
+    hook path."""
+    try:
+        from contexer import guard_engine
+        # _guard_content_artifacts doesn't dedupe (a path can satisfy both the raw path regex
+        # and the trailing dotted-component regex, e.g. "contexer/guard_engine.py" also
+        # yields "guard_engine.py") — dedupe here, order-preserving, so canon/canon_by_base
+        # below don't do redundant work and the WEAK pointer's file list never repeats itself.
+        file_artifacts = list(dict.fromkeys(guard_engine._guard_content_artifacts(prompt)))
+        if not file_artifacts:
+            return [], [], []
+
+        if index is not None:
+            global_entries = _load_global().get("entries") or []
+            raw_hits = (_index_file_lookup(repo_path, index, file_artifacts)
+                       + guard_engine.decisions_for_files(repo_path, file_artifacts,
+                                                          decisions=global_entries))
+        else:
+            raw_hits = guard_engine.decisions_for_files(repo_path, file_artifacts)
+
+        anchor_ids: list[str] = []
+        mention_hits: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for hit in raw_hits:
+            did = hit.get("decision_id")
+            if not did or did in ws or did in seen:
+                continue
+            seen.add(did)
+            if hit.get("reason") == "source_files match":
+                anchor_ids.append(did)
+            else:
+                mention_hits.append((did, hit.get("title") or ""))
+        return anchor_ids, mention_hits, file_artifacts
+    except Exception:
+        return [], [], []
+
+
 def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
     """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
     "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} — structured data for
@@ -5304,12 +5464,36 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
     # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
     # overview/global fallbacks below — only this vector changes.
+    ws = set(working_set_ids(repo_path, session_id))
+
+    # File route (#187): a prompt naming a path/module-shaped file ("fix the pairing bug in
+    # contexer/guard_engine.py") consults the anchor/content-reference lookup deterministically
+    # — the gate above already decides whether we're here at all (a real path artifact already
+    # makes `artifacts` non-empty); this only refines what happens INSIDE an already-open gate,
+    # never widens it. Tiered by signal strength (fix round 1): an explicit `source_files`
+    # anchor is a human governance signal and leads the STRONG set (BM25 fills the rest); a
+    # bare content-artifact mention is weaker signal and is downgraded to the WEAK pointer
+    # lane below — a wrong pointer costs one line, a wrong STRONG injection plants false
+    # context as if human-approved.
+    anchor_ids, mention_hits, file_artifacts_prompt = _prompt_file_hits(repo_path, prompt, ws, index)
+
+    # NOTE (fix round 1): mention-tier ids are deliberately NOT excluded from BM25's own
+    # candidate pool here. The file route's tiering governs what the FILE SIGNAL itself
+    # contributes (anchor_ids lead strong; mention_hits are capped at the WEAK pointer below)
+    # — it does not reach into BM25's separately-existing, already-shipped artifact-double-
+    # weighting mechanism (predates #187 — see test_artifact_extraction_routes_paste_to_db).
+    # A decision that also has genuine independent term overlap (e.g. a discriminative word
+    # like "OperationalError" alongside the path) still earns BM25 STRONG on its own merits,
+    # exactly as before this feature existed (pinned: TestIndexDominatesLegacy). Only a
+    # decision whose sole overlap IS the artifact tokens themselves stays capped at pointer,
+    # because a single-subtoken filename (e.g. "config.py" -> just "config") can't clear
+    # BM25's own hits >= _STRONG_MIN_HITS (2) bar without genuine additional overlap.
     art_tokens = _index_tokens(" ".join(artifacts))
     query_terms = _index_tokens(prompt) + art_tokens + art_tokens   # artifacts double-weighted
     ranked = _bm25_rank(query_terms, index)
-    ws = set(working_set_ids(repo_path, session_id))
     ranked = [r for r in ranked if r[0] not in ws]
 
+    strong: list[str] = list(anchor_ids)
     if ranked:
         top_score = ranked[0][1]
         # Junk guard: a bare question (no rationale/project word) only earns a content
@@ -5318,29 +5502,34 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
         # constraint on the word "time".
         question_only = is_question and not is_rationale and not is_project
         allow_strong = not question_only or ranked[0][3] >= 1
-        strong: list[str] = []
+        bm25_strong: list[str] = []
         if allow_strong:
             for did, score, hits, _dh in ranked[:_STRONG_CANDIDATES]:
                 if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
-                    strong.append(did)
+                    bm25_strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
         # yields one doc with one hit — relax to hits>=1 on the top candidate so legacy's
         # full-content recall for both prompt classes is preserved. A bare question gets the
         # same relaxation only when it *is* single-keyword (and hence discriminative per the
         # guard above) — with more keywords, one lone hit is noise, not an answer.
         relax = is_rationale or is_project or (question_only and len(set(query_terms)) == 1)
-        if not strong and allow_strong and relax and ranked[0][2] >= 1:
-            strong = [ranked[0][0]]
-        strong = strong[:_STRONG_CAP]
-        if strong:
-            rendered = _render_prompt_decisions(repo_path, strong)
-            if rendered:
-                _ws_add(repo_path, session_id, strong)
-                # Suffix (not part of the pinned header prefix): without it the model
-                # narrates "I'll pull this from Contexer" and re-fetches what it already has.
-                text = ("[Contexer: auto-fetched for this question] "
-                        f"(already in context — no get_context call needed)\n{rendered}")
-                return text, _rendered_meta("strong", text)
+        if not bm25_strong and allow_strong and relax and ranked[0][2] >= 1:
+            bm25_strong = [ranked[0][0]]
+        # File-route hits already lead `strong` (deterministic, highest-precision signal);
+        # BM25 candidates fill any remaining slots, deduped against what the file route found.
+        for did in bm25_strong:
+            if did not in strong:
+                strong.append(did)
+    strong = strong[:_STRONG_CAP]
+    if strong:
+        rendered = _render_prompt_decisions(repo_path, strong)
+        if rendered:
+            _ws_add(repo_path, session_id, strong)
+            # Suffix (not part of the pinned header prefix): without it the model
+            # narrates "I'll pull this from Contexer" and re-fetches what it already has.
+            text = ("[Contexer: auto-fetched for this question] "
+                    f"(already in context — no get_context call needed)\n{rendered}")
+            return text, _rendered_meta("strong", text)
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
     # a ~15-token pointer instead of full content.
@@ -5361,6 +5550,25 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
                     f"call get_context(query='{ordered_topics[0]}') if relevant.")
             meta = {"kind": "pointer", "count": sum(counts.values()), "topics": ordered_topics}
             return text, meta
+
+    # WEAK (file-mention tier, #187 fix round 1): a content-artifact match alone is not a
+    # governance signal — no explicit source_files anchor, just the file's name appearing in
+    # a decision's prose — so it earns a pointer, never full content. Reached only when
+    # nothing above already returned (an anchor hit renders full content and returns early;
+    # unrelated topic overlap already produced its own pointer and returned too) — a mention
+    # hit is never duplicated alongside a STRONG anchor render or the topic-overlap pointer.
+    if mention_hits:
+        titles = [t for _, t in mention_hits if t][:3]
+        extra = len(mention_hits) - len(titles)
+        named = "; ".join(titles) if titles else f"{len(mention_hits)} decision(s)"
+        more = f" (+{extra} more)" if extra > 0 else ""
+        _retrieval_log(repo_path, {"e": "pointer", "topics": file_artifacts_prompt,
+                                   "sid": session_id, "ts": time.time()})
+        text = (f"[Contexer] Related stored decisions mention "
+                f"{', '.join(file_artifacts_prompt[:3])}: {named}{more} — "
+                f"call get_context(files={file_artifacts_prompt!r}) if relevant.")
+        meta = {"kind": "pointer", "count": len(mention_hits), "topics": file_artifacts_prompt}
+        return text, meta
 
     # Overview + global fallbacks run ONLY for rationale/project prompts — legacy was silent
     # on an artifact-only prompt that produced no strong hit and no pointer, so we stay silent.
