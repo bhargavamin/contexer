@@ -1,36 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-label="Benchmarks, medians across 548 published sessions: 6 times fewer tokens per session; right answer in 1 turn vs 6 turns of guessing; 8 of 8 stored rules followed vs 0 of 8 bare; $0.043 per session with right answers vs $0.116 with wrong ones">
-  <rect width="1200" height="250" rx="16" fill="#F2F1E6"/>
-  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-    <!-- dividers -->
-    <line x1="312" y1="52" x2="312" y2="172" stroke="#15170D" stroke-opacity="0.12"/>
-    <line x1="588" y1="52" x2="588" y2="172" stroke="#15170D" stroke-opacity="0.12"/>
-    <line x1="864" y1="52" x2="864" y2="172" stroke="#15170D" stroke-opacity="0.12"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="310" viewBox="0 0 1200 310" role="img" aria-label="Benchmarks, medians across 548 published sessions, Contexer vs no memory: 6 times fewer tokens per session (32,804 vs 198,864); right answer in 1 turn vs 6; 8 of 8 stored rules followed vs 0 of 8; $0.043 per session vs $0.116">
+  <rect width="1200" height="310" rx="16" fill="#F5F4E9"/>
+  <g font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif">
 
-    <!-- tile 1: tokens -->
-    <rect x="48" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
-    <text x="48" y="112" font-size="54" font-weight="800" fill="#15170D">6&#215;</text>
-    <text x="48" y="142" font-size="17" font-weight="600" fill="#15170D">fewer tokens per session</text>
-    <text x="48" y="166" font-size="14" fill="#6B6D5F">32,804 vs 198,864 with no memory</text>
+    <!-- header: legend left, methodology right -->
+    <rect x="40" y="33" width="12" height="12" rx="3" fill="#CDEB36"/>
+    <text x="59" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#70725F">CONTEXER</text>
+    <rect x="158" y="33" width="12" height="12" rx="3" fill="#15170D" fill-opacity="0.16"/>
+    <text x="177" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#70725F">NO MEMORY</text>
+    <text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#70725F">MEDIANS OF 548 PUBLISHED SESSIONS &#183; SCORED BY CODE, NOT AN LLM JUDGE</text>
 
-    <!-- tile 2: rationale -->
-    <rect x="324" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
-    <text x="324" y="112" font-size="54" font-weight="800" fill="#15170D">1 turn</text>
-    <text x="324" y="142" font-size="17" font-weight="600" fill="#15170D">to the right &#8220;why did we&#8230;?&#8221;</text>
-    <text x="324" y="166" font-size="14" fill="#6B6D5F">no memory: 6 turns, then a guess</text>
+    <!-- card 1: tokens -->
+    <rect x="40" y="68" width="265" height="192" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
+    <text x="64" y="140" font-size="46" font-weight="800" fill="#15170D" style="font-variant-numeric: tabular-nums">6&#215;</text>
+    <text x="64" y="166" font-size="14" font-weight="600" fill="#15170D">fewer tokens per session</text>
+    <rect x="64" y="190" width="21" height="7" rx="3.5" fill="#CDEB36"/>
+    <text x="203" y="197" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">33k</text>
+    <rect x="64" y="208" width="130" height="7" rx="3.5" fill="#15170D" fill-opacity="0.16"/>
+    <text x="203" y="215" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">199k</text>
 
-    <!-- tile 3: compliance -->
-    <rect x="600" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
-    <text x="600" y="112" font-size="54" font-weight="800" fill="#15170D">8/8</text>
-    <text x="600" y="142" font-size="17" font-weight="600" fill="#15170D">stored rules followed</text>
-    <text x="600" y="166" font-size="14" fill="#6B6D5F">bare agents: 0/8 (Opus)</text>
+    <!-- card 2: turns to answer -->
+    <rect x="325" y="68" width="265" height="192" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
+    <text x="349" y="140" font-size="46" font-weight="800" fill="#15170D" style="font-variant-numeric: tabular-nums">1 turn</text>
+    <text x="349" y="166" font-size="14" font-weight="600" fill="#15170D">to the right &#8220;why did we&#8230;?&#8221;</text>
+    <rect x="349" y="190" width="22" height="7" rx="3.5" fill="#CDEB36"/>
+    <text x="488" y="197" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">1 turn</text>
+    <rect x="349" y="208" width="130" height="7" rx="3.5" fill="#15170D" fill-opacity="0.16"/>
+    <text x="488" y="215" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">6 turns</text>
 
-    <!-- tile 4: cost -->
-    <rect x="876" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
-    <text x="876" y="112" font-size="54" font-weight="800" fill="#15170D">$0.043</text>
-    <text x="876" y="142" font-size="17" font-weight="600" fill="#15170D">per session, right answers</text>
-    <text x="876" y="166" font-size="14" fill="#6B6D5F">no memory: $0.116, wrong answers</text>
+    <!-- card 3: rule compliance (dot rows) -->
+    <rect x="610" y="68" width="265" height="192" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
+    <text x="634" y="140" font-size="46" font-weight="800" fill="#15170D" style="font-variant-numeric: tabular-nums">8/8</text>
+    <text x="634" y="166" font-size="14" font-weight="600" fill="#15170D">stored rules followed</text>
+    <g fill="#CDEB36">
+      <circle cx="639" cy="193.5" r="4.5"/><circle cx="654" cy="193.5" r="4.5"/><circle cx="669" cy="193.5" r="4.5"/><circle cx="684" cy="193.5" r="4.5"/><circle cx="699" cy="193.5" r="4.5"/><circle cx="714" cy="193.5" r="4.5"/><circle cx="729" cy="193.5" r="4.5"/><circle cx="744" cy="193.5" r="4.5"/>
+    </g>
+    <text x="773" y="197" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">8/8</text>
+    <g fill="none" stroke="#15170D" stroke-opacity="0.3">
+      <circle cx="639" cy="211.5" r="4"/><circle cx="654" cy="211.5" r="4"/><circle cx="669" cy="211.5" r="4"/><circle cx="684" cy="211.5" r="4"/><circle cx="699" cy="211.5" r="4"/><circle cx="714" cy="211.5" r="4"/><circle cx="729" cy="211.5" r="4"/><circle cx="744" cy="211.5" r="4"/>
+    </g>
+    <text x="773" y="215" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">0/8</text>
 
-    <!-- footer -->
-    <text x="600" y="216" font-size="13.5" fill="#6B6D5F" text-anchor="middle">Medians across 548 published live agent sessions &#183; same repo, model, and questions &#183; scored by code, not an LLM judge</text>
+    <!-- card 4: cost -->
+    <rect x="895" y="68" width="265" height="192" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
+    <text x="919" y="140" font-size="46" font-weight="800" fill="#15170D" style="font-variant-numeric: tabular-nums">$0.043</text>
+    <text x="919" y="166" font-size="14" font-weight="600" fill="#15170D">per session, right answers</text>
+    <rect x="919" y="190" width="48" height="7" rx="3.5" fill="#CDEB36"/>
+    <text x="1058" y="197" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">$0.043</text>
+    <rect x="919" y="208" width="130" height="7" rx="3.5" fill="#15170D" fill-opacity="0.16"/>
+    <text x="1058" y="215" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">$0.116, wrong</text>
   </g>
 </svg>
