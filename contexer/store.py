@@ -2763,7 +2763,15 @@ def _console_factors(entry: dict) -> list[str]:
 def _console_summary(entry: dict) -> dict:
     """The console's shared per-decision row shape. Internal fields (revision ids, session
     ids, the raw revisions list) stay server-side; a caller that needs them asks for the
-    detail projection instead."""
+    detail projection instead.
+
+    `source_files` is the anchored-files list verbatim (Task 4 of #174) — schema-additive,
+    so every existing caller (dashboard, list, detail, tombstones) picks it up for free. No
+    staleness flag here on purpose: `_staleness_note` costs a `git diff` subprocess per
+    entry, and this projection backs the console's 10-second poll of `list_decisions` /
+    `dashboard_summary` — adding a git call per row there would multiply into a poll-time
+    subprocess storm. Staleness stays confined to its two existing render sites
+    (`get_context`, `_render_prompt_decisions`), both budget-capped and neither on a UI poll."""
     content = _current_content(entry)
     rev = _current_revision(entry) or {}
     return {
@@ -2779,6 +2787,7 @@ def _console_summary(entry: dict) -> dict:
         "occurrence_count": entry.get("occurrence_count", 1),
         "confidence": rev.get("confidence_score", entry.get("confidence", 0)),
         "has_proposal": bool(entry.get("proposed_revision")),
+        "source_files": list(entry.get("source_files") or []),
     }
 
 
@@ -3018,16 +3027,32 @@ def dashboard_summary(repo_path: str) -> dict:
 
 
 def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",
-                   limit: int = 0, offset: int = 0) -> dict:
+                   files: list[str] | None = None, limit: int = 0, offset: int = 0) -> dict:
     """A filtered, paged page of decisions, newest change first.
 
     `total` is the count BEFORE paging so a caller can render "N matching". `limit <= 0`
     means no cap. Carries the same `ok`/`error` pair as the dashboard: a corrupt store
     returns an empty page with `ok: false`, never a silently empty list. One read of the
-    store file — this is on the console's 10-second poll."""
+    store file — this is on the console's 10-second poll.
+
+    `files`: same read-surface semantics as `get_context(files=...)` — decisions that GOVERN
+    the given files (`guard_engine.decisions_for_files`: source_files anchor or a path-like
+    content artifact), no trust filter, `ignored` excluded. Scoped to THIS store only (the
+    console's file filter lives on the per-repo decisions list, not the global one), so the
+    already-loaded `rows` are passed as an override rather than letting the engine reload the
+    store AND pull in the global store's entries too. A file that matches nothing yields an
+    empty list, never an error — same as a query with no hits."""
     data, error, _mtime = _read_store(repo_path)
     health = {"ok": error is None, "error": error}
     rows = [e for e in data.get("entries", []) if e.get("type") == "decision"]
+    if files:
+        # Local import — see get_context's identical comment: a module-level `from contexer
+        # import guard_engine` here would recreate the store <-> guard_engine load-order cycle
+        # guard_engine.py's own docstring describes.
+        from contexer import guard_engine
+        hit_ids = {h["decision_id"]
+                  for h in guard_engine.decisions_for_files(repo_path, files, decisions=rows)}
+        rows = [e for e in rows if e.get("id") in hit_ids]
     if subtype:
         rows = [e for e in rows if e.get("subtype") == subtype]
     if status:

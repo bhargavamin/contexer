@@ -61,7 +61,7 @@
     stores: [],
     slug: "", // sticky: the store the store-scoped nav links point at
     route: { name: "boot", slug: "", id: "" },
-    filters: { q: "", subtype: "", status: "" },
+    filters: { q: "", subtype: "", status: "", file: "" },
     counts: { global: null, team: null },
     // Last known readability of the tombstone sidecar. A corrupt sidecar is not "nothing
     // deleted", so the Deleted nav badge has to be able to say so from any view.
@@ -200,6 +200,18 @@
     const c = (d && d.content ? String(d.content) : "").trim();
     if (!c) return "(untitled decision)";
     return c.length > 96 ? c.slice(0, 96) + "…" : c;
+  }
+
+  /** Row-level file summary (Task 4 of #174): the first two anchored files, then a "+N more"
+   * count — mirrors the "+N more" convention the store's own staleness note uses, so a
+   * decision anchored to many files still renders as one short line instead of pushing the
+   * row's height around. The detail pane's "Anchored files" block lists every file in full;
+   * this stays a compact pointer at it. */
+  function filesLabel(files) {
+    if (!Array.isArray(files) || !files.length) return "";
+    const shown = files.slice(0, 2).join(", ");
+    const extra = files.length - 2;
+    return extra > 0 ? shown + `, +${extra} more` : shown;
   }
 
   /** Tolerates both `[...]` and `{key: [...]}` payload shapes for list endpoints. */
@@ -1008,6 +1020,9 @@
       [
         h("span", { class: "drow-title", text: titleOf(d) }),
         h("span", { class: "drow-text", text: String(d.content || "") }),
+        Array.isArray(d.source_files) && d.source_files.length
+          ? h("span", { class: "drow-files mono", text: filesLabel(d.source_files) })
+          : null,
         h("span", { class: "drow-meta" }, [
           subtypeBadge(d.subtype),
           statusBadge(d.status),
@@ -1297,6 +1312,7 @@
     if (f.q) params.set("q", f.q);
     if (f.subtype) params.set("subtype", f.subtype);
     if (f.status) params.set("status", f.status);
+    if (f.file) params.set("file", f.file);
     params.set("limit", String(PAGE_LIMIT));
     params.set("offset", "0");
     const listUrl =
@@ -1329,6 +1345,7 @@
         String(total) + " matching",
         truncated ? "showing the first " + rows.length : null,
         f.q ? 'query "' + f.q + '"' : null,
+        f.file ? 'file "' + f.file + '"' : null,
       ]
     );
 
@@ -1347,21 +1364,39 @@
       },
     });
 
+    // Comma-separated (`a.py, b.py`) mirrors the API's own `file=a,b` convention (see
+    // ui/api.py:_list_param), so one box covers filtering by several files at once.
+    const fileFilter = h("input", {
+      class: "input file-filter",
+      type: "search",
+      placeholder: "Filter by file (path or path,path)",
+      autocomplete: "off",
+      "aria-label": "Filter by file",
+      props: { value: f.file },
+      on: {
+        input: (ev) => {
+          f.file = ev.target.value;
+          debouncedRender();
+        },
+      },
+    });
+
     const toolbar = h("div", { class: "toolbar" }, [
       h("div", { class: "search-wrap" }, [
         search,
         f.q ? null : h("span", { class: "search-hint", text: "/" }),
       ]),
+      fileFilter,
       selectFilter("subtype", SUBTYPES, "All subtypes"),
       selectFilter("status", STATUSES, "All statuses", (v) => STATUS_LABEL[v] || v),
-      f.q || f.subtype || f.status
+      f.q || f.subtype || f.status || f.file
         ? h("button", {
             class: "btn btn-ghost btn-sm",
             type: "button",
             text: "Clear",
             on: {
               click: () => {
-                state.filters = { q: "", subtype: "", status: "" };
+                state.filters = { q: "", subtype: "", status: "", file: "" };
                 render();
               },
             },
@@ -1376,8 +1411,8 @@
     const list = h("div", { class: "card" }, [
       rows.length === 0
         ? emptyState(
-            f.q || f.subtype || f.status ? "No matches" : "No decisions stored",
-            f.q || f.subtype || f.status
+            f.q || f.subtype || f.status || f.file ? "No matches" : "No decisions stored",
+            f.q || f.subtype || f.status || f.file
               ? ["Nothing matches those filters."]
               : bootstrapHint()
           )
@@ -1628,11 +1663,22 @@
   }
 
   function readBody(d, factors, conf) {
+    const files = Array.isArray(d.source_files) ? d.source_files : [];
     return frag([
       h("div", { class: "block" }, [
         h("div", { class: "block-label", text: "Content" }),
         h("p", { class: "prose", text: String(d.content || "") }),
       ]),
+      files.length
+        ? h("div", { class: "block" }, [
+            h("div", { class: "block-label", text: "Anchored files" }),
+            h(
+              "ul",
+              { class: "factors" },
+              files.map((path) => h("li", { text: String(path) }))
+            ),
+          ])
+        : null,
       d.rationale
         ? h("div", { class: "block" }, [
             h("div", { class: "block-label", text: "Rationale" }),

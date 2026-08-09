@@ -20,7 +20,8 @@ from contexer.ui import api, daemon, server
 TOKEN = "console-token-for-tests"
 
 SUMMARY_KEYS = {"id", "title", "content", "subtype", "status", "created_by", "timestamp",
-                "updated_at", "revision", "occurrence_count", "confidence", "has_proposal"}
+                "updated_at", "revision", "occurrence_count", "confidence", "has_proposal",
+                "source_files"}
 PROPOSED_KEYS = {"content", "title", "subtype", "source", "created_at", "confidence",
                  "confidence_factors"}
 PROPOSAL_KEYS = {"id", "title", "subtype", "status", "revision", "current", "proposed"}
@@ -144,7 +145,7 @@ def _contract(slug: str, entry_id: str) -> dict:
             "id", "title", "content", "subtype", "status", "created_by", "timestamp",
             "updated_at", "revision", "occurrence_count", "session_count", "memory_key",
             "approved_at", "approved_by", "rationale", "confidence", "revisions",
-            "proposed_revision", "share"},
+            "proposed_revision", "share", "source_files"},
         f"/api/store/{slug}/deleted": {"ok", "error", "tombstones"},
         "/api/global": {"ok", "error", "rules"},
         f"/api/team/{slug}": {"slug", "repo_key", "mode", "enabled", "counts", "staleness",
@@ -371,6 +372,76 @@ def test_the_decision_list_pages(console, repo):
 @pytest.mark.parametrize("query", ["?limit=abc", "?offset=-1", "?limit=100000"])
 def test_a_bad_paging_parameter_is_a_400(console, repo, query):
     assert read(console, f"/api/store/{repo['slug']}/decisions{query}").status == 400
+
+
+# --- file filter (Task 4 of #174) -------------------------------------------------------
+
+@pytest.fixture
+def files_repo(console, tmp_path):
+    """One decision anchored to a file, one not — for the file= filter tests below."""
+    path = str(tmp_path / "files-widgets")
+    _ok, jwt = store.update_decision(
+        path, "Decided to use JWT for stateless auth tokens", "s1",
+        subtype="architecture", created_by="human", source_files=["auth/jwt.py"])
+    _ok, plain = store.update_decision(
+        path, "Use pytest for unit tests", "s1", subtype="convention", created_by="human")
+    return {"path": path, "slug": store._slug(path), "jwt": jwt, "plain": plain}
+
+
+def test_the_file_filter_matches(console, files_repo):
+    listing = ok(console, f"/api/store/{files_repo['slug']}/decisions?file=auth/jwt.py")
+    assert listing["total"] == 1
+    assert listing["decisions"][0]["id"] == files_repo["jwt"]
+    assert listing["decisions"][0]["source_files"] == ["auth/jwt.py"]
+
+
+def test_the_file_filter_excludes_non_matching(console, files_repo):
+    listing = ok(console, f"/api/store/{files_repo['slug']}/decisions?file=unrelated/file.py")
+    assert listing["total"] == 0
+    assert listing["decisions"] == []
+    assert listing["ok"] is True
+
+
+def test_an_unknown_file_is_an_empty_result_not_an_error(console, files_repo):
+    reply = read(console, f"/api/store/{files_repo['slug']}/decisions?file=nope.py")
+    assert reply.status == 200
+    assert reply.data["total"] == 0
+
+
+def test_the_file_filter_accepts_a_repeated_param(console, files_repo):
+    listing = ok(console, f"/api/store/{files_repo['slug']}/decisions"
+                          "?file=unrelated/file.py&file=auth/jwt.py")
+    assert listing["total"] == 1
+
+
+def test_the_file_filter_accepts_a_comma_separated_value(console, files_repo):
+    listing = ok(console, f"/api/store/{files_repo['slug']}/decisions"
+                          "?file=unrelated/file.py,auth/jwt.py")
+    assert listing["total"] == 1
+
+
+def test_the_file_filter_combines_with_subtype(console, files_repo):
+    listing = ok(console, f"/api/store/{files_repo['slug']}/decisions"
+                          "?file=auth/jwt.py&subtype=convention")
+    assert listing["total"] == 0
+
+
+@pytest.mark.parametrize("value", ["../../etc/passwd", "/etc/passwd", "..%2f..%2fetc%2fpasswd"])
+def test_the_file_filter_drops_escape_shaped_values_without_error(console, files_repo, value):
+    reply = read(console, f"/api/store/{files_repo['slug']}/decisions?file={value}")
+    assert reply.status == 200
+    assert reply.data["total"] == 0
+
+
+def test_too_many_file_values_is_a_400(console, files_repo):
+    query = "&".join(f"file=f{i}.py" for i in range(api.MAX_FILES + 1))
+    assert read(console, f"/api/store/{files_repo['slug']}/decisions?{query}").status == 400
+
+
+def test_an_overlong_file_value_is_a_400(console, files_repo):
+    value = "a" * (api.MAX_FILE_LEN + 1)
+    reply = read(console, f"/api/store/{files_repo['slug']}/decisions?file={value}")
+    assert reply.status == 400
 
 
 # --- decision detail -------------------------------------------------------------------

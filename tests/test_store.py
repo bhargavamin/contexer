@@ -2836,6 +2836,106 @@ class TestGetContextFiles:
         assert "No matching decisions found" in result
 
 
+# ── console projection + list_decisions(files=...) (Task 4 of #174) ───────────
+# The console's per-decision row/detail shape now carries source_files, and the
+# store-detail list endpoint accepts the same files= filter get_context(files=...)
+# already exercises above, scoped to this repo's own store only (no global-store
+# participation — that lives behind the console's separate /api/global view).
+
+class TestConsoleSourceFiles:
+    def test_console_summary_carries_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py", "auth/session.py"])
+        listing = store.list_decisions(tmp_repo)
+        assert listing["decisions"][0]["source_files"] == ["auth/jwt.py", "auth/session.py"]
+
+    def test_console_summary_source_files_defaults_empty(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use pytest for unit tests", "s1", subtype="convention",
+                              created_by="human")
+        listing = store.list_decisions(tmp_repo)
+        assert listing["decisions"][0]["source_files"] == []
+
+    def test_dashboard_summary_recent_also_carries_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        dashboard = store.dashboard_summary(tmp_repo)
+        assert dashboard["recent"][0]["source_files"] == ["auth/jwt.py"]
+
+    def test_files_filter_matches(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"])
+        assert listing["total"] == 1
+        assert "JWT" in listing["decisions"][0]["content"]
+
+    def test_files_filter_excludes_non_matching(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        store.update_decision(tmp_repo, "Use pytest for unit tests", "s1", subtype="convention",
+                              created_by="human")
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"])
+        assert listing["total"] == 1
+
+    def test_unknown_file_yields_empty_result_not_error(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["nonexistent/file.py"])
+        assert listing["total"] == 0
+        assert listing["decisions"] == []
+        assert listing["ok"] is True
+        assert listing["error"] is None
+
+    def test_escape_shaped_file_dropped_no_traversal(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["../../etc/passwd"])
+        assert listing["total"] == 0
+        assert listing["ok"] is True
+
+    def test_absolute_path_input_canonicalized(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        absolute = str(Path(tmp_repo) / "auth" / "jwt.py")
+        listing = store.list_decisions(tmp_repo, files=[absolute])
+        assert listing["total"] == 1
+
+    def test_files_filter_combines_with_subtype(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        store.update_decision(tmp_repo, "Never ship a migration without a rollback plan", "s1",
+                              subtype="constraint", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"], subtype="architecture")
+        assert listing["total"] == 1
+        assert listing["decisions"][0]["subtype"] == "architecture"
+
+    def test_ignored_decision_excluded_from_files_filter(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for stateless auth tokens", "s1", "architecture",
+            created_by="human", source_files=["auth/jwt.py"])
+        assert stored
+        store.approve_decision(tmp_repo, eid, "ignore")
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"])
+        assert listing["total"] == 0
+
+    def test_files_filter_does_not_pull_in_global_store(self, tmp_repo):
+        # list_decisions is the console's per-repo list; a global-store hit on the same
+        # file must not leak into it — that scope stays behind /api/global.
+        store.update_global_decision(
+            "The contexer.store module owns all read/write logic", "s1", "convention",
+            created_by="human")
+        listing = store.list_decisions(tmp_repo, files=["contexer/store.py"])
+        assert listing["total"] == 0
+
+
 # ── get_context with status tags ──────────────────────────────────────────────
 
 class TestGetContextStatusTags:
