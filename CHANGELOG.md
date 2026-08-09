@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.32.0](https://github.com/bhargavamin/contexer/compare/v0.31.0...v0.32.0) (2026-08-09)
+
+
+### Features
+
+* **anchors:** decision-file navigation and review-gated decay ([336d2af](https://github.com/bhargavamin/contexer/commit/336d2af2a3d85f7db3896353d92e2498f6b5803a))
+* **anchors:** review-gated anchor decay — rename re-anchor, retirement proposals ([df92fe6](https://github.com/bhargavamin/contexer/commit/df92fe630e3365b50105341e588a08cd74e174d5))
+* **retrieval:** deterministic file-route injection at the prompt seam ([36dc13b](https://github.com/bhargavamin/contexer/commit/36dc13bcfd30c531dea7dddddcf934dca70e83c9))
+* **retrieval:** get_context(files=…) — decisions that govern the given files ([2144595](https://github.com/bhargavamin/contexer/commit/21445954b01829f66781f42fbf6faa79c4252af9))
+* **retrieval:** route prompt-named files through the anchor lookup ahead of BM25 ([1f99e6b](https://github.com/bhargavamin/contexer/commit/1f99e6b0a75d1d8a03952c64d15b2e71c8d14e09))
+* **share:** carry source_files in projection and preview, gated off the wire pending server support ([6961049](https://github.com/bhargavamin/contexer/commit/6961049ceef22bb08313a83b65735404c24ac7c1))
+* **ui:** show decision file references and filter by file ([ee43615](https://github.com/bhargavamin/contexer/commit/ee43615c105a7aa52ba7c82b0f2a0fff0bf3a9bb))
+
+
+### Bug Fixes
+
+* **anchors:** approved retirements exit participation; budget exhaustion leaves entries unverified ([37f63e7](https://github.com/bhargavamin/contexer/commit/37f63e7d974275f801c1eacb5f980a63503e40ce))
+* **anchors:** follow rename chains so multi-hop renames re-anchor instead of retiring ([757eaba](https://github.com/bhargavamin/contexer/commit/757eabaa25a24b95f75767114bb347470663d1d3))
+* **anchors:** retirement approvals clear candidates and preserve titles; budget guarantees progress ([c1627dc](https://github.com/bhargavamin/contexer/commit/c1627dc2729d54f9dc1e28b699ebda66bd3de5f9))
+* **retrieval:** tier file-route hits by signal strength; measured serving path ([a2cda33](https://github.com/bhargavamin/contexer/commit/a2cda3315f0395b8839183c047be4171a419237e))
+
+
+### Documentation
+
+* **anchors:** document file navigation and review-gated decay ([026122c](https://github.com/bhargavamin/contexer/commit/026122c9d4d44a1abfcfb941306b97b030d05b08))
+* **anchors:** honest dismiss/partial-loss/linked wording ([669c808](https://github.com/bhargavamin/contexer/commit/669c8082f1b6c36bd1af5e3fb585cc2e31012316))
+
 ## [0.31.0](https://github.com/bhargavamin/contexer/compare/v0.30.0...v0.31.0) (2026-08-08)
 
 
