@@ -65,7 +65,18 @@ Contexer is the **decision and enforcement layer**: it captures engineering deci
 
 No workflow change, no prompt discipline: directives like *"always use uv, never pip"* are captured automatically, and *"store that decision"* catches anything else. Everything stays in plain JSON on your machine. The open-source version is per-developer; **[Contexer Teams](https://contexer.ai)** (early access) makes it organizational.
 
-The injection and token-cost claims are measured, not marketed: hundreds of live agent sessions, deterministic scoring, independent validation, negative findings published. **[Read the benchmark →](docs/benchmark.md)**
+### Measured, not marketed
+
+548 published live agent sessions: same repo, same model, same questions, only the memory setup changes. Medians:
+
+| | No memory | With Contexer |
+|---|---|---|
+| Tokens per session | 198,864 | **32,804 (6x fewer)** |
+| Answers "why did we choose X?" | 6 turns of searching, then guesses or gives up | **Right answer in 1 turn** |
+| Follows a stored rule ("never log request data") | Violated most runs (Opus: 0/8) | **8/8 compliant** |
+| Cost per session | $0.116, wrong answers | **$0.043, right answers** |
+
+The honest part: a complete, up-to-date CLAUDE.md ties Contexer on cost. The difference is that nobody has to write that file or keep it perfect. Every number is recomputable from raw session rows, scored by code (no LLM judge), independently validated, negative findings included. **[Read the benchmark →](docs/benchmark.md)**
 
 ---
 
