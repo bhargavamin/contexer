@@ -28,7 +28,7 @@ Only `constraint` and `convention` types can be stored globally. Architecture an
 "which decisions apply to src/api/users.py?"
 ```
 
-Ask which decisions govern a specific file (or files) and Contexer returns only the ones actually linked to it — by an approved anchor, or by mentioning that file in their text — instead of everything stored.
+Ask which decisions govern a specific file (or files) and Contexer returns only the ones actually about it — linked to that file, or mentioning it in their text — instead of everything stored.
 
 ## Review pending decisions
 

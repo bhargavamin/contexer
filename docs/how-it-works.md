@@ -102,7 +102,7 @@ A decision's warnings get sharper once it's linked to the files it's about, and 
 
 Either way, you always see the files before they're linked — nothing is linked to a decision you haven't reviewed.
 
-If a decision's linked files later disappear, Contexer first checks whether they were simply renamed or moved — if so, it quietly updates the link and moves on. Only when the files are truly gone does it ask you, in your next review, whether the decision still applies. It never removes or changes a decision on its own; you always get the final say.
+If a decision's linked files later disappear, Contexer first checks whether they were simply renamed or moved — if so, it quietly updates the link and moves on. The same goes when only some of them are gone: it quietly trims the link down to the files that still exist, without asking. Only when *every* linked file is truly gone does it ask you, in your next review, whether the decision still applies. It never removes or changes a decision on its own; you always get the final say.
 
 ### Keeping it quiet
 
