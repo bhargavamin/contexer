@@ -40,11 +40,14 @@ The entry-level outcome then follows from what was collected:
     proposal also stashes `clear_anchors = True`, honored by `store._promote_proposal` —
     approving must drop `source_files`/`anchor_commit` from the entry, or it would
     re-qualify as a participant next TTL cycle and stack a second withdrawal clause onto
-    the content the first approval just wrote. A dedupe guard additionally refuses to
-    attach a second clause if the entry's current content already carries one (belt and
-    suspenders alongside the clear-on-approval fix, not a substitute for it). Dismissing
-    a proposal leaves the entry, `source_files` included, untouched — it re-qualifies and
-    re-proposes (once, thanks to the guard) on the next TTL cycle, same as before.
+    the content the first approval just wrote (it also drops any `anchor_candidates`,
+    which retirement moots). A dedupe guard additionally refuses to attach a second
+    clause if the entry's current CONTENT already carries one (belt and suspenders
+    alongside the clear-on-approval fix, not a substitute for it). Dismissing a proposal
+    leaves the entry, `source_files` included, untouched — and since dismissal never
+    writes the clause into the content, that guard cannot fire for it: a dismissed
+    retirement is re-proposed on EVERY TTL cycle until the developer approves it or
+    ignores the decision. Dismiss means "not now", not "never ask again".
 
 Contexer NEVER deletes an anchored decision on its own: the total-loss path only ever
 proposes, through the ordinary review flow (`review_pending` / the `.pending_review`
@@ -73,10 +76,14 @@ entry outcome branch needing one more git call (the `rev-parse HEAD` that refres
 `anchor_commit` after a rename) makes that call BEFORE mutating the entry, so a mid-branch
 exhaustion never leaves a half-applied change behind.
 
-`anchor_candidates` (unconfirmed, human-not-yet-blessed anchor guesses) are out of scope
-for this module by design — they die with review anyway, the same way a plain
-`pending_approval` entry does, and are never anchored in the first place (no
-`source_files`), so they never enter `verify_anchors`'s participant set."""
+`anchor_candidates` (unconfirmed, human-not-yet-blessed anchor guesses) are never a reason
+to participate: participation requires a real `source_files` anchor, which a candidate by
+definition is not. They can still RIDE ALONG on a participant, though — an approved entry
+that was anchored and also carries a stale guess (candidates survive the pending-twin
+promote path and `_route_containment`, neither of which pops them) — which is why approving
+a retirement drops them along with the anchor (`store._promote_proposal`'s `clear_anchors`
+handling): left behind, they would be blessed into a fresh anchor by the very next approval
+and pull the retired decision back into decay participation."""
 
 import time
 from datetime import datetime, timezone
@@ -86,9 +93,17 @@ from contexer import store          # module object, not `from`-imports: see doc
 
 _ANCHOR_VERIFY_TTL = 86400   # 24h — file layouts don't churn fast enough to re-check every
                               # session start; mirrors store._MINER_VERIFY_TTL.
-_ANCHOR_GIT_BUDGET = 10      # git calls per verify_anchors run (rename checks cost up to 2
-                              # each, plus one rev-parse per rename found) — a session-start
-                              # latency guarantee, same spirit as the guard engine's budgets.
+_ANCHOR_GIT_BUDGET = 2 * store._MAX_SOURCE_FILES + 1
+# git calls per verify_anchors run — a session-start latency guarantee, same spirit as the
+# guard engine's budgets. The number is DERIVED, not picked: one entry's worst case is every
+# one of its (at most _MAX_SOURCE_FILES) anchored paths missing, costing 2 calls each
+# (`log` + `show`), plus at most one `rev-parse HEAD` for the outcome — so a budget of
+# `2 * _MAX_SOURCE_FILES + 1` guarantees the FIRST entry of every run always completes.
+# That guarantee is what makes the run make forward progress: a smaller budget lets a single
+# fat entry exhaust it inside its own file loop, so that entry — and every entry after it —
+# is skipped on every run, forever, silently. Later entries can still be cut off (that's the
+# budget doing its job), but they are then reached on a subsequent run, once the entries
+# ahead of them have been repaired.
 
 _ACTIVE_STATUSES = ("approved", "suggested")
 
@@ -291,8 +306,13 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                         f"{current} {_ANCHOR_WITHDRAWN_MARKER} {', '.join(missing)} "
                         f"no longer exist)"
                     )
+                    # Carry the entry's existing title: this proposal is bookkeeping, and
+                    # promoting it must not let _build_proposal's empty-title fallback
+                    # re-derive a title from content-plus-withdrawal-clause, silently
+                    # destroying a curated one.
                     proposal = store._build_proposal(
-                        entry, proposal_content, "", "", now, source="scan")
+                        entry, proposal_content, "", "", now, source="scan",
+                        title=entry.get("title") or "")
                     proposal["clear_anchors"] = True
                     entry["proposed_revision"] = proposal
                     proposed += 1

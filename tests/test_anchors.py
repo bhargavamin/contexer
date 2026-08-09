@@ -6,6 +6,7 @@ directly for the entry-construction/approval helpers the tests need (_new_decisi
 approve_decision, _load/_save, ...)."""
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -280,6 +281,62 @@ class TestTotalLoss:
         assert reloaded_again["content"] == reloaded["content"]
         assert reloaded_again["content"].count("anchors withdrawn on re-verification") == 1
 
+    def test_approving_retirement_pops_stale_anchor_candidates(self, repo, monkeypatch):
+        # `anchor_candidates` legitimately SURVIVE on an already-approved entry (the
+        # pending-twin promote path and _route_containment neither bless nor pop them), so
+        # a retirement approval can meet a stale guess. _promote_proposal clears
+        # source_files/anchor_commit — and the candidate-blessing branch right after it
+        # used to read that now-empty anchor as "nothing anchors this entry" and promote
+        # the stale guess into a REAL anchor, re-anchoring the just-retired decision to
+        # unrelated files and dragging it straight back into decay participation.
+        _write(repo, "gone.py")
+        _write(repo, "unrelated.py")
+        _git(repo, "add", "gone.py", "unrelated.py")
+        _commit(repo)
+        entry = _seed_entry(repo, "Use gone.py to configure the thing.",
+                            source_files=["gone.py"])
+        data = store._load(str(repo))
+        target = next(e for e in data["entries"] if e["id"] == entry["id"])
+        target["anchor_candidates"] = ["unrelated.py"]
+        store._save(str(repo), data)
+        os.remove(str(repo / "gone.py"))
+
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
+        anchors.verify_anchors(str(repo), force=True)
+
+        store.approve_decision(str(repo), entry["id"], "approve")
+        reloaded = _reload(repo)
+        assert "source_files" not in reloaded
+        assert "anchor_commit" not in reloaded
+        # Retirement moots the guess: the candidates go too, rather than sitting there
+        # waiting for the next approval to bless them.
+        assert "anchor_candidates" not in reloaded
+
+        # And the entry is genuinely out of the participant set now.
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 0}
+        assert _reload(repo).get("proposed_revision") is None
+
+    def test_retirement_approval_preserves_curated_title(self, repo, monkeypatch):
+        # The retirement proposal is bookkeeping — it must not rewrite the decision's
+        # curated title into one derived from content + the withdrawal clause.
+        curated = "Thing configuration lives in gone.py"
+        _write(repo, "gone.py")
+        _git(repo, "add", "gone.py")
+        _commit(repo)
+        entry = _seed_entry(repo, "Use gone.py to configure the thing.",
+                            source_files=["gone.py"], title=curated)
+        os.remove(str(repo / "gone.py"))
+
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
+        anchors.verify_anchors(str(repo), force=True)
+        assert _reload(repo)["proposed_revision"]["title"] == curated
+
+        store.approve_decision(str(repo), entry["id"], "approve")
+        reloaded = _reload(repo)
+        assert reloaded["title"] == curated
+        assert store._current_revision(reloaded)["title"] == curated
+
     def test_dismissing_proposal_preserves_entry_and_reproposes_once(self, repo, monkeypatch):
         _write(repo, "gone.py")
         _git(repo, "add", "gone.py")
@@ -375,10 +432,13 @@ class TestBudget:
     def test_budget_exhaustion_leaves_remaining_entries_unverified(self, repo, monkeypatch):
         # Reviewer's exact repro: 6 entries, each with a REAL git-mv rename (no mocking of
         # git at all — this exercises the true 3-call-per-reanchor cost: log + show +
-        # rev-parse). budget=10 covers exactly 3 full re-anchors (9 calls); the 4th
+        # rev-parse). The budget is pinned to 10 HERE rather than read from the module, so
+        # this test keeps exercising the exhaustion semantics regardless of what the real
+        # constant is set to: 10 covers exactly 3 full re-anchors (9 calls); the 4th
         # entry's rename check spends the 10th call on `log`, then hits exhaustion on
         # `show` and must be left completely untouched — not misclassified as a total
         # loss (the old return-None-on-exhaustion bug) and not partially applied.
+        monkeypatch.setattr(anchors, "_ANCHOR_GIT_BUDGET", 10)
         names = [f"old_{i}.py" for i in range(6)]
         for name in names:
             _write(repo, name, f"content {name}\n")
@@ -410,6 +470,29 @@ class TestBudget:
             reloaded = by_id[entries[i]["id"]]
             assert reloaded["source_files"] == [names[i]]      # completely untouched
             assert reloaded.get("proposed_revision") is None
+
+    def test_budget_covers_one_worst_case_entry_so_the_run_progresses(self, repo, monkeypatch):
+        # Starvation repro: a single fat entry must never be able to exhaust the budget
+        # INSIDE its own file loop — that entry, and every entry after it, would then be
+        # skipped on every single run, forever, silently. 8 missing committed files cost
+        # 16 git calls (log + show each), well past the old budget of 10; the budget now
+        # covers the worst case an entry can present (2 * _MAX_SOURCE_FILES + 1), so this
+        # one forced run completes BOTH entries.
+        fat = [f"fat_{i}.py" for i in range(8)]
+        for name in (*fat, "lean.py"):
+            _write(repo, name, f"content {name}\n")
+        _git(repo, "add", *fat, "lean.py")
+        _commit(repo)
+        fat_entry = _seed_entry(repo, "Decision about the fat file set.", source_files=fat)
+        lean_entry = _seed_entry(repo, "Decision about lean.py", source_files=["lean.py"])
+        _git(repo, "rm", "-q", *fat, "lean.py")
+        _commit(repo, "delete all")
+
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 2}
+        by_id = {e["id"]: e for e in store._load(str(repo))["entries"]}
+        assert by_id[fat_entry["id"]].get("proposed_revision") is not None
+        assert by_id[lean_entry["id"]].get("proposed_revision") is not None
 
 
 # ── fail-soft ────────────────────────────────────────────────────────────────
@@ -469,3 +552,26 @@ class TestSessionStartWiring:
         data = store._load(str(repo))
         entry = next(e for e in data["entries"] if e["subtype"] == "constraint")
         assert entry["source_files"] == ["new.py"]
+
+
+# ── import order ─────────────────────────────────────────────────────────────
+
+class TestImportOrderRegression:
+    """anchors.py imports `store` at its own top level and store.py calls back into
+    `anchors` from the session-start path — the same shape that once broke guard_engine
+    (see test_guard_engine.py's TestImportOrderRegression). A fresh subprocess is the only
+    honest check: pytest has already imported both modules in this process, in the safe
+    order, so an in-process assertion would prove nothing. `import contexer.anchors` as the
+    very first touch of the package is the order at risk."""
+
+    def test_anchors_first_import_order_does_not_raise(self):
+        probe = (
+            "import contexer.anchors\n"
+            "import contexer.store\n"
+            "assert contexer.anchors.store is contexer.store\n"
+            "print('OK')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe],
+                                 capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OK"

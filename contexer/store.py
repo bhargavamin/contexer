@@ -2184,6 +2184,13 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         entry["status"] = "approved"
         entry["approved_at"] = now
         prop_had_source_files = bool((entry.get("proposed_revision") or {}).get("source_files"))
+        # Read BEFORE promoting — _promote_proposal consumes the proposal. `clear_anchors`
+        # (anchors.py's total-loss retirement) means this approval RETIRES the entry's anchor;
+        # the candidate-blessing branch below must not then read the freshly-emptied
+        # source_files as "nothing anchors this entry" and promote a stale guess into a real
+        # anchor, which would re-anchor the just-retired decision to unrelated files and drag
+        # it straight back into anchor-decay participation (and Tier-1 guard pairing).
+        prop_clear = bool((entry.get("proposed_revision") or {}).get("clear_anchors"))
         _promote_proposal(repo_path, entry, content if action == "edit" else None)
         # Stamp approved_by AFTER promoting, not before: _append_revision (called inside
         # _promote_proposal) invalidates approved_by whenever the new revision's source isn't
@@ -2206,7 +2213,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if not prop_had_source_files and entry.get("source_files"):
             _anchor_sources(repo_path, entry, entry["source_files"])
         elif (not prop_had_source_files and not has_caller_source_files
-                and entry.get("anchor_candidates")):
+                and not prop_clear and entry.get("anchor_candidates")):
             # Nothing else anchors this entry — the Suggested Update's own stashed
             # source_files wins when present (above), and a caller-passed source_files
             # is about to override anyway; only then do the accrued candidates fill the gap.
@@ -2214,7 +2221,10 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         # A real anchor (however it got here — the proposal's own stash, a refreshed prior
         # anchor, or the candidates promoted just above) makes any leftover candidate guess
         # moot; drop it rather than leave stale data dangling on an already-anchored entry.
-        if entry.get("source_files"):
+        # A retirement approval moots it just as thoroughly, from the other direction: the
+        # entry is deliberately anchor-less now, so a lingering guess would only wait around
+        # for some later approval to bless it back into an anchor.
+        if entry.get("source_files") or prop_clear:
             entry.pop("anchor_candidates", None)
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
