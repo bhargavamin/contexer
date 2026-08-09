@@ -238,15 +238,20 @@ class TestTotalLoss:
         prop = reloaded.get("proposed_revision")
         assert prop is not None
         # Rule-shaped: approving must yield a sane live revision, so the proposal starts
-        # with the original rule text, not a status memo.
+        # with the original rule text, not a status memo. Closed, factual wording — not
+        # an open action-request — since approving bakes this text in as the live content.
         assert prop["content"].startswith(content)
-        assert "anchored files no longer exist: gone.py" in prop["content"]
-        assert "confirm whether this decision still applies" in prop["content"]
+        assert "(anchors withdrawn on re-verification: gone.py no longer exist)" in prop["content"]
+        assert "confirm whether" not in prop["content"]
+        assert prop["clear_anchors"] is True
         assert reloaded["status"] == "approved"       # current revision stays trusted
         # nudge armed
         assert store._pending_review_flag(str(repo)).exists()
 
-    def test_approving_proposal_yields_sane_content(self, repo, monkeypatch):
+    def test_approving_clears_anchors_and_exits_participation(self, repo, monkeypatch):
+        # Critical fix: approval must both (a) drop source_files/anchor_commit so the
+        # entry stops re-qualifying, and (b) never let a second verify_anchors run stack
+        # a duplicate withdrawal clause onto the just-approved content.
         _write(repo, "gone.py")
         _git(repo, "add", "gone.py")
         _commit(repo)
@@ -260,10 +265,22 @@ class TestTotalLoss:
         reloaded = _reload(repo)
         assert reloaded.get("proposed_revision") is None
         assert reloaded["content"].startswith(content)
-        assert "anchored files no longer exist" in reloaded["content"]
+        assert "(anchors withdrawn on re-verification: gone.py no longer exist)" in reloaded["content"]
         assert len(reloaded["revisions"]) == 2
+        # (a) mechanism: source_files/anchor_commit dropped, not left pointing at gone.py.
+        assert "source_files" not in reloaded
+        assert "anchor_commit" not in reloaded
 
-    def test_dismissing_proposal_preserves_entry(self, repo, monkeypatch):
+        # A subsequent forced run must treat the entry as a non-participant: no second
+        # proposal, no duplicate clause, content unchanged.
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 0}
+        reloaded_again = _reload(repo)
+        assert reloaded_again.get("proposed_revision") is None
+        assert reloaded_again["content"] == reloaded["content"]
+        assert reloaded_again["content"].count("anchors withdrawn on re-verification") == 1
+
+    def test_dismissing_proposal_preserves_entry_and_reproposes_once(self, repo, monkeypatch):
         _write(repo, "gone.py")
         _git(repo, "add", "gone.py")
         _commit(repo)
@@ -278,6 +295,38 @@ class TestTotalLoss:
         assert reloaded.get("proposed_revision") is None
         assert reloaded["content"] == content          # unchanged
         assert len(reloaded["revisions"]) == 1          # no new revision appended
+        assert reloaded["source_files"] == ["gone.py"]  # dismiss leaves anchors as-is
+
+        # Dismissal leaves the entry re-qualified: the next TTL cycle re-proposes, with
+        # exactly one clause (never two) since the dedupe guard checks live content, not
+        # the (now-gone) proposal.
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 1}
+        reproposed = _reload(repo)
+        prop = reproposed["proposed_revision"]
+        assert prop["content"].count("anchors withdrawn on re-verification") == 1
+
+    def test_dedupe_guard_skips_when_content_already_carries_clause(self, repo, monkeypatch):
+        # Defensive backstop (belt-and-suspenders alongside the approval-clears-anchors
+        # fix): an entry whose CURRENT content already carries a withdrawal clause but
+        # whose source_files/anchor_commit were somehow left in place (legacy data, a
+        # race, or the pre-fix bug) must never get a second clause stacked onto it.
+        _write(repo, "gone.py")
+        _git(repo, "add", "gone.py")
+        _commit(repo)
+        content = ("Use gone.py to configure the thing. (anchors withdrawn on "
+                   "re-verification: gone.py no longer exist)")
+        _seed_entry(repo, content, source_files=["gone.py"])
+        os.remove(str(repo / "gone.py"))
+
+        calls = []
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 0}
+        reloaded = _reload(repo)
+        assert reloaded.get("proposed_revision") is None
+        assert reloaded["content"] == store._normalize_content(content)
+        assert reloaded["content"].count("anchors withdrawn on re-verification") == 1
 
     def test_existing_proposal_entry_is_skipped(self, repo, monkeypatch):
         _write(repo, "gone.py")
@@ -323,27 +372,44 @@ class TestTotalLoss:
 # ── budget ────────────────────────────────────────────────────────────────────
 
 class TestBudget:
-    def test_budget_exhaustion_stops_cleanly(self, repo, monkeypatch):
-        # 6 entries each needing a rename check (2 git calls each = 12 needed), budget=10.
-        _git(repo, "commit", "--allow-empty", "-q", "-m", "seed")
-        for i in range(6):
-            _seed_entry(repo, f"Decision about missing_{i}.py",
-                        source_files=[f"missing_{i}.py"])
+    def test_budget_exhaustion_leaves_remaining_entries_unverified(self, repo, monkeypatch):
+        # Reviewer's exact repro: 6 entries, each with a REAL git-mv rename (no mocking of
+        # git at all — this exercises the true 3-call-per-reanchor cost: log + show +
+        # rev-parse). budget=10 covers exactly 3 full re-anchors (9 calls); the 4th
+        # entry's rename check spends the 10th call on `log`, then hits exhaustion on
+        # `show` and must be left completely untouched — not misclassified as a total
+        # loss (the old return-None-on-exhaustion bug) and not partially applied.
+        names = [f"old_{i}.py" for i in range(6)]
+        for name in names:
+            _write(repo, name, f"content {name}\n")
+        _git(repo, "add", *names)
+        _commit(repo)
+        entries = [_seed_entry(repo, f"Decision about old_{i}.py", source_files=[names[i]])
+                   for i in range(6)]
+        for i, name in enumerate(names):
+            _git(repo, "mv", name, f"new_{i}.py")
+        _commit(repo, "rename all")
 
+        real_run_git = anchors._run_git
         calls = []
 
-        def counting_git(repo_path, *args):
+        def counting(repo_path, *args):
             calls.append(args)
-            return None   # never finds a rename -> every entry is a total loss when exhausted
+            return real_run_git(repo_path, *args)
+        monkeypatch.setattr(anchors, "_run_git", counting)
 
-        monkeypatch.setattr(anchors, "_run_git", counting_git)
         result = anchors.verify_anchors(str(repo), force=True)   # must not raise
+        assert result == {"reanchored": 3, "proposed": 0}
         assert len(calls) <= anchors._ANCHOR_GIT_BUDGET
-        assert isinstance(result, dict)
-        # whatever got decided (total-loss proposals for whichever entries were reached)
-        # was actually persisted — a budget stop is clean, not a torn/half-written state.
+
         data = store._load(str(repo))
-        assert len(data["entries"]) == 6
+        by_id = {e["id"]: e for e in data["entries"]}
+        for i in range(3):
+            assert by_id[entries[i]["id"]]["source_files"] == [f"new_{i}.py"]
+        for i in range(3, 6):
+            reloaded = by_id[entries[i]["id"]]
+            assert reloaded["source_files"] == [names[i]]      # completely untouched
+            assert reloaded.get("proposed_revision") is None
 
 
 # ── fail-soft ────────────────────────────────────────────────────────────────

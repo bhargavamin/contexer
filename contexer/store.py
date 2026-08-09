@@ -1692,7 +1692,15 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     edit at approval time changed the content, the title is dropped so _append_revision
     re-derives it from the final content instead of carrying a stale one. A source_files stashed
     on the proposal (see _build_proposal) is applied NOW, since the corrected content is only
-    now becoming the live, rendered revision."""
+    now becoming the live, rendered revision.
+
+    `clear_anchors` (contexer/anchors.py's total-loss retirement proposals): a stashed
+    `True` means approving this proposal must DROP the entry's `source_files`/
+    `anchor_commit` rather than leave them pointing at files already confirmed gone —
+    otherwise the entry would re-qualify as an anchor-decay participant on the very next
+    TTL cycle and stack a second withdrawal clause onto the content this approval just
+    wrote. An explicit stashed marker, not a wording/content heuristic, so this never
+    misfires on an ordinary proposal that happens to mention missing files."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1713,6 +1721,9 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
     entry.pop("proposed_revision", None)
+    if prop.get("clear_anchors"):
+        entry.pop("source_files", None)
+        entry.pop("anchor_commit", None)
 
 
 _PENDING_REVIEW_NUDGE = (
