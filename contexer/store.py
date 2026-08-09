@@ -4220,6 +4220,20 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except Exception:
         pass  # verification is opportunistic; a session start must never fail on it
 
+    try:
+        if source not in ("resume", "compact"):
+            # Same re-read convention as verify_scan_conventions just above: a rename
+            # re-anchor or a total-loss retirement proposal changed the store, so THIS
+            # session must render the corrected addresses / fresh pending count instead
+            # of the pre-verify snapshot loaded earlier.
+            from contexer import anchors
+            outcome = anchors.verify_anchors(repo_path)
+            if outcome.get("reanchored") or outcome.get("proposed"):
+                data = _load(repo_path)
+                decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    except Exception:
+        pass  # verification is opportunistic; a session start must never fail on it
+
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
             return {"status": "", "context": ""}
