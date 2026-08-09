@@ -5188,9 +5188,21 @@ def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> 
 def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     """Render the given decisions in the same two-line format `get_context` uses: a bullet
     line ending in the title, then a `    `-indented line with the current content. Skips
-    ignored / missing entries; empty string when nothing renders."""
+    ignored / missing entries; empty string when nothing renders.
+
+    `ids` normally come from the repo's own BM25 index (repo-store-only by construction), but
+    the file route (#187, `_prompt_file_ids`) can hand back a `decisions_for_files` hit scoped
+    "global" — a decision that lives in the GLOBAL store, not this repo's. So any id not found
+    in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
+    `files=` two-store merge. A no-op extra read for the pure-BM25 case (nothing is ever
+    missing there)."""
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
+    missing = [d for d in ids if d not in by_id]
+    if missing:
+        global_data = _load_global()
+        by_id.update({e.get("id"): e for e in global_data.get("entries", [])
+                     if e.get("type") == "decision" and e.get("id") in missing})
     stale = _staleness_notes(repo_path, [by_id[d] for d in ids
                                          if d in by_id and _entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
@@ -5262,6 +5274,42 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
     return _global_prompt_lookup(ordered_kws)
 
 
+def _prompt_file_ids(repo_path: str, prompt: str, ws: set[str]) -> list[str]:
+    """Path/module-shaped files named IN THE PROMPT itself (issue #187 — "fix the pairing bug
+    in contexer/guard_engine.py"), routed deterministically through the same anchor/content-
+    reference lookup the commit-time guard uses (`guard_engine.decisions_for_files`), no
+    voluntary `get_context(files=...)` call required.
+
+    Reuses `guard_engine._guard_content_artifacts` — the identical _pathlike_artifact-filtered
+    raw-regex extraction the guard already applies to DECISION content — on the prompt text
+    instead. That's the same precision class `_artifact_path_match` enforces everywhere else
+    in the guard: a bare topic word, a symbol artifact ("FooError"), or a route-shaped string
+    never qualifies, and a bare basename only pairs on an exact match — never a directory-
+    suffix match — so "utils.py" alone doesn't accidentally pull in a decision that only
+    mentions "some/other/utils.py". `decisions_for_files` itself covers both the repo AND the
+    global store, matches on `source_files` anchors first and content artifacts second, and
+    already excludes `ignored` decisions.
+
+    Working-set ids are dropped up front (never re-inject something already surfaced this
+    session), and the result is ordered by `decisions_for_files`' own hit order, deduped.
+    Fail-soft throughout: any exception here (corrupt store, unreadable index, ...) degrades
+    to [] so the BM25 ladder runs exactly as if no file signal existed — never raises into the
+    per-prompt hook path."""
+    try:
+        from contexer import guard_engine
+        file_artifacts = guard_engine._guard_content_artifacts(prompt)
+        if not file_artifacts:
+            return []
+        ids: list[str] = []
+        for hit in guard_engine.decisions_for_files(repo_path, file_artifacts):
+            did = hit.get("decision_id")
+            if did and did not in ws and did not in ids:
+                ids.append(did)
+        return ids
+    except Exception:
+        return []
+
+
 def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
     """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
     "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} — structured data for
@@ -5304,12 +5352,21 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
     # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
     # overview/global fallbacks below — only this vector changes.
+    ws = set(working_set_ids(repo_path, session_id))
+
+    # File route (#187): a prompt naming a path/module-shaped file ("fix the pairing bug in
+    # contexer/guard_engine.py") consults the anchor/content-reference lookup deterministically
+    # — path-artifact hits lead the STRONG set, BM25 fills the rest. The gate above already
+    # decides whether we're here at all (a real path artifact already makes `artifacts`
+    # non-empty); this only refines what happens INSIDE an already-open gate, never widens it.
+    file_ids = _prompt_file_ids(repo_path, prompt, ws)
+
     art_tokens = _index_tokens(" ".join(artifacts))
     query_terms = _index_tokens(prompt) + art_tokens + art_tokens   # artifacts double-weighted
     ranked = _bm25_rank(query_terms, index)
-    ws = set(working_set_ids(repo_path, session_id))
     ranked = [r for r in ranked if r[0] not in ws]
 
+    strong: list[str] = list(file_ids)
     if ranked:
         top_score = ranked[0][1]
         # Junk guard: a bare question (no rationale/project word) only earns a content
@@ -5318,29 +5375,34 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
         # constraint on the word "time".
         question_only = is_question and not is_rationale and not is_project
         allow_strong = not question_only or ranked[0][3] >= 1
-        strong: list[str] = []
+        bm25_strong: list[str] = []
         if allow_strong:
             for did, score, hits, _dh in ranked[:_STRONG_CANDIDATES]:
                 if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
-                    strong.append(did)
+                    bm25_strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
         # yields one doc with one hit — relax to hits>=1 on the top candidate so legacy's
         # full-content recall for both prompt classes is preserved. A bare question gets the
         # same relaxation only when it *is* single-keyword (and hence discriminative per the
         # guard above) — with more keywords, one lone hit is noise, not an answer.
         relax = is_rationale or is_project or (question_only and len(set(query_terms)) == 1)
-        if not strong and allow_strong and relax and ranked[0][2] >= 1:
-            strong = [ranked[0][0]]
-        strong = strong[:_STRONG_CAP]
-        if strong:
-            rendered = _render_prompt_decisions(repo_path, strong)
-            if rendered:
-                _ws_add(repo_path, session_id, strong)
-                # Suffix (not part of the pinned header prefix): without it the model
-                # narrates "I'll pull this from Contexer" and re-fetches what it already has.
-                text = ("[Contexer: auto-fetched for this question] "
-                        f"(already in context — no get_context call needed)\n{rendered}")
-                return text, _rendered_meta("strong", text)
+        if not bm25_strong and allow_strong and relax and ranked[0][2] >= 1:
+            bm25_strong = [ranked[0][0]]
+        # File-route hits already lead `strong` (deterministic, highest-precision signal);
+        # BM25 candidates fill any remaining slots, deduped against what the file route found.
+        for did in bm25_strong:
+            if did not in strong:
+                strong.append(did)
+    strong = strong[:_STRONG_CAP]
+    if strong:
+        rendered = _render_prompt_decisions(repo_path, strong)
+        if rendered:
+            _ws_add(repo_path, session_id, strong)
+            # Suffix (not part of the pinned header prefix): without it the model
+            # narrates "I'll pull this from Contexer" and re-fetches what it already has.
+            text = ("[Contexer: auto-fetched for this question] "
+                    f"(already in context — no get_context call needed)\n{rendered}")
+            return text, _rendered_meta("strong", text)
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
     # a ~15-token pointer instead of full content.

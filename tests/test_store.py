@@ -4629,6 +4629,139 @@ class TestArtifactRouteGate:
         assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
 
 
+class TestFileRoute:
+    """#187 — a prompt naming a path/module-shaped file routes through
+    guard_engine.decisions_for_files deterministically, ahead of BM25, at the prompt seam.
+    No get_context(files=...) call required."""
+
+    def test_qualified_path_in_task_prompt_injects_governing_decision(self, tmp_repo):
+        # Task-shaped prompt: no rationale/project word, no question lead — the ONLY signal
+        # is the file path itself. Anchored via source_files, the realistic #172/#174 case.
+        store.update_decision(
+            tmp_repo,
+            "The commit-time guard's pairing engine lives in contexer/guard_engine.py and "
+            "matches staged files against trusted decisions",
+            RV1_SESSION, "architecture", source_files=["contexer/guard_engine.py"],
+        )
+        result = store.get_context_for_prompt(
+            tmp_repo, "fix the pairing bug in contexer/guard_engine.py")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "pairing engine" in result
+
+    def test_content_artifact_match_without_source_files(self, tmp_repo):
+        # No source_files anchor — pairing falls back to a path-shaped artifact extracted
+        # from the decision's own content (mirrors guard_engine's own _guard_pairs signal).
+        store.update_decision(
+            tmp_repo,
+            "The store <-> contexer/guard_engine.py module boundary must stay a "
+            "function-level import to avoid a load cycle",
+            RV1_SESSION, "architecture",
+        )
+        result = store.get_context_for_prompt(
+            tmp_repo, "update the imports in contexer/guard_engine.py")
+        assert "function-level import" in result
+
+    def test_file_hit_leads_and_bm25_fills_remaining_slots(self, tmp_repo):
+        store.update_decision(tmp_repo,
+            "JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies",
+            RV1_SESSION, "architecture")
+        store.update_decision(tmp_repo,
+            "REST endpoints under the orders route return a JSON response envelope",
+            RV1_SESSION, "pattern")
+        store.update_decision(tmp_repo,
+            "Settings load from a TOML config file validated at startup before anything "
+            "else runs", RV1_SESSION, "convention", source_files=["contexer/config.py"])
+
+        result = store.get_context_for_prompt(
+            tmp_repo, "why does contexer/config.py break the jwt refresh cookie flow?")
+        # File-route hit (config.py) renders BEFORE the BM25-ranked hit (jwt) — "ahead of
+        # BM25 scores", not just present somewhere in a merged/deduped set.
+        assert 0 <= result.find("Settings load") < result.find("JWT refresh tokens")
+
+    def test_working_set_dedup_applies_to_file_hits(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "guard_engine.py pairs decisions against staged files",
+            RV1_SESSION, "architecture", source_files=["guard_engine.py"])
+        sid = "sess-file-ws"
+        first = store.get_context_for_prompt(
+            tmp_repo, "fix the pairing bug in guard_engine.py", sid)
+        assert first.startswith("[Contexer: auto-fetched for this question]")
+        second = store.get_context_for_prompt(
+            tmp_repo, "fix the pairing bug in guard_engine.py", sid)
+        assert second == ""   # already in the working set — no re-injection, no fallback
+
+    def test_bare_topic_word_not_pathlike_no_file_route(self, tmp_repo):
+        store.update_decision(tmp_repo, "We use PostgreSQL as the primary datastore",
+                              RV1_SESSION, "architecture")
+        ws: set = set()
+        assert store._prompt_file_ids(tmp_repo, "what about postgres?", ws) == []
+
+    def test_bare_basename_with_no_matching_decision_stays_silent(self, tmp_repo):
+        # "utils.py" IS pathlike (has an extension), but nothing in either store references
+        # it — decisions_for_files finds no signal, so the file route contributes nothing.
+        store.update_decision(tmp_repo, "The cart service owns checkout totals",
+                              RV1_SESSION, "architecture")
+        store.update_global_decision("Always rename modules using git mv to preserve history",
+                                     RV1_SESSION, "convention")
+        assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
+
+    def test_global_scope_file_hit_renders(self, tmp_repo):
+        # decisions_for_files spans both stores; _render_prompt_decisions must resolve a
+        # global-scope id too (it only used to look in the repo store).
+        store.update_decision(tmp_repo, "The cart service owns checkout totals",
+                              RV1_SESSION, "architecture")   # forces a repo index to exist
+        store.update_global_decision(
+            "Secrets loading happens in contexer/config.py at import time",
+            RV1_SESSION, "constraint")
+        result = store.get_context_for_prompt(
+            tmp_repo, "update contexer/config.py loading order")
+        assert "Secrets loading" in result
+
+    def test_meta_reflects_file_driven_hit(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "guard_engine.py pairs decisions against staged files",
+            RV1_SESSION, "architecture", source_files=["guard_engine.py"])
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "fix the bug in guard_engine.py")
+        assert meta["kind"] == "strong"
+        assert meta["count"] == 1
+
+    def test_no_index_path_never_calls_file_route(self, tmp_repo, monkeypatch):
+        # Fail-soft / unchanged-legacy-path guarantee: with no repo-local decisions there is
+        # no retrieval index, so the legacy per-prompt lookup runs — and must never touch the
+        # file route at all, even though a rationale-word prompt clears its own gate.
+        from contexer import guard_engine
+
+        def _boom(*a, **k):
+            raise AssertionError("decisions_for_files must not run on the no-index legacy path")
+        monkeypatch.setattr(guard_engine, "decisions_for_files", _boom)
+        store.update_global_decision(
+            "Always rename modules using git mv to preserve history", RV1_SESSION, "convention")
+        assert store._read_retrieval_index(tmp_repo) is None
+        result = store.get_context_for_prompt(
+            tmp_repo, "why did we decide to rename utils.py this way?")
+        assert "global" in result.lower()
+
+    def test_corrupt_index_falls_back_to_legacy_without_file_route(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "The cart service owns checkout totals",
+                              RV1_SESSION, "architecture")
+        store._index_path(tmp_repo).write_text("{ not json")
+        from contexer import guard_engine
+
+        def _boom(*a, **k):
+            raise AssertionError("file route must not run against a corrupt index")
+        monkeypatch.setattr(guard_engine, "decisions_for_files", _boom)
+        assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
+
+    def test_prompt_file_ids_fail_soft_on_exception(self, tmp_repo, monkeypatch):
+        from contexer import guard_engine
+
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(guard_engine, "decisions_for_files", _boom)
+        assert store._prompt_file_ids(tmp_repo, "fix contexer/guard_engine.py", set()) == []
+
+
 class TestTopicAliasRetry:
     def test_bare_topic_query_falls_back_to_aliases(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
