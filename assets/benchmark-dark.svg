@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="310" viewBox="0 0 1200 310" role="img" aria-label="Benchmarks, medians across 548 published sessions, Contexer vs no memory: 6 times fewer tokens per session (32,804 vs 198,864); right answer in 1 turn vs 6; 8 of 8 stored rules followed vs 0 of 8; $0.043 per session vs $0.116">
+  <rect width="1200" height="310" rx="16" fill="#15170D"/>
+  <g font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif">
+
+    <!-- header: legend left, methodology right -->
+    <rect x="40" y="33" width="12" height="12" rx="3" fill="#CDEB36"/>
+    <text x="59" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#A6A899">CONTEXER</text>
+    <rect x="158" y="33" width="12" height="12" rx="3" fill="#F2F1E6" fill-opacity="0.22"/>
+    <text x="177" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#A6A899">NO MEMORY</text>
+    <text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#A6A899">MEDIANS OF 548 PUBLISHED SESSIONS &#183; SCORED BY CODE, NOT AN LLM JUDGE</text>
+
+    <!-- card 1: tokens -->
+    <rect x="40" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
+    <text x="64" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">6&#215;</text>
+    <text x="64" y="166" font-size="14" font-weight="600" fill="#F2F1E6">fewer tokens per session</text>
+    <rect x="64" y="190" width="21" height="7" rx="3.5" fill="#CDEB36"/>
+    <text x="203" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">33k</text>
+    <rect x="64" y="208" width="130" height="7" rx="3.5" fill="#F2F1E6" fill-opacity="0.22"/>
+    <text x="203" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">199k</text>
+
+    <!-- card 2: turns to answer -->
+    <rect x="325" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
+    <text x="349" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">1 turn</text>
+    <text x="349" y="166" font-size="14" font-weight="600" fill="#F2F1E6">to the right &#8220;why did we&#8230;?&#8221;</text>
+    <rect x="349" y="190" width="22" height="7" rx="3.5" fill="#CDEB36"/>
+    <text x="488" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">1 turn</text>
+    <rect x="349" y="208" width="130" height="7" rx="3.5" fill="#F2F1E6" fill-opacity="0.22"/>
+    <text x="488" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">6 turns</text>
+
+    <!-- card 3: rule compliance (dot rows) -->
+    <rect x="610" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
+    <text x="634" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">8/8</text>
+    <text x="634" y="166" font-size="14" font-weight="600" fill="#F2F1E6">stored rules followed</text>
+    <g fill="#CDEB36">
+      <circle cx="639" cy="193.5" r="4.5"/><circle cx="654" cy="193.5" r="4.5"/><circle cx="669" cy="193.5" r="4.5"/><circle cx="684" cy="193.5" r="4.5"/><circle cx="699" cy="193.5" r="4.5"/><circle cx="714" cy="193.5" r="4.5"/><circle cx="729" cy="193.5" r="4.5"/><circle cx="744" cy="193.5" r="4.5"/>
+    </g>
+    <text x="773" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">8/8</text>
+    <g fill="none" stroke="#F2F1E6" stroke-opacity="0.35">
+      <circle cx="639" cy="211.5" r="4"/><circle cx="654" cy="211.5" r="4"/><circle cx="669" cy="211.5" r="4"/><circle cx="684" cy="211.5" r="4"/><circle cx="699" cy="211.5" r="4"/><circle cx="714" cy="211.5" r="4"/><circle cx="729" cy="211.5" r="4"/><circle cx="744" cy="211.5" r="4"/>
+    </g>
+    <text x="773" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">0/8</text>
+
+    <!-- card 4: cost -->
+    <rect x="895" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
+    <text x="919" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">$0.043</text>
+    <text x="919" y="166" font-size="14" font-weight="600" fill="#F2F1E6">per session, right answers</text>
+    <rect x="919" y="190" width="48" height="7" rx="3.5" fill="#CDEB36"/>
+    <text x="1058" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.043</text>
+    <rect x="919" y="208" width="130" height="7" rx="3.5" fill="#F2F1E6" fill-opacity="0.22"/>
+    <text x="1058" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.116, wrong</text>
+  </g>
+</svg>
