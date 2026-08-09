@@ -159,6 +159,112 @@ class TestRenameReanchor:
         assert reloaded["anchor_commit"] != old_anchor_commit
         assert reloaded["anchor_commit"] == store._git(str(repo), "rev-parse", "HEAD")
 
+    def test_multi_hop_rename_chain_reanchors_to_final_target(self, repo):
+        # Greptile P1 repro: a -> b -> c across two commits. `old.py`'s single
+        # most-recent-touch commit only ever resolves to `mid.py`, which no longer exists
+        # either (it was renamed on again) — the fix must chase that hop too and land on
+        # `new.py`, not fall through to "missing, no rename".
+        _write(repo, "old.py", "a\nb\nc\n")
+        _git(repo, "add", "old.py")
+        _commit(repo)
+        entry = _seed_entry(repo, "Decision about old.py", source_files=["old.py"])
+        old_anchor_commit = entry["anchor_commit"]
+
+        _git(repo, "mv", "old.py", "mid.py")
+        _commit(repo, "rename hop 1")
+        _git(repo, "mv", "mid.py", "new.py")
+        _commit(repo, "rename hop 2")
+
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 1, "proposed": 0}
+        reloaded = _reload(repo)
+        assert reloaded["source_files"] == ["new.py"]
+        assert reloaded.get("proposed_revision") is None
+        assert reloaded["anchor_commit"] != old_anchor_commit
+        assert reloaded["anchor_commit"] == store._git(str(repo), "rev-parse", "HEAD")
+
+    def test_rename_chain_exceeding_hop_cap_treated_as_missing(self, repo, monkeypatch):
+        # A chain longer than _RENAME_CHAIN_MAX must NOT be chased indefinitely — it's
+        # treated as a plain miss, same as no rename at all, and (since it's the only
+        # anchored file) falls through to the total-loss proposal path.
+        monkeypatch.setattr(anchors, "_RENAME_CHAIN_MAX", 2)
+        _write(repo, "p0.py", "content\n")
+        _git(repo, "add", "p0.py")
+        _commit(repo)
+        _seed_entry(repo, "Decision about p0.py", source_files=["p0.py"])
+
+        # Three rename hops: p0 -> p1 -> p2 -> p3 — one more than the capped chain length.
+        for i in range(3):
+            _git(repo, "mv", f"p{i}.py", f"p{i + 1}.py")
+            _commit(repo, f"rename hop {i}")
+
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 1}
+        reloaded = _reload(repo)
+        assert reloaded["source_files"] == ["p0.py"]   # untouched — no rename applied
+        prop = reloaded.get("proposed_revision")
+        assert prop is not None
+        assert "p0.py no longer exist" in prop["content"]
+
+    def test_ambiguity_mid_chain_not_confident(self, repo, monkeypatch):
+        # Hop 1 (old.py -> mid.py) is confident; hop 2 (mid.py -> ???) is ambiguous. The
+        # whole chain must be rejected — not confident — rather than stopping at the
+        # ambiguous hop and treating the last confident hop as good enough.
+        _write(repo, "old.py", "a\n")
+        _write(repo, "keep.py", "b\n")
+        _git(repo, "add", "old.py", "keep.py")
+        _commit(repo)
+        _seed_entry(repo, "Decision about old.py and keep.py",
+                    source_files=["old.py", "keep.py"])
+        os.remove(str(repo / "old.py"))
+
+        def fake_git(repo_path, *args):
+            if args[0] == "log":
+                target = args[-1]
+                if target == "old.py":
+                    return "commit1"
+                if target == "mid.py":
+                    return "commit2"
+                return None
+            if args[0] == "show":
+                commit = args[-1]
+                if commit == "commit1":
+                    return "R100\told.py\tmid.py"
+                if commit == "commit2":
+                    return "R100\tmid.py\ta.py\nR090\tmid.py\tb.py"   # ambiguous
+                return None
+            if args[:2] == ("rev-parse", "HEAD"):
+                return store._git(repo_path, *args)
+            return None
+        monkeypatch.setattr(anchors, "_run_git", fake_git)
+
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 1, "proposed": 0}   # partial loss: keep.py survives
+        reloaded = _reload(repo)
+        assert reloaded["source_files"] == ["keep.py"]
+        assert reloaded.get("proposed_revision") is None
+
+    def test_budget_exhaustion_mid_chain_leaves_entry_unverified(self, repo, monkeypatch):
+        # The budget can run out partway through a rename chain (after hop 1's log+show,
+        # before hop 2's log). That must surface as _BudgetExceeded like any other
+        # mid-entry exhaustion — the entry left completely untouched, not misclassified.
+        _write(repo, "old.py", "a\n")
+        _git(repo, "add", "old.py")
+        _commit(repo)
+        entry = _seed_entry(repo, "Decision about old.py", source_files=["old.py"])
+        _git(repo, "mv", "old.py", "mid.py")
+        _commit(repo, "rename hop 1")
+        _git(repo, "mv", "mid.py", "new.py")
+        _commit(repo, "rename hop 2")
+
+        monkeypatch.setattr(anchors, "_ANCHOR_GIT_BUDGET", 2)  # exactly one hop's worth
+        result = anchors.verify_anchors(str(repo), force=True)
+        assert result == {"reanchored": 0, "proposed": 0}
+        reloaded = _reload(repo)
+        assert reloaded["source_files"] == ["old.py"]          # untouched
+        assert reloaded["anchor_commit"] == entry["anchor_commit"]
+        assert reloaded.get("proposed_revision") is None
+
     def test_ambiguous_rename_treated_as_missing(self, repo, monkeypatch):
         _write(repo, "old.py", "a\n")
         _write(repo, "keep.py", "b\n")

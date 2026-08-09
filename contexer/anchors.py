@@ -55,13 +55,17 @@ nudge / `contexer review`), and a developer who dismisses that proposal keeps th
 exactly as it was.
 
 Rename detection is git-budgeted (`_ANCHOR_GIT_BUDGET` git calls per run, `store.
-_GIT_FAST_TIMEOUT`-second timeouts, fail-soft throughout): `git log --follow --format=%H
--1 -- <old>` finds the most recent commit that touched the path, then `git show --format=
---name-status <commit>` (deliberately no pathspec — see `_parse_rename_target`) is parsed
-for the rename record(s) whose old side is that path. Confident means exactly one distinct
-new path, and that new path must actually exist in the working tree now — anything else
-(no commit, no rename record, more than one distinct target, or a target that itself no
-longer exists) is treated as a plain miss, same as no rename at all.
+_GIT_FAST_TIMEOUT`-second timeouts, fail-soft throughout) and CHASES THE RENAME CHAIN, not
+just one hop: `git log --follow --format=%H -1 -- <old>` finds the most recent commit that
+touched the path, then `git show --format= --name-status <commit>` (deliberately no
+pathspec — see `_parse_rename_target`) is parsed for the rename record(s) whose old side is
+that path. Confident means exactly one distinct new path at THAT hop; anything else (no
+commit, no rename record, more than one distinct target) is a plain miss, same as no rename
+at all, at whatever hop it happens. If the resolved target itself doesn't exist in the
+working tree (the file was renamed again since), the same two-call lookup repeats on that
+target, up to `_RENAME_CHAIN_MAX` hops (a -> b -> c -> ... — the plausible case inside a
+24h TTL window or after several skipped sessions) — the FIRST hop whose target exists wins.
+A chain that never bottoms out within the cap is treated as a plain miss too.
 
 Budget exhaustion is HONEST, not degraded into a false verdict: once the budget is spent,
 `_call` raises `_BudgetExceeded` instead of returning a value indistinguishable from "git
@@ -93,17 +97,28 @@ from contexer import store          # module object, not `from`-imports: see doc
 
 _ANCHOR_VERIFY_TTL = 86400   # 24h — file layouts don't churn fast enough to re-check every
                               # session start; mirrors store._MINER_VERIFY_TTL.
-_ANCHOR_GIT_BUDGET = 2 * store._MAX_SOURCE_FILES + 1
+_RENAME_CHAIN_MAX = 4
+# Cap on rename hops _confident_rename will chase past the first (a -> b -> c -> d -> ...)
+# before giving up on a vanished anchor path. A file renamed more than a handful of times
+# between two verification runs (a 24h TTL window, or a few skipped sessions) is
+# vanishingly rare; chasing an UNBOUNDED chain risks unbounded git-call cost per path on a
+# pathological or cyclic history, which is worse than the alternative below. A chain that
+# exceeds the cap is treated as NOT confident — same as any other hop that can't produce a
+# single, currently-existing target — so the file counts as missing under the entry's
+# existing missing/partial/total-loss classification (a possibly-spurious proposal or list
+# trim, not a hung verify run); a human reviewing that proposal can always dismiss it.
+_ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store._MAX_SOURCE_FILES + 1
 # git calls per verify_anchors run — a session-start latency guarantee, same spirit as the
 # guard engine's budgets. The number is DERIVED, not picked: one entry's worst case is every
-# one of its (at most _MAX_SOURCE_FILES) anchored paths missing, costing 2 calls each
-# (`log` + `show`), plus at most one `rev-parse HEAD` for the outcome — so a budget of
-# `2 * _MAX_SOURCE_FILES + 1` guarantees the FIRST entry of every run always completes.
-# That guarantee is what makes the run make forward progress: a smaller budget lets a single
-# fat entry exhaust it inside its own file loop, so that entry — and every entry after it —
-# is skipped on every run, forever, silently. Later entries can still be cut off (that's the
-# budget doing its job), but they are then reached on a subsequent run, once the entries
-# ahead of them have been repaired.
+# one of its (at most _MAX_SOURCE_FILES) anchored paths missing, and each of those paths
+# potentially needing the full rename chain (up to _RENAME_CHAIN_MAX hops, 2 calls per hop
+# — `log` + `show`) before resolving or giving up, plus at most one `rev-parse HEAD` for
+# the outcome — so a budget of `_RENAME_CHAIN_MAX * 2 * _MAX_SOURCE_FILES + 1` guarantees
+# the FIRST entry of every run always completes. That guarantee is what makes the run make
+# forward progress: a smaller budget lets a single fat entry exhaust it inside its own file
+# loop, so that entry — and every entry after it — is skipped on every run, forever,
+# silently. Later entries can still be cut off (that's the budget doing its job), but they
+# are then reached on a subsequent run, once the entries ahead of them have been repaired.
 
 _ACTIVE_STATUSES = ("approved", "suggested")
 
@@ -163,28 +178,38 @@ def _confident_rename(repo_path: str, old_path: str, repo_root: Path, call) -> s
     """Best-effort git rename detection for one vanished anchor path, using `call` (the
     caller's budget-tracking wrapper around `_run_git`, which RAISES `_BudgetExceeded`
     once the run's git budget is spent rather than returning a value indistinguishable
-    from "git found nothing" — see verify_anchors). Confident requires BOTH a single
-    distinct rename target from the commit's name-status AND that target actually
-    existing in the working tree right now — a target that was itself later deleted or
-    renamed again is not a usable address correction.
+    from "git found nothing" — see verify_anchors). Confident requires, at every hop, BOTH
+    a single distinct rename target from the commit's name-status AND (once the chain
+    stops) that final target actually existing in the working tree right now.
 
-    Two calls: (1) the most recent commit that touched `old_path` at all (`--follow` so a
-    file renamed more than once is still found; `-1` since only the LATEST touch — the
-    rename/delete itself — matters here); (2) that commit's full name-status, parsed (see
-    _parse_rename_target) for the rename record whose old side is `old_path` — the `show`
-    call carries NO pathspec, for the reason documented there."""
-    commit = call("log", "--follow", "--format=%H", "-1", "--", old_path)
-    if not commit:
-        return None
-    name_status = call("show", "--format=", "--name-status", commit)
-    if not name_status:
-        return None
-    target = _parse_rename_target(name_status, old_path)
-    if target is None or target == old_path:
-        return None
-    if not (repo_root / target).exists():
-        return None
-    return target
+    Follows the rename CHAIN, not just one hop: a file anchored at commit T that was
+    renamed a -> b before T and b -> c after T is still `a` in the entry's `source_files`,
+    but `a`'s single most-recent-touch commit only ever resolves to `b` — which itself no
+    longer exists. So each resolved hop that doesn't exist on disk is fed back in as the
+    next `old_path` to resolve, same two calls as before (`log --follow` + `show
+    --name-status`, see _parse_rename_target for why `show` carries no pathspec), up to
+    `_RENAME_CHAIN_MAX` hops. Ambiguity (not exactly one distinct target) at ANY hop is
+    treated exactly like a single-hop ambiguity: not confident, full stop — a chain must
+    be an unbroken line of confident hops, not confident-then-guess.
+
+    A chain that never bottoms out in an existing file within the hop cap is NOT
+    confident: see _RENAME_CHAIN_MAX for why that's a deliberate "count it as missing"
+    choice rather than a further widened search."""
+    current = old_path
+    for _ in range(_RENAME_CHAIN_MAX):
+        commit = call("log", "--follow", "--format=%H", "-1", "--", current)
+        if not commit:
+            return None
+        name_status = call("show", "--format=", "--name-status", commit)
+        if not name_status:
+            return None
+        target = _parse_rename_target(name_status, current)
+        if target is None or target == current:
+            return None
+        if (repo_root / target).exists():
+            return target
+        current = target  # this hop's target vanished too — chase it one more hop
+    return None
 
 
 def verify_anchors(repo_path: str, force: bool = False) -> dict:
