@@ -895,3 +895,95 @@ def guard_candidates(repo_path: str, paths: list[str] | None = None, explain: bo
     except Exception:
         return []
 
+
+# ── Decisions-for-files retrieval (Task 1 of #174) — reuses the Tier-1 pairing ─
+# signals (source_files membership, path-like content artifacts) but is pure
+# RETRIEVAL, not advisory noise control: unlike _guard_pairs there is no
+# guard-trust filter (a pending/suggested decision can still govern a file —
+# the caller decides what to do with its status) and no throttle/dismissals
+# (nothing here is ever surfaced repeatedly at commit time, so there is
+# nothing to suppress). Every non-ignored entry of BOTH stores participates.
+
+def decisions_for_files(repo_path: str, files: list[str],
+                         decisions: list[dict] | None = None) -> list[dict]:
+    """Which stored decisions govern the given files: `[{decision_id, title, status,
+    scope, files_matched, reason}]`, one entry per matching decision. `files` may be
+    repo-relative or absolute; each is canonicalized via `_guard_relpath` and any
+    path that escapes the repo (`_escapes_repo`) is dropped before pairing, exactly
+    like every other path this module compares.
+
+    Pairing signal per decision (mirrors `_guard_pairs`): the decision's
+    `source_files` (repo-store entries only — global entries never carry
+    `source_files` and pair via artifact match only), OR a path/module-shaped
+    artifact extracted from its content (`_guard_content_artifacts`) matching one
+    of the given files (`_artifact_path_match`, via the same O(1)
+    `_guard_artifact_matches` lookup `_guard_pairs` uses). No signal -> the
+    decision is simply absent from the result, not emitted-false — there is no
+    rejected-candidate concept here, only hits.
+
+    `files_matched` lists, in the CALLER'S input order, which of the queried files
+    matched this decision — the reverse-tracing property: given a decision back
+    from this call, the caller can tell which of the files it asked about are the
+    ones this decision actually governs. `reason` is the single strongest signal
+    across every matched file for this decision — `source_files match` beats any
+    artifact reason, mirroring `_guard_pairs`' per-file `matched.setdefault` order
+    (source_files inserted first, artifacts only fill gaps).
+
+    `decisions=` overrides BOTH loaded stores with the given list (tagged
+    scope="personal"), the same extension point `_guard_pairs` offers.
+
+    Fail-soft: any exception -> []."""
+    try:
+        canon = [p for p in (_guard_relpath(repo_path, f) for f in (files or []))
+                 if p and not _escapes_repo(p)]
+        if not canon:
+            return []
+        if decisions is not None:
+            sources: list[tuple[list[dict], str]] = [(decisions, "personal")]
+        else:
+            sources = [(store._load(repo_path).get("entries") or [], "personal"),
+                       (store._load_global().get("entries") or [], "global")]
+
+        canon_set = set(canon)
+        canon_by_base: dict[str, list[str]] = {}
+        for relpath in canon:
+            canon_by_base.setdefault(relpath.rsplit("/", 1)[-1], []).append(relpath)
+
+        hits: list[dict] = []
+        for entries, scope in sources:
+            for entry in entries:
+                if entry.get("type") != "decision" or store._entry_status(entry) == "ignored":
+                    continue
+                decision_id = entry.get("id", "")
+                rev = store._current_revision(entry)
+                content = rev.get("content", "") if rev else entry.get("content", "")
+                title = entry.get("title") or store._derive_title(content)
+                source_files = ({p for p in (_guard_relpath(repo_path, f)
+                                              for f in (entry.get("source_files") or [])) if p}
+                                 if scope == "personal" else set())
+                # relpath -> reason, source_files winning over artifacts — same
+                # setdefault order _guard_pairs uses for its per-file matched dict.
+                matched: dict[str, str] = {p: "source_files match"
+                                           for p in source_files & canon_set}
+                for artifact in _guard_content_artifacts(content):
+                    reason = _guard_artifact_reason(artifact)
+                    for relpath in _guard_artifact_matches(artifact, canon_set, canon_by_base):
+                        matched.setdefault(relpath, reason)
+                if not matched:
+                    continue
+                files_matched = [p for p in canon if p in matched]
+                reason = ("source_files match"
+                          if any(r == "source_files match" for r in matched.values())
+                          else matched[files_matched[0]])
+                hits.append({
+                    "decision_id": decision_id,
+                    "title": title,
+                    "status": store._entry_status(entry),
+                    "scope": scope,
+                    "files_matched": files_matched,
+                    "reason": reason,
+                })
+        return hits
+    except Exception:
+        return []
+

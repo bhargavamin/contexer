@@ -185,17 +185,20 @@ def list_shareable(repo_path: str = "") -> str:
 
 
 @mcp.tool()
-def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limit: int = 0) -> str:
+def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limit: int = 0,
+                 files: list[str] | None = None) -> str:
     """Returns stored context for the current repository. Call this when the task requires project context.
 
     query: optional keyword filter (case-insensitive substring match against decision content).
     entry_type: optional subtype filter — architecture | constraint | pattern | convention
     limit: max decisions to return (0 = auto: 25 for filtered queries, 10 for unfiltered overview).
+    files: repo-relative files you are about to work on — returns the decisions that govern
+    them (anchors + content references).
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
-    result = store.get_context(resolved, query, entry_type, limit)
+    result = store.get_context(resolved, query, entry_type, limit, files)
     # Follow-through log (Retrieval V1 Part B): if a recent pointer nudge for this repo
     # matches this query's topic AND this call actually found decisions, record it. Log-only
     # — never changes the result above.

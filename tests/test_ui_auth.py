@@ -262,6 +262,31 @@ def test_no_route_is_reachable_without_a_credential(console, method, path):
     assert call(console, method, path).status == 403
 
 
+# --- file= filter (Task 4 of #174) inherits the decisions route's own guarantees ------
+# `file=` is a query param on the EXISTING store-detail decisions route, not a new route,
+# so it must inherit every invariant that route already carries: gated without a credential,
+# no CORS header, slug resolution (and its 404) happening before the param is ever read, and
+# no traversal reaching the filesystem through it.
+
+def test_the_file_filter_param_requires_a_credential(console):
+    assert call(console, "GET", "/api/store/anything/decisions?file=x").status == 403
+
+
+def test_the_file_filter_param_sends_no_cors_header(console):
+    reply = read(console, "/api/store/anything/decisions?file=x")
+    assert not [k for k in reply.headers if k.lower().startswith("access-control")]
+
+
+@pytest.mark.parametrize("value", ["../../etc/passwd", "/etc/passwd",
+                                   "..%2f..%2fetc%2fpasswd", "a" * 2000])
+def test_the_file_filter_param_cannot_reach_past_an_unknown_slug(console, value):
+    """An escape-shaped or oversized `file=` value against a slug that names no store is
+    still a plain 404 from slug resolution — the param is never read far enough to probe the
+    filesystem or crash the request."""
+    reply = read(console, f"/api/store/does-not-exist/decisions?file={value}")
+    assert reply.status == 404
+
+
 # --- Host header (anti-DNS-rebinding) -------------------------------------------------
 
 @pytest.mark.parametrize("host", ["evil.com", "127.0.0.1", "127.0.0.1:1", "0.0.0.0:{port}",

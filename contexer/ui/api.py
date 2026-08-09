@@ -25,6 +25,13 @@ MAX_OFFSET = 10 ** 6
 MAX_QUERY = 200
 MAX_SHARE_IDS = 200
 
+# Bounds on the `file=` filter (Task 4 of #174): a generous cap on how many files one commit
+# or one filter box plausibly names, and a generous per-path length — well past MAX_QUERY
+# because a real repo-relative path (nested monorepo packages) can run longer than a search
+# phrase.
+MAX_FILES = 50
+MAX_FILE_LEN = 300
+
 # Sanity cap on a short single-token field (a subtype, an id). The vocabulary itself is
 # validated by the store; this only keeps a megabyte of junk out of an error message.
 MAX_WORD = 64
@@ -138,6 +145,10 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
             query=_str_param(query, "q")[:MAX_QUERY],
             subtype=_str_param(query, "subtype"),
             status=_str_param(query, "status"),
+            # Repeatable (`file=a&file=b`) AND comma-separated (`file=a,b`) both work —
+            # _list_param flattens either into one list, so the console's single filter input
+            # can just comma-join and a `curl` caller can repeat the param instead.
+            files=_list_param(query, "file", MAX_FILES, MAX_FILE_LEN) or None,
             # Absent/0 means MAX_LIMIT, not "no cap": store.list_decisions reads `limit <= 0`
             # as unbounded, so forwarding the bare 0 let a `limit`-less URL serialize every
             # row after all — the exact thing MAX_LIMIT is here to prevent.
@@ -532,6 +543,31 @@ def _text(payload: dict, key: str, cap: int, *, required: bool = False) -> str |
 def _str_param(query: dict, key: str) -> str:
     values = query.get(key) or [""]
     return values[0] if isinstance(values[0], str) else ""
+
+
+def _list_param(query: dict, key: str, max_items: int, max_len: int) -> list[str]:
+    """Every value for `key`, accepting BOTH a repeated param (`file=a&file=b`) and a single
+    comma-separated one (`file=a,b`) — `parse_qs` already hands back one list entry per
+    repeated occurrence, so splitting each entry on "," and flattening covers both
+    conventions without forcing a caller to pick one. Blank pieces (a stray leading/trailing
+    comma) are dropped. Canonicalization, traversal-escaping and repo-relativity are NOT this
+    function's job — `guard_engine.decisions_for_files` (via `_guard_relpath`) already does
+    that safely and this stays a thin, path-agnostic string splitter."""
+    raw = query.get(key) or []
+    out: list[str] = []
+    for value in raw:
+        if not isinstance(value, str):
+            continue
+        for piece in value.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if len(piece) > max_len:
+                raise ApiError(400, f"{key} value is longer than {max_len} characters")
+            out.append(piece)
+    if len(out) > max_items:
+        raise ApiError(400, f"at most {max_items} {key} values")
+    return out
 
 
 def _int_param(query: dict, key: str, maximum: int) -> int:

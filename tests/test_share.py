@@ -6,6 +6,7 @@ profile is passed explicitly to share() to avoid reading a real config.toml.
 import asyncio
 import threading
 import time
+import types
 
 import pytest
 
@@ -527,6 +528,43 @@ def test_drain_outbox_sends_title_on_retry(tmp_repo, monkeypatch):
     by_id = {kw["decision_id"]: kw for kw in fake.batches[0]}
     assert by_id["d1"]["title"] == "Queued heading"
     assert by_id["d2"]["title"] is None  # legacy row without a title -> omitted, never fabricated
+
+
+def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monkeypatch):
+    """issue #174 Task 5 — an entry queued while gated OFF (the shipped default) must still
+    respect a LATER flip of remote._WIRE_SOURCE_FILES at the moment it actually drains, not
+    whatever the gate was when it was enqueued. Uses the real RemoteStore (network seam
+    `remote._acall_tool` mocked, like test_remote.py) rather than _FakeRS, so the real
+    _wire_args gate check is actually exercised — _FakeRS bypasses it entirely."""
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
+                    "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                    "source": "ai", "title": None, "source_files": ["auth/jwt.py"],
+                    "queued_at": 1.0, "attempts": 0})
+    captured = {}
+
+    async def fake_call(endpoint, token, name, arguments, timeout):
+        captured.update(name=name, args=arguments)
+        return types.SimpleNamespace(
+            content=[], isError=False,
+            structuredContent={"results": [{"decisionId": "d1", "id": "srv-1"}], "skipped": []})
+
+    monkeypatch.setattr(remote, "_acall_tool", fake_call)
+    remote.reset_degradation_warnings()
+
+    # Gate OFF (default): source_files was on the queued entry but must NOT reach the wire.
+    assert share.drain_outbox(TEAM) == 1
+    assert "source_files" not in captured["args"]["decisions"][0]
+
+    # Re-queue the identical entry and flip the gate ON before draining again: now it must
+    # reach the wire, scrubbed — proving the gate is read fresh at drain, never cached from
+    # queue time.
+    share._enqueue({"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
+                    "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                    "source": "ai", "title": None, "source_files": ["auth/jwt.py"],
+                    "queued_at": 1.0, "attempts": 0})
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+    assert share.drain_outbox(TEAM) == 1
+    assert captured["args"]["decisions"][0]["source_files"] == ["auth/jwt.py"]
 
 
 def test_load_outbox_corrupt_file_reads_empty(tmp_repo):

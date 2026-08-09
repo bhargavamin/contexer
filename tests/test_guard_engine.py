@@ -1330,6 +1330,136 @@ class TestGuardCandidates:
         assert guard_engine.guard_candidates(str(repo), explain=True) == []
 
 
+# ── decisions_for_files (Task 1 of #174) ──────────────────────────────────────
+
+class TestDecisionsForFiles:
+    def test_source_files_hit(self, repo):
+        entry = _seed_entry(repo, "Decided to use JWT for auth",
+                             source_files=["auth/jwt.py"])
+        hits = guard_engine.decisions_for_files(str(repo), ["auth/jwt.py"])
+        assert len(hits) == 1
+        h = hits[0]
+        assert h["decision_id"] == entry["id"]
+        assert h["title"]
+        assert h["status"] == "approved"
+        assert h["scope"] == "personal"
+        assert h["files_matched"] == ["auth/jwt.py"]
+        assert h["reason"] == "source_files match"
+
+    def test_artifact_hit(self, repo):
+        entry = _seed_entry(repo, "The contexer.store module owns all read/write logic")
+        hits = guard_engine.decisions_for_files(str(repo), ["contexer/store.py"])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["files_matched"] == ["contexer/store.py"]
+        assert "module artifact" in hits[0]["reason"]
+
+    def test_no_signal_no_hit(self, repo):
+        _seed_entry(repo, "We use bcrypt for password hashing", source_files=["auth/hash.py"])
+        hits = guard_engine.decisions_for_files(str(repo), ["unrelated/file.py"])
+        assert hits == []
+
+    def test_pending_decision_still_hits(self, repo):
+        # Unlike _guard_pairs, retrieval has no guard-trust filter — an untrusted
+        # (pending/ai) decision still governs the file, it just carries its real
+        # status so the caller can render a [pending] tag.
+        entry = _seed_entry(repo, "Decided to use JWT for auth", created_by="ai",
+                             status="pending_approval", source_files=["auth/jwt.py"])
+        hits = guard_engine.decisions_for_files(str(repo), ["auth/jwt.py"])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["status"] == "pending_approval"
+
+    def test_ignored_decision_excluded(self, repo):
+        entry = _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        store.approve_decision(str(repo), entry["id"], "ignore")
+        hits = guard_engine.decisions_for_files(str(repo), ["auth/jwt.py"])
+        assert hits == []
+
+    def test_global_scope_tagged(self, repo):
+        entry = _seed_entry(repo, "The contexer.store module owns all read/write logic",
+                             global_store=True)
+        hits = guard_engine.decisions_for_files(str(repo), ["contexer/store.py"])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["scope"] == "global"
+
+    def test_source_files_beats_artifact_reason(self, repo):
+        # A decision whose content also mentions an artifact for a DIFFERENT queried
+        # file must still report "source_files match" as its overall reason — the
+        # strongest signal wins, even though it wasn't the first file matched.
+        entry = _seed_entry(
+            repo,
+            "See contexer/other.py for background; the real decision lives in auth/jwt.py",
+            source_files=["auth/jwt.py"],
+        )
+        hits = guard_engine.decisions_for_files(
+            str(repo), ["contexer/other.py", "auth/jwt.py"])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["reason"] == "source_files match"
+        assert set(hits[0]["files_matched"]) == {"contexer/other.py", "auth/jwt.py"}
+
+    def test_dedup_one_hit_per_decision_even_with_multiple_files_matched(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth",
+                    source_files=["auth/jwt.py", "auth/session.py"])
+        hits = guard_engine.decisions_for_files(
+            str(repo), ["auth/jwt.py", "auth/session.py"])
+        assert len(hits) == 1
+        assert set(hits[0]["files_matched"]) == {"auth/jwt.py", "auth/session.py"}
+
+    def test_reverse_tracing_files_matched(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth",
+                    source_files=["auth/jwt.py"])
+        hits = guard_engine.decisions_for_files(
+            str(repo), ["auth/jwt.py", "unrelated/other.py"])
+        assert len(hits) == 1
+        assert hits[0]["files_matched"] == ["auth/jwt.py"]
+        assert "unrelated/other.py" not in hits[0]["files_matched"]
+
+    def test_absolute_path_input_canonicalized(self, repo):
+        entry = _seed_entry(repo, "Decided to use JWT for auth",
+                             source_files=["auth/jwt.py"])
+        absolute = str(repo / "auth" / "jwt.py")
+        hits = guard_engine.decisions_for_files(str(repo), [absolute])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["files_matched"] == ["auth/jwt.py"]
+
+    def test_escape_dropped(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        hits = guard_engine.decisions_for_files(str(repo), ["../../etc/passwd"])
+        assert hits == []
+
+    def test_empty_files_fails_soft(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        assert guard_engine.decisions_for_files(str(repo), []) == []
+
+    def test_garbage_input_fails_soft(self, repo):
+        assert guard_engine.decisions_for_files(str(repo), None) == []
+
+    def test_corrupt_store_fails_soft(self, repo):
+        store_path = store._store_path(str(repo))
+        store_path.write_text("not json{{{")
+        assert guard_engine.decisions_for_files(str(repo), ["auth/jwt.py"]) == []
+
+    def test_decisions_override_replaces_loaded_entries(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        override_entry = store._new_decision_entry("Use OAuth for auth", "sess", "architecture",
+                                                     created_by="human", status="approved")
+        override_entry["source_files"] = ["auth/oauth.py"]
+        hits = guard_engine.decisions_for_files(str(repo), ["auth/jwt.py", "auth/oauth.py"],
+                                                  decisions=[override_entry])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == override_entry["id"]
+        assert hits[0]["scope"] == "personal"
+
+    def test_bare_basename_does_not_pair(self, repo):
+        _seed_entry(repo, "See utils.py for the shared helper")
+        hits = guard_engine.decisions_for_files(str(repo), ["a/utils.py"])
+        assert hits == []
+
+
 # ── anchor_candidates_for_backfill (Task 1 of #175) ───────────────────────────
 
 class TestAnchorCandidatesForBackfill:
@@ -2060,6 +2190,22 @@ class TestWireSafety:
                                  "paths": "", "message": "no TODOs", "armed_at": "t"}
         projected = store._share_projection(entry, redact_on=False)
         assert "guard_check" not in projected
+
+    def test_share_projection_source_files_present_but_guard_and_anchor_never_egress(self, repo):
+        # issue #174 Task 5: source_files becomes a deliberate projection field, but that must
+        # not loosen the whitelist — guard_check/anchor_candidates/anchor_commit still never
+        # appear, even on an entry that carries all of them at once.
+        entry = _seed_entry(repo, "Use JWT tokens for session auth",
+                            source_files=["auth/jwt.py"])
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "", "message": "no TODOs", "armed_at": "t"}
+        entry["anchor_candidates"] = ["other/file.py"]
+        entry["anchor_commit"] = "deadbeef"
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py"]
+        assert "guard_check" not in projected
+        assert "anchor_candidates" not in projected
+        assert "anchor_commit" not in projected
 
 
 # ── Task 4: store.py backward-compat re-export ────────────────────────────────

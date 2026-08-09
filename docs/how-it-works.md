@@ -71,6 +71,8 @@ for questions about architecture, design, or rationale.
 
 Ask about a past decision or rationale ("why did we pick REST?") and Contexer fetches the matching entries automatically, before the agent responds — and shows you a one-line receipt of what it recalled ("Contexer: recalled 2 decisions (db)"), so retrieval is observable, never spooky.
 
+Before editing a file, an assistant can also ask Contexer which of your decisions govern it — decisions linked to that file, or that mention it by name — and get back only those, instead of everything stored. This works for one file or several at once.
+
 ## Trust and review
 
 AI-proposed architecture and constraint decisions — and any change to a decision you have already approved — are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them (`contexer review`).
@@ -99,6 +101,8 @@ A decision's warnings get sharper once it's linked to the files it's about, and 
 - **Automatically, going forward.** When you approve a new decision, Contexer proposes the files you were just working on as its link (shown as `would anchor: …` on the review screen), and approving accepts it.
 
 Either way, you always see the files before they're linked — nothing is linked to a decision you haven't reviewed.
+
+If a decision's linked files later disappear, Contexer first checks whether they were simply renamed or moved — if so, it quietly updates the link and moves on. The same goes when only some of them are gone: it quietly trims the link down to the files that still exist, without asking. Only when *every* linked file is truly gone does it ask you, in your next review, whether the decision still applies. It never removes or changes a decision on its own; you always get the final say.
 
 ### Keeping it quiet
 

@@ -847,6 +847,17 @@ class TestPollCost:
 
         assert read_counts[store._store_path(tmp_repo).name] == 1
 
+    def test_list_decisions_files_filter_reads_the_store_once(self, tmp_repo, read_counts):
+        # decisions_for_files must be given the already-loaded rows (`decisions=rows`), not
+        # left to reload the store itself — otherwise the files filter would silently double
+        # the poll's file I/O every time a file filter is active.
+        _store_one(tmp_repo, CACHE_DECISION, source_files=["cache/redis.py"])
+        read_counts.clear()
+
+        store.list_decisions(tmp_repo, files=["cache/redis.py"])
+
+        assert read_counts[store._store_path(tmp_repo).name] == 1
+
     def test_collapsing_the_reads_kept_the_corrupt_signal(self, tmp_repo):
         _store_one(tmp_repo, CACHE_DECISION)
         _truncate_store(tmp_repo)

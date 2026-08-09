@@ -2693,6 +2693,249 @@ class TestGetPendingApprovalPrompt:
         assert store.get_pending_approval_prompt(tmp_repo, "nonexistent") == ""
 
 
+# ── get_context(files=...) — decisions-for-files retrieval (Task 1 of #174) ───
+# Full-content rendering through the existing get_context machinery, driven by
+# guard_engine.decisions_for_files. Staleness-note-on-a-files-hit needs a real git
+# repo (anchor_commit + git diff), so that one case lives in test_staleness.py
+# alongside the module's other real-git staleness fixtures; everything else here
+# uses the plain (non-git) tmp_repo fixture, exactly like the rest of this file.
+
+class TestGetContextFiles:
+    def test_source_files_hit_renders_full_content(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        result = store.get_context(tmp_repo, files=["auth/jwt.py"])
+        assert "JWT" in result
+        assert "[scope=personal]" in result
+
+    def test_artifact_hit_renders_full_content(self, tmp_repo):
+        store.update_decision(tmp_repo, "The contexer.store module owns all read/write logic",
+                              "s1", "architecture", created_by="human")
+        result = store.get_context(tmp_repo, files=["contexer/store.py"])
+        assert "contexer.store module owns all read/write logic" in result
+
+    def test_pending_decision_renders_with_pending_tag(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Always validate the JWT signature server-side before trusting claims",
+            "s1", "constraint", created_by="ai", source_files=["auth/jwt.py"])
+        assert stored
+        entry = store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+        assert entry["status"] == "pending_approval"
+        result = store.get_context(tmp_repo, files=["auth/jwt.py"])
+        assert "[pending]" in result
+        assert "validate the JWT signature" in result
+
+    def test_ignored_decision_never_renders(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for stateless auth tokens", "s1", "architecture",
+            created_by="human", source_files=["auth/jwt.py"])
+        assert stored
+        store.approve_decision(tmp_repo, eid, "ignore")
+        result = store.get_context(tmp_repo, files=["auth/jwt.py"])
+        assert "JWT" not in result
+        assert "No matching decisions found" in result
+
+    def test_global_scope_tagged(self, tmp_repo):
+        store.update_global_decision(
+            "The contexer.store module owns all read/write logic", "s1", "convention",
+            created_by="human")
+        result = store.get_context(tmp_repo, files=["contexer/store.py"])
+        assert "[scope=global]" in result
+
+    def test_cap_and_showing_note(self, tmp_repo):
+        # Same 30 distinct constraint sentences TestGetContext's own filtered-cap test
+        # uses (proven novel against each other), each anchored to its own file.
+        constraints = [
+            "constraint: bcrypt for password hashing, never md5 or sha1",
+            "constraint: api responses must be typed using pydantic models",
+            "constraint: database migrations run manually in production only",
+            "constraint: all secrets stored in environment variables",
+            "constraint: input validation at every api boundary before service layer",
+            "constraint: no direct database access from route handlers",
+            "constraint: logging must not include personally identifiable information",
+            "constraint: external api calls wrapped in retry logic with backoff",
+            "constraint: test coverage required for all repository and service functions",
+            "constraint: feature flags for all new functionality in production",
+            "constraint: database connection pooling configured per environment",
+            "constraint: authentication tokens expire after 24 hours maximum",
+            "constraint: rate limiting applied to all public endpoints at gateway",
+            "constraint: background jobs must be idempotent for safe re-execution",
+            "constraint: no business logic in database migration scripts",
+            "constraint: ssl certificates renewed automatically via scheduled job",
+            "constraint: docker images built from minimal base images for security",
+            "constraint: all configuration loaded at startup not at request time",
+            "constraint: json responses include api version header on all routes",
+            "constraint: database indexes reviewed for every new query pattern",
+            "constraint: error messages never expose internal stack traces to clients",
+            "constraint: health check endpoints excluded from authentication",
+            "constraint: all file uploads scanned for malware before processing",
+            "constraint: pagination required for all list endpoints returning collections",
+            "constraint: cache invalidation strategy documented per cached resource",
+            "constraint: database transactions wrap all multi-step write operations",
+            "constraint: api deprecation notices sent 90 days before removal",
+            "constraint: audit log written for all writes on sensitive user data",
+            "constraint: memory limits set on all containerized service deployments",
+            "constraint: zero trust networking enforced between internal microservices",
+        ]
+        files = [f"mod{i}.py" for i in range(len(constraints))]
+        for content, fname in zip(constraints, files):
+            store.update_decision(tmp_repo, content, "s1", "constraint",
+                                  created_by="human", source_files=[fname])
+        result = store.get_context(tmp_repo, files=files)
+        assert f"showing {store._FILTERED_DISPLAY} of {len(constraints)}" in result
+        assert result.count("[scope=personal]") == store._FILTERED_DISPLAY
+
+    def test_files_and_entry_type_intersection(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided architecture: route JWT auth through middleware",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        store.update_decision(tmp_repo, "Constraint: never log raw JWT tokens in plaintext",
+                              "s2", "constraint", created_by="human",
+                              source_files=["auth/jwt.py"])
+        result = store.get_context(tmp_repo, files=["auth/jwt.py"], entry_type="constraint")
+        assert "never log raw JWT" in result
+        assert "route JWT auth through middleware" not in result
+
+    def test_query_narrows_within_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT bearer tokens for auth",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        store.update_decision(tmp_repo, "Decided to use bcrypt for password hashing",
+                              "s2", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        result = store.get_context(tmp_repo, files=["auth/jwt.py"], query="bcrypt")
+        assert "bcrypt" in result
+        assert "bearer tokens" not in result
+
+    def test_absolute_path_input_canonicalized(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        absolute = str(Path(tmp_repo) / "auth" / "jwt.py")
+        result = store.get_context(tmp_repo, files=[absolute])
+        assert "JWT" in result
+
+    def test_escape_dropped(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        result = store.get_context(tmp_repo, files=["../../etc/passwd"])
+        assert "JWT" not in result
+        assert "No matching decisions found" in result
+
+    def test_empty_store_fails_soft(self, tmp_repo):
+        result = store.get_context(tmp_repo, files=["nonexistent/file.py"])
+        assert "No context stored" in result
+
+    def test_garbage_files_input_fails_soft(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        result = store.get_context(tmp_repo, files=[123, None, ""])  # garbage entries
+        assert "No matching decisions found" in result
+
+
+# ── console projection + list_decisions(files=...) (Task 4 of #174) ───────────
+# The console's per-decision row/detail shape now carries source_files, and the
+# store-detail list endpoint accepts the same files= filter get_context(files=...)
+# already exercises above, scoped to this repo's own store only (no global-store
+# participation — that lives behind the console's separate /api/global view).
+
+class TestConsoleSourceFiles:
+    def test_console_summary_carries_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py", "auth/session.py"])
+        listing = store.list_decisions(tmp_repo)
+        assert listing["decisions"][0]["source_files"] == ["auth/jwt.py", "auth/session.py"]
+
+    def test_console_summary_source_files_defaults_empty(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use pytest for unit tests", "s1", subtype="convention",
+                              created_by="human")
+        listing = store.list_decisions(tmp_repo)
+        assert listing["decisions"][0]["source_files"] == []
+
+    def test_dashboard_summary_recent_also_carries_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        dashboard = store.dashboard_summary(tmp_repo)
+        assert dashboard["recent"][0]["source_files"] == ["auth/jwt.py"]
+
+    def test_files_filter_matches(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"])
+        assert listing["total"] == 1
+        assert "JWT" in listing["decisions"][0]["content"]
+
+    def test_files_filter_excludes_non_matching(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        store.update_decision(tmp_repo, "Use pytest for unit tests", "s1", subtype="convention",
+                              created_by="human")
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"])
+        assert listing["total"] == 1
+
+    def test_unknown_file_yields_empty_result_not_error(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["nonexistent/file.py"])
+        assert listing["total"] == 0
+        assert listing["decisions"] == []
+        assert listing["ok"] is True
+        assert listing["error"] is None
+
+    def test_escape_shaped_file_dropped_no_traversal(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["../../etc/passwd"])
+        assert listing["total"] == 0
+        assert listing["ok"] is True
+
+    def test_absolute_path_input_canonicalized(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        absolute = str(Path(tmp_repo) / "auth" / "jwt.py")
+        listing = store.list_decisions(tmp_repo, files=[absolute])
+        assert listing["total"] == 1
+
+    def test_files_filter_combines_with_subtype(self, tmp_repo):
+        store.update_decision(tmp_repo, "Decided to use JWT for stateless auth tokens",
+                              "s1", "architecture", created_by="human",
+                              source_files=["auth/jwt.py"])
+        store.update_decision(tmp_repo, "Never ship a migration without a rollback plan", "s1",
+                              subtype="constraint", created_by="human",
+                              source_files=["auth/jwt.py"])
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"], subtype="architecture")
+        assert listing["total"] == 1
+        assert listing["decisions"][0]["subtype"] == "architecture"
+
+    def test_ignored_decision_excluded_from_files_filter(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for stateless auth tokens", "s1", "architecture",
+            created_by="human", source_files=["auth/jwt.py"])
+        assert stored
+        store.approve_decision(tmp_repo, eid, "ignore")
+        listing = store.list_decisions(tmp_repo, files=["auth/jwt.py"])
+        assert listing["total"] == 0
+
+    def test_files_filter_does_not_pull_in_global_store(self, tmp_repo):
+        # list_decisions is the console's per-repo list; a global-store hit on the same
+        # file must not leak into it — that scope stays behind /api/global.
+        store.update_global_decision(
+            "The contexer.store module owns all read/write logic", "s1", "convention",
+            created_by="human")
+        listing = store.list_decisions(tmp_repo, files=["contexer/store.py"])
+        assert listing["total"] == 0
+
+
 # ── get_context with status tags ──────────────────────────────────────────────
 
 class TestGetContextStatusTags:
@@ -3291,6 +3534,76 @@ class TestPendingReviewFlag:
         out = store.format_share_preview(tmp_repo, ",".join(ids))
         assert "2 decisions" in out
         assert "Use Redis for caching" in out and "Store blobs in object storage" in out
+
+
+# ── source_files on the share wire (issue #174 Task 5, gated) ─────────────────
+
+class TestShareProjectionSourceFiles:
+    """`_share_projection` carries `source_files` locally (scrubbed, empties dropped) so the
+    preview and outbox can show it; whether it reaches the actual wire is a separate gate
+    owned by `remote._WIRE_SOURCE_FILES` (see tests/test_remote.py). `anchor_commit` never
+    projects — it's a machine-local ref, not something a preview or wire payload should show."""
+
+    def test_projection_carries_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1",
+                              "architecture", source_files=["auth/jwt.py", "auth/session.py"])
+        entry = store._load(tmp_repo)["entries"][0]
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py", "auth/session.py"]
+
+    def test_projection_scrubs_secret_shaped_path(self, tmp_repo):
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=[f"auth/{secret}.py"])
+        entry = store._load(tmp_repo)["entries"][0]
+        projected = store._share_projection(entry, redact_on=True)
+        joined = " ".join(projected["source_files"])
+        assert secret not in joined
+        assert "[REDACTED:aws_key]" in joined
+        assert projected["redacted"] >= 1
+
+    def test_projection_drops_empty_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        entry = store._load(tmp_repo)["entries"][0]
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == []
+
+    def test_projection_never_carries_anchor_commit(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        entry = store._load(tmp_repo)["entries"][0]
+        # tmp_repo isn't a real git checkout, so _anchor_sources stamps an empty anchor_commit
+        # (fail-soft) — stamp a real-looking one directly to prove the FIELD never projects,
+        # independent of whether git anchoring itself succeeded.
+        entry["anchor_commit"] = "deadbeefcafe"
+        projected = store._share_projection(entry, redact_on=False)
+        assert "anchor_commit" not in projected
+
+    def test_preview_shows_files_with_pending_note_when_gate_off(self, tmp_repo, monkeypatch):
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", False)
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files: auth/jwt.py" in out
+        assert "not yet sent" in out
+
+    def test_preview_drops_pending_note_when_gate_on(self, tmp_repo, monkeypatch):
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files: auth/jwt.py" in out
+        assert "not yet sent" not in out
+
+    def test_preview_omits_files_line_when_no_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files:" not in out
 
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────

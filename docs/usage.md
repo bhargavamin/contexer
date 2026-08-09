@@ -25,7 +25,10 @@ Only `constraint` and `convention` types can be stored globally. Architecture an
 "show me all constraints"
 "what decisions did we make about postgres?"
 "show everything stored for this repo"
+"which decisions apply to src/api/users.py?"
 ```
+
+Ask which decisions govern a specific file (or files) and Contexer returns only the ones actually about it — linked to that file, or mentioning it in their text — instead of everything stored.
 
 ## Review pending decisions
 

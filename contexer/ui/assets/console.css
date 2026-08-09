@@ -828,6 +828,14 @@ a.stat-card:hover {
   min-width: 220px;
   position: relative;
 }
+/* Fixed-ish sizing (not the 100%-basis every bare .input/.select in the toolbar defaults to)
+   so the file filter doesn't fight the subtype/status selects for space, or balloon on a
+   long typed path — it wraps to its own row under flex-wrap instead. */
+.file-filter {
+  flex: 1 1 200px;
+  min-width: 160px;
+  max-width: 280px;
+}
 .search-hint {
   position: absolute;
   right: 10px;
@@ -850,6 +858,7 @@ a.stat-card:hover {
    hosted dashboard carries the same rule for the same reason. */
 .drow-title,
 .drow-text,
+.drow-files,
 .detail-title,
 .tl-title,
 .review-title,
@@ -948,6 +957,13 @@ a.stat-card:hover {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--muted-foreground);
+}
+.drow-files {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Detail pane ────────────────────────────────────────────────────────── */

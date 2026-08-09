@@ -1692,7 +1692,15 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     edit at approval time changed the content, the title is dropped so _append_revision
     re-derives it from the final content instead of carrying a stale one. A source_files stashed
     on the proposal (see _build_proposal) is applied NOW, since the corrected content is only
-    now becoming the live, rendered revision."""
+    now becoming the live, rendered revision.
+
+    `clear_anchors` (contexer/anchors.py's total-loss retirement proposals): a stashed
+    `True` means approving this proposal must DROP the entry's `source_files`/
+    `anchor_commit` rather than leave them pointing at files already confirmed gone —
+    otherwise the entry would re-qualify as an anchor-decay participant on the very next
+    TTL cycle and stack a second withdrawal clause onto the content this approval just
+    wrote. An explicit stashed marker, not a wording/content heuristic, so this never
+    misfires on an ordinary proposal that happens to mention missing files."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1713,6 +1721,9 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
     entry.pop("proposed_revision", None)
+    if prop.get("clear_anchors"):
+        entry.pop("source_files", None)
+        entry.pop("anchor_commit", None)
 
 
 _PENDING_REVIEW_NUDGE = (
@@ -2173,6 +2184,13 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         entry["status"] = "approved"
         entry["approved_at"] = now
         prop_had_source_files = bool((entry.get("proposed_revision") or {}).get("source_files"))
+        # Read BEFORE promoting — _promote_proposal consumes the proposal. `clear_anchors`
+        # (anchors.py's total-loss retirement) means this approval RETIRES the entry's anchor;
+        # the candidate-blessing branch below must not then read the freshly-emptied
+        # source_files as "nothing anchors this entry" and promote a stale guess into a real
+        # anchor, which would re-anchor the just-retired decision to unrelated files and drag
+        # it straight back into anchor-decay participation (and Tier-1 guard pairing).
+        prop_clear = bool((entry.get("proposed_revision") or {}).get("clear_anchors"))
         _promote_proposal(repo_path, entry, content if action == "edit" else None)
         # Stamp approved_by AFTER promoting, not before: _append_revision (called inside
         # _promote_proposal) invalidates approved_by whenever the new revision's source isn't
@@ -2195,7 +2213,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if not prop_had_source_files and entry.get("source_files"):
             _anchor_sources(repo_path, entry, entry["source_files"])
         elif (not prop_had_source_files and not has_caller_source_files
-                and entry.get("anchor_candidates")):
+                and not prop_clear and entry.get("anchor_candidates")):
             # Nothing else anchors this entry — the Suggested Update's own stashed
             # source_files wins when present (above), and a caller-passed source_files
             # is about to override anyway; only then do the accrued candidates fill the gap.
@@ -2203,7 +2221,10 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         # A real anchor (however it got here — the proposal's own stash, a refreshed prior
         # anchor, or the candidates promoted just above) makes any leftover candidate guess
         # moot; drop it rather than leave stale data dangling on an already-anchored entry.
-        if entry.get("source_files"):
+        # A retirement approval moots it just as thoroughly, from the other direction: the
+        # entry is deliberately anchor-less now, so a lingering guess would only wait around
+        # for some later approval to bless it back into an anchor.
+        if entry.get("source_files") or prop_clear:
             entry.pop("anchor_candidates", None)
         stored = _current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
@@ -2752,7 +2773,15 @@ def _console_factors(entry: dict) -> list[str]:
 def _console_summary(entry: dict) -> dict:
     """The console's shared per-decision row shape. Internal fields (revision ids, session
     ids, the raw revisions list) stay server-side; a caller that needs them asks for the
-    detail projection instead."""
+    detail projection instead.
+
+    `source_files` is the anchored-files list verbatim (Task 4 of #174) — schema-additive,
+    so every existing caller (dashboard, list, detail, tombstones) picks it up for free. No
+    staleness flag here on purpose: `_staleness_note` costs a `git diff` subprocess per
+    entry, and this projection backs the console's 10-second poll of `list_decisions` /
+    `dashboard_summary` — adding a git call per row there would multiply into a poll-time
+    subprocess storm. Staleness stays confined to its two existing render sites
+    (`get_context`, `_render_prompt_decisions`), both budget-capped and neither on a UI poll."""
     content = _current_content(entry)
     rev = _current_revision(entry) or {}
     return {
@@ -2768,6 +2797,7 @@ def _console_summary(entry: dict) -> dict:
         "occurrence_count": entry.get("occurrence_count", 1),
         "confidence": rev.get("confidence_score", entry.get("confidence", 0)),
         "has_proposal": bool(entry.get("proposed_revision")),
+        "source_files": list(entry.get("source_files") or []),
     }
 
 
@@ -3007,16 +3037,32 @@ def dashboard_summary(repo_path: str) -> dict:
 
 
 def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",
-                   limit: int = 0, offset: int = 0) -> dict:
+                   files: list[str] | None = None, limit: int = 0, offset: int = 0) -> dict:
     """A filtered, paged page of decisions, newest change first.
 
     `total` is the count BEFORE paging so a caller can render "N matching". `limit <= 0`
     means no cap. Carries the same `ok`/`error` pair as the dashboard: a corrupt store
     returns an empty page with `ok: false`, never a silently empty list. One read of the
-    store file — this is on the console's 10-second poll."""
+    store file — this is on the console's 10-second poll.
+
+    `files`: same read-surface semantics as `get_context(files=...)` — decisions that GOVERN
+    the given files (`guard_engine.decisions_for_files`: source_files anchor or a path-like
+    content artifact), no trust filter, `ignored` excluded. Scoped to THIS store only (the
+    console's file filter lives on the per-repo decisions list, not the global one), so the
+    already-loaded `rows` are passed as an override rather than letting the engine reload the
+    store AND pull in the global store's entries too. A file that matches nothing yields an
+    empty list, never an error — same as a query with no hits."""
     data, error, _mtime = _read_store(repo_path)
     health = {"ok": error is None, "error": error}
     rows = [e for e in data.get("entries", []) if e.get("type") == "decision"]
+    if files:
+        # Local import — see get_context's identical comment: a module-level `from contexer
+        # import guard_engine` here would recreate the store <-> guard_engine load-order cycle
+        # guard_engine.py's own docstring describes.
+        from contexer import guard_engine
+        hit_ids = {h["decision_id"]
+                  for h in guard_engine.decisions_for_files(repo_path, files, decisions=rows)}
+        rows = [e for e in rows if e.get("id") in hit_ids]
     if subtype:
         rows = [e for e in rows if e.get("subtype") == subtype]
     if status:
@@ -3237,7 +3283,16 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     """Project a decision entry onto the push wire shape {id, type, title, content, confidence,
     evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
     the push omits it. `redact_on` lets a batch caller (or a preview with an explicit profile)
-    resolve the redaction flag ONCE and pass it in; None means resolve it here."""
+    resolve the redaction flag ONCE and pass it in; None means resolve it here.
+
+    `source_files` (issue #174 Task 5) is the entry's anchored files, repo-relative, each run
+    through the same egress scrub as content/title/evidence (uniform rule — paths rarely carry
+    secrets, but the projection must not special-case a field just because it usually looks
+    harmless), with empties dropped. `anchor_commit` is deliberately NOT projected here: it is a
+    machine-local ref (meaningless on another machine or on the server) and never egresses,
+    regardless of `source_files`. Whether `source_files` actually reaches the WIRE is a separate,
+    later gate — see `remote._WIRE_SOURCE_FILES` — this projection always carries it locally so
+    the preview and durable outbox can show the developer what will be sent once that gate opens."""
     if redact_on is None:
         redact_on = _redaction_enabled()
     rev = _current_revision(entry) or {}
@@ -3249,6 +3304,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     # security requirement as content/evidence, not polish.
     title = entry.get("title") or _derive_title(content)
     evidence = rev.get("evidence") or None
+    source_files = [f for f in (entry.get("source_files") or []) if f]
     # Redact at the projection so the confirm-preview and durable outbox show exactly what
     # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
     # `redacted` counts scrubbed secrets for the preview banner; extra key ignored by the
@@ -3265,6 +3321,13 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
                 scrubbed.append(se)
                 redacted += ne
             evidence = scrubbed
+        if source_files:
+            scrubbed_files = []
+            for f in source_files:
+                sf, nf = redact.scrub(f)
+                scrubbed_files.append(sf)
+                redacted += nf
+            source_files = scrubbed_files
     return {
         "id": entry.get("id", ""),
         "type": entry.get("subtype", "") or "convention",
@@ -3278,6 +3341,10 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # can show it and the developer doesn't push a not-yet-reviewed decision by accident.
         # Extra key like `redacted`: the wire builders read named fields, so it never egresses.
         "status": _entry_status(entry),
+        # LOCAL-only until remote._WIRE_SOURCE_FILES flips True — see that constant's docstring.
+        # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
+        # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
+        "source_files": source_files,
     }
 
 
@@ -3460,7 +3527,15 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     """Dry-run preview of what a personal-cloud push would send — a pure local read, NO network.
     Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
-    id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml."""
+    id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml.
+
+    `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files
+    locally, but the wire only sends them once `remote._WIRE_SOURCE_FILES` is flipped True (see
+    that constant). While gated off, this preview stays WIRE-ACCURATE by appending a `files:`
+    line PER DECISION with an honest "(not yet sent — server support pending)" note, rather than
+    silently showing files that won't actually go out; once the gate opens the note drops and
+    the line reads as plain fact."""
+    from contexer import remote
     from contexer.config import default_endpoint, load_profile
     prof = profile or load_profile()  # resolved ONCE — governs both endpoint and redaction
     projs = _resolve_share_projections(repo_path, decision_id, prof.redact_secrets)
@@ -3470,7 +3545,12 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
     lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}). "
              f"{_SHARE_SECRETS_HINT}:\n"]
-    lines += [_share_item_line(p) for p in projs]
+    for p in projs:
+        lines.append(_share_item_line(p))
+        files = p.get("source_files") or []
+        if files:
+            note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent — server support pending)"
+            lines.append(f"      files: {', '.join(files)}{note}")
     redacted = sum(p.get("redacted", 0) for p in projs)
     if redacted:
         lines.append(f"\n  ({_pl(redacted, 'secret')} redacted before sending)")
@@ -4215,6 +4295,20 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             # renders the verified state and any fresh proposal reaches the pending
             # count, instead of the pre-verify snapshot loaded above.
             if verify_scan_conventions(repo_path):
+                data = _load(repo_path)
+                decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    except Exception:
+        pass  # verification is opportunistic; a session start must never fail on it
+
+    try:
+        if source not in ("resume", "compact"):
+            # Same re-read convention as verify_scan_conventions just above: a rename
+            # re-anchor or a total-loss retirement proposal changed the store, so THIS
+            # session must render the corrected addresses / fresh pending count instead
+            # of the pre-verify snapshot loaded earlier.
+            from contexer import anchors
+            outcome = anchors.verify_anchors(repo_path)
+            if outcome.get("reanchored") or outcome.get("proposed"):
                 data = _load(repo_path)
                 decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     except Exception:
@@ -5345,8 +5439,18 @@ def _team_display_cap() -> int:
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
-                _active_only: bool = False) -> str:
+                files: list[str] | None = None, _active_only: bool = False) -> str:
     """Returns stored context for the given repo.
+
+    files: optional repo-relative or absolute files the caller is about to work on — when
+    given, only decisions that GOVERN them are considered (source_files anchors or
+    path-like content artifacts naming one of them; see `guard_engine.decisions_for_files`,
+    which both the repo store AND the global store participate in), each rendered with its
+    real `[scope=personal]`/`[scope=global]` tag instead of the usual hardcoded personal
+    tag. Combines with `entry_type` as an intersection (both filters must pass) and with
+    `query` as files-first: the file-governed set is computed first, then `query` narrows
+    it by keyword — exactly the existing entry_type -> query filter order, with `files`
+    threaded in ahead of both.
 
     _active_only: internal flag — when True, exclude pending_approval and ignored entries
     (used by auto-injection paths so only trusted decisions reach the AI automatically).
@@ -5356,23 +5460,43 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     """
     data = _load(repo_path)
     entries = data.get("entries", [])
+
+    # file_hits: decision_id -> the guard_engine hit dict (carries the real scope tag and
+    # reverse-tracing files_matched). Local import — see _anchor_sources's docstring for why
+    # a module-level `from contexer import guard_engine` here would recreate the store <->
+    # guard_engine load-order cycle guard_engine.py's own docstring describes.
+    file_hits: dict[str, dict] = {}
+    if files:
+        from contexer import guard_engine
+        file_hits = {h["decision_id"]: h
+                     for h in guard_engine.decisions_for_files(repo_path, files)}
+
     # Only forward `limit` to the team section on a targeted entry_type fetch (the same
     # "explicit type = JIT fetch, not a bulk render" rule _team_section's defer bypass
     # already follows) - an unfiltered get_context() must keep the plain _TEAM_DISPLAY cap.
     team_section = _team_section(repo_path, query, entry_type,
                                  limit=(limit if entry_type else 0))
-    if not entries and not team_section:
+    if not entries and not team_section and not file_hits:
         return "No context stored for this repository."
 
     lines = [f"# Context for {repo_path}\n"]
 
-    decisions = [e for e in entries if e["type"] == "decision"]
-    # Always exclude ignored decisions — they are permanently suppressed.
-    decisions = [d for d in decisions if _entry_status(d) != "ignored"]
+    if files:
+        # file_hits already excludes `ignored` (guard_engine.decisions_for_files' own
+        # filter) — pull the matching full entries from BOTH stores by id so global-scope
+        # hits render too, not just repo-local ones.
+        global_entries = _load_global().get("entries", [])
+        by_id = {e.get("id"): e for e in entries if e.get("type") == "decision"}
+        by_id.update({e.get("id"): e for e in global_entries if e.get("type") == "decision"})
+        decisions = [by_id[did] for did in file_hits if did in by_id]
+    else:
+        decisions = [e for e in entries if e["type"] == "decision"]
+        # Always exclude ignored decisions — they are permanently suppressed.
+        decisions = [d for d in decisions if _entry_status(d) != "ignored"]
     if _active_only:
         decisions = [d for d in decisions if _entry_status(d) in ("approved", "suggested")]
 
-    is_filtered = bool(query or entry_type)
+    is_filtered = bool(query or entry_type or files)
     if entry_type:
         decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
 
@@ -5400,6 +5524,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 parts.append(f"query='{query}'")
             if entry_type:
                 parts.append(f"type='{entry_type}'")
+            if files:
+                parts.append(f"files={len(files)}")
             filter_note = f" (filtered: {', '.join(parts)})"
         total = len(decisions)
         shown = _keep_top(decisions, display_limit)
@@ -5415,7 +5541,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
             title, body = _title_and_body(d)
-            lines.append(f"- [scope=personal] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
+            hit = file_hits.get(d.get("id")) if files else None
+            scope = hit["scope"] if hit else "personal"
+            lines.append(f"- [scope={scope}] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
                          f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
                 lines.append(f"    {body}")
@@ -5430,6 +5558,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             parts.append(f"query='{query}'")
         if entry_type:
             parts.append(f"type='{entry_type}'")
+        if files:
+            parts.append(f"files={len(files)}")
         lines.append(f"No matching decisions found ({', '.join(parts)}).")
 
     if team_section:

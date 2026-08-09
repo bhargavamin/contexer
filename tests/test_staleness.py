@@ -64,6 +64,16 @@ def test_changed_file_renders_note_in_both_sites(repo):
     assert "[may be stale: auth.py changed since capture]" in rendered
 
 
+def test_files_hit_renders_staleness_note(repo):
+    """get_context(files=...) (issue #174 Task 1) is the THIRD render site that must run
+    a source_files hit through the same staleness-note machinery as query/id lookup."""
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+
+    out = store.get_context(repo, files=["auth.py"])
+    assert "[may be stale: auth.py changed since capture]" in out
+
+
 def test_uncommitted_edit_renders_note(repo):
     """The dominant case: the session is editing the file right now, nothing committed yet."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
@@ -342,16 +352,19 @@ def test_approve_with_source_files_param_anchors_and_clears_future_staleness(rep
     assert " [may be stale" in store.get_context(repo, query="auth")
 
 
-def test_share_projection_carries_no_anchor_fields_after_approval_anchor(repo):
-    """Wire-safety: approval-time anchoring must not leak source_files/anchor_commit
-    onto the push wire shape (mirrors the existing no-anchor-fields invariant)."""
+def test_share_projection_carries_source_files_but_never_anchor_commit(repo):
+    """Wire-safety (updated for issue #174 Task 5): approval-time anchoring now
+    deliberately projects `source_files` (the anchored files, for the preview/outbox)
+    but `anchor_commit` — a machine-local ref — must still never leak onto the push
+    wire shape."""
     stored, eid = store.update_decision(repo, SUMMARY, "s1", "constraint")
     assert stored
     store.approve_decision(repo, eid, "approve", source_files=["auth.py"])
     entry = _entry(repo)
     assert entry["source_files"] and entry["anchor_commit"]
     projected = store._share_projection(entry, redact_on=False)
-    assert "source_files" not in projected and "anchor_commit" not in projected
+    assert projected["source_files"] == entry["source_files"]
+    assert "anchor_commit" not in projected
 
 
 # ── _anchor_sources canonicalization (M6, issue #172 fix wave) ─────────────────

@@ -38,12 +38,24 @@ def _redaction_enabled() -> bool:
 _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
 _DEFAULT_TIMEOUT = 10.0
 
+# GATE (issue #174 Task 5, developer-ruled): the contexer-teams `push_decision`/`push_decisions`
+# schema is server-controlled, and an unknown/rejected field can poison the outbox with permanent
+# validation failures — this happened for real with `source="plan"` (-32602 on every retry, 192
+# attempts, before the server accepted the value). `source_files` MUST NOT reach the wire until
+# the contexer-teams server has deployed support for it. Until then it stays LOCAL: the share
+# projection/preview/outbox carry it (so the developer can see what will be sent once enabled),
+# but `_wire_args` omits it from the actual push payload while this is False. Flipping this to
+# True is a deliberate, one-line follow-up client PR after the server-side schema change ships —
+# NOT a user-facing config flag, since a config toggle could be flipped on before the server is
+# ready and reintroduce the same poisoning failure mode.
+_WIRE_SOURCE_FILES = False
+
 
 def _wire_args(*, type: str, content: str, repo: str | None = None,
                rationale: str | None = None, agent: str | None = None,
                confidence: int | None = None, evidence: list[str] | None = None,
                source: str | None = None, decision_id: str | None = None,
-               title: str | None = None,
+               title: str | None = None, source_files: list[str] | None = None,
                redact_on: bool | None = None) -> dict:
     """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
     reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
@@ -56,6 +68,13 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     it is scrubbed independently, same as content/evidence. Idempotent with the capture scrub
     (the [REDACTED] placeholder never re-matches).
 
+    `source_files` is GATED (see `_WIRE_SOURCE_FILES` above): it is re-scrubbed here for the same
+    idempotent-egress-rule reason as content/evidence/title, but only ever lands in the returned
+    dict when the module-level gate is True. The gate is read HERE, at call time — not captured
+    by a caller ahead of time — so an outbox entry queued while gated stays valid to drain later:
+    a drain re-invokes this function fresh, so it always reflects whatever the constant is set to
+    AT DRAIN TIME, never at the time the entry was queued.
+
     `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
     config.toml per row); None means resolve it here for a lone call."""
     scrub = _redaction_enabled() if redact_on is None else redact_on
@@ -67,6 +86,8 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
             evidence = [redact.scrub_text(e) for e in evidence]
         if title is not None:
             title = redact.scrub_text(title)
+        if source_files is not None:
+            source_files = [redact.scrub_text(f) for f in source_files]
     args: dict = {"type": type, "content": content}
     if repo is not None:
         args["repo"] = repo
@@ -84,6 +105,8 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
         args["decisionId"] = decision_id
     if title is not None:
         args["title"] = title
+    if _WIRE_SOURCE_FILES and source_files:
+        args["source_files"] = source_files
     return args
 
 
@@ -180,12 +203,13 @@ class RemoteStore:
                              rationale: str | None = None, agent: str | None = None,
                              confidence: int | None = None, evidence: list[str] | None = None,
                              source: str | None = None, decision_id: str | None = None,
-                             title: str | None = None) -> str:
+                             title: str | None = None,
+                             source_files: list[str] | None = None) -> str:
         """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
         result = await self._ainvoke("push_decision", _wire_args(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title, redact_on=self._redact_on()))
+            title=title, source_files=source_files, redact_on=self._redact_on()))
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
@@ -257,7 +281,8 @@ class RemoteStore:
                       rationale: str | None = None, agent: str | None = None,
                       confidence: int | None = None, evidence: list[str] | None = None,
                       source: str | None = None, decision_id: str | None = None,
-                      title: str | None = None) -> str:
+                      title: str | None = None,
+                      source_files: list[str] | None = None) -> str:
         """Push one local decision to the caller's personal Teams context (sync shim).
 
         Returns the server decision id (best-effort; ``""`` if the response carries none).
@@ -267,7 +292,7 @@ class RemoteStore:
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title)))
+            title=title, source_files=source_files)))
 
     def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
         """Batch-push decisions in ONE call (sync shim over :meth:`apush_decisions`). Off-loop
