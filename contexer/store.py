@@ -3273,7 +3273,16 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     """Project a decision entry onto the push wire shape {id, type, title, content, confidence,
     evidence, source}: `type` is the decision subtype; `evidence` is None when empty so
     the push omits it. `redact_on` lets a batch caller (or a preview with an explicit profile)
-    resolve the redaction flag ONCE and pass it in; None means resolve it here."""
+    resolve the redaction flag ONCE and pass it in; None means resolve it here.
+
+    `source_files` (issue #174 Task 5) is the entry's anchored files, repo-relative, each run
+    through the same egress scrub as content/title/evidence (uniform rule — paths rarely carry
+    secrets, but the projection must not special-case a field just because it usually looks
+    harmless), with empties dropped. `anchor_commit` is deliberately NOT projected here: it is a
+    machine-local ref (meaningless on another machine or on the server) and never egresses,
+    regardless of `source_files`. Whether `source_files` actually reaches the WIRE is a separate,
+    later gate — see `remote._WIRE_SOURCE_FILES` — this projection always carries it locally so
+    the preview and durable outbox can show the developer what will be sent once that gate opens."""
     if redact_on is None:
         redact_on = _redaction_enabled()
     rev = _current_revision(entry) or {}
@@ -3285,6 +3294,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     # security requirement as content/evidence, not polish.
     title = entry.get("title") or _derive_title(content)
     evidence = rev.get("evidence") or None
+    source_files = [f for f in (entry.get("source_files") or []) if f]
     # Redact at the projection so the confirm-preview and durable outbox show exactly what
     # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
     # `redacted` counts scrubbed secrets for the preview banner; extra key ignored by the
@@ -3301,6 +3311,13 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
                 scrubbed.append(se)
                 redacted += ne
             evidence = scrubbed
+        if source_files:
+            scrubbed_files = []
+            for f in source_files:
+                sf, nf = redact.scrub(f)
+                scrubbed_files.append(sf)
+                redacted += nf
+            source_files = scrubbed_files
     return {
         "id": entry.get("id", ""),
         "type": entry.get("subtype", "") or "convention",
@@ -3314,6 +3331,10 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # can show it and the developer doesn't push a not-yet-reviewed decision by accident.
         # Extra key like `redacted`: the wire builders read named fields, so it never egresses.
         "status": _entry_status(entry),
+        # LOCAL-only until remote._WIRE_SOURCE_FILES flips True — see that constant's docstring.
+        # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
+        # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
+        "source_files": source_files,
     }
 
 
@@ -3496,7 +3517,15 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     """Dry-run preview of what a personal-cloud push would send — a pure local read, NO network.
     Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
-    id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml."""
+    id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml.
+
+    `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files
+    locally, but the wire only sends them once `remote._WIRE_SOURCE_FILES` is flipped True (see
+    that constant). While gated off, this preview stays WIRE-ACCURATE by appending a `files:`
+    line PER DECISION with an honest "(not yet sent — server support pending)" note, rather than
+    silently showing files that won't actually go out; once the gate opens the note drops and
+    the line reads as plain fact."""
+    from contexer import remote
     from contexer.config import default_endpoint, load_profile
     prof = profile or load_profile()  # resolved ONCE — governs both endpoint and redaction
     projs = _resolve_share_projections(repo_path, decision_id, prof.redact_secrets)
@@ -3506,7 +3535,12 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
     lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}). "
              f"{_SHARE_SECRETS_HINT}:\n"]
-    lines += [_share_item_line(p) for p in projs]
+    for p in projs:
+        lines.append(_share_item_line(p))
+        files = p.get("source_files") or []
+        if files:
+            note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent — server support pending)"
+            lines.append(f"      files: {', '.join(files)}{note}")
     redacted = sum(p.get("redacted", 0) for p in projs)
     if redacted:
         lines.append(f"\n  ({_pl(redacted, 'secret')} redacted before sending)")

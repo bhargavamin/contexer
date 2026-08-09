@@ -2191,6 +2191,22 @@ class TestWireSafety:
         projected = store._share_projection(entry, redact_on=False)
         assert "guard_check" not in projected
 
+    def test_share_projection_source_files_present_but_guard_and_anchor_never_egress(self, repo):
+        # issue #174 Task 5: source_files becomes a deliberate projection field, but that must
+        # not loosen the whitelist — guard_check/anchor_candidates/anchor_commit still never
+        # appear, even on an entry that carries all of them at once.
+        entry = _seed_entry(repo, "Use JWT tokens for session auth",
+                            source_files=["auth/jwt.py"])
+        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
+                                 "paths": "", "message": "no TODOs", "armed_at": "t"}
+        entry["anchor_candidates"] = ["other/file.py"]
+        entry["anchor_commit"] = "deadbeef"
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py"]
+        assert "guard_check" not in projected
+        assert "anchor_candidates" not in projected
+        assert "anchor_commit" not in projected
+
 
 # ── Task 4: store.py backward-compat re-export ────────────────────────────────
 

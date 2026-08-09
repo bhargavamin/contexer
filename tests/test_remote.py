@@ -809,6 +809,77 @@ def test_wire_args_redact_param_overrides_config():
     assert _WIRE_AWS in off["content"]  # caller-resolved flag wins over a config read
 
 
+# ── source_files on the wire (issue #174 Task 5, gated) ────────────────────────
+# THE pin that protects the outbox: contexer-teams' push_decision schema is server-controlled,
+# and an unknown/rejected field can poison the outbox with permanent validation failures (the
+# source="plan" incident: -32602 on every retry, 192 attempts). `source_files` must stay off the
+# wire until the server accepts it — `remote._WIRE_SOURCE_FILES` (shipped False) is the gate.
+
+def test_wire_args_excludes_source_files_by_default():
+    args = remote._wire_args(type="architecture", content="use jwt", source_files=["auth/jwt.py"])
+    assert "source_files" not in args
+
+
+def test_wire_args_includes_scrubbed_source_files_when_gated_on(monkeypatch):
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+    args = remote._wire_args(type="architecture", content="use jwt",
+                             source_files=[f"auth/{_WIRE_AWS}.py"])
+    assert args["source_files"] == ["auth/[REDACTED:aws_key].py"]
+
+
+def test_wire_args_source_files_respects_redact_opt_out(monkeypatch):
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+    args = remote._wire_args(type="architecture", content="use jwt",
+                             source_files=[f"auth/{_WIRE_AWS}.py"], redact_on=False)
+    assert args["source_files"] == [f"auth/{_WIRE_AWS}.py"]  # opted out entirely
+
+
+def test_wire_args_empty_source_files_omitted_even_when_gated_on(monkeypatch):
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+    args = remote._wire_args(type="architecture", content="use jwt", source_files=[])
+    assert "source_files" not in args
+
+
+def test_wire_args_no_source_files_key_when_none():
+    args = remote._wire_args(type="architecture", content="use jwt", source_files=None)
+    assert "source_files" not in args
+
+
+def test_push_decision_excludes_source_files_by_default(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda e, t, n, args, to: captured.update(args=args)
+        or _result(content=[_text("Saved decision x to your personal context.")]),
+    )
+    RemoteStore("https://t/mcp", "tok").push_decision(
+        type="architecture", content="use jwt", repo=None, source_files=["auth/jwt.py"])
+    assert "source_files" not in captured["args"]
+
+
+def test_push_decision_includes_source_files_when_gated_on(monkeypatch):
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+    captured = {}
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda e, t, n, args, to: captured.update(args=args)
+        or _result(content=[_text("Saved decision x to your personal context.")]),
+    )
+    RemoteStore("https://t/mcp", "tok").push_decision(
+        type="architecture", content="use jwt", repo=None, source_files=["auth/jwt.py"])
+    assert captured["args"]["source_files"] == ["auth/jwt.py"]
+
+
+def test_wire_args_never_leaks_guard_check_or_anchor_fields():
+    # source_files becomes a deliberate, tested inclusion — guard_check/anchor_candidates/
+    # anchor_commit remain never-egress: _wire_args has no parameter for any of them, so a
+    # caller literally cannot put them on the wire through this function.
+    params = inspect.signature(remote._wire_args).parameters
+    assert "guard_check" not in params
+    assert "anchor_candidates" not in params
+    assert "anchor_commit" not in params
+
+
 def test_wire_honors_store_profile_over_global(monkeypatch):
     # A RemoteStore built from a profile with redaction ON must redact even when the GLOBAL
     # config says OFF — otherwise an explicit opt-in caller silently leaks raw secrets.

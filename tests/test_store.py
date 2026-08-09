@@ -3536,6 +3536,76 @@ class TestPendingReviewFlag:
         assert "Use Redis for caching" in out and "Store blobs in object storage" in out
 
 
+# ── source_files on the share wire (issue #174 Task 5, gated) ─────────────────
+
+class TestShareProjectionSourceFiles:
+    """`_share_projection` carries `source_files` locally (scrubbed, empties dropped) so the
+    preview and outbox can show it; whether it reaches the actual wire is a separate gate
+    owned by `remote._WIRE_SOURCE_FILES` (see tests/test_remote.py). `anchor_commit` never
+    projects — it's a machine-local ref, not something a preview or wire payload should show."""
+
+    def test_projection_carries_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1",
+                              "architecture", source_files=["auth/jwt.py", "auth/session.py"])
+        entry = store._load(tmp_repo)["entries"][0]
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py", "auth/session.py"]
+
+    def test_projection_scrubs_secret_shaped_path(self, tmp_repo):
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=[f"auth/{secret}.py"])
+        entry = store._load(tmp_repo)["entries"][0]
+        projected = store._share_projection(entry, redact_on=True)
+        joined = " ".join(projected["source_files"])
+        assert secret not in joined
+        assert "[REDACTED:aws_key]" in joined
+        assert projected["redacted"] >= 1
+
+    def test_projection_drops_empty_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        entry = store._load(tmp_repo)["entries"][0]
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == []
+
+    def test_projection_never_carries_anchor_commit(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        entry = store._load(tmp_repo)["entries"][0]
+        # tmp_repo isn't a real git checkout, so _anchor_sources stamps an empty anchor_commit
+        # (fail-soft) — stamp a real-looking one directly to prove the FIELD never projects,
+        # independent of whether git anchoring itself succeeded.
+        entry["anchor_commit"] = "deadbeefcafe"
+        projected = store._share_projection(entry, redact_on=False)
+        assert "anchor_commit" not in projected
+
+    def test_preview_shows_files_with_pending_note_when_gate_off(self, tmp_repo, monkeypatch):
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", False)
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files: auth/jwt.py" in out
+        assert "not yet sent" in out
+
+    def test_preview_drops_pending_note_when_gate_on(self, tmp_repo, monkeypatch):
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files: auth/jwt.py" in out
+        assert "not yet sent" not in out
+
+    def test_preview_omits_files_line_when_no_source_files(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files:" not in out
+
+
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
 
 class TestInsightCache:

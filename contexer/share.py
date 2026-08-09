@@ -250,21 +250,33 @@ def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
 
 def _entry_push_kwargs(entry: dict) -> dict:
     """push_decision kwargs for one outbox entry. Shared by drain_outbox + adrain_outbox so
-    the two drains serialize an entry identically (source coerced through _wire_source)."""
+    the two drains serialize an entry identically (source coerced through _wire_source).
+
+    `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally — it is
+    still gated at the actual wire by `remote._wire_args`/`_WIRE_SOURCE_FILES`, and that gate is
+    read at CALL time, i.e. AT DRAIN, not at the time this entry was queued. So an entry queued
+    while the gate was off and drained after a later flip sends it correctly, with no re-queue or
+    schema migration needed; conversely a flip that gets reverted before this entry drains means
+    it still won't egress the field, exactly as if it had never been gated on."""
     return dict(
         type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
         rationale=entry.get("rationale"), confidence=entry.get("confidence"),
         evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
-        decision_id=entry.get("decision_id"), title=entry.get("title"))
+        decision_id=entry.get("decision_id"), title=entry.get("title"),
+        source_files=entry.get("source_files"))
 
 
 def _dec_push_kwargs(dec: dict, key) -> dict:
     """push_decision kwargs for one shareable decision. Shared by share / share_all /
-    share_async so every share path puts the same decision on the wire identically."""
+    share_async so every share path puts the same decision on the wire identically.
+
+    `source_files` passes through from the projection; whether it actually reaches the wire is
+    decided later, at `remote._wire_args` time, by `remote._WIRE_SOURCE_FILES`."""
     return dict(
         type=dec["type"], content=dec["content"], repo=key,
         confidence=dec["confidence"], evidence=dec["evidence"],
-        source=_wire_source(dec["source"]), decision_id=dec["id"], title=dec.get("title"))
+        source=_wire_source(dec["source"]), decision_id=dec["id"], title=dec.get("title"),
+        source_files=dec.get("source_files"))
 
 
 def _finish_share(dec: dict, key, server_id, endpoint: str | None = None) -> str:
@@ -517,12 +529,15 @@ async def adrain_outbox(profile: Profile | None = None) -> int:
 def _payload(dec: dict, key) -> dict:
     """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
     title so a queued offline share still sends it once drained (_entry_push_kwargs reads
-    it back off this same row)."""
+    it back off this same row). Also carries `source_files` (issue #174 Task 5) the same way —
+    stored in the outbox regardless of the current wire gate, so `_entry_push_kwargs` +
+    `remote._wire_args` decide at DRAIN time whether it actually egresses."""
     return {
         "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
         "repo": key, "rationale": None, "confidence": dec["confidence"],
         "evidence": dec["evidence"], "source": _wire_source(dec["source"]),
-        "title": dec.get("title"), "queued_at": time.time(), "attempts": 0,
+        "title": dec.get("title"), "source_files": dec.get("source_files"),
+        "queued_at": time.time(), "attempts": 0,
     }
 
 
