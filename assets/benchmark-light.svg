@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-label="Benchmarks, medians across 548 published sessions: 6 times fewer tokens per session; right answer in 1 turn vs 6 turns of guessing; 8 of 8 stored rules followed vs 0 of 8 bare; $0.043 per session with right answers vs $0.116 with wrong ones">
+  <rect width="1200" height="250" rx="16" fill="#F2F1E6"/>
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <!-- dividers -->
+    <line x1="312" y1="52" x2="312" y2="172" stroke="#15170D" stroke-opacity="0.12"/>
+    <line x1="588" y1="52" x2="588" y2="172" stroke="#15170D" stroke-opacity="0.12"/>
+    <line x1="864" y1="52" x2="864" y2="172" stroke="#15170D" stroke-opacity="0.12"/>
+
+    <!-- tile 1: tokens -->
+    <rect x="48" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
+    <text x="48" y="112" font-size="54" font-weight="800" fill="#15170D">6&#215;</text>
+    <text x="48" y="142" font-size="17" font-weight="600" fill="#15170D">fewer tokens per session</text>
+    <text x="48" y="166" font-size="14" fill="#6B6D5F">32,804 vs 198,864 with no memory</text>
+
+    <!-- tile 2: rationale -->
+    <rect x="324" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
+    <text x="324" y="112" font-size="54" font-weight="800" fill="#15170D">1 turn</text>
+    <text x="324" y="142" font-size="17" font-weight="600" fill="#15170D">to the right &#8220;why did we&#8230;?&#8221;</text>
+    <text x="324" y="166" font-size="14" fill="#6B6D5F">no memory: 6 turns, then a guess</text>
+
+    <!-- tile 3: compliance -->
+    <rect x="600" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
+    <text x="600" y="112" font-size="54" font-weight="800" fill="#15170D">8/8</text>
+    <text x="600" y="142" font-size="17" font-weight="600" fill="#15170D">stored rules followed</text>
+    <text x="600" y="166" font-size="14" fill="#6B6D5F">bare agents: 0/8 (Opus)</text>
+
+    <!-- tile 4: cost -->
+    <rect x="876" y="48" width="44" height="6" rx="3" fill="#CDEB36"/>
+    <text x="876" y="112" font-size="54" font-weight="800" fill="#15170D">$0.043</text>
+    <text x="876" y="142" font-size="17" font-weight="600" fill="#15170D">per session, right answers</text>
+    <text x="876" y="166" font-size="14" fill="#6B6D5F">no memory: $0.116, wrong answers</text>
+
+    <!-- footer -->
+    <text x="600" y="216" font-size="13.5" fill="#6B6D5F" text-anchor="middle">Medians across 548 published live agent sessions &#183; same repo, model, and questions &#183; scored by code, not an LLM judge</text>
+  </g>
+</svg>
