@@ -79,9 +79,13 @@ def _run_and_record(row: dict, work: Path, home: Path, prompt: str, claude_cmd: 
     return res
 
 
-def _find_never_log_id(work: Path, home: Path) -> str | None:
+def _find_never_log_id(work: Path, home: Path) -> tuple[str | None, str | None]:
     """Looks up the approved "never log request data" decision id in the isolated
-    store, via a child `uv run python -c` (contexer's venv, not this process's)."""
+    store, via a child `uv run python -c` (contexer's venv, not this process's).
+    Returns (id, None) on success, (None, None) for the genuine "not captured/
+    approved" outcome (the probe's own deliberate exit 3), or (None, error) for
+    any OTHER exit — a uv resolution failure or corrupt store must not collapse
+    into the same message as a real no-capture result (Important 4)."""
     code = ("from contexer import store\n"
             f"entries = store._load({str(work)!r})['entries']\n"
             "hit = next((e['id'] for e in entries "
@@ -91,24 +95,38 @@ def _find_never_log_id(work: Path, home: Path) -> str | None:
             "sys.exit(3) if hit is None else print(hit)\n")
     proc = subprocess.run(["uv", "run", "python", "-c", code], cwd=_SRC,
                           env=_session_env(home, 0), capture_output=True, text=True)
-    return proc.stdout.strip() if proc.returncode == 0 else None
+    if proc.returncode == 0:
+        return proc.stdout.strip(), None
+    if proc.returncode == 3:
+        return None, None
+    return None, f"probe failed rc={proc.returncode}: {proc.stderr[-300:]}"
 
 
-def _enf_commit_setup(work: Path, home: Path) -> bool:
+def _enf_commit_setup(work: Path, home: Path) -> tuple[bool, str]:
     """Arms the guard on the taught rule and installs the pre-commit hook, so the
     "with" arm's enforcement task can actually be blocked. `--project` points uv
     at this checkout's venv while `cwd=work` is what makes `contexer guard` (which
-    resolves its target repo from cwd) operate on the fixture repo, not this one."""
-    decision_id = _find_never_log_id(work, home)
+    resolves its target repo from cwd) operate on the fixture repo, not this one.
+    Returns (ok, error) — error is "" on success. Both the arm and the hook-install
+    subprocess results are checked (Critical 3): a silent arm/install failure would
+    otherwise run the enforcement task with NO guard and score success=False
+    indistinguishably from a genuine model failure."""
+    decision_id, probe_err = _find_never_log_id(work, home)
+    if probe_err:
+        return False, f"enf setup: {probe_err}"
     if not decision_id:
-        return False
+        return False, "enf setup: taught rule not captured/approved"
     env = _session_env(home, 0)
-    subprocess.run(["uv", "run", "--project", str(_SRC), "contexer", "guard", "arm",
-                    decision_id, "--regex", _ENF_REGEX, "--flags", "i"],
-                   cwd=work, env=env, capture_output=True)
-    subprocess.run(["uv", "run", "--project", str(_SRC), "contexer", "guard", "--install-hook"],
-                   cwd=work, env=env, capture_output=True)
-    return True
+    arm = subprocess.run(["uv", "run", "--project", str(_SRC), "contexer", "guard", "arm",
+                         decision_id, "--regex", _ENF_REGEX, "--flags", "i"],
+                        cwd=work, env=env, capture_output=True, text=True)
+    if arm.returncode != 0:
+        return False, f"enf setup: guard arm failed rc={arm.returncode}: {arm.stderr[-300:]}"
+    hook = subprocess.run(["uv", "run", "--project", str(_SRC), "contexer", "guard", "--install-hook"],
+                          cwd=work, env=env, capture_output=True, text=True)
+    if hook.returncode != 0:
+        return False, f"enf setup: guard install-hook failed rc={hook.returncode}: {hook.stderr[-300:]}"
+    return True, ""
 
 
 def _score_task(row: dict, task: dict, work: Path, arm: str, base_sha: str,
@@ -134,29 +152,36 @@ def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: 
                   baseline: list, capture: dict) -> dict:
     row = _base_row(task["id"], task["kind"], arm, rep, tier, "measure", model)
     row["capture"] = capture
-    if arm == "with":
-        row["contaminated"] = bool(memory_files(home, work))
-    elif arm == "memory":
-        c = score.capture_stats(home, work)
-        row["contaminated"] = (home / ".contexer").exists() and c["contexer_entries"] > 0
+    try:
+        if task["scorer"] == "enforcement" and arm == "with":
+            ok, err = _enf_commit_setup(work, home)
+            if not ok:
+                row["error"] = err
+                return row  # skip the session entirely; success stays False
 
-    if task["scorer"] == "enforcement" and arm == "with":
-        if not _enf_commit_setup(work, home):
-            row["error"] = "enf setup: taught rule not captured/approved"
-            return row  # skip the session entirely; success stays False
-
-    prompt = task["prompt"].replace("{seed}", str(seed))
-    base_sha = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
-                              capture_output=True, text=True).stdout.strip() or "HEAD"
-    res = _run_and_record(row, work, home, prompt, claude_cmd, model, rx)
-    if row["error"]:
-        return row
-    check_cmd = task["check_cmd"].replace("{seed}", str(seed))
-    chk = None
-    if check_cmd:
-        chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
-                             timeout=600, env=_session_env(home, 0))
-    _score_task(row, task, work, arm, base_sha, baseline, check_cmd, chk, res)
+        prompt = task["prompt"].replace("{seed}", str(seed))
+        base_sha = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip() or "HEAD"
+        res = _run_and_record(row, work, home, prompt, claude_cmd, model, rx)
+        if row["error"]:
+            return row
+        check_cmd = task["check_cmd"].replace("{seed}", str(seed))
+        chk = None
+        if check_cmd:
+            chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
+                                 timeout=600, env=_session_env(home, 0))
+        _score_task(row, task, work, arm, base_sha, baseline, check_cmd, chk, res)
+    except Exception as exc:  # a failed run is a data point, never a crash (Critical 2)
+        row["error"] = repr(exc)
+    finally:
+        # Post-run, always (Critical 1): contamination must reflect what the
+        # MEASURED session itself did (e.g. memory tool writing mid-session), not
+        # the pre-session restored-snapshot state computed before it even ran.
+        if arm == "with":
+            row["contaminated"] = bool(memory_files(home, work))
+        elif arm == "memory":
+            c = score.capture_stats(home, work)
+            row["contaminated"] = (home / ".contexer").exists() and c["contexer_entries"] > 0
     return row
 
 
@@ -183,7 +208,10 @@ def _run_arm(out: Path, td: Path, golden: Path, baseline: list, tasks: list, tea
         sessions = sorted((s for s in teaching if s["tier"] == tier), key=lambda s: s["session"])
         for s in sessions:
             row = _base_row(f"teach-s{s['session']}", "teach", arm, rep, tier, "teach", model)
-            _run_and_record(row, work, home, "\n\n".join(s["prompts"]), claude_cmd, model, rx)
+            try:
+                _run_and_record(row, work, home, "\n\n".join(s["prompts"]), claude_cmd, model, rx)
+            except Exception as exc:  # a failed run is a data point, never a crash
+                row["error"] = repr(exc)
             _append(out, row)
     capture = score.capture_stats(home, work)
 
