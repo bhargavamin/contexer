@@ -100,3 +100,42 @@ class TestThreeConditions:
                 _row("with", kind="rationale", rationale=1.0)]
         md = render(_write(tmp_path, rows))
         assert "rationale 0.0 can mean" not in md
+
+
+def _mrow(task_id, arm, tier="implicit", rep=0, phase="measure", success=True,
+         tokens=1000, error="", capture=None, model="m1"):
+    return {"task_id": task_id, "kind": "x", "arm": arm, "condition": arm, "tier": tier,
+            "phase": phase, "rep": rep, "model": model, "tokens_total": tokens,
+            "success": success, "error": error, "capture": capture or {},
+            "sup_result": "", "contaminated": False}
+
+
+class TestMemoryCampaignSection:
+    def test_memory_section_renders_wilson_and_isolates_enf_commit(self, tmp_path):
+        rows = [
+            _mrow("sup-current", "with", "implicit", rep=0, success=True),
+            _mrow("sup-current", "without", "implicit", rep=0, success=False),
+            _mrow("cont-log", "with", "implicit", rep=0, success=True),
+            _mrow("teach-s0", "with", "implicit", rep=0, phase="teach",
+                 capture={"memory_files": 0, "contexer_entries": 3}, tokens=500),
+            _mrow("teach-s1", "memory", "implicit", rep=0, phase="teach",
+                 capture={"memory_files": 2, "contexer_entries": 0}, tokens=800),
+            _mrow("enf-commit", "with", "implicit", rep=0, success=True),
+            _mrow("enf-commit", "memory", "implicit", rep=0, success=False),
+            {**_mrow("sup-current", "with", "explicit", rep=2, success=False), "error": "timeout"},
+        ]
+        md = render(_write(tmp_path, rows))
+        assert "Memory-vs-Contexer" in md
+        assert "1/1 (" in md  # a rendered wilson-interval cell
+        assert "## Mechanism demonstration" in md
+        heading_idx = md.index("## Mechanism demonstration")
+        assert "enf-commit" not in md[:heading_idx]
+        assert "blocked" in md
+        assert "no mechanism" in md
+        assert "1 errored run(s) excluded" in md
+
+    def test_legacy_campaign_unaffected(self, tmp_path):
+        rows = [_row("without", 9000), _row("with", 4000)]
+        md = render(_write(tmp_path, rows))
+        assert "Memory-vs-Contexer" not in md
+        assert "Mechanism demonstration" not in md
