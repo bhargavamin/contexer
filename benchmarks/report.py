@@ -80,13 +80,17 @@ def _render_memory_campaign(rows: list) -> str:
                      for tier in _MEMORY_TIERS]
             lines.append(f"| {arm} | " + " | ".join(cells) + " |")
 
-    # Capture rate: the last teach row per (arm, rep) carries the post-teaching
-    # counts (earlier teach rows in the same rep are mid-teaching snapshots).
-    last_teach = {}
-    for r in teach:
-        last_teach[(r["arm"], r["rep"])] = r
+    # Capture rate: every measure row in a rep shares the same restored,
+    # post-teaching snapshot (captured once after teaching, before the
+    # per-task restore loop) — the first measure row per (arm, rep) is a
+    # deterministic pick of that snapshot.
+    first_measure = {}
+    for r in measure:
+        key = (r["arm"], r["rep"])
+        if key not in first_measure:
+            first_measure[key] = r
     groups: dict = {}
-    for r in last_teach.values():
+    for r in first_measure.values():
         groups.setdefault((r["arm"], r["tier"]), []).append(r)
     if groups:
         lines += ["", "## Capture rate (post-teaching)", "",

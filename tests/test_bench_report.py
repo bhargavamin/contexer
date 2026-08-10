@@ -113,13 +113,15 @@ def _mrow(task_id, arm, tier="implicit", rep=0, phase="measure", success=True,
 class TestMemoryCampaignSection:
     def test_memory_section_renders_wilson_and_isolates_enf_commit(self, tmp_path):
         rows = [
-            _mrow("sup-current", "with", "implicit", rep=0, success=True),
+            # first measure row per (arm, rep) carries the post-teaching snapshot
+            _mrow("sup-current", "with", "implicit", rep=0, success=True,
+                 capture={"memory_files": 0, "contexer_entries": 3}),
+            _mrow("sup-current", "memory", "implicit", rep=0, success=True,
+                 capture={"memory_files": 2, "contexer_entries": 0}),
             _mrow("sup-current", "without", "implicit", rep=0, success=False),
             _mrow("cont-log", "with", "implicit", rep=0, success=True),
-            _mrow("teach-s0", "with", "implicit", rep=0, phase="teach",
-                 capture={"memory_files": 0, "contexer_entries": 3}, tokens=500),
-            _mrow("teach-s1", "memory", "implicit", rep=0, phase="teach",
-                 capture={"memory_files": 2, "contexer_entries": 0}, tokens=800),
+            _mrow("teach-s0", "with", "implicit", rep=0, phase="teach", tokens=500),
+            _mrow("teach-s1", "memory", "implicit", rep=0, phase="teach", tokens=800),
             _mrow("enf-commit", "with", "implicit", rep=0, success=True),
             _mrow("enf-commit", "memory", "implicit", rep=0, success=False),
             {**_mrow("sup-current", "with", "explicit", rep=2, success=False), "error": "timeout"},
@@ -127,6 +129,9 @@ class TestMemoryCampaignSection:
         md = render(_write(tmp_path, rows))
         assert "Memory-vs-Contexer" in md
         assert "1/1 (" in md  # a rendered wilson-interval cell
+        assert "## Capture rate" in md
+        assert "| with | implicit | 1 | 0 | 3 |" in md
+        assert "| memory | implicit | 1 | 2 | 0 |" in md
         assert "## Mechanism demonstration" in md
         heading_idx = md.index("## Mechanism demonstration")
         assert "enf-commit" not in md[:heading_idx]
