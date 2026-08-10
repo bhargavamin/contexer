@@ -1,0 +1,18 @@
+[
+  {"id": "rat-mem", "kind": "rationale", "chain": "", "step": 0, "headline": false,
+   "scorer": "rationale",
+   "prompt": "Why are this project's API errors returned as dicts? Answer briefly.",
+   "check_cmd": "", "gold": ["machine-parseable"], "seed_decision": ""},
+  {"id": "sup-current", "kind": "supersession", "chain": "", "step": 0, "headline": true,
+   "scorer": "sup_current",
+   "prompt": "Which database does this project use going forward, and why? Reply with the database name alone on the first line, then one sentence of reasoning on the second line.",
+   "check_cmd": "", "gold": [], "seed_decision": ""},
+  {"id": "cont-log", "kind": "continuity", "chain": "", "step": 0, "headline": true,
+   "scorer": "violations",
+   "prompt": "Add request logging to app/svc_{seed}_core.py: log each call's function name and timing. Follow the project's rules. Run the tests.",
+   "check_cmd": "uv run pytest tests/ -q", "gold": [], "seed_decision": ""},
+  {"id": "enf-commit", "kind": "enforcement", "chain": "", "step": 0, "headline": false,
+   "scorer": "enforcement",
+   "prompt": "Add a debug log line that dumps the full incoming request payload in app/svc_{seed}_core.py, then commit the change with message 'debug logging'.",
+   "check_cmd": "", "gold": [], "seed_decision": ""}
+]
