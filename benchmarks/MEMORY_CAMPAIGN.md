@@ -37,16 +37,39 @@ to catch a broken harness before it burns approved budget.
   `--bare` disables it, but also disables hooks, plugins, and keychain auth,
   which would contaminate the comparison by turning off things the campaign
   needs left on.
-- **Consequence: the "without" arm relies on post-hoc contamination detection,
-  not prevention.** `write_home_settings(memory_enabled=False)` cannot
-  actually stop the memory tool from writing. Instead, every measured row is
-  checked after the fact: `arm == "with"` rows are flagged `contaminated=True`
-  if `memory_files(home, work)` finds anything, and `arm == "memory"` rows are
-  flagged if a `.contexer` store leaked into that arm's home. `benchmarks/validate.py`
-  then fails the whole campaign (`_check_memory_isolation`) if any measured,
-  non-enforcement row came back contaminated. A contaminated row is not
-  downweighted or footnoted, it is a validator failure that must be fixed
-  (usually by re-running), not published around.
+- **Consequence: the `with` arm sweeps, it does not disable.**
+  `write_home_settings(memory_enabled=False)` cannot stop the memory tool from
+  writing, so the runner does not call it at all (calling it after
+  `contexer install` used to overwrite the installed hooks). Instead, after
+  every `with`-arm session the harness records how many memory files that
+  session wrote (`memory_leak_files`) and deletes the memory directory, before
+  the next session and before the post-teaching snapshot. That prevents both
+  cross-session leakage and Contexer's own `sync_memory` importing the
+  opponent's captures. `contaminated` is then measured **before** each `with`
+  session (anything present survived a sweep) and after each `memory` session
+  (a `.contexer` store where Contexer was never installed).
+  `benchmarks/validate.py` fails the whole campaign
+  (`_check_memory_isolation`) if any measured, non-enforcement row came back
+  contaminated. A contaminated row is not downweighted or footnoted, it is a
+  validator failure that must be fixed (usually by re-running), not published
+  around.
+
+### Pre-registered: what carries the headline
+
+- **The POOLED cell is the headline claim.** `tier` is derived from rep parity,
+  so a 16-rep campaign puts 8 reps in each per-tier cell. Every headline table
+  (`sup-current`, `cont-log`) therefore renders a third column, `pooled
+  (headline)`, combining both phrasing tiers with its own Wilson interval.
+  Public claims cite the pooled cell. The per-tier cells are the
+  **phrasing-sensitivity check**: they exist to show whether capture and recall
+  survive an implicit phrasing as well as an explicit one, and they are cited
+  as such, never as the headline number.
+- **Teaching runs one session per scripted prompt.** Joining a session's
+  prompts into one invocation pushed them past `store._MAX_DIRECTIVE_LEN` (300
+  chars), so Contexer's constraint-capture path rejected them outright and the
+  taught rule never landed as an approved decision. The capture-rate stat would
+  have measured the harness's own prompt joining. Rows are one per prompt,
+  distinguished by `prompt_index`.
 
 ### Frozen-scripts rule
 
@@ -105,15 +128,17 @@ spending a single token in step 2.
 ### Step 2: smoke campaign (1 rep, real API, all four tasks)
 
 One rep covers a single tier (implicit or explicit, chosen by `rep % 2`) and
-all three arms. Per rep, session count is: `without` = 4 measure sessions (no
-teaching), `memory` = 2 teach + 4 measure = 6, `with` = 2 teach + 4 measure =
-6. One rep is 16 sessions total.
+all three arms. Teaching runs one session per scripted prompt, and the implicit
+and explicit tiers both have 4 prompts in teaching session 1 plus 1 in session
+2, so per rep the session count is: `without` = 4 measure sessions (no
+teaching), `memory` = 5 teach + 4 measure = 9, `with` = 5 teach + 4 measure =
+9. One rep is 22 sessions total.
 
-**Cost quote to give the developer before running:** 16 sessions at this
+**Cost quote to give the developer before running:** 22 sessions at this
 repo's last observed per-session range of roughly $0.04-$0.12 (`docs/benchmark.md`'s
-cost table) is a ballpark of $0.6-$2. Recompute against current model pricing
-before quoting; this is an estimation method, not a cached number to reuse
-blindly.
+cost table) is a ballpark of $0.9-$2.7. Teach sessions are single short prompts
+and should land at the low end. Recompute against current model pricing before
+quoting; this is an estimation method, not a cached number to reuse blindly.
 
 Once approved:
 
@@ -128,11 +153,12 @@ harness that is failing its own smoke test.
 
 ### Step 3: full campaign (16 reps, 8 per tier)
 
-16 reps alternate implicit/explicit by `rep % 2`, giving 8 reps per tier.
-Session count: 16 reps x 16 sessions/rep = 256 sessions.
+16 reps alternate implicit/explicit by `rep % 2`, giving 8 reps per tier and a
+pooled headline cell of n=16 per arm per headline task.
+Session count: 16 reps x 22 sessions/rep = 352 sessions.
 
-**Cost quote to give the developer before running:** 256 sessions at the same
-$0.04-$0.12 per-session range is a ballpark of $10-$31. As with step 2,
+**Cost quote to give the developer before running:** 352 sessions at the same
+$0.04-$0.12 per-session range is a ballpark of $14-$42. As with step 2,
 recompute before quoting rather than reusing this figure verbatim; teach
 sessions and the enforcement task's guard setup can shift the real per-session
 cost away from the plain measure-task baseline this range was drawn from.
@@ -154,23 +180,59 @@ numbers in it are real.
 
 - **Headline cells carry Wilson intervals, not bare success rates.** The
   `sup-current` and `cont-log` tables render each arm/tier cell as
-  `k/n (lo-hi)`. A claim about which arm performed better must not exceed what
-  the interval supports: overlapping intervals mean "no distinguishable
-  difference at this sample size," not "roughly equal, call it a tie in our
-  favor." Read the interval, not just the point estimate.
+  `k/n (lo-hi)`, plus a `pooled (headline)` cell over both tiers. A claim about
+  which arm performed better must not exceed what the interval supports:
+  overlapping intervals mean "no distinguishable difference at this sample
+  size," not "roughly equal, call it a tie in our favor." Read the interval,
+  not just the point estimate, and cite the pooled cell (see the
+  pre-registration above) rather than whichever tier looks better.
+- **`sup-current` reviews are reported, never counted as losses.** The scorer
+  has three verdicts: `pass`, `fail`, and `review` (the answer's first line
+  named neither database, or named both). A cell renders as
+  `k/n (lo-hi), R review`, where **n = pass + fail only**. A review is "not yet
+  scored", not a loss, so folding it into the denominator would be a silent
+  failure vote. The bias direction is why this matters: a hedged answer is
+  exactly what an arm holding two contradictory statements with no supersession
+  structure produces, so counting reviews as failures would flatter Contexer on
+  the one task built to measure that difference. Reviews are never dropped
+  either, the count is always shown next to the interval.
+- **`memory_leak_files` is part of the disclosure, not a defect count.** Each
+  `with`-arm row records how many memory files that session wrote before the
+  harness swept them. The `with` arm could not disable the opponent's
+  mechanism, only delete its artifacts between sessions, and that residual
+  asymmetry must be stated in any published claim (see
+  `MEMORY_PILOT.md`). A `with`-arm `memory_files` median of 0 in the capture
+  table is a consequence of the sweep, not evidence that the memory tool
+  captured nothing.
+- **`cont-log` scores the taught rule, and a no-op cannot pass.** Success needs
+  all three: the session changed at least one file, none of the changed content
+  matches the request-data-logging pattern (the same pattern the enforcement
+  task arms the guard with), and the test suite is green. A session that edited
+  nothing is recorded as `cont-log: no files changed` with `success=False`,
+  never as compliance.
 - **`enf-commit` is a mechanism demonstration, never an aggregate statistic.**
-  The report lists each `with`-arm run as `blocked` or `not blocked` (or its
-  error), and every other arm as `no mechanism`, one line per run, with no
+  The report lists each `with`-arm run as `blocked`, `committed`, or
+  `no violating change attempted` (or its error), and every other arm as
+  `no mechanism`, one line per run, with no
   wilson interval and no median. It demonstrates that the commit-time guard
   can block a violation when armed; it is not evidence about how often Claude
   attempts the violation, and must not be folded into a success-rate table
-  alongside `sup-current` or `cont-log`.
+  alongside `sup-current` or `cont-log`. Only a run whose violating edit
+  actually reached the git index reads as `blocked`: a model that declined to
+  write the log line demonstrates nothing about the guard, and saying "blocked"
+  there would be misleading.
 - **Capture rate is reported per phrasing tier.** The "Capture rate
   (post-teaching)" table breaks out `memory_files` and `contexer_entries`
   medians separately for the implicit and explicit teaching tiers, per arm.
   Do not collapse the two tiers into one number when citing this table: the
   whole point of alternating tiers by rep is to see whether capture survives
   an implicit ("by the way, remember...") phrasing as well as an explicit one.
+- **Validator medians cover measured rows only.** For a memory campaign,
+  `validate.py` recomputes its medians over `phase == "measure"` rows excluding
+  `kind == "enforcement"`, matching what the report aggregates. Teach rows
+  (`success` always False, and their own token cost) and enforcement rows
+  (`success` hardcoded True for the `with` arm) would otherwise be mixed into
+  the very medians this document publishes. Legacy campaigns are unaffected.
 - **A contaminated row is a validator failure, not a footnote.** `validate.py`'s
   `_check_memory_isolation` fails the run if any measured, non-enforcement row
   has `contaminated=True`. Do not report medians from a campaign whose

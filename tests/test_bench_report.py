@@ -103,11 +103,11 @@ class TestThreeConditions:
 
 
 def _mrow(task_id, arm, tier="implicit", rep=0, phase="measure", success=True,
-         tokens=1000, error="", capture=None, model="m1"):
+         tokens=1000, error="", capture=None, model="m1", sup_result=""):
     return {"task_id": task_id, "kind": "x", "arm": arm, "condition": arm, "tier": tier,
             "phase": phase, "rep": rep, "model": model, "tokens_total": tokens,
             "success": success, "error": error, "capture": capture or {},
-            "sup_result": "", "contaminated": False}
+            "sup_result": sup_result, "contaminated": False}
 
 
 class TestMemoryCampaignSection:
@@ -144,3 +144,42 @@ class TestMemoryCampaignSection:
         md = render(_write(tmp_path, rows))
         assert "Memory-vs-Contexer" not in md
         assert "Mechanism demonstration" not in md
+
+    def test_pooled_headline_cell_combines_both_tiers(self, tmp_path):
+        """Important 1: tier derives from rep parity, so a 16-rep campaign gives
+        n=8 per tier. The pooled cell (n = both tiers) carries the headline."""
+        rows = [_mrow("sup-current", "with", "implicit", rep=0, success=True,
+                     sup_result="pass"),
+                _mrow("sup-current", "with", "explicit", rep=1, success=True,
+                     sup_result="pass")]
+        md = render(_write(tmp_path, rows))
+        assert "| arm | implicit | explicit | pooled (headline) |" in md
+        line = next(l for l in md.splitlines() if l.startswith("| with |"))
+        assert line.count("1/1 (") == 2      # the two per-tier cells
+        assert "2/2 (" in line               # the pooled cell
+        assert "pre-registered headline number" in md
+
+    def test_reviews_are_shown_and_left_out_of_the_denominator(self, tmp_path):
+        """Important 2: a review is "not yet scored", not a loss — counting it in n
+        would flatter Contexer, since hedged answers are what the memory arm
+        (holding two contradictory statements) produces."""
+        rows = [_mrow("sup-current", "memory", "implicit", rep=0, success=True,
+                     sup_result="pass"),
+                _mrow("sup-current", "memory", "implicit", rep=2, success=False,
+                     sup_result="review")]
+        md = render(_write(tmp_path, rows))
+        line = next(l for l in md.splitlines() if l.startswith("| memory |"))
+        assert "1/1 (" in line and "1 review" in line
+        assert "1/2" not in line and "0/1" not in line
+
+    def test_enforcement_outcome_distinguishes_a_declined_edit(self, tmp_path):
+        rows = [{**_mrow("enf-commit", "with", success=True),
+                 "enf_outcome": "no violating change attempted"}]
+        md = render(_write(tmp_path, rows))
+        assert "no violating change attempted" in md
+
+    def test_mixed_legacy_and_memory_rows_do_not_crash(self, tmp_path):
+        """Minor: render dispatches on any("arm" in r), so the memory renderer must
+        tolerate a legacy row that carries no "arm"."""
+        rows = [_mrow("sup-current", "with", success=True), _row("without")]
+        assert "Memory-vs-Contexer" in render(_write(tmp_path, rows))

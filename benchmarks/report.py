@@ -37,14 +37,24 @@ def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, flo
 
 
 def _wilson_cell(cell_rows: list) -> str:
-    k = sum(1 for r in cell_rows if r["success"])
-    n = len(cell_rows)
+    """`k/n (lo-hi)`, plus a separate review count when the cell holds any.
+
+    A sup-current "review" verdict is "not yet scored", not a loss, so it is
+    EXCLUDED from the denominator and reported alongside instead of being folded
+    into n as a silent failure. The bias direction matters: hedged answers are
+    exactly what an arm holding two contradictory statements produces, so
+    counting reviews as failures would flatter Contexer."""
+    reviews = sum(1 for r in cell_rows if r.get("sup_result") == "review")
+    scored = [r for r in cell_rows if r.get("sup_result") != "review"]
+    k = sum(1 for r in scored if r["success"])
+    n = len(scored)
     lo, hi = wilson_interval(k, n)
-    return f"{k}/{n} ({lo:.2f}-{hi:.2f})"
+    cell = f"{k}/{n} ({lo:.2f}-{hi:.2f})"
+    return f"{cell}, {reviews} review" if reviews else cell
 
 
 def _memory_arms_present(rows):
-    present = {r["arm"] for r in rows}
+    present = {r.get("arm") for r in rows} - {None}
     return [a for a in _MEMORY_ARM_ORDER if a in present] + sorted(present - set(_MEMORY_ARM_ORDER))
 
 
@@ -71,14 +81,21 @@ def _render_memory_campaign(rows: list) -> str:
         task_rows = [r for r in measure if r["task_id"] == task_id]
         if not task_rows:
             continue
+        # Tier alternates by rep, so a 16-rep campaign puts only 8 reps in each
+        # per-tier cell. The POOLED column (both tiers, n = 16) carries the
+        # headline claim; the per-tier columns are the phrasing-sensitivity check.
         lines += ["", f"## {task_id}", "",
-                  "| arm | " + " | ".join(_MEMORY_TIERS) + " |",
-                  "|" + "---|" * (1 + len(_MEMORY_TIERS))]
+                  "| arm | " + " | ".join(_MEMORY_TIERS) + " | pooled (headline) |",
+                  "|" + "---|" * (2 + len(_MEMORY_TIERS))]
         for arm in arms:
-            cells = [_wilson_cell([r for r in task_rows if r["arm"] == arm
-                                   and r["tier"] == tier and not r.get("error")])
+            arm_rows = [r for r in task_rows if r.get("arm") == arm and not r.get("error")]
+            cells = [_wilson_cell([r for r in arm_rows if r.get("tier") == tier])
                      for tier in _MEMORY_TIERS]
+            cells.append(_wilson_cell(arm_rows))
             lines.append(f"| {arm} | " + " | ".join(cells) + " |")
+        lines += ["", "_Pooled cell = both phrasing tiers combined, with its own Wilson "
+                  "interval; it is the pre-registered headline number. Per-tier cells "
+                  "are half the reps each and exist to show phrasing sensitivity._"]
 
     # Capture rate: every measure row in a rep shares the same restored,
     # post-teaching snapshot (captured once after teaching, before the
@@ -122,7 +139,11 @@ def _render_memory_campaign(rows: list) -> str:
                 if r.get("error"):
                     outcome = f"error: {r['error']}"
                 else:
-                    outcome = "blocked" if r["success"] else "not blocked"
+                    # enf_outcome distinguishes "the guard stopped a staged violation"
+                    # from "the model never attempted one" — both score success=True,
+                    # but only the first demonstrates the mechanism.
+                    outcome = r.get("enf_outcome") or ("blocked" if r["success"]
+                                                       else "not blocked")
             else:
                 outcome = "no mechanism"
             lines.append(f"- {r['arm']} ({r['tier']}, rep {r['rep']}): {outcome}")

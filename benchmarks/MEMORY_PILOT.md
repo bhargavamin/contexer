@@ -72,16 +72,52 @@ memory tool while leaving everything else on.
 
 `2.1.226 (Claude Code)`.
 
-## Decision: detection-only fallback
+## Decision: sweep-between-sessions, not disable
 
 Since there is no settings-based disable mechanism, `write_home_settings`
 writes `{}` in both the `memory_enabled=True` and `memory_enabled=False`
 cases (the boolean is accepted for interface symmetry with the benchmark
 harness's "with memory" / "without memory" arms, but it does not change what
-gets written). The "without memory" arm of the campaign cannot actually
-prevent the tool from writing memory files. Instead, the benchmark's post-run
-validator must detect memory files under the run's throwaway HOME
-(`memory_files(home, repo)` non-empty) and mark that row `contaminated=true`:
-excluded from aggregate scoring, counted and reported separately. This is
-honesty over pretense: a fabricated "disabled" setting that does not disable
-anything would silently corrupt the comparison instead of flagging it.
+gets written). It is therefore a no-op, and **`memory_campaign.py` no longer
+calls it at all**. The function is kept here because it documents this finding
+and is covered by tests, not because the runner needs it.
+
+Two consequences the runner acts on:
+
+1. **Never write settings after `contexer install`.** In the `with` arm,
+   `_condition_b_setup` runs the real installer, which writes five hook events
+   into `<home>/.claude/settings.json`. The earlier code then called
+   `write_home_settings(home, memory_enabled=False)`, which wrote `{}` over
+   that exact path and deleted every hook. The `with` arm was measuring
+   Contexer with its entire deterministic mechanism switched off. Any future
+   settings write in that arm must happen **before** the installer, never
+   after, and `tests/test_bench_memory_campaign.py::test_with_arm_setup_keeps_contexer_hooks`
+   fails if that ordering is broken again.
+
+2. **The `with` arm sweeps memory artifacts between sessions.** Because memory
+   is default-on and cannot be turned off, the `with` HOME has both systems
+   live. The explicit-tier teaching prompts literally say "Remember this for
+   future sessions", so memory files are a certainty, not a risk: they would
+   land in the post-teaching snapshot, be restored before every measured
+   session, and (worse) be imported into the Contexer store by Contexer's own
+   `SessionStart` -> `sync_memory` hook, feeding the `with` arm with the
+   opponent's captures. So after every `with`-arm session (teaching and
+   measured alike) the harness counts the memory files into the row's
+   `memory_leak_files` field and then deletes the memory directory, before the
+   next session and before the snapshot is taken. Within-session writes cannot
+   help the session that made them; deletion kills the two vectors that matter
+   (cross-session leakage and `sync_memory` ingestion).
+
+With the sweep in place, `contaminated` becomes a genuine tripwire again
+rather than a field that is always true: for `with` rows it is measured
+**before** the session runs, so it flags only memory files that survived a
+sweep or the snapshot. For `memory` rows it stays a post-run check for a
+Contexer store appearing where Contexer was never installed. `validate.py`'s
+`_check_memory_isolation` fails the campaign on any contaminated measured row.
+
+**Residual asymmetry, to be disclosed in any published claim:** the `with` arm
+could not disable the opponent's mechanism, only delete its artifacts between
+sessions. This is honesty over pretense: a fabricated "disabled" setting that
+disabled nothing would silently corrupt the comparison instead of flagging it,
+and `memory_leak_files` keeps the size of what was swept on the record instead
+of hiding it.
