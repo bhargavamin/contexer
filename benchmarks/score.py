@@ -1,9 +1,13 @@
 """Deterministic scorers for the A/B benchmark. No LLM judge — a violation is a
 measurable contradiction of a high-tier mined convention in the changed code."""
 import ast
+import json
 import re
 import subprocess
 from pathlib import Path
+
+from benchmarks.memory_home import memory_files
+from contexer import store as _store
 
 _SNAKE = re.compile(r"^_?[a-z][a-z0-9_]*$")
 # True dunders only (__init__), matching the miner's exclusion — a generated
@@ -87,15 +91,12 @@ def sup_current_score(answer: str, current: str = "dynamodb", superseded: str = 
 
 
 def capture_stats(home, repo) -> dict:
-    import json as _json, re as _re
-    from pathlib import Path as _P
-    from benchmarks.memory_home import memory_files
-    home, repo = _P(home), _P(repo)
-    slug = _re.sub(r"[^a-zA-Z0-9]", "_", str(repo))
+    home, repo = Path(home), Path(repo)
+    slug = _store._slug(str(repo))
     entries = 0
     store = home / ".contexer" / f"{slug}.json"
     try:
-        data = _json.loads(store.read_text())
+        data = json.loads(store.read_text())
         entries = sum(1 for e in data.get("entries", []) if e.get("type") == "decision")
     except Exception:
         entries = 0
