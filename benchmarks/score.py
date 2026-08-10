@@ -72,3 +72,15 @@ def count_violations(diff_files: dict[str, str], baseline: list[dict]) -> int:
                 if "hints" in checks and node.returns is None and not any(a.annotation for a in args):
                     violations += 1
     return violations
+
+
+def sup_current_score(answer: str, current: str = "dynamodb", superseded: str = "postgres") -> str:
+    """Slot-scored supersession check (spec: never free-text NLP). First non-empty
+    line names the choice; 'review' rows are counted separately, never dropped."""
+    first = next((ln for ln in (answer or "").splitlines() if ln.strip()), "").lower()
+    has_cur, has_old = current in first, superseded in first
+    if has_cur and not has_old:
+        return "pass"
+    if has_old and not has_cur:
+        return "fail"
+    return "review"
