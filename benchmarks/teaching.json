@@ -1,0 +1,20 @@
+[
+  {"session": 1, "tier": "implicit", "prompts": [
+    "Before we start: some project context. API errors here are returned as dicts with code and message keys so clients get machine-parseable failures. No action needed.",
+    "Also, we chose Postgres over MySQL for transactional integrity under concurrent writes.",
+    "For caching we went with an in-memory LRU cache instead of Redis, to avoid an infra dependency.",
+    "One rule for this codebase: never log request data."
+  ]},
+  {"session": 1, "tier": "explicit", "prompts": [
+    "Remember this for future sessions: API errors are returned as dicts with code and message keys so clients get machine-parseable failures.",
+    "Remember this decision: we chose Postgres over MySQL for transactional integrity under concurrent writes.",
+    "Remember this decision: caching uses an in-memory LRU cache instead of Redis, to avoid an infra dependency.",
+    "Remember this rule and always apply it: never log request data."
+  ]},
+  {"session": 2, "tier": "implicit", "prompts": [
+    "Update on storage: we're migrating from Postgres to DynamoDB for horizontal write scaling. Going forward DynamoDB is the database decision; the Postgres choice is superseded."
+  ]},
+  {"session": 2, "tier": "explicit", "prompts": [
+    "Remember this update and forget the old value: the database is now DynamoDB, chosen for horizontal write scaling. The earlier Postgres decision is superseded."
+  ]}
+]
