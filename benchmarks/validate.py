@@ -33,6 +33,9 @@ PAIRED_METRICS = ("tokens_total", "cost_usd", "turns", "tool_calls", "duration_m
 MEDIAN_METRICS = ("tokens_total", "cost_usd", "turns", "tool_calls",
                   "duration_ms", "violations", "rationale", "success")
 EDITING_KINDS = ("convention", "efficiency", "continuity")
+# memory_campaign.py's headline tasks (memory_tasks.json's "headline": true).
+# Kept as a literal, like EDITING_KINDS above, so this validator notices drift.
+MEMORY_HEADLINE_TASKS = ("sup-current", "cont-log")
 # Stable display order for known conditions; unknown names are appended.
 CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
                    "with", "claudemd_with")
@@ -128,6 +131,8 @@ def validate(campaign_dir):
     _check_paired(ok_rows, warnings, recomputed)
     _check_chains(rows, failures)
     _check_interleaving(rows, warnings)
+    _check_memory_isolation(rows, failures)
+    _check_tier_coverage(rows, warnings)
 
     return {"ok": not failures, "failures": failures, "warnings": warnings,
             "recomputed": recomputed}
@@ -342,6 +347,39 @@ def _check_interleaving(rows, warnings):
             warnings.append(f"condition '{c}' ran as one contiguous time block "
                             f"before all other conditions — conditions were not "
                             f"interleaved")
+
+
+def _check_memory_isolation(rows, failures):
+    """Check 9 (memory campaign): a measured row that leaked state across arms
+    (contaminated=True) is a failure. Enforcement rows (which deliberately act
+    on the fixture) and teach rows are exempt. No-op for legacy campaigns whose
+    rows predate Task 6's arm/tier/phase/contaminated fields."""
+    for r in rows:
+        if "arm" not in r or not r.get("contaminated"):
+            continue
+        if r.get("phase") != "measure" or r.get("kind") == "enforcement":
+            continue
+        failures.append(f"contaminated row: {r.get('task_id')}/{r.get('arm')}/"
+                        f"rep{r.get('rep')}")
+
+
+def _check_tier_coverage(rows, warnings):
+    """Check 10 (memory campaign): each headline task/arm needs equal, non-zero
+    implicit vs. explicit measured reps. No-op for legacy campaigns (no `arm`)."""
+    counts = {}
+    for r in rows:
+        if "arm" not in r:
+            continue
+        if r.get("phase") != "measure" or r.get("task_id") not in MEMORY_HEADLINE_TASKS:
+            continue
+        cell = counts.setdefault((r["task_id"], r["arm"]), {"implicit": 0, "explicit": 0})
+        if r.get("tier") in cell:
+            cell[r["tier"]] += 1
+    for (task_id, arm), c in counts.items():
+        imp, exp = c["implicit"], c["explicit"]
+        if imp != exp or imp < 1 or exp < 1:
+            warnings.append(f"tier imbalance for {task_id}/{arm}: "
+                            f"implicit={imp} explicit={exp}")
 
 
 # --- rendering --------------------------------------------------------------
