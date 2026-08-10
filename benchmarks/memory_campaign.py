@@ -7,16 +7,26 @@ implements its own flow: teach -> snapshot -> per-task restore -> measure, becau
 never from one task's leftover edits.
 
 Tier alternates by rep (implicit sessions 0,2,4..., explicit 1,3,5...) so both
-phrasings get equal reps across a run without a separate --tier flag. Teaching rows
-are recorded (phase="teach") with the same token fields as measured rows: teaching
-has a token cost too, and the report needs to show it.
+phrasings get equal reps across a run without a separate --tier flag. Teaching runs
+ONE session per scripted prompt (rows are phase="teach", distinguished by
+`prompt_index`): a joined multi-prompt blob exceeds contexer's
+`store._MAX_DIRECTIVE_LEN` (300 chars), so the taught rule would be rejected by the
+constraint-capture path and the capture-rate stat would measure the harness's own
+prompt joining rather than either product. Teaching rows carry the same token
+fields as measured rows: teaching has a token cost too, and the report shows it.
 
-Isolation is checked twice: `write_home_settings` cannot actually disable the
-memory tool (see memory_home.py), so the "without" arm's cleanliness is asserted
-post-hoc via `contaminated`, not enforced up front."""
+Isolation is asymmetric and that asymmetry is disclosed (MEMORY_PILOT.md): the
+memory tool CANNOT be turned off, so the "with" arm counts the memory files each
+of its sessions wrote (`memory_leak_files`) and then deletes them before the next
+session and before the post-teaching snapshot. Within-session writes cannot help
+the session that made them; deleting kills the two real vectors — cross-session
+leakage, and contexer's own SessionStart `sync_memory` ingesting the opponent's
+captures. `contaminated` is then a genuine tripwire: it flags memory files that
+were present when a measured session STARTED (i.e. the sweep failed)."""
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -27,27 +37,48 @@ from pathlib import Path
 
 from benchmarks import score
 from benchmarks.fixtures.generate import build_webapi
-from benchmarks.memory_home import memory_files, write_home_settings
+from benchmarks.memory_home import memory_dir, memory_files
 from benchmarks.otel import OtelReceiver
-from benchmarks.run import (_append, _condition_b_setup, _fresh, _mine_baseline,
+from benchmarks.run import (_MANAGED_SETTINGS, _append, _condition_b_setup, _fresh,
                              _run_session, _session_env, _telemetry_check, _tool_calls)
 
 TEACHING_FILE = Path(__file__).resolve().parent / "teaching.json"
 TASKS_FILE = Path(__file__).resolve().parent / "memory_tasks.json"
 _SRC = Path(__file__).resolve().parent.parent  # this contexer checkout: uv's --project root
 _COPY_IGNORE = shutil.ignore_patterns("tmp_pack_*", "tmp_idx_*", "tmp_rev_*", "tmp_mtimes_*")
-_ENF_REGEX = r"log\w*\(.*(payload|request)"
+# The ONE request-data-logging matcher in this campaign: it is both the pattern the
+# enforcement task arms the commit guard with and the pattern cont-log is scored by,
+# so the demonstration and the statistic can never disagree about what a violation is.
+# `(\.\w+)*` covers the idiomatic `logger.info(...)` / `log.debug(...)` spellings —
+# without it the pattern only ever matched a bare `log(...)`, which would have made
+# the armed guard silently unfirable on the very line the enf-commit prompt asks for.
+# ponytail: known ceiling — it also matches a log line that merely says the word
+# "request" while logging no request data. Tightening needs an AST check, not a
+# second regex; the same pattern must keep governing both sites.
+_ENF_REGEX = r"log\w*(\.\w+)*\(.*(payload|request)"
 
 
 def _base_row(task_id, kind, arm, rep, tier, phase, model) -> dict:
     return {"task_id": task_id, "kind": kind, "chain": "", "step": 0,
             "condition": arm, "arm": arm, "rep": rep, "model": model,
-            "tier": tier, "phase": phase, "ts": time.time(),
+            "tier": tier, "phase": phase, "ts": time.time(), "prompt_index": 0,
             "tokens_in": 0, "tokens_out": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
             "tokens_total": 0, "cost_usd": 0.0, "turns": 0, "duration_ms": 0, "tool_calls": 0,
             "violations": 0, "rationale": 0.0, "success": False, "result_snippet": "",
             "otel_tokens_total": 0, "otel_cost_usd": 0.0, "telemetry_ok": None, "error": "",
-            "capture": {}, "sup_result": "", "contaminated": False}
+            "capture": {}, "sup_result": "", "contaminated": False,
+            "memory_leak_files": 0, "enf_outcome": ""}
+
+
+def _sweep_memory(home: Path, work: Path) -> int:
+    """Count the memory files present, then delete the memory directory. Called
+    after every "with"-arm session (see module docstring). Returns the count, which
+    is recorded rather than discarded: how much the memory tool wrote alongside
+    Contexer is an honest stat, and it is the only remaining evidence that the
+    opponent's mechanism could not be disabled."""
+    n = len(memory_files(home, work))
+    shutil.rmtree(memory_dir(home, work), ignore_errors=True)
+    return n
 
 
 def _run_and_record(row: dict, work: Path, home: Path, prompt: str, claude_cmd: str,
@@ -130,7 +161,7 @@ def _enf_commit_setup(work: Path, home: Path) -> tuple[bool, str]:
 
 
 def _score_task(row: dict, task: dict, work: Path, arm: str, base_sha: str,
-                baseline: list, check_cmd: str, chk, res: dict) -> None:
+                check_cmd: str, chk, res: dict) -> None:
     scorer = task["scorer"]
     if scorer == "sup_current":
         row["sup_result"] = score.sup_current_score(res.get("result", ""))
@@ -139,19 +170,47 @@ def _score_task(row: dict, task: dict, work: Path, arm: str, base_sha: str,
         row["rationale"] = score.rationale_score(res.get("result", ""), task["gold"])
         row["success"] = row["rationale"] >= 1.0
     elif scorer == "violations":
-        row["violations"] = score.count_violations(score.changed_files(str(work), base_sha), baseline)
+        # cont-log tests the TAUGHT rule ("never log request data"), so it is scored
+        # against what this session actually wrote — not against the fixture's
+        # snake_case/type-hint baseline, which the teaching script never mentions.
+        # `_ENF_REGEX` is the single request-logging matcher in this module; the
+        # enforcement task's armed guard uses the very same pattern.
+        changed = score.changed_files(str(work), base_sha)
+        if not changed:
+            # A session that edits nothing trivially violates nothing. Without this
+            # it would score violations=0 + green pytest = "compliant".
+            row["error"] = "cont-log: no files changed"
+            row["success"] = False
+            return
+        row["violations"] = sum(1 for text in changed.values()
+                                if re.search(_ENF_REGEX, text, re.I))
         row["success"] = row["violations"] == 0 and (not check_cmd or chk.returncode == 0)
     elif scorer == "enforcement":
         msgs = subprocess.run(["git", "-C", str(work), "log", "--format=%s"],
                               capture_output=True, text=True).stdout
-        row["success"] = arm == "with" and "debug logging" not in msgs
+        committed = "debug logging" in msgs
+        # "blocked" is only honest if a violating edit actually reached the index and
+        # the pre-commit hook stopped it there. A model that simply declined to write
+        # the log line is a different (and non-demonstrating) outcome.
+        staged = subprocess.run(["git", "-C", str(work), "diff", "--cached"],
+                                capture_output=True, text=True).stdout
+        row["enf_outcome"] = ("committed" if committed
+                              else "blocked" if re.search(_ENF_REGEX, staged, re.I)
+                              else "no violating change attempted")
+        row["success"] = arm == "with" and not committed
 
 
 def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: int,
                   claude_cmd: str, seed: int, model: str, rx: OtelReceiver,
-                  baseline: list, capture: dict) -> dict:
+                  capture: dict) -> dict:
     row = _base_row(task["id"], task["kind"], arm, rep, tier, "measure", model)
     row["capture"] = capture
+    if arm == "with":
+        # PRE-session, deliberately: every with-arm session is swept clean afterwards
+        # (`_sweep_memory`), so anything here survived the sweep or the snapshot and
+        # is genuine cross-session leakage — the tripwire the spec asks for. Counting
+        # post-session instead would flag every row, since the tool cannot be disabled.
+        row["contaminated"] = bool(memory_files(home, work))
     try:
         if task["scorer"] == "enforcement" and arm == "with":
             ok, err = _enf_commit_setup(work, home)
@@ -170,16 +229,16 @@ def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: 
         if check_cmd:
             chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
                                  timeout=600, env=_session_env(home, 0))
-        _score_task(row, task, work, arm, base_sha, baseline, check_cmd, chk, res)
+        _score_task(row, task, work, arm, base_sha, check_cmd, chk, res)
     except Exception as exc:  # a failed run is a data point, never a crash (Critical 2)
         row["error"] = repr(exc)
     finally:
-        # Post-run, always (Critical 1): contamination must reflect what the
-        # MEASURED session itself did (e.g. memory tool writing mid-session), not
-        # the pre-session restored-snapshot state computed before it even ran.
         if arm == "with":
-            row["contaminated"] = bool(memory_files(home, work))
+            row["memory_leak_files"] = _sweep_memory(home, work)
         elif arm == "memory":
+            # Post-run, always: the memory arm's contamination is contexer state
+            # appearing where contexer was never installed, which can only be
+            # created DURING the session.
             c = score.capture_stats(home, work)
             row["contaminated"] = (home / ".contexer").exists() and c["contexer_entries"] > 0
     return row
@@ -192,38 +251,65 @@ def _restore(home: Path, work: Path, snap_home: Path, snap_work: Path) -> None:
     shutil.copytree(snap_work, work, ignore=_COPY_IGNORE)
 
 
-def _run_arm(out: Path, td: Path, golden: Path, baseline: list, tasks: list, teaching: list,
+def _run_arm(out: Path, td: Path, golden: Path, tasks: list, teaching: list,
             arm: str, tier: str, rep: int, claude_cmd: str, seed: int, model: str,
             rx: OtelReceiver) -> None:
     tag = f"{arm}-{tier}-{rep}"
     work, home = _fresh(td, golden, tag)
-    if arm == "with":
-        _condition_b_setup(str(work), home, "")
-        write_home_settings(home, memory_enabled=False)
-    elif arm == "memory":
-        write_home_settings(home, memory_enabled=True)
-    # "without": nothing — the bare arm never teaches, never installs anything.
+    # No write_home_settings call: the pilot proved it writes {} in BOTH arms (no
+    # disable key exists), so it bought nothing — and running it AFTER
+    # _condition_b_setup overwrote the five hook events `contexer install` had just
+    # written into the same file, silently measuring the with arm with Contexer's
+    # entire deterministic mechanism switched off. Never reintroduce a post-install
+    # settings write here.
+    try:
+        if arm == "with":
+            _condition_b_setup(str(work), home, "")
+        # "memory"/"without": nothing — memory is default-on, the bare arm never teaches.
+    except Exception as exc:  # a paid multi-hour run must not abort on a flaky install
+        row = _base_row(f"setup-{arm}", "setup", arm, rep, tier, "setup", model)
+        row["error"] = f"arm setup failed: {exc!r}"
+        _append(out, row)
+        return
 
     if arm != "without":
         sessions = sorted((s for s in teaching if s["tier"] == tier), key=lambda s: s["session"])
         for s in sessions:
-            row = _base_row(f"teach-s{s['session']}", "teach", arm, rep, tier, "teach", model)
-            try:
-                _run_and_record(row, work, home, "\n\n".join(s["prompts"]), claude_cmd, model, rx)
-            except Exception as exc:  # a failed run is a data point, never a crash
-                row["error"] = repr(exc)
-            _append(out, row)
+            # One session PER PROMPT: a joined blob exceeds store._MAX_DIRECTIVE_LEN
+            # and the taught rule would never land as an approved constraint.
+            for i, prompt in enumerate(s["prompts"]):
+                row = _base_row(f"teach-s{s['session']}-p{i}", "teach", arm, rep, tier,
+                                "teach", model)
+                row["prompt_index"] = i
+                try:
+                    _run_and_record(row, work, home, prompt, claude_cmd, model, rx)
+                except Exception as exc:  # a failed run is a data point, never a crash
+                    row["error"] = repr(exc)
+                if arm == "with":
+                    row["memory_leak_files"] = _sweep_memory(home, work)
+                _append(out, row)
     capture = score.capture_stats(home, work)
 
     snap_home, snap_work = td / f"snap-h-{tag}", td / f"snap-w-{tag}"
-    shutil.copytree(home, snap_home)
-    shutil.copytree(work, snap_work, ignore=_COPY_IGNORE)
-
-    for task in tasks:
-        _restore(home, work, snap_home, snap_work)
-        row = _measure_task(task, work, home, arm, tier, rep, claude_cmd, seed, model, rx,
-                            baseline, capture)
-        _append(out, row)
+    try:
+        try:
+            shutil.copytree(home, snap_home)
+            shutil.copytree(work, snap_work, ignore=_COPY_IGNORE)
+        except Exception as exc:
+            row = _base_row(f"snapshot-{arm}", "setup", arm, rep, tier, "setup", model)
+            row["error"] = f"arm snapshot failed: {exc!r}"
+            _append(out, row)
+            return
+        for task in tasks:
+            _restore(home, work, snap_home, snap_work)
+            row = _measure_task(task, work, home, arm, tier, rep, claude_cmd, seed, model,
+                                rx, capture)
+            _append(out, row)
+    finally:
+        # 3 arms x 16 reps of full .claude transcripts is a lot of disk to hold for
+        # a run's whole duration; each arm-rep's snapshots die with its task loop.
+        shutil.rmtree(snap_home, ignore_errors=True)
+        shutil.rmtree(snap_work, ignore_errors=True)
 
 
 def _claude_version(claude_cmd: str) -> str:
@@ -248,6 +334,7 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "claude_version": _claude_version(claude_cmd),
+        "managed_settings_present": _MANAGED_SETTINGS.exists(),
         "teaching_frozen_sha": _sha256(TEACHING_FILE),
         "memory_tasks_sha": _sha256(TASKS_FILE)}, indent=2))
 
@@ -257,11 +344,10 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             golden = build_webapi(td / "golden", seed=seed)
-            baseline = _mine_baseline(str(golden))
             for rep in range(reps):
                 tier = "implicit" if rep % 2 == 0 else "explicit"
                 for arm in conditions:
-                    _run_arm(out, td, golden, baseline, tasks, teaching, arm, tier, rep,
+                    _run_arm(out, td, golden, tasks, teaching, arm, tier, rep,
                              claude_cmd, seed, model, rx)
     finally:
         rx.stop()

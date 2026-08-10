@@ -23,11 +23,21 @@ def _is_test_path(rel: str) -> bool:
     return name.startswith("test_") or name.endswith("_test.py") or "tests" in parts[:-1]
 
 
-def rationale_score(answer: str, gold: list[str]) -> float:
+def rationale_score(answer: str, gold: list) -> float:
+    """Fraction of the gold facts the answer contains.
+
+    A gold item is either a string (that substring must appear) or a LIST of
+    accepted spellings for the same fact, any one of which counts. The variant
+    form exists so a gold fact cannot reward verbatim echoing of one system's
+    stored wording: "machine-parseable" and "machine readable" are the same
+    fact, and a scorer that only accepts the first measures architecture
+    (Contexer injects the sentence verbatim) rather than recall."""
     if not gold:
         return 1.0
     low = answer.lower()
-    return sum(1 for g in gold if g.lower() in low) / len(gold)
+    hits = sum(1 for g in gold
+               if any(a.lower() in low for a in ([g] if isinstance(g, str) else g)))
+    return hits / len(gold)
 
 
 def changed_files(repo: str, base: str = "HEAD") -> dict[str, str]:
