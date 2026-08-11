@@ -1426,6 +1426,105 @@ class TestGuardInstallHook:
         _run_main(monkeypatch, "guard", "--uninstall-hook")
         assert "no hook installed" in capsys.readouterr().out.lower()
 
+    def test_undecodable_hook_refuses_install_and_preserves_it(
+            self, guard_repo, monkeypatch, capsys):
+        """A hook we cannot decode is a hook we must not touch. Before the encoding
+        pin these three paths read with the LOCALE codec, so an ordinary hook echoing
+        a non-ASCII message raised UnicodeDecodeError under LC_ALL=C — a traceback out
+        of install, a traceback out of uninstall, and "not installed" from status."""
+        _stub_guard_bin(monkeypatch)
+        hook = _guard_hook_path(guard_repo)
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        raw = b'#!/bin/sh\necho "\xff\xfe not utf-8"\n'   # undecodable under ANY locale
+        hook.write_bytes(raw)
+
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "--install-hook")
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "not readable as UTF-8" in err
+        assert "contexer guard" in err          # the block is handed over for manual use
+        assert hook.read_bytes() == raw         # byte-preserved, not clobbered
+
+    def test_undecodable_hook_refuses_uninstall_instead_of_claiming_none(
+            self, guard_repo, monkeypatch, capsys):
+        hook = _guard_hook_path(guard_repo)
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        raw = ("#!/bin/sh\n# >>> contexer guard >>>\ncontexer guard\n"
+               "# <<< contexer guard <<<\n").encode() + b'echo "\xff\xfe"\n'
+        hook.write_bytes(raw)
+
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard", "--uninstall-hook")
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "not readable as UTF-8" in err
+        assert ">>> contexer guard >>>" in err   # tells them what to delete by hand
+        assert hook.read_bytes() == raw
+
+    def test_status_says_unknown_not_not_installed_for_undecodable_hook(
+            self, guard_repo, monkeypatch):
+        hook = _guard_hook_path(guard_repo)
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_bytes(b'#!/bin/sh\n# >>> contexer guard >>>\necho "\xff"\n')
+        line = cli._guard_hook_status_line()
+        assert "not readable as UTF-8" in line
+        assert "not installed" not in line       # ours IS in there; do not deny it
+
+    def test_unreadable_hook_reports_the_os_error_not_an_encoding_one(
+            self, guard_repo, monkeypatch):
+        """An OSError and a decode error are different diagnoses. Reporting "not
+        readable as UTF-8" for a mode-0o000 hook sends the developer after an encoding
+        problem that isn't there."""
+        hook = _guard_hook_path(guard_repo)
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        def denied(self, *a, **kw):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "read_bytes", denied)
+        line = cli._guard_hook_status_line()
+        assert "could not be read" in line and "Permission denied" in line
+        assert "UTF-8" not in line
+
+    def test_crlf_hook_keeps_its_line_endings(self, guard_repo, monkeypatch):
+        """Byte-exactness, not just decodability. Text mode translates newlines, so a
+        CRLF hook read through it came back LF-only — every foreign line silently lost
+        its \\r, and uninstall did not restore it. Reads/writes are bytes now, so the
+        developer's endings survive and our own block stays LF (a \\r in a `#!/bin/sh`
+        script breaks it under Git-for-Windows sh)."""
+        _stub_guard_bin(monkeypatch)
+        hook = _guard_hook_path(guard_repo)
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        foreign = b"#!/bin/sh\r\necho hi\r\n"
+        hook.write_bytes(foreign)
+
+        _run_main(monkeypatch, "guard", "--install-hook")
+        appended = hook.read_bytes()
+        assert appended.startswith(foreign)                     # \r intact, byte for byte
+        block = appended[len(foreign):]
+        assert b"\r" not in block                               # our block is LF-only
+
+        _run_main(monkeypatch, "guard", "--uninstall-hook")
+        assert hook.read_bytes() == foreign
+
+    def test_utf8_hook_round_trips_regardless_of_locale(self, guard_repo, monkeypatch):
+        """The pin also fixes the silent half: a hook with non-ASCII text is read and
+        rewritten as UTF-8, so appending our block cannot mangle the developer's bytes."""
+        _stub_guard_bin(monkeypatch)
+        hook = _guard_hook_path(guard_repo)
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        foreign = '#!/bin/sh\necho "✖ lint failed — naïve check"\n'
+        hook.write_text(foreign, encoding="utf-8")
+
+        _run_main(monkeypatch, "guard", "--install-hook")
+        appended = hook.read_text(encoding="utf-8")
+        assert appended.startswith(foreign)
+
+        _run_main(monkeypatch, "guard", "--uninstall-hook")
+        assert hook.read_text(encoding="utf-8") == foreign
+
     def test_install_falls_back_to_argv0_when_which_fails(self, guard_repo, monkeypatch):
         monkeypatch.setattr(cli.shutil, "which", lambda name: None)
         monkeypatch.setattr(cli, "_guard_bin_supports_guard", lambda p: True)
