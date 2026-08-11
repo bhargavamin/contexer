@@ -58,6 +58,40 @@ class TestConfigConventions:
         assert any("single" in c for c in contents)
         assert all(i["tier"] == "high" for i in items)
 
+    def test_ruff_lint_select_detected(self, tmp_path):
+        # Without this the repo's own blocking `ruff check` gate mined nothing at all:
+        # _emit_ruff read only line-length and quote-style, so a session was never told
+        # linting was enforced.
+        _write(tmp_path / "pyproject.toml", textwrap.dedent("""\
+            [tool.ruff.lint]
+            select = ["E4", "E7", "E9", "F"]
+        """))
+        items = miner._config_conventions(tmp_path)
+        hit = next(c for c in _contents(items) if "Ruff lint enforced" in c)
+        assert "E4, E7, E9, F" in hit
+        assert all(i["tier"] == "high" for i in items)
+
+    def test_ruff_legacy_top_level_select_detected(self, tmp_path):
+        # ruff moved `select` under [lint] in 0.2; configs on the old spelling are still
+        # declaring the same rule, so both are read.
+        _write(tmp_path / "pyproject.toml", '[tool.ruff]\nselect = ["E", "F"]\n')
+        assert any("Ruff lint enforced" in c
+                   for c in _contents(miner._config_conventions(tmp_path)))
+
+    def test_ruff_lint_select_truncated_when_long(self, tmp_path):
+        rules = [f"R{i}" for i in range(12)]
+        _write(tmp_path / "pyproject.toml",
+               f"[tool.ruff.lint]\nselect = {rules!r}\n".replace("'", '"'))
+        hit = next(c for c in _contents(miner._config_conventions(tmp_path))
+                   if "Ruff lint enforced" in c)
+        assert "R7" in hit and "R8" not in hit and "…" in hit
+
+    def test_ruff_without_select_emits_no_lint_convention(self, tmp_path):
+        # Silence over noise: a [tool.ruff] table that selects nothing declares nothing.
+        _write(tmp_path / "pyproject.toml", "[tool.ruff]\ntarget-version = \"py312\"\n")
+        assert not any("Ruff lint enforced" in c
+                       for c in _contents(miner._config_conventions(tmp_path)))
+
     def test_mypy_strict_detected(self, tmp_path):
         _write(tmp_path / "pyproject.toml", "[tool.mypy]\nstrict = true\n")
         items = miner._config_conventions(tmp_path)

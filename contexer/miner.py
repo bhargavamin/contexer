@@ -110,6 +110,20 @@ def _emit_ruff(cfg: dict, source: str) -> list[dict]:
     if quote:
         items.append({"content": f"Quote style '{quote}' enforced by ruff ({source})",
                       "subtype": "convention", "tier": "high"})
+    # Selected rule set. Read from both spellings: ruff moved `select` under [lint] in
+    # 0.2, and plenty of configs still carry the top-level key. Without this a repo whose
+    # CI blocks on `ruff check` mined nothing about linting at all — the gate existed and
+    # no session was ever told, which is the one failure this module is here to prevent.
+    lint = cfg.get("lint") if isinstance(cfg.get("lint"), dict) else {}
+    select = lint.get("select") or cfg.get("select")
+    if isinstance(select, list):
+        rules = [str(r) for r in select if isinstance(r, str)]
+        if rules:
+            # Truncated: a repo selecting 40 rule groups would otherwise bury the fact
+            # that linting is enforced under the list itself.
+            shown = ", ".join(rules[:8]) + (", …" if len(rules) > 8 else "")
+            items.append({"content": f"Ruff lint enforced, rules selected: {shown} ({source})",
+                          "subtype": "convention", "tier": "high"})
     return items
 
 
