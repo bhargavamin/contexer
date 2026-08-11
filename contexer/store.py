@@ -351,7 +351,10 @@ def _store_lock(slug: str):
         return
     STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     lock_path = STORE_DIR / f"{slug}.lock"
-    f = open(lock_path, "w")
+    # Binary, not text: only the fd is ever used (flock), nothing is written, so a text
+    # wrapper would just be a locale-dependent codec attached to a file we never encode
+    # into. "wb" says that outright — and keeps this call out of the text-IO invariant.
+    f = open(lock_path, "wb")
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         yield
