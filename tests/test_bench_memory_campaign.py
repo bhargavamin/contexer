@@ -198,3 +198,14 @@ def test_campaign_survives_a_crashing_session(tmp_path):
     assert len(rows) == 13
     errored = sum(1 for r in rows if r["error"])
     assert 0 < errored < 13
+
+
+def test_enf_regex_needs_a_word_boundary():
+    """`catalog`/`blog`/`dialog` all contain "log"; without \\b the armed guard
+    would block ordinary code and cont-log would score false violations."""
+    import re
+    from benchmarks.memory_campaign import _ENF_REGEX
+    for clean in ("catalog.get(request)", "blog.render(request)", "dialog(payload)"):
+        assert not re.search(_ENF_REGEX, clean, re.I), clean
+    for dirty in ("logger.info(payload)", "log.debug(request.body)", "self.log(payload)"):
+        assert re.search(_ENF_REGEX, dirty, re.I), dirty

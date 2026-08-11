@@ -30,7 +30,8 @@ EXPECTED_KEYS = (
 # "arm"). Required, not warned about: _check_memory_isolation short-circuits on a
 # missing "contaminated", so a producer refactor that dropped the field would make
 # the campaign's central isolation check pass vacuously.
-MEMORY_KEYS = ("arm", "tier", "phase", "contaminated", "capture", "sup_result")
+MEMORY_KEYS = ("arm", "tier", "phase", "contaminated", "capture", "sup_result",
+               "memory_leak_files")
 TOKEN_PARTS = ("tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_write")
 # Cost-like metrics: lower is better, so a paired "win" for the first arm of a
 # pair means its value is strictly below the second arm's.

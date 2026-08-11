@@ -55,7 +55,10 @@ _COPY_IGNORE = shutil.ignore_patterns("tmp_pack_*", "tmp_idx_*", "tmp_rev_*", "t
 # ponytail: known ceiling — it also matches a log line that merely says the word
 # "request" while logging no request data. Tightening needs an AST check, not a
 # second regex; the same pattern must keep governing both sites.
-_ENF_REGEX = r"log\w*(\.\w+)*\(.*(payload|request)"
+# \b anchors the match to a real `log`-prefixed identifier: without it the
+# pattern fires inside `catalog.get(request)`, `blog.render(request)`,
+# `dialog(payload)` — words that merely contain "log".
+_ENF_REGEX = r"\blog\w*(\.\w+)*\(.*(payload|request)"
 
 
 def _base_row(task_id, kind, arm, rep, tier, phase, model) -> dict:

@@ -9,7 +9,7 @@
     "Remember this for future sessions: API errors are returned as dicts with code and message keys so clients get machine-parseable failures.",
     "Remember this decision: we chose Postgres over MySQL for transactional integrity under concurrent writes.",
     "Remember this decision: caching uses an in-memory LRU cache instead of Redis, to avoid an infra dependency.",
-    "Remember this rule and always apply it: never log request data."
+    "Remember one rule for this codebase, and always apply: never log request data."
   ]},
   {"session": 2, "tier": "implicit", "prompts": [
     "Update on storage: we're migrating from Postgres to DynamoDB for horizontal write scaling. Going forward DynamoDB is the database decision; the Postgres choice is superseded."

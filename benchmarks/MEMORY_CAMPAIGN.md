@@ -53,6 +53,12 @@ to catch a broken harness before it burns approved budget.
   contaminated. A contaminated row is not downweighted or footnoted, it is a
   validator failure that must be fixed (usually by re-running), not published
   around.
+- **Residual, disclosed:** because `contaminated` is read before the `with`
+  session runs, a memory file that session writes *and then reads back within
+  the same session* is invisible to it (the sweep deletes it afterwards, so no
+  later session sees it). Publication should state that the `with` arm's
+  isolation is cross-session, not within-session; `memory_leak_files` is the
+  per-session upper bound on how much that could ever have been.
 
 ### Pre-registered: what carries the headline
 
