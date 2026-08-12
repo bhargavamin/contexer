@@ -263,7 +263,7 @@ def version() -> None:
 
 def review() -> None:
     """Interactively review and approve/ignore/edit pending engineering decisions."""
-    from contexer import store
+    from contexer import conflicts, store
 
     repo_path = store._git_root(os.getcwd())
     if not repo_path:
@@ -291,7 +291,17 @@ def review() -> None:
             rev = entry.get("revision", 1)
             print(f"[{subtype}] Suggested update")
             print(f'  Current (revision {rev}): "{store._clip_body(entry["content"])}"')
-            print(f'  Detected:                "{store._clip_body(prop.get("content", ""))}"\n')
+            print(f'  Detected:                "{store._clip_body(prop.get("content", ""))}"')
+            memo = entry.get("conflict_memo")
+            if memo and memo.get("pair") == conflicts._conflict_pair_key(entry):
+                memo_date = (memo.get("created_at") or "")[:10]
+                if memo.get("choice") == "update":
+                    print(f"  The update was picked with the developer on {memo_date}"
+                          f" — approve to formalize (dismiss drops it)")
+                else:
+                    print(f"  The update was declined with the developer on {memo_date}"
+                          f" — dismiss to formalize (approve applies it instead)")
+            print()
         else:
             score, factors = store._compute_confidence(entry)
             title, body = store._title_and_body(entry)

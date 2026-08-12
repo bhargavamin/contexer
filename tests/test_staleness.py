@@ -213,8 +213,9 @@ def test_identical_content_recapture_reanchors_and_clears_note(repo):
 
 def test_gated_correction_defers_reanchor_until_approved(repo):
     """A significant (architecture, AI-inferred) correction attaches a Suggested Update —
-    the live entry keeps rendering its OLD content until a developer approves, so its
-    anchor must keep describing that old content. Only approval re-anchors."""
+    the live entry keeps its OLD content as the standing one until a developer approves
+    (#193 renders the proposal beside it, clearly labeled unreviewed), so its anchor must
+    keep describing that old content. Only approval re-anchors."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
                                    source_files=["auth.py"])
     assert store._entry_status(_entry(repo)) in ("approved", "suggested")  # trusted, renders
@@ -233,7 +234,11 @@ def test_gated_correction_defers_reanchor_until_approved(repo):
     assert entry["content"] == store._normalize_content(SUMMARY)
     out = store.get_context(repo, query="auth")
     assert " [may be stale" in out
-    assert "JWT" not in out  # proposed content is not yet what's rendered
+    # #193: the proposal IS rendered now, but only as the labeled unreviewed-update line —
+    # never as the entry's standing content, which is still the old text.
+    update_lines = [ln for ln in out.splitlines() if "Unreviewed update" in ln]
+    assert len(update_lines) == 1 and "JWT" in update_lines[0]
+    assert "JWT" not in out.replace(update_lines[0], "")
 
     ok, _ = store.approve_decision(repo, eid, "approve")
     assert ok

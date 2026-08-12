@@ -733,6 +733,50 @@ class TestReviewAnchorCandidates:
         assert "Would anchor" not in out
 
 
+class TestReviewConflictMemo:
+    def _conflicted(self, tmp_repo, store):
+        """An approved decision carrying an ai-sourced Suggested Update (issue #193 shape)."""
+        store.update_decision(tmp_repo, "Use Postgres for the decision store", "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = next(e for e in data["entries"] if e.get("type") == "decision")
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+        eid = entry["id"]
+        ok, rid = store.update_decision(
+            tmp_repo, "Switch to DynamoDB for the decision store", "s2", "architecture",
+            replace_id=eid)
+        assert ok and rid == eid
+        return eid
+
+    def test_review_prints_update_choice_memo_line(self, tmp_repo, monkeypatch, capsys):
+        from contexer import store
+
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        eid = self._conflicted(tmp_repo, store)
+        store.record_conflict_memo(tmp_repo, eid, "update")
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")
+        cli.review()
+
+        out = capsys.readouterr().out
+        assert "The update was picked with the developer on" in out
+        assert "approve to formalize (dismiss drops it)" in out
+
+    def test_review_prints_standing_choice_memo_line(self, tmp_repo, monkeypatch, capsys):
+        from contexer import store
+
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        eid = self._conflicted(tmp_repo, store)
+        store.record_conflict_memo(tmp_repo, eid, "standing")
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")
+        cli.review()
+
+        out = capsys.readouterr().out
+        assert "The update was declined with the developer on" in out
+        assert "dismiss to formalize (approve applies it instead)" in out
+
+
 # ── guard ────────────────────────────────────────────────────────────────────
 
 @pytest.fixture

@@ -161,6 +161,28 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
 
 
 @mcp.tool()
+def resolve_conflict(entry_id: str, choice: str, repo_path: str = "") -> str:
+    """Record the developer's EXPLICIT pick between a decision's standing (approved) version
+    and its unreviewed Suggested Update, as shown in a labeled conflict render (both versions,
+    with dates). Call this ONLY when the developer themselves stated the pick in a genuine user
+    turn in this conversation. NEVER call it from your own inference, codebase exploration, or
+    judgment about which version looks correct — if the developer hasn't said, ask them. This
+    approves nothing: the update stays pending formal review (review_pending / `contexer
+    review`); a later explicit statement from the developer outranks the memo.
+
+    entry_id: the decision's id exactly as rendered, e.g. (id=6fb28fd9) — at least 8 chars.
+    choice:   'standing' (steer by the current approved version) or 'update' (steer by the
+              unreviewed proposal — its content becomes operative but the approved version
+              still renders as a demoted continuation line, since only a review action fully
+              hides reviewed content).
+    """
+    resolved = store._resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    return store.record_conflict_memo(resolved, entry_id, choice, session_id=SESSION_ID)[1]
+
+
+@mcp.tool()
 def review_pending(repo_path: str = "") -> str:
     """List decisions awaiting the developer's review — brand-new pending-approval decisions and
     suggested updates — each with its id and full content, so you can surface them conversationally

@@ -545,8 +545,12 @@ def _matches_query(pat: "re.Pattern", row: dict) -> bool:
 
     Decisions render title-led, so the heading is often the part a developer remembers - a
     query that hits only the title must not silently drop the row (an authored title can be
-    wholly different words from the body). Mirrors the web app's search rule."""
-    return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or ""))
+    wholly different words from the body). Mirrors the web app's search rule.
+
+    An open proposal's content counts too (#193): it now RENDERS as a labeled unreviewed
+    update, so a query using only the update's terms must reach the row that shows it."""
+    return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or "")
+                or pat.search((row.get("proposed_revision") or {}).get("content", "")))
 
 
 def _find_match(content: str, existing: list) -> dict | None:
@@ -1724,6 +1728,7 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
     entry.pop("proposed_revision", None)
+    entry.pop("conflict_memo", None)          # the pair it resolved no longer exists
     if prop.get("clear_anchors"):
         entry.pop("source_files", None)
         entry.pop("anchor_commit", None)
@@ -2182,6 +2187,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if action in ("dismiss", "ignore"):
             rev = entry.get("revision", 1)
             entry.pop("proposed_revision", None)
+            entry.pop("conflict_memo", None)  # the pair it resolved no longer exists
             return True, f"Dismissed - kept current revision {rev}.", True
         # approve or edit → promote the proposal to a new revision (history preserved).
         entry["status"] = "approved"
@@ -2331,6 +2337,7 @@ def format_pending_review(repo_path: str) -> str:
     twin of the `contexer review` terminal command). Content IS shown here: this is the
     on-demand surface, pulled only when the developer asks to review, so it is where the detail
     belongs (unlike the deliberately terse SessionStart count)."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     pending = get_pending_decisions(repo_path)
     if not pending:
         return "Nothing pending review."
@@ -2354,6 +2361,15 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
             lines.append(f'    detected: "{detected}"')
+            memo = d.get("conflict_memo")
+            if memo and memo.get("pair") == conflicts._conflict_pair_key(d):
+                memo_date = (memo.get("created_at") or "")[:10]
+                if memo.get("choice") == "update":
+                    lines.append(f"    the update was picked with the developer on {memo_date}"
+                                 f" — approve to formalize (dismiss drops it)")
+                else:
+                    lines.append(f"    the update was declined with the developer on {memo_date}"
+                                 f" — dismiss to formalize (approve applies it instead)")
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
@@ -4231,6 +4247,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     (content of the most-recently-injected decisions) after the normal rules injection —
     additionalContext re-injection doesn't otherwise know what the pre-compaction router
     already surfaced this session."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     # Fold any pre-fix stray worktree stores into the canonical store BEFORE the store
     # read below: the first post-upgrade session must render the merged context (and must
     # not show the bootstrap offer over a repo whose context was just recovered).
@@ -4362,11 +4379,15 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
-            title, body = _title_and_body(d)
+            title, body, extras = conflicts._conflict_view(d)
             sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}")
             if body is not None:
                 sys_parts.append(f"    {body}")
+            for extra in extras:
+                sys_parts.append(f"    {extra}")
     if global_rules or pre_loaded:
+        if any(conflicts._has_open_conflict(d) for d in pre_loaded):
+            sys_parts.append(f"\n{conflicts._CONFLICT_GUIDE}")  # blank line off the decision bullets
         sys_parts.append(
             "If the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
@@ -4742,7 +4763,11 @@ def _build_retrieval_index(data: dict) -> dict:
         if status == "ignored":
             continue
         content = _current_content(e)
-        toks = _index_tokens(content)
+        # #193: an open proposal renders alongside the standing content as a labeled
+        # unreviewed update, so its terms must be rankable too. Tokens only — topics,
+        # artifacts and title stay derived from the standing content.
+        prop_content = (e.get("proposed_revision") or {}).get("content", "")
+        toks = _index_tokens(f"{content} {prop_content}" if prop_content else content)
         tf: dict[str, int] = {}
         for t in toks:
             tf[t] = tf.get(t, 0) + 1
@@ -5035,6 +5060,7 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
     """The content of at most the _REHYDRATE_CAP most-recently-injected working-set
     decisions (current content, active statuses only), under a heading. '' when there is
     no session id / working set / nothing still active to show."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     ids = working_set_ids(repo_path, session_id)
     if not ids:
         return ""
@@ -5042,17 +5068,23 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
     lines = []
+    conflicted = False
     for did in recent:
         e = by_id.get(did)
         if not e or _entry_status(e) not in ("approved", "suggested"):
             continue
         subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
-        title, body = _title_and_body(e)
+        title, body, extras = conflicts._conflict_view(e)
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}")
         if body is not None:
             lines.append(f"    {body}")
+        for extra in extras:
+            lines.append(f"    {extra}")
+        conflicted = conflicted or bool(extras)
     if not lines:
         return ""
+    if conflicted:
+        lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
     return "## Rehydrated working context:\n" + "\n".join(lines)
 
 
@@ -5226,6 +5258,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
     `files=` two-store merge. A no-op extra read for the pure-BM25 case (nothing is ever
     missing there)."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
     missing = [d for d in ids if d not in by_id]
@@ -5236,6 +5269,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     stale = _staleness_notes(repo_path, [by_id[d] for d in ids
                                          if d in by_id and _entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
+    conflicted = False
     for did in ids:
         e = by_id.get(did)
         if not e or _entry_status(e) == "ignored":
@@ -5245,11 +5279,16 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
-        title, body = _title_and_body(e)
+        title, body, extras = conflicts._conflict_view(e)
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
                      f"{title}{id_tag}{stale.get(did, '')}")
         if body is not None:
             lines.append(f"    {body}")
+        for extra in extras:
+            lines.append(f"    {extra}")
+        conflicted = conflicted or bool(extras)
+    if conflicted:
+        lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
     return "\n".join(lines)
 
 
@@ -5669,6 +5708,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     Team context (pulled by C5 and cached separately) is appended as its own section so
     the agent reads local (personal) and team decisions together, scope-tagged.
     """
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     data = _load(repo_path)
     entries = data.get("entries", [])
 
@@ -5751,13 +5791,19 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
-            title, body = _title_and_body(d)
+            # Global-scope hits (files= route) never carry a proposal — update_global_decision
+            # has no replace_id path — so _conflict_view can only ever plain-render them.
+            title, body, extras = conflicts._conflict_view(d)
             hit = file_hits.get(d.get("id")) if files else None
             scope = hit["scope"] if hit else "personal"
             lines.append(f"- [scope={scope}] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
                          f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
                 lines.append(f"    {body}")
+            for extra in extras:
+                lines.append(f"    {extra}")
+        if any(conflicts._has_open_conflict(d) for d in shown):
+            lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
@@ -6612,9 +6658,10 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
         return changed
 
 
-# ── Commit-time guard: backward-compat re-export ──────────────────────────────
+# ── Extracted-module public re-exports ────────────────────────────────────────
 # The guard engine (staged-file plumbing, Tier-1 advisory pairing, Tier-2 armed
-# rules) lives in contexer/guard_engine.py; store.py stays the public facade.
+# rules) lives in contexer/guard_engine.py, and conflict resolution memos (#193)
+# in contexer/conflicts.py; store.py stays the public facade.
 # A PEP 562 module __getattr__, not an eager `from contexer.guard_engine import
 # ...`, on purpose: guard_engine imports `store` at ITS top for the store-owned
 # helpers it needs (STORE_DIR, _load, _save, ...), so an eager import here would
@@ -6628,12 +6675,20 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
 _GUARD_EXPORTS = frozenset({
     "guard_staged", "guard_candidates", "arm_guard", "disarm_guard", "dismiss_guard",
 })
+# Same mechanism, same reason, for the one PUBLIC entrypoint conflicts.py owns
+# (server.py's resolve_conflict tool calls it as store.record_conflict_memo).
+# The private conflict helpers are NOT re-exported — a private helper's caller
+# imports the module that owns it (cli.py's review branch does exactly that).
+_CONFLICT_EXPORTS = frozenset({"record_conflict_memo"})
 
 
 def __getattr__(name):
     if name in _GUARD_EXPORTS:
         from contexer import guard_engine
         return getattr(guard_engine, name)
+    if name in _CONFLICT_EXPORTS:
+        from contexer import conflicts
+        return getattr(conflicts, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
