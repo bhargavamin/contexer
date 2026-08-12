@@ -358,6 +358,17 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
                         model: str = "", conditions: tuple = ("without", "memory", "with")) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "runs.jsonl"
+    if out.exists() and out.stat().st_size > 0:
+        # _append (below) is pure append-mode and campaign.json is unconditionally
+        # overwritten just below — a rerun into an existing --out would silently mix
+        # this run's rows in under the OLD run's now-discarded metadata (model, reps,
+        # frozen teaching hash), and neither report.py nor validate.py cross-checks
+        # row count against campaign.json's declared reps to catch it. Fail loud
+        # instead of aggregating two heterogeneous runs as if they were one.
+        raise FileExistsError(
+            f"{out} already has rows from a previous run. Rerunning into the same "
+            f"--out would silently mix runs under mismatched metadata. Pick a fresh "
+            f"--out directory, or remove the existing runs.jsonl first.")
     tasks = json.loads(TASKS_FILE.read_text())
     teaching = json.loads(TEACHING_FILE.read_text())
     (out_dir / "campaign.json").write_text(json.dumps({

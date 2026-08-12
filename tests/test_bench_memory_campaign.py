@@ -15,6 +15,25 @@ def _stub(tmp_path):
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return str(p)
 
+def test_rerun_into_existing_out_dir_fails_loud(tmp_path):
+    """Greptile P1: _append is pure append-mode and campaign.json is unconditionally
+    overwritten, so a second run into the same --out would silently mix this run's
+    rows in under the new run's (mismatched) metadata. Must refuse instead."""
+    import pytest
+    out_dir = tmp_path / "out"
+    first = run_memory_campaign(out_dir, reps=1, claude_cmd=_stub(tmp_path),
+                                model="stub", conditions=("without",))
+    rows_after_first = first.read_text().splitlines()
+    assert rows_after_first  # sanity: the first run actually wrote something
+
+    with pytest.raises(FileExistsError):
+        run_memory_campaign(out_dir, reps=1, claude_cmd=_stub(tmp_path),
+                            model="stub", conditions=("without",))
+
+    # the guard must fire before any row is appended or campaign.json overwritten
+    assert first.read_text().splitlines() == rows_after_first
+
+
 def test_campaign_writes_rows_with_new_fields(tmp_path):
     out = run_memory_campaign(tmp_path / "out", reps=1, claude_cmd=_stub(tmp_path),
                               model="stub", conditions=("without", "memory", "with"))
