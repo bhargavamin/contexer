@@ -368,7 +368,7 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
     # which leaves a race window between the check and the write), so it closes both
     # the sequential-rerun case and the concurrent-processes case the same way.
     try:
-        os.close(os.open(out, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        os.close(os.open(out, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
     except FileExistsError:
         raise FileExistsError(
             f"{out} already exists — from a previous run or a concurrently running "
