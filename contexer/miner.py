@@ -110,6 +110,27 @@ def _emit_ruff(cfg: dict, source: str) -> list[dict]:
     if quote:
         items.append({"content": f"Quote style '{quote}' enforced by ruff ({source})",
                       "subtype": "convention", "tier": "high"})
+    # Selected rule set. Read from both spellings: ruff moved `select` under [lint] in
+    # 0.2, and plenty of configs still carry the top-level key. Without this a repo whose
+    # CI blocks on `ruff check` mined nothing about linting at all — the gate existed and
+    # no session was ever told, which is the one failure this module is here to prevent.
+    #
+    # PRESENCE, not truthiness: when both spellings are set, `lint.select` wins in ruff
+    # even when it is EMPTY. Verified with ruff 0.15.4 — top-level select = ["E","F"] plus
+    # lint.select = [] reports "All checks passed!" on a file with two violations, while
+    # the legacy key alone finds both. A `lint.get("select") or cfg.get("select")` would
+    # therefore mine "rules selected: E, F" for a repo whose linter enforces nothing:
+    # exactly the unverifiable claim this module exists not to make.
+    lint = cfg.get("lint") if isinstance(cfg.get("lint"), dict) else {}
+    select = lint["select"] if "select" in lint else cfg.get("select")
+    if isinstance(select, list):
+        rules = [str(r) for r in select if isinstance(r, str)]
+        if rules:
+            # Truncated: a repo selecting 40 rule groups would otherwise bury the fact
+            # that linting is enforced under the list itself.
+            shown = ", ".join(rules[:8]) + (", …" if len(rules) > 8 else "")
+            items.append({"content": f"Ruff lint enforced, rules selected: {shown} ({source})",
+                          "subtype": "convention", "tier": "high"})
     return items
 
 
