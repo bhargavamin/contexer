@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.33.0](https://github.com/bhargavamin/contexer/compare/v0.32.0...v0.33.0) (2026-08-12)
+
+
+### Features
+
+* **bench:** capture-rate inspectors ([6680fb1](https://github.com/bhargavamin/contexer/commit/6680fb14aa10251c53079f70be5ecf6fe49d6a82))
+* **bench:** frozen teaching scripts ([5ef4c4a](https://github.com/bhargavamin/contexer/commit/5ef4c4a3279f37c88edb7baa5a4046b135bb83a3))
+* **bench:** memory-campaign task definitions ([d7fecbe](https://github.com/bhargavamin/contexer/commit/d7fecbe978e032f68804c2ad7eed8fca94f62c12))
+* **bench:** memory-home helpers + pilot findings ([ec58a55](https://github.com/bhargavamin/contexer/commit/ec58a55e63e9f0dbeb32b4387023ab85317d7657))
+* **bench:** memory-vs-contexer campaign runner ([18b23b1](https://github.com/bhargavamin/contexer/commit/18b23b1749a2b83cce6a084d17a6d64832e207eb))
+* **bench:** sup-current slot scorer with pilot answer set ([ef29a84](https://github.com/bhargavamin/contexer/commit/ef29a84e33db5a0095e39b034c245412dbab136c))
+* **bench:** validator isolation and tier-coverage checks ([0d8cc74](https://github.com/bhargavamin/contexer/commit/0d8cc743a753d0c475e44be966dc96586dabcfb0))
+* **bench:** wilson intervals + memory-campaign report section ([49d04fc](https://github.com/bhargavamin/contexer/commit/49d04fc4a585c8ecc67482a234e8ea569ada88f9))
+* **miner:** mine ruff's selected rule set as a lint convention ([f9f0d75](https://github.com/bhargavamin/contexer/commit/f9f0d75fdb7dedee65c6c44ca4f3330750107790))
+
+
+### Bug Fixes
+
+* **bench:** capture_stats derives store filename via store._slug ([b03cbfc](https://github.com/bhargavamin/contexer/commit/b03cbfc0e947ab2ad0701c64d497d8352e750259))
+* **bench:** capture-rate table sources measure rows ([a415075](https://github.com/bhargavamin/contexer/commit/a4150752ffe3f79331195be11053bfe27c79914a))
+* **bench:** explicit-tier rule was deictic, log regex matched "catalog" ([e0ab33d](https://github.com/bhargavamin/contexer/commit/e0ab33d829a7facb0e61843663cd8f430fa3f95b))
+* **bench:** lint clean — ruff never ran locally during this build ([acdb4cc](https://github.com/bhargavamin/contexer/commit/acdb4cc4aa4d0f925f1cbe988510c71eab1dcc09))
+* **bench:** memory campaign measured Contexer with its hooks deleted ([83341ad](https://github.com/bhargavamin/contexer/commit/83341ad3364c76a592703b0f47bcf09a0276c0ff))
+* **bench:** pooled headline cell, review bucket, validator memory contract ([566a4a6](https://github.com/bhargavamin/contexer/commit/566a4a67000fac5cb97dcca7d2ee765fe8266757))
+* **bench:** post-run contamination, per-row error capture, loud enf setup ([e528d16](https://github.com/bhargavamin/contexer/commit/e528d16e90725b781bbe3773d8ba8443250dcb91))
+* **bench:** refuse to run into an --out dir that already has rows ([02311c4](https://github.com/bhargavamin/contexer/commit/02311c47f78a386f966797cfc9d8ff1c51c336f4))
+* **bench:** score before check_cmd, per-session tool_calls, observed guard block ([67c79b1](https://github.com/bhargavamin/contexer/commit/67c79b1856140eded9d6f6dd52fc96fff487b6f5))
+* **cli:** byte-exact guard-hook IO, an AST invariant to keep it, and ruff-gate mining ([a1f3b5f](https://github.com/bhargavamin/contexer/commit/a1f3b5fa0a70950cffbc4d544aef9c4f5d6c0988))
+* **cli:** read and write the guard hook byte-exactly ([05d093b](https://github.com/bhargavamin/contexer/commit/05d093ba5c4ab4c5f1f5f679aa0b1ac4dc838bc5))
+* **deps:** bump mcp, cryptography, starlette, pydantic-settings, python-multipart ([72d0b2b](https://github.com/bhargavamin/contexer/commit/72d0b2b4198899b27bfe858f4d896b7527ed7763))
+* **deps:** bump mcp, cryptography, starlette, pydantic-settings, python-multipart ([f77bd10](https://github.com/bhargavamin/contexer/commit/f77bd104a44e2d2dcdde4afb325c2a50fd371dfd))
+* **deps:** bump mcp, cryptography, starlette, pydantic-settings, python-multipart ([2aa0531](https://github.com/bhargavamin/contexer/commit/2aa0531b8bcbd7a3da374ca020509ce54285ce4d))
+* **miner:** let an empty lint.select suppress a legacy top-level one ([00e8486](https://github.com/bhargavamin/contexer/commit/00e8486e3bfc46ccf15f5d7b6047426741eae24b))
+
+
+### Documentation
+
+* **assets:** redesign benchmark image as comparison stat cards ([79b02e5](https://github.com/bhargavamin/contexer/commit/79b02e50c7238f08c7b4a97085242221f8ed1e7c))
+* **bench:** memory-campaign runbook ([06454d6](https://github.com/bhargavamin/contexer/commit/06454d6ef2e23d6ca3a642047d43db171583ef12))
+* **bench:** step-2 smoke must never run at --reps 1 ([f970992](https://github.com/bhargavamin/contexer/commit/f970992740d979ad14947bdd4154fe76b5d6d208))
+* **readme:** benchmark stats as a themed stat-tile image ([fa3bd6f](https://github.com/bhargavamin/contexer/commit/fa3bd6f2582f4fffae4ec5d93ea03abd778ccb8e))
+* **readme:** pain-first rewrite with problem/feature matrix ([0af6b65](https://github.com/bhargavamin/contexer/commit/0af6b65260de54813ea7e5d86224f532a047d77e))
+* **readme:** pain-first rewrite with problem/feature matrix ([edb2bf7](https://github.com/bhargavamin/contexer/commit/edb2bf70bfe1de9071228279f4c15b6b82d0f885))
+* **readme:** surface headline benchmark numbers in a stats table ([261264f](https://github.com/bhargavamin/contexer/commit/261264fb19dacfad52331b577de1ef4a7975bba5))
+
 ## [0.32.0](https://github.com/bhargavamin/contexer/compare/v0.31.0...v0.32.0) (2026-08-09)
 
 
