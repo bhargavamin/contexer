@@ -1,0 +1,15 @@
+{
+  "model": "claude-sonnet-5",
+  "seed": 0,
+  "reps": 3,
+  "conditions": [
+    "without",
+    "memory",
+    "with"
+  ],
+  "started_at": "2026-08-12T19:18:50.850187+00:00",
+  "claude_version": "2.1.228 (Claude Code)",
+  "managed_settings_present": false,
+  "teaching_frozen_sha": "7b58ff6040b67a28e184e29ee654dcafca39d65aafce8025e4f6f9005134848c",
+  "memory_tasks_sha": "b31ba800f123e732b041e0096d135036d4580044d7cf8afb08393a627dcd66e1"
+}
