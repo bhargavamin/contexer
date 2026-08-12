@@ -86,6 +86,33 @@ class TestConfigConventions:
                    if "Ruff lint enforced" in c)
         assert "R7" in hit and "R8" not in hit and "…" in hit
 
+    def test_empty_modern_select_beats_a_legacy_top_level_one(self, tmp_path):
+        """`lint.select` wins in ruff even when EMPTY — verified with ruff 0.15.4: this
+        exact config reports "All checks passed!" on a file with two violations, while
+        the legacy key alone finds both. Reading the modern key by presence rather than
+        truthiness is what keeps us from advertising rules nothing enforces."""
+        _write(tmp_path / "pyproject.toml", textwrap.dedent("""\
+            [tool.ruff]
+            select = ["E", "F"]
+
+            [tool.ruff.lint]
+            select = []
+        """))
+        assert not any("Ruff lint enforced" in c
+                       for c in _contents(miner._config_conventions(tmp_path)))
+
+    def test_non_empty_modern_select_wins_over_legacy(self, tmp_path):
+        _write(tmp_path / "pyproject.toml", textwrap.dedent("""\
+            [tool.ruff]
+            select = ["ALL"]
+
+            [tool.ruff.lint]
+            select = ["E4"]
+        """))
+        hit = next(c for c in _contents(miner._config_conventions(tmp_path))
+                   if "Ruff lint enforced" in c)
+        assert "E4" in hit and "ALL" not in hit
+
     def test_ruff_without_select_emits_no_lint_convention(self, tmp_path):
         # Silence over noise: a [tool.ruff] table that selects nothing declares nothing.
         _write(tmp_path / "pyproject.toml", "[tool.ruff]\ntarget-version = \"py312\"\n")
