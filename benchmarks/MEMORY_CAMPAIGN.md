@@ -134,31 +134,58 @@ of those paths. A narrower selection can pass while the reporting path is
 broken — exactly the failure step 1 exists to catch before money is spent.
 All of them must pass before spending a single token in step 2.
 
-### Step 2: smoke campaign (1 rep, real API, all four tasks)
+### Step 2: smoke campaign (real API, all four tasks, NEVER 1 rep)
 
-One rep covers a single tier (implicit or explicit, chosen by `rep % 2`) and
-all three arms. Teaching runs one session per scripted prompt, and the implicit
-and explicit tiers both have 4 prompts in teaching session 1 plus 1 in session
-2, so per rep the session count is: `without` = 4 measure sessions (no
-teaching), `memory` = 5 teach + 4 measure = 9, `with` = 5 teach + 4 measure =
-9. One rep is 22 sessions total.
+Per rep the session count is: `without` = 4 measure sessions (no teaching),
+`memory` = 5 teach + 4 measure = 9, `with` = 5 teach + 4 measure = 9 — 22
+sessions total. Teaching runs one session per scripted prompt, and the implicit
+and explicit tiers both have 4 prompts in teaching session 1 plus 1 in session 2.
 
-**Cost quote to give the developer before running:** 22 sessions at this
-repo's last observed per-session range of roughly $0.04-$0.12 (`docs/benchmark.md`'s
-cost table) is a ballpark of $0.9-$2.7. Teach sessions are single short prompts
-and should land at the low end. Recompute against current model pricing before
-quoting; this is an estimation method, not a cached number to reuse blindly.
+**Never run this step at `--reps 1`.** Tier alternates by `rep % 2`, so one rep
+exercises the implicit tier and nothing else — and the explicit tier is where
+the deictic-phrasing bug (R1) hid, which would have made every explicit-tier
+`enf-commit` row error out while a 1-rep smoke ran clean. A pre-flight gate that
+can't see half the frozen teaching script isn't a gate. **Use `--reps 2` or
+more**; an even count also balances the tiers, which is what the per-tier
+capture-rate table reports on.
 
-Once approved:
+**Step 2 is also the pilot that sizes step 3.** Whether the full campaign needs
+8, 12, or 16 reps depends on how often the built-in memory tool actually
+captures and recalls — an unknown until a live arm runs. Read the smoke's
+capture-rate table and headline cells before committing to step 3's `--reps`,
+then commit to that number BEFORE launching and disclose the pilot in the
+writeup. Re-running step 3 at a higher `--reps` because the intervals overlapped
+is optional stopping — it is p-hacking, and the spec's multiple-comparisons
+discipline forbids it. An overlapping result is published as "no distinguishable
+difference at this sample size."
+
+**Cost quote to give the developer before running:** estimate per session from
+the medians in `benchmarks/artifacts/*/runs.jsonl` (compute them; do not reuse
+a number from this file), splitting teach sessions — single short prompts, at
+the cheap end — from measure sessions. As of the last recompute that worked out
+to roughly $2.20/rep, i.e. ~$4.40 at 2 reps and ~$6.60 at 3. Recompute against
+current model pricing before quoting; this is an estimation method, not a cached
+number to reuse blindly.
+
+Once approved (3 reps shown; adjust `--reps`, never below 2):
 
 ```bash
-uv run python -m benchmarks.memory_campaign --reps 1 --model claude-sonnet-5 \
+uv run python -m benchmarks.memory_campaign --reps 3 --model claude-sonnet-5 \
   --out benchmarks/artifacts/memcamp-smoke
 uv run python -m benchmarks.validate benchmarks/artifacts/memcamp-smoke
 ```
 
 If validation fails here, stop. Do not proceed to the full campaign on a
 harness that is failing its own smoke test.
+
+**Read the warnings, not just the PASS/FAIL line.** `_check_tier_coverage`
+emits a `tier imbalance` *warning* — never a failure — so a single-tier or
+odd-rep smoke still reports `PASS` with the imbalance noted underneath. At an
+odd `--reps` that warning is expected and fine (3 reps is implicit=2,
+explicit=1: both tiers covered, deliberately unbalanced). At `--reps 1` the
+same warning reads `explicit=0` and means the run never touched half the frozen
+teaching script — treat that one as a stop. **Step 3 must use an even `--reps`**
+so the per-tier tables are balanced.
 
 ### Step 3: full campaign (16 reps, 8 per tier)
 
