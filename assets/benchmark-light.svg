@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="310" viewBox="0 0 1200 310" role="img" aria-label="Benchmarks, medians across 548 published sessions, Contexer vs no memory: 6 times fewer tokens per session (32,804 vs 198,864); right answer in 1 turn vs 6; 8 of 8 stored rules followed vs 0 of 8; $0.043 per session vs $0.116">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="310" viewBox="0 0 1200 310" role="img" aria-label="Benchmarks, medians across 548 published sessions, Contexer vs no memory: 6 times fewer tokens per session (32,804 vs 198,864); right answer in 1 turn vs 6; 8 of 8 stored rules followed (Sonnet 5) vs 0 of 8 (Opus); $0.043 per session vs $0.116">
   <rect width="1200" height="310" rx="16" fill="#F5F4E9"/>
   <g font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif">
 
@@ -7,7 +7,7 @@
     <text x="59" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#70725F">CONTEXER</text>
     <rect x="158" y="33" width="12" height="12" rx="3" fill="#15170D" fill-opacity="0.16"/>
     <text x="177" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#70725F">NO MEMORY</text>
-    <text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#70725F">MEDIANS OF 548 PUBLISHED SESSIONS &#183; SCORED BY CODE, NOT AN LLM JUDGE</text>
+    <text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#70725F">SONNET 5 MEDIANS OF 548 PUBLISHED SESSIONS &#183; SCORED BY CODE, NOT AN LLM JUDGE</text>
 
     <!-- card 1: tokens -->
     <rect x="40" y="68" width="265" height="192" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
@@ -38,7 +38,7 @@
     <g fill="none" stroke="#15170D" stroke-opacity="0.3">
       <circle cx="639" cy="211.5" r="4"/><circle cx="654" cy="211.5" r="4"/><circle cx="669" cy="211.5" r="4"/><circle cx="684" cy="211.5" r="4"/><circle cx="699" cy="211.5" r="4"/><circle cx="714" cy="211.5" r="4"/><circle cx="729" cy="211.5" r="4"/><circle cx="744" cy="211.5" r="4"/>
     </g>
-    <text x="773" y="215" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">0/8</text>
+    <text x="773" y="215" font-size="11.5" fill="#70725F" style="font-variant-numeric: tabular-nums">0/8 &#183; Opus</text>
 
     <!-- card 4: cost -->
     <rect x="895" y="68" width="265" height="192" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>

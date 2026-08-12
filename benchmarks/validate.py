@@ -44,13 +44,17 @@ EDITING_KINDS = ("convention", "efficiency", "continuity")
 MEMORY_HEADLINE_TASKS = ("sup-current", "cont-log")
 # Stable display order for known conditions; unknown names are appended.
 CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
-                   "with", "claudemd_with")
+                   "memory", "with", "claudemd_with")
 # The condition pairs that matter, first arm vs second arm. claudemd_with-vs-claudemd
 # is the adoption question: contexer's marginal value on an already-documented repo.
 # agentsmd-vs-claudemd measures whether the assistant honors AGENTS.md like CLAUDE.md.
+# with-vs-memory is the memory campaign's headline comparison; memory-vs-without
+# says whether the memory tool beat a bare agent at all. A pair whose conditions
+# are not both present in a campaign is skipped, so these are inert elsewhere.
 PAIRS = (("with", "without"), ("with", "claudemd"), ("claudemd", "without"),
          ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
-         ("claudemd_agentsmd", "claudemd"))
+         ("claudemd_agentsmd", "claudemd"), ("with", "memory"),
+         ("memory", "without"))
 
 
 def _conditions_present(rows):
@@ -272,18 +276,26 @@ def _check_anomalies(rows, ok_rows, err_rows, warnings, recomputed):
     # rationale tasks scoring identically extreme in with AND without — the pair
     # where an identical extreme signals a leak or a broken injection.
     rat_tasks = sorted({r.get("task_id") for r in ok_rows if r.get("kind") == "rationale"})
+    def _rat_median(task_id, cond):
+        cr = [r for r in ok_rows
+              if r.get("task_id") == task_id and r.get("condition") == cond]
+        return _median(_num(r, "rationale") for r in cr) if cr else None
+
     for t in rat_tasks:
-        scores = {}
-        for c in ("without", "with"):
-            cr = [r for r in ok_rows if r.get("task_id") == t and r.get("condition") == c]
-            if cr:
-                scores[c] = _median(_num(r, "rationale") for r in cr)
-        if len(scores) == 2 and scores["with"] == scores["without"]:
-            if scores["with"] == 1.0:
-                warnings.append(f"rationale task '{t}' scores 1.0 in BOTH conditions "
+        w = _rat_median(t, "with")
+        # Each no-injection baseline present gets its own comparison: a memory
+        # campaign's opponent arm is "memory", and checking only "without" would
+        # leave the arm actually under comparison unwatched.
+        for base in ("without", "memory"):
+            b = _rat_median(t, base)
+            if w is None or b is None or w != b:
+                continue
+            where = "BOTH conditions" if base == "without" else f"BOTH with and {base}"
+            if w == 1.0:
+                warnings.append(f"rationale task '{t}' scores 1.0 in {where} "
                                 f"(gold may be leaking into the prompt)")
-            elif scores["with"] == 0.0:
-                warnings.append(f"rationale task '{t}' scores 0.0 in BOTH conditions "
+            elif w == 0.0:
+                warnings.append(f"rationale task '{t}' scores 0.0 in {where} "
                                 f"(injection may be broken)")
 
 
@@ -383,13 +395,14 @@ def _check_interleaving(rows, warnings):
 
 def _check_memory_isolation(rows, failures):
     """Check 9 (memory campaign): a measured row that leaked state across arms
-    (contaminated=True) is a failure. Enforcement rows (which deliberately act
-    on the fixture) and teach rows are exempt. No-op for legacy campaigns whose
-    rows predate Task 6's arm/tier/phase/contaminated fields."""
+    (contaminated=True) is a failure. Teach rows are exempt; enforcement rows are
+    NOT — `contaminated` measures the opponent's state leaking into the HOME, which
+    has nothing to do with the fixture mutations that make enf rows special. No-op
+    for legacy campaigns whose rows predate Task 6's arm/tier/phase fields."""
     for r in rows:
         if "arm" not in r or not r.get("contaminated"):
             continue
-        if r.get("phase") != "measure" or r.get("kind") == "enforcement":
+        if r.get("phase") != "measure":
             continue
         failures.append(f"contaminated row: {r.get('task_id')}/{r.get('arm')}/"
                         f"rep{r.get('rep')}")

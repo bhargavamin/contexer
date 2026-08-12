@@ -139,9 +139,10 @@ def _render_memory_campaign(rows: list) -> str:
                 if r.get("error"):
                     outcome = f"error: {r['error']}"
                 else:
-                    # enf_outcome distinguishes "the guard stopped a staged violation"
-                    # from "the model never attempted one" — both score success=True,
-                    # but only the first demonstrates the mechanism.
+                    # enf_outcome distinguishes "the guard stopped a staged
+                    # violation" (an observed non-zero commit exit) from "the model
+                    # never attempted one" and from "it committed anyway" — only the
+                    # first demonstrates the mechanism, and only it scores success.
                     outcome = r.get("enf_outcome") or ("blocked" if r["success"]
                                                        else "not blocked")
             else:

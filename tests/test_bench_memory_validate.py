@@ -31,11 +31,13 @@ def test_tier_imbalance_warns():
     assert warns and "tier" in warns[0].lower()
 
 
-def test_enforcement_rows_exempt_from_contamination_check():
+def test_enforcement_rows_are_not_exempt_from_contamination_check():
+    """`contaminated` tracks the opponent's state leaking into the HOME, which is
+    unrelated to the fixture mutations that make enforcement rows special."""
     fails = []
     _check_memory_isolation(
         [_row(task_id="enf-commit", kind="enforcement", contaminated=True)], fails)
-    assert fails == []
+    assert len(fails) == 1 and "enf-commit" in fails[0]
 
 
 def test_teach_rows_exempt_from_contamination_check():
@@ -101,3 +103,21 @@ def test_coverage_skips_teach_ids_for_arms_that_never_teach():
     _check_coverage(rows, 1, warns, rec)
     assert warns == []
     assert "teach-s1-p0|without" not in rec["cell_counts"]
+
+
+def test_headline_pairing_covers_with_vs_memory():
+    """MEDIUM: without this pair the validator never corroborates the campaign's
+    central comparison."""
+    from benchmarks.validate import PAIRS, CONDITION_ORDER
+    assert ("with", "memory") in PAIRS
+    assert "memory" in CONDITION_ORDER
+
+
+def test_rationale_anomaly_check_watches_the_memory_arm():
+    from benchmarks.validate import _check_anomalies
+    rows = [_row(task_id="rat-mem", kind="rationale", condition=c, rationale=0.0,
+                 error="", phase="measure")
+            for c in ("with", "memory") for _ in range(2)]
+    warns, rec = [], {}
+    _check_anomalies(rows, rows, [], warns, rec)
+    assert any("rat-mem" in w and "memory" in w for w in warns), warns

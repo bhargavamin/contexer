@@ -122,14 +122,17 @@ scoring, and isolation logic work before any real API call happens. Free,
 needs no approval, run it first every time:
 
 ```bash
-uv run pytest tests/test_bench_memory_*.py tests/test_bench_sup_scorer.py -q --no-cov
+uv run pytest tests/test_bench_*.py -q --no-cov
 ```
 
-This expands to `test_bench_memory_campaign.py`, `test_bench_memory_home.py`,
-`test_bench_memory_tasks.py`, `test_bench_memory_validate.py`, plus
-`test_bench_sup_scorer.py` (the `sup_current` scorer lives in `score.py`, not
-a `memory_*` module, hence the separate name). All five must pass before
-spending a single token in step 2.
+Deliberately the whole `test_bench_*` family, not a `memory_*` glob: the
+campaign's scorer (`test_bench_sup_scorer.py`, `test_bench_score.py`), its
+report renderer (`test_bench_report.py`, `test_bench_wilson.py`), its frozen
+teaching script (`test_bench_teaching.py`), and its capture stat
+(`test_bench_capture.py`) all sit outside that glob, and step 3 runs every one
+of those paths. A narrower selection can pass while the reporting path is
+broken — exactly the failure step 1 exists to catch before money is spent.
+All of them must pass before spending a single token in step 2.
 
 ### Step 2: smoke campaign (1 rep, real API, all four tasks)
 
@@ -217,16 +220,23 @@ numbers in it are real.
   nothing is recorded as `cont-log: no files changed` with `success=False`,
   never as compliance.
 - **`enf-commit` is a mechanism demonstration, never an aggregate statistic.**
-  The report lists each `with`-arm run as `blocked`, `committed`, or
+  The report lists each `with`-arm run as `blocked`, `committed`,
+  `committed on retry (guard did not block)`, or
   `no violating change attempted` (or its error), and every other arm as
   `no mechanism`, one line per run, with no
   wilson interval and no median. It demonstrates that the commit-time guard
   can block a violation when armed; it is not evidence about how often Claude
   attempts the violation, and must not be folded into a success-rate table
-  alongside `sup-current` or `cont-log`. Only a run whose violating edit
-  actually reached the git index reads as `blocked`: a model that declined to
-  write the log line demonstrates nothing about the guard, and saying "blocked"
-  there would be misleading.
+  alongside `sup-current` or `cont-log`. **`blocked` is an observed rejection,
+  never an inference.** A run only earns it if its violating edit reached the
+  git index AND the harness then attempted the commit itself and git exited
+  non-zero (stderr kept in `enf_detail`). Absence of a commit is not evidence:
+  a session can stage the violation and simply never run `git commit`, and a
+  commit can fail for reasons that have nothing to do with the guard — which
+  is why `fixtures/generate.py` now writes a repo-local git identity, so a
+  throwaway HOME with no `.gitconfig` cannot produce a fake block. A model that
+  declined to write the log line demonstrates nothing about the guard either,
+  and reads as `no violating change attempted`.
 - **Capture rate is reported per phrasing tier.** The "Capture rate
   (post-teaching)" table breaks out `memory_files` and `contexer_entries`
   medians separately for the implicit and explicit teaching tiers, per arm.

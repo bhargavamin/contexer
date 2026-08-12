@@ -70,7 +70,7 @@ def _base_row(task_id, kind, arm, rep, tier, phase, model) -> dict:
             "violations": 0, "rationale": 0.0, "success": False, "result_snippet": "",
             "otel_tokens_total": 0, "otel_cost_usd": 0.0, "telemetry_ok": None, "error": "",
             "capture": {}, "sup_result": "", "contaminated": False,
-            "memory_leak_files": 0, "enf_outcome": ""}
+            "memory_leak_files": 0, "enf_outcome": "", "enf_detail": ""}
 
 
 def _sweep_memory(home: Path, work: Path) -> int:
@@ -89,6 +89,12 @@ def _run_and_record(row: dict, work: Path, home: Path, prompt: str, claude_cmd: 
     """Runs one session and fills the run.py-shaped token/cost fields onto `row`.
     Returns the raw session result (for callers that also need res["result"])."""
     rx.reset()
+    # _tool_calls counts every tool_use ever written into this HOME's transcripts.
+    # run.py gets away with the raw count because each of its runs owns a fresh
+    # HOME; here one HOME carries the arm's teaching sessions and is restored from
+    # a snapshot that contains them, so the raw count would add teaching's tool
+    # calls to every measured row of the taught arms and none to `without`.
+    calls_before = _tool_calls(home)
     res = _run_session(str(work), prompt, claude_cmd, _session_env(home, rx.port), model)
     if res.get("_error"):
         row["error"] = res["_error"]
@@ -102,13 +108,15 @@ def _run_and_record(row: dict, work: Path, home: Path, prompt: str, claude_cmd: 
                tokens_cache_read=u.get("cache_read_input_tokens", 0),
                tokens_cache_write=u.get("cache_creation_input_tokens", 0),
                cost_usd=res.get("total_cost_usd", 0.0), turns=res.get("num_turns", 0),
-               duration_ms=res.get("duration_ms", 0), tool_calls=_tool_calls(home))
+               duration_ms=res.get("duration_ms", 0),
+               tool_calls=max(0, _tool_calls(home) - calls_before))
     row["tokens_total"] = (row["tokens_in"] + row["tokens_out"] +
                            row["tokens_cache_read"] + row["tokens_cache_write"])
     row["result_snippet"] = str(res.get("result", ""))[:300]
-    # ponytail: no OTel flush wait (run.py sleeps 1.5s before snapshotting) — this
-    # signature has no wait_for_otel knob; usage/cost already come straight from
-    # claude's own JSON, so a missed OTel flush only zeroes the corroboration field.
+    # Same 1.5s OTel flush wait run.py takes. Skipping it does not merely zero the
+    # corroboration field: a PARTIAL export lands a nonzero total below tolerance,
+    # which _telemetry_check reports as telemetry_ok=False — a fake disagreement.
+    time.sleep(1.5)
     _telemetry_check(row, rx.snapshot())
     return res
 
@@ -163,7 +171,7 @@ def _enf_commit_setup(work: Path, home: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def _score_task(row: dict, task: dict, work: Path, arm: str, base_sha: str,
+def _score_task(row: dict, task: dict, work: Path, arm: str, changed: dict,
                 check_cmd: str, chk, res: dict) -> None:
     scorer = task["scorer"]
     if scorer == "sup_current":
@@ -178,7 +186,10 @@ def _score_task(row: dict, task: dict, work: Path, arm: str, base_sha: str,
         # snake_case/type-hint baseline, which the teaching script never mentions.
         # `_ENF_REGEX` is the single request-logging matcher in this module; the
         # enforcement task's armed guard uses the very same pattern.
-        changed = score.changed_files(str(work), base_sha)
+        # `changed` is snapshotted by the caller BEFORE check_cmd runs: `uv run
+        # pytest` leaves uv.lock + tests/__pycache__/*.pyc untracked in the
+        # fixture, which would make this dict non-empty for a session that
+        # edited nothing — the exact false "compliant" the guard below prevents.
         if not changed:
             # A session that edits nothing trivially violates nothing. Without this
             # it would score violations=0 + green pytest = "compliant".
@@ -197,10 +208,22 @@ def _score_task(row: dict, task: dict, work: Path, arm: str, base_sha: str,
         # the log line is a different (and non-demonstrating) outcome.
         staged = subprocess.run(["git", "-C", str(work), "diff", "--cached"],
                                 capture_output=True, text=True).stdout
-        row["enf_outcome"] = ("committed" if committed
-                              else "blocked" if re.search(_ENF_REGEX, staged, re.I)
-                              else "no violating change attempted")
-        row["success"] = arm == "with" and not committed
+        if committed:
+            row["enf_outcome"] = "committed"
+        elif not re.search(_ENF_REGEX, staged, re.I):
+            row["enf_outcome"] = "no violating change attempted"
+        else:
+            # A staged violation that never became a commit is NOT self-evidently
+            # "blocked" — the session may simply never have run `git commit`. The
+            # only honest way to label it is to attempt the commit ourselves and
+            # read the hook's verdict, so the demonstration rests on an observed
+            # rejection rather than on an absence.
+            att = subprocess.run(["git", "-C", str(work), "commit", "-m", "debug logging"],
+                                 capture_output=True, text=True, timeout=120)
+            row["enf_outcome"] = ("blocked" if att.returncode != 0
+                                  else "committed on retry (guard did not block)")
+            row["enf_detail"] = (att.stderr or att.stdout)[-300:]
+        row["success"] = arm == "with" and row["enf_outcome"] == "blocked"
 
 
 def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: int,
@@ -227,12 +250,16 @@ def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: 
         res = _run_and_record(row, work, home, prompt, claude_cmd, model, rx)
         if row["error"]:
             return row
+        # Snapshot what the SESSION changed before check_cmd runs — check_cmd
+        # (`uv run pytest`) creates untracked build artifacts of its own. run.py
+        # scores before check_cmd for the same reason.
+        changed = score.changed_files(str(work), base_sha)
         check_cmd = task["check_cmd"].replace("{seed}", str(seed))
         chk = None
         if check_cmd:
             chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
                                  timeout=600, env=_session_env(home, 0))
-        _score_task(row, task, work, arm, base_sha, check_cmd, chk, res)
+        _score_task(row, task, work, arm, changed, check_cmd, chk, res)
     except Exception as exc:  # a failed run is a data point, never a crash (Critical 2)
         row["error"] = repr(exc)
     finally:
@@ -349,7 +376,13 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
             golden = build_webapi(td / "golden", seed=seed)
             for rep in range(reps):
                 tier = "implicit" if rep % 2 == 0 else "explicit"
-                for arm in conditions:
+                # An arm's ~9 sessions run consecutively (teach -> snapshot ->
+                # measure cannot be interleaved across arms without holding three
+                # HOMEs live), so within a rep the last arm always runs latest.
+                # Reversing on odd reps keeps that position from being a fixed
+                # property of any one arm across the campaign.
+                order = conditions if rep % 2 == 0 else list(reversed(conditions))
+                for arm in order:
                     _run_arm(out, td, golden, tasks, teaching, arm, tier, rep,
                              claude_cmd, seed, model, rx)
     finally:

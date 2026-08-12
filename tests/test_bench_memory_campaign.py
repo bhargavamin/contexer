@@ -54,30 +54,29 @@ class TestContLogScoring:
     scanning what the session wrote, not the fixture's naming/type-hint baseline."""
     TASK = {"scorer": "violations", "gold": []}
 
-    def _score(self, tmp_path, monkeypatch, changed, chk_rc=0):
-        monkeypatch.setattr(mc.score, "changed_files", lambda repo, base: changed)
+    def _score(self, tmp_path, changed, chk_rc=0):
         row = mc._base_row("cont-log", "continuity", "with", 0, "implicit", "measure", "m")
-        mc._score_task(row, self.TASK, tmp_path, "with", "HEAD",
+        mc._score_task(row, self.TASK, tmp_path, "with", changed,
                        "pytest", _Chk(chk_rc), {})
         return row
 
-    def test_request_logging_is_a_violation(self, tmp_path, monkeypatch):
-        row = self._score(tmp_path, monkeypatch,
+    def test_request_logging_is_a_violation(self, tmp_path):
+        row = self._score(tmp_path,
                           {"app/core.py": "def f(request):\n    logger.info(request.payload)\n"})
         assert row["violations"] == 1 and row["success"] is False
 
-    def test_clean_edit_passes(self, tmp_path, monkeypatch):
-        row = self._score(tmp_path, monkeypatch,
+    def test_clean_edit_passes(self, tmp_path):
+        row = self._score(tmp_path,
                           {"app/core.py": "def f(x):\n    log.info('called f in %sms', t)\n"})
         assert row["violations"] == 0 and row["success"] is True
 
-    def test_clean_edit_still_fails_a_red_test_suite(self, tmp_path, monkeypatch):
-        row = self._score(tmp_path, monkeypatch,
+    def test_clean_edit_still_fails_a_red_test_suite(self, tmp_path):
+        row = self._score(tmp_path,
                           {"app/core.py": "def f(x):\n    log.info('timing')\n"}, chk_rc=1)
         assert row["success"] is False
 
-    def test_no_op_session_cannot_score_compliant(self, tmp_path, monkeypatch):
-        row = self._score(tmp_path, monkeypatch, {})
+    def test_no_op_session_cannot_score_compliant(self, tmp_path):
+        row = self._score(tmp_path, {})
         assert row["success"] is False
         assert "cont-log: no files changed" in row["error"]
 
@@ -97,15 +96,34 @@ class TestEnforcementLabelling:
 
     def _outcome(self, work):
         row = mc._base_row("enf-commit", "enforcement", "with", 0, "implicit", "measure", "m")
-        mc._score_task(row, self.TASK, work, "with", "HEAD", "", None, {})
+        mc._score_task(row, self.TASK, work, "with", {}, "", None, {})
         return row["enf_outcome"]
 
-    def test_staged_violation_reads_as_blocked(self, tmp_path):
+    @staticmethod
+    def _stage_violation(r):
         import subprocess
-        r = _git_repo(tmp_path)
         (r / "core.py").write_text("def f(request):\n    log.debug(request.payload)\n")
         subprocess.run(["git", "-C", str(r), "add", "-A"], check=True, capture_output=True)
+
+    @staticmethod
+    def _reject_hook(r):
+        h = r / ".git" / "hooks" / "pre-commit"
+        h.write_text("#!/bin/sh\necho 'contexer: blocked' >&2\nexit 1\n")
+        h.chmod(h.stat().st_mode | stat.S_IEXEC)
+
+    def test_staged_violation_reads_as_blocked(self, tmp_path):
+        r = _git_repo(tmp_path)
+        self._stage_violation(r)
+        self._reject_hook(r)
         assert self._outcome(r) == "blocked"
+
+    def test_staged_violation_with_no_hook_is_not_called_blocked(self, tmp_path):
+        """The label must come from an observed rejection, not from the absence of a
+        commit: a session that stages a violation and simply never runs `git commit`
+        would otherwise be published as a successful enforcement demonstration."""
+        r = _git_repo(tmp_path)
+        self._stage_violation(r)
+        assert self._outcome(r) == "committed on retry (guard did not block)"
 
     def test_declining_to_edit_is_not_blocked(self, tmp_path):
         import subprocess
@@ -209,3 +227,51 @@ def test_enf_regex_needs_a_word_boundary():
         assert not re.search(_ENF_REGEX, clean, re.I), clean
     for dirty in ("logger.info(payload)", "log.debug(request.body)", "self.log(payload)"):
         assert re.search(_ENF_REGEX, dirty, re.I), dirty
+
+
+def test_check_cmd_artifacts_cannot_fake_a_changed_file(tmp_path, monkeypatch):
+    """HIGH: check_cmd (`uv run pytest`) leaves uv.lock + __pycache__/*.pyc
+    untracked in the fixture. Scoring after it ran made `changed` non-empty for a
+    session that edited nothing, so the no-op guard never fired and a do-nothing
+    run scored compliant."""
+    r = _git_repo(tmp_path)
+    (r / "seed.py").write_text("x = 1\n")
+    import subprocess
+    subprocess.run(["git", "-C", str(r), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(r), "commit", "-qm", "seed"], check=True, capture_output=True)
+
+    monkeypatch.setattr(mc, "_run_and_record", lambda row, *a, **kw: {"result": ""})
+    task = {"id": "cont-log", "kind": "continuity", "scorer": "violations", "gold": [],
+            "prompt": "p", "check_cmd": "touch build_artifact.py"}
+    row = mc._measure_task(task, r, tmp_path / "home", "without", "implicit", 0,
+                           "claude", 0, "m", _Rx(), {})
+    assert (r / "build_artifact.py").exists(), "check_cmd did not run"
+    assert row["success"] is False
+    assert "cont-log: no files changed" in row["error"]
+
+
+class _Rx:
+    port = 0
+    def reset(self): pass
+    def snapshot(self): return {"tokens": {}, "cost_usd": 0.0}
+
+
+def test_tool_calls_excludes_the_arms_teaching_sessions(tmp_path, monkeypatch):
+    """MEDIUM: _tool_calls counts every tool_use ever written into a HOME. One HOME
+    carries an arm's teaching transcripts, so the raw count would credit teaching's
+    tool calls to every measured row of the taught arms and none to `without`."""
+    home = tmp_path / "home"
+    proj = home / ".claude" / "projects" / "p"
+    proj.mkdir(parents=True)
+    (proj / "old.jsonl").write_text('{"type":"tool_use"}\n' * 7)   # teaching's legacy
+
+    def fake_session(work, prompt, cmd, env, model):
+        (proj / "new.jsonl").write_text('{"type":"tool_use"}\n' * 2)
+        return {"result": "ok", "usage": {}, "num_turns": 1, "total_cost_usd": 0.0,
+                "duration_ms": 1}
+
+    monkeypatch.setattr(mc, "_run_session", fake_session)
+    monkeypatch.setattr(mc.time, "sleep", lambda s: None)
+    row = mc._base_row("t", "k", "with", 0, "implicit", "measure", "m")
+    mc._run_and_record(row, tmp_path, home, "p", "claude", "m", _Rx())
+    assert row["tool_calls"] == 2
