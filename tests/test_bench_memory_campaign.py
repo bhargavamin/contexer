@@ -34,6 +34,23 @@ def test_rerun_into_existing_out_dir_fails_loud(tmp_path):
     assert first.read_text().splitlines() == rows_after_first
 
 
+def test_zero_byte_existing_file_also_blocks(tmp_path):
+    """Greptile follow-up: the guard is an atomic O_EXCL claim, not a size check —
+    a check-then-write (e.g. `exists() and st_size > 0`) leaves a race window where
+    two concurrent campaigns can both pass before either writes. A pre-existing
+    EMPTY file must block too, since a size-based check would let it through and
+    silently reintroduce that race."""
+    import pytest
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "runs.jsonl").touch()  # zero bytes — would pass an st_size>0 check
+
+    with pytest.raises(FileExistsError):
+        run_memory_campaign(out_dir, reps=1, claude_cmd=_stub(tmp_path),
+                            model="stub", conditions=("without",))
+    assert not (out_dir / "campaign.json").exists()  # never got that far
+
+
 def test_campaign_writes_rows_with_new_fields(tmp_path):
     out = run_memory_campaign(tmp_path / "out", reps=1, claude_cmd=_stub(tmp_path),
                               model="stub", conditions=("without", "memory", "with"))

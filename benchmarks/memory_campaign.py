@@ -26,6 +26,7 @@ were present when a measured session STARTED (i.e. the sweep failed)."""
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -358,17 +359,22 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
                         model: str = "", conditions: tuple = ("without", "memory", "with")) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "runs.jsonl"
-    if out.exists() and out.stat().st_size > 0:
-        # _append (below) is pure append-mode and campaign.json is unconditionally
-        # overwritten just below — a rerun into an existing --out would silently mix
-        # this run's rows in under the OLD run's now-discarded metadata (model, reps,
-        # frozen teaching hash), and neither report.py nor validate.py cross-checks
-        # row count against campaign.json's declared reps to catch it. Fail loud
-        # instead of aggregating two heterogeneous runs as if they were one.
+    # Atomic claim, not a check-then-write: _append (below) is pure append-mode and
+    # campaign.json is unconditionally overwritten just below, so either a rerun into
+    # an existing --out or two campaigns racing on the same fresh --out would silently
+    # mix rows in under one run's (mismatched) metadata — and neither report.py nor
+    # validate.py cross-checks row count against campaign.json's declared reps to
+    # catch it. O_CREAT|O_EXCL is a single atomic syscall (unlike an exists() check,
+    # which leaves a race window between the check and the write), so it closes both
+    # the sequential-rerun case and the concurrent-processes case the same way.
+    try:
+        os.close(os.open(out, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+    except FileExistsError:
         raise FileExistsError(
-            f"{out} already has rows from a previous run. Rerunning into the same "
-            f"--out would silently mix runs under mismatched metadata. Pick a fresh "
-            f"--out directory, or remove the existing runs.jsonl first.")
+            f"{out} already exists — from a previous run or a concurrently running "
+            f"one. Rerunning into the same --out would silently mix runs under "
+            f"mismatched metadata. Pick a fresh --out directory, or remove the "
+            f"existing runs.jsonl first.") from None
     tasks = json.loads(TASKS_FILE.read_text())
     teaching = json.loads(TEACHING_FILE.read_text())
     (out_dir / "campaign.json").write_text(json.dumps({
