@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from benchmarks.memory_home import write_home_settings, memory_dir, memory_files
 

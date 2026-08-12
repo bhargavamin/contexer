@@ -1,4 +1,5 @@
-import json, os, stat
+import json
+import stat
 from pathlib import Path
 
 import benchmarks.memory_campaign as mc
@@ -9,13 +10,15 @@ echo '{"result": "DynamoDB\\nscaling", "usage": {"input_tokens": 10, "output_tok
 """
 
 def _stub(tmp_path):
-    p = tmp_path / "claude"; p.write_text(STUB); p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    p = tmp_path / "claude"
+    p.write_text(STUB)
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return str(p)
 
 def test_campaign_writes_rows_with_new_fields(tmp_path):
     out = run_memory_campaign(tmp_path / "out", reps=1, claude_cmd=_stub(tmp_path),
                               model="stub", conditions=("without", "memory", "with"))
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
     arms = {r["arm"] for r in rows}
     assert arms == {"without", "memory", "with"}
     assert any(r["phase"] == "teach" for r in rows)       # teaching rows recorded
@@ -36,7 +39,7 @@ def test_teaching_runs_one_session_per_prompt(tmp_path):
 
     out = run_memory_campaign(tmp_path / "out", reps=1, claude_cmd=_stub(tmp_path),
                               model="stub", conditions=("memory",))
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
     teach = [r for r in rows if r["phase"] == "teach"]
     n_prompts = sum(len(s["prompts"]) for s in teaching if s["tier"] == "implicit")
     assert len(teach) == n_prompts
@@ -181,7 +184,7 @@ def test_with_arm_sweeps_memory_and_records_the_count(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "_run_and_record", writing_run)
     out = run_memory_campaign(tmp_path / "out", reps=1, claude_cmd=_stub(tmp_path),
                               model="stub", conditions=("with",))
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
     assert started_dirty and not any(started_dirty)   # no session inherited memory files
     # every session that ran recorded its one leaked file, and nothing survived
     assert sum(1 for r in rows if r["memory_leak_files"] == 1) == len(started_dirty)
@@ -203,11 +206,13 @@ echo '{"result": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}, "num_tu
 """
 
 def test_campaign_survives_a_crashing_session(tmp_path):
-    p = tmp_path / "claude_crashy"; p.write_text(_CRASH_STUB); p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    p = tmp_path / "claude_crashy"
+    p.write_text(_CRASH_STUB)
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
 
     out = run_memory_campaign(tmp_path / "out2", reps=1, claude_cmd=str(p),
                               model="stub", conditions=("without", "memory"))
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
     # without: 4 measured calls; memory: 5 teach (one session per scripted prompt:
     # 4 in teaching session 1 + 1 in session 2) + 4 measured = 13 total (the
     # campaign.json claude_version probe eats one of the stub's 3 healthy calls

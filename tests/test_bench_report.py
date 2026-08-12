@@ -154,7 +154,7 @@ class TestMemoryCampaignSection:
                      sup_result="pass")]
         md = render(_write(tmp_path, rows))
         assert "| arm | implicit | explicit | pooled (headline) |" in md
-        line = next(l for l in md.splitlines() if l.startswith("| with |"))
+        line = next(ln for ln in md.splitlines() if ln.startswith("| with |"))
         assert line.count("1/1 (") == 2      # the two per-tier cells
         assert "2/2 (" in line               # the pooled cell
         assert "pre-registered headline number" in md
@@ -168,7 +168,7 @@ class TestMemoryCampaignSection:
                 _mrow("sup-current", "memory", "implicit", rep=2, success=False,
                      sup_result="review")]
         md = render(_write(tmp_path, rows))
-        line = next(l for l in md.splitlines() if l.startswith("| memory |"))
+        line = next(ln for ln in md.splitlines() if ln.startswith("| memory |"))
         assert "1/1 (" in line and "1 review" in line
         assert "1/2" not in line and "0/1" not in line
 
