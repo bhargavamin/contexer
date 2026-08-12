@@ -26,6 +26,12 @@ EXPECTED_KEYS = (
     "violations", "rationale", "success", "result_snippet",
     "otel_tokens_total", "otel_cost_usd", "telemetry_ok", "error",
 )
+# Additional columns every memory-campaign row must carry (a row is one iff it has
+# "arm"). Required, not warned about: _check_memory_isolation short-circuits on a
+# missing "contaminated", so a producer refactor that dropped the field would make
+# the campaign's central isolation check pass vacuously.
+MEMORY_KEYS = ("arm", "tier", "phase", "contaminated", "capture", "sup_result",
+               "memory_leak_files")
 TOKEN_PARTS = ("tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_write")
 # Cost-like metrics: lower is better, so a paired "win" for the first arm of a
 # pair means its value is strictly below the second arm's.
@@ -33,15 +39,22 @@ PAIRED_METRICS = ("tokens_total", "cost_usd", "turns", "tool_calls", "duration_m
 MEDIAN_METRICS = ("tokens_total", "cost_usd", "turns", "tool_calls",
                   "duration_ms", "violations", "rationale", "success")
 EDITING_KINDS = ("convention", "efficiency", "continuity")
+# memory_campaign.py's headline tasks (memory_tasks.json's "headline": true).
+# Kept as a literal, like EDITING_KINDS above, so this validator notices drift.
+MEMORY_HEADLINE_TASKS = ("sup-current", "cont-log")
 # Stable display order for known conditions; unknown names are appended.
 CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
-                   "with", "claudemd_with")
+                   "memory", "with", "claudemd_with")
 # The condition pairs that matter, first arm vs second arm. claudemd_with-vs-claudemd
 # is the adoption question: contexer's marginal value on an already-documented repo.
 # agentsmd-vs-claudemd measures whether the assistant honors AGENTS.md like CLAUDE.md.
+# with-vs-memory is the memory campaign's headline comparison; memory-vs-without
+# says whether the memory tool beat a bare agent at all. A pair whose conditions
+# are not both present in a campaign is skipped, so these are inert elsewhere.
 PAIRS = (("with", "without"), ("with", "claudemd"), ("claudemd", "without"),
          ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
-         ("claudemd_agentsmd", "claudemd"))
+         ("claudemd_agentsmd", "claudemd"), ("with", "memory"),
+         ("memory", "without"))
 
 
 def _conditions_present(rows):
@@ -122,12 +135,14 @@ def validate(campaign_dir):
     _check_schema(rows, failures)
     _check_model(ok_rows, camp_model, failures)
     _check_coverage(rows, reps, warnings, recomputed)
-    recomputed["medians"] = _recompute_medians(ok_rows)
+    recomputed["medians"] = _recompute_medians(_median_rows(ok_rows))
     recomputed["excluded_errored"] = len(err_rows)
     _check_anomalies(rows, ok_rows, err_rows, warnings, recomputed)
     _check_paired(ok_rows, warnings, recomputed)
     _check_chains(rows, failures)
     _check_interleaving(rows, warnings)
+    _check_memory_isolation(rows, failures)
+    _check_tier_coverage(rows, warnings)
 
     return {"ok": not failures, "failures": failures, "warnings": warnings,
             "recomputed": recomputed}
@@ -141,6 +156,11 @@ def _check_schema(rows, failures):
             failures.append(f"row {i + 1} ({r.get('task_id', '?')}) missing keys: "
                             f"{', '.join(missing)}")
             continue
+        if "arm" in r:
+            missing = [k for k in MEMORY_KEYS if k not in r]
+            if missing:
+                failures.append(f"row {i + 1} ({r.get('task_id', '?')}) missing "
+                                f"memory-campaign keys: {', '.join(missing)}")
         parts = sum(int(r.get(k, 0) or 0) for k in TOKEN_PARTS)
         if int(r.get("tokens_total", 0) or 0) != parts:
             failures.append(
@@ -170,14 +190,35 @@ def _check_coverage(rows, reps, warnings, recomputed):
     """
     tasks = sorted({r.get("task_id") for r in rows})
     conditions = sorted({r.get("condition") for r in rows})
+    # A teach-phase task id can only exist in an arm that teaches; the bare arm never
+    # does, so pairing them would emit a guaranteed spurious "0 of N rows" per teach
+    # id. Both sets are empty for legacy campaigns (no "phase"), so nothing changes.
+    teach_tasks = {r.get("task_id") for r in rows if r.get("phase") == "teach"}
+    teach_conds = {r.get("condition") for r in rows if r.get("phase") == "teach"}
     counts = {}
     for t in tasks:
         for c in conditions:
+            if t in teach_tasks and c not in teach_conds:
+                continue
             n = sum(1 for r in rows if r.get("task_id") == t and r.get("condition") == c)
             counts[f"{t}|{c}"] = n
             if reps is not None and n < reps:
                 warnings.append(f"cell ({t}, {c}) has {n} of {reps} rows (short)")
     recomputed["cell_counts"] = counts
+
+
+def _median_rows(ok_rows):
+    """Rows eligible for median recomputation.
+
+    Legacy campaigns: every non-errored row, unchanged. Memory campaigns (any row
+    carries "arm"): measured, non-enforcement rows only — the same exclusion
+    report.py already applies. Folding them in would put teach rows (success always
+    False, and their own token cost) and enforcement rows (success hardcoded True
+    for the "with" arm) into the very medians MEMORY_CAMPAIGN.md publishes."""
+    if not any("arm" in r for r in ok_rows):
+        return ok_rows
+    return [r for r in ok_rows
+            if r.get("phase") == "measure" and r.get("kind") != "enforcement"]
 
 
 def _recompute_medians(ok_rows):
@@ -235,18 +276,26 @@ def _check_anomalies(rows, ok_rows, err_rows, warnings, recomputed):
     # rationale tasks scoring identically extreme in with AND without — the pair
     # where an identical extreme signals a leak or a broken injection.
     rat_tasks = sorted({r.get("task_id") for r in ok_rows if r.get("kind") == "rationale"})
+    def _rat_median(task_id, cond):
+        cr = [r for r in ok_rows
+              if r.get("task_id") == task_id and r.get("condition") == cond]
+        return _median(_num(r, "rationale") for r in cr) if cr else None
+
     for t in rat_tasks:
-        scores = {}
-        for c in ("without", "with"):
-            cr = [r for r in ok_rows if r.get("task_id") == t and r.get("condition") == c]
-            if cr:
-                scores[c] = _median(_num(r, "rationale") for r in cr)
-        if len(scores) == 2 and scores["with"] == scores["without"]:
-            if scores["with"] == 1.0:
-                warnings.append(f"rationale task '{t}' scores 1.0 in BOTH conditions "
+        w = _rat_median(t, "with")
+        # Each no-injection baseline present gets its own comparison: a memory
+        # campaign's opponent arm is "memory", and checking only "without" would
+        # leave the arm actually under comparison unwatched.
+        for base in ("without", "memory"):
+            b = _rat_median(t, base)
+            if w is None or b is None or w != b:
+                continue
+            where = "BOTH conditions" if base == "without" else f"BOTH with and {base}"
+            if w == 1.0:
+                warnings.append(f"rationale task '{t}' scores 1.0 in {where} "
                                 f"(gold may be leaking into the prompt)")
-            elif scores["with"] == 0.0:
-                warnings.append(f"rationale task '{t}' scores 0.0 in BOTH conditions "
+            elif w == 0.0:
+                warnings.append(f"rationale task '{t}' scores 0.0 in {where} "
                                 f"(injection may be broken)")
 
 
@@ -342,6 +391,40 @@ def _check_interleaving(rows, warnings):
             warnings.append(f"condition '{c}' ran as one contiguous time block "
                             f"before all other conditions — conditions were not "
                             f"interleaved")
+
+
+def _check_memory_isolation(rows, failures):
+    """Check 9 (memory campaign): a measured row that leaked state across arms
+    (contaminated=True) is a failure. Teach rows are exempt; enforcement rows are
+    NOT — `contaminated` measures the opponent's state leaking into the HOME, which
+    has nothing to do with the fixture mutations that make enf rows special. No-op
+    for legacy campaigns whose rows predate Task 6's arm/tier/phase fields."""
+    for r in rows:
+        if "arm" not in r or not r.get("contaminated"):
+            continue
+        if r.get("phase") != "measure":
+            continue
+        failures.append(f"contaminated row: {r.get('task_id')}/{r.get('arm')}/"
+                        f"rep{r.get('rep')}")
+
+
+def _check_tier_coverage(rows, warnings):
+    """Check 10 (memory campaign): each headline task/arm needs equal, non-zero
+    implicit vs. explicit measured reps. No-op for legacy campaigns (no `arm`)."""
+    counts = {}
+    for r in rows:
+        if "arm" not in r:
+            continue
+        if r.get("phase") != "measure" or r.get("task_id") not in MEMORY_HEADLINE_TASKS:
+            continue
+        cell = counts.setdefault((r["task_id"], r["arm"]), {"implicit": 0, "explicit": 0})
+        if r.get("tier") in cell:
+            cell[r["tier"]] += 1
+    for (task_id, arm), c in counts.items():
+        imp, exp = c["implicit"], c["explicit"]
+        if imp != exp or imp < 1 or exp < 1:
+            warnings.append(f"tier imbalance for {task_id}/{arm}: "
+                            f"implicit={imp} explicit={exp}")
 
 
 # --- rendering --------------------------------------------------------------

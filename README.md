@@ -70,7 +70,7 @@ No workflow change, no prompt discipline: directives like *"always use uv, never
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
-    <img alt="Benchmarks, medians across 548 published live agent sessions: 6x fewer tokens per session (32,804 vs 198,864 with no memory); right answer in 1 turn vs 6 turns of guessing; 8/8 stored rules followed vs 0/8 bare; $0.043 per session with right answers vs $0.116 with wrong ones" src="assets/benchmark-light.svg" width="1000">
+    <img alt="Benchmarks, Sonnet 5 medians across 548 published live agent sessions: 6x fewer tokens per session (32,804 vs 198,864 with no memory); right answer in 1 turn vs 6 turns of guessing; 8/8 stored rules followed vs 0/8 bare (Opus); $0.043 per session with right answers vs $0.116 with wrong ones" src="assets/benchmark-light.svg" width="1000">
   </picture>
 </p>
 

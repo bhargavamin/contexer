@@ -16,6 +16,16 @@ class TestRationaleScore:
     def test_empty_gold(self):
         assert score.rationale_score("anything", []) == 1.0
 
+    def test_gold_variant_group_accepts_any_spelling(self):
+        gold = [["machine-parseable", "machine readable"], ["dict", "dictionary"]]
+        assert score.rationale_score("Returns a dictionary so it is machine readable.",
+                                     gold) == 1.0
+        assert score.rationale_score("Returns a dict, machine-parseable.", gold) == 1.0
+
+    def test_gold_variant_group_still_misses_when_no_spelling_matches(self):
+        gold = [["machine-parseable", "machine readable"], ["dict", "dictionary"]]
+        assert score.rationale_score("Returns a dict.", gold) == 0.5
+
 
 class TestCountViolations:
     BASELINE = [
