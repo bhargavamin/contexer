@@ -306,3 +306,24 @@ class TestConflictReviewLines:
         out = store.format_pending_review(tmp_repo)
         assert "picked with the developer" not in out
         assert "declined with the developer" not in out
+
+
+class TestConflictProposalDisplaced:
+    """Issue #200: a developer restatement displaces a lower-trust proposal. The dual render
+    must follow the NEW proposal, and the memo bound to the replaced one must be gone."""
+
+    _STANDING = "Always commit automatically"
+    _AI_UPDATE = "Always commit automatically once the CI pipeline is green"
+    _HUMAN = "Always commit automatically after approvals and ensure you double cfonirm"
+
+    def test_dual_render_follows_the_replacing_proposal(self, tmp_repo):
+        eid = _conflicted(tmp_repo, self._STANDING, self._AI_UPDATE, subtype="constraint")
+        assert store.record_conflict_memo(tmp_repo, eid, "update", "s2")[0]
+        assert "CI pipeline" in store.get_context(tmp_repo)      # memo steers to the update
+
+        eid2, _content, status = store.capture_user_constraint(tmp_repo, self._HUMAN, "s3")
+        assert (eid2, status) == (eid, "revision_proposed")
+        out = store.get_context(tmp_repo)
+        assert "Unreviewed update" in out and "cfonirm" in out
+        assert "CI pipeline" not in out, "the displaced proposal is archived, not rendered"
+        assert "picked with the developer" not in out, "the memo's referent is gone"

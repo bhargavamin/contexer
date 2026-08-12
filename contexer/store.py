@@ -1249,6 +1249,20 @@ def capture_user_constraint(
         return entry["id"], content, status
 
 
+# Trust order for the single proposal slot (issue #200): a developer restatement is the
+# highest-trust signal in the system, a plan-sourced value survived reconciliation, an AI
+# guess is inferred, and a scan proposal is bookkeeping that re-proposes on its own TTL.
+_PROPOSAL_TRUST = {"human": 3, "plan": 2, "ai": 1, "scan": 0}
+
+
+def _outranks_proposal(source: str, prop: dict) -> bool:
+    """Whether a new proposal from `source` may displace the unreviewed `prop` already
+    holding the entry's one proposal slot. STRICTLY greater only: a human proposal is never
+    auto-replaced, and an equal-trust collision keeps the refusal. An unrecognised source
+    ranks below every known one — it never displaces, and is itself displaceable."""
+    return _PROPOSAL_TRUST.get(source, -1) > _PROPOSAL_TRUST.get(prop.get("source", ""), -1)
+
+
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
                        deictic: bool, session_id: str) -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
@@ -1262,9 +1276,13 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
       - approved/suggested, no unresolved proposal → attach a proposed_revision (Suggested
                                                     Update — approval promotes it)
       - approved/suggested, DIFFERENT proposal
-        already pending                            → leave the existing proposal untouched,
-                                                    return "revision_already_pending" (never
-                                                    clobber an unreviewed Suggested Update)
+        already pending                            → trust-ordered slot (_outranks_proposal):
+                                                    this restatement is human-sourced, so it
+                                                    DISPLACES a lower-trust (ai/scan) proposal
+                                                    — archived to superseded_proposals — and
+                                                    bounces off an equal-or-higher one with
+                                                    "revision_already_pending" (never clobber
+                                                    a human's unreviewed Suggested Update)
     New content SHORTER (user re-types the terse version):
       - pending twin + clean → promote keeping the fuller existing content
       - otherwise            → recurrence, silent no-op like an ordinary duplicate."""
@@ -1301,17 +1319,33 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             return _recur_silently()  # never propose on an unreviewed base
         norm = _normalize_content(content)
         prop = hit.get("proposed_revision")
+        displaced = False
         if prop and prop.get("content") != norm:
-            # A DIFFERENT Suggested Update is already awaiting review on this entry —
-            # never clobber it (it would vanish unreviewed). Leave it untouched and
-            # surface the new phrasing to the developer instead of silently dropping it.
-            return hit["id"], norm, "revision_already_pending"
+            # A DIFFERENT Suggested Update is already awaiting review on this entry. The slot
+            # is trust-ordered (issue #200): this path IS the developer restating the rule,
+            # the highest-trust source there is, so it displaces a lower-trust (ai/scan)
+            # proposal rather than bouncing off it — otherwise the session renders the AI's
+            # unreviewed update while the developer's own correction was never recorded.
+            # Equal-or-higher trust keeps the refusal: never clobber it (it would vanish
+            # unreviewed); surface the new phrasing to the developer instead.
+            if not _outranks_proposal("human", prop):
+                return hit["id"], norm, "revision_already_pending"
+            # Displaced, not discarded — same archival shape as edit_decision's dropped
+            # proposal, so the timeline can still show what was suggested.
+            hit.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
+            hit.pop("proposed_revision", None)
+            hit.pop("conflict_memo", None)   # it referenced the proposal just replaced
+            prop, displaced = None, True
         if not prop:
             hit["proposed_revision"] = _build_proposal(
                 hit, content, subtype, session_id, now, source="human")
             _save(repo_path, data)
-        # No .pending_review flag here for the same reason as new captures: the
-        # in-band revision_proposed ack already notifies the developer.
+            # No .pending_review flag on a FRESH attach, for the same reason as new captures:
+            # the in-band revision_proposed ack already notifies the developer. A displaced
+            # proposal is heavier — something already awaiting review just changed — so that
+            # one arms the deterministic nudge too.
+            if displaced:
+                _touch_pending_review(repo_path)
         return hit["id"], norm, "revision_proposed"
 
     if pending_twin and not deictic:
@@ -2026,9 +2060,24 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # still a change to a constraint.
                 if (_update_needs_approval(new_subtype, created_by)
                         or _update_needs_approval(old_subtype, created_by)):
-                    # Fix: don't attach a proposal to an entry that isn't approved yet -
-                    # the developer needs to review the base first.
+                    # Don't attach a proposal to an entry that isn't approved yet - the
+                    # developer reviews the base first, and a proposal on it would need two
+                    # approvals for one still-unreviewed draft. AMEND THE DRAFT IN PLACE
+                    # instead (issue #199): the refusal used to drop the correction entirely,
+                    # and a capture misfire must fail toward review, never toward silent loss.
+                    # Same pre-approval amend precedent as _route_containment's deictic path
+                    # and _apply_approval's pending edit: rewrite the current revision, mint
+                    # no new version, stay pending_approval so the WHOLE amended draft still
+                    # gets its one human review. anchor_candidates/memory_key are untouched -
+                    # candidates are blessed at approval, not here.
                     if _entry_status(target) == "pending_approval":
+                        rev = _current_revision(target)
+                        if rev is not None:
+                            rev["content"] = content
+                            rev["title"] = _normalize_title(title) or _derive_title(content)
+                            target["updated_at"] = now
+                            _sync_decision_cache(target)
+                            _save(repo_path, data)
                         return True, target["id"]
                     # Fix: don't overwrite an existing proposal if the new content AND its
                     # effective title are identical - the proposal is already pending for the same

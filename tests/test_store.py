@@ -2018,6 +2018,17 @@ class TestSuggestedUpdate:
         store._save(repo, data)
         return entry["id"]
 
+    _PENDING_BASE = "Use Kafka instead of RabbitMQ for event streaming"
+
+    def _pending(self, repo: str) -> str:
+        """A base that lands pending_approval (L3 architecture signal) — what issue #199's
+        replace_id correction lands on."""
+        store.update_decision(repo, self._PENDING_BASE, "s1", "architecture")
+        entry = next(e for e in store._load(repo)["entries"] if e.get("type") == "decision")
+        assert entry.get("status") == "pending_approval", (
+            f"Expected pending_approval but got {entry.get('status')!r}")
+        return entry["id"]
+
     def test_significant_change_creates_proposal_not_overwrite(self, tmp_repo):
         eid = self._approved(tmp_repo, "Rollback endpoint is /api/v1/rollback")
         ok, rid = store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
@@ -2143,6 +2154,43 @@ class TestSuggestedUpdate:
                                         "architecture", replace_id=eid)
         assert ok is True
         entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert "proposed_revision" not in entry
+
+    def test_correction_on_pending_base_amends_the_draft_in_place(self, tmp_repo):
+        # Issue #199: the refusal above used to DROP the correction entirely. It now amends
+        # the unreviewed draft — one draft, one review — instead of failing toward silent loss.
+        eid = self._pending(tmp_repo)
+        ok, rid = store.update_decision(
+            tmp_repo, "Use DynamoDB instead of Kafka for event streaming", "s2",
+            "architecture", replace_id=eid, title="Use DynamoDB for event streaming")
+        assert (ok, rid) == (True, eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["content"] == "Use DynamoDB instead of Kafka for event streaming"
+        assert entry["title"] == "Use DynamoDB for event streaming"
+        assert entry["status"] == "pending_approval", "still the developer's to review"
+        assert "proposed_revision" not in entry, "no proposal on an unreviewed base"
+        assert entry["revision"] == 1 and len(entry["revisions"]) == 1, "pre-approval amend"
+
+    def test_amended_pending_draft_surfaces_the_new_content_for_review(self, tmp_repo):
+        eid = self._pending(tmp_repo)
+        store.update_decision(tmp_repo, "Use DynamoDB instead of Kafka for event streaming",
+                              "s2", "architecture", replace_id=eid)
+        assert eid in [e["id"] for e in store.get_pending_decisions(tmp_repo)]
+        review = store.format_pending_review(tmp_repo)
+        assert "DynamoDB" in review and "RabbitMQ" not in review
+        # and the ack handed back to the calling model names the corrected text, not silence
+        prompt = store.get_pending_approval_prompt(tmp_repo, eid)
+        assert "pending review" in prompt and "DynamoDB" in prompt
+
+    def test_identical_recapture_on_pending_base_is_not_a_change(self, tmp_repo):
+        eid = self._pending(tmp_repo)
+        stamp = next(e for e in store._load(tmp_repo)["entries"]
+                     if e.get("id") == eid)["updated_at"]
+        ok, rid = store.update_decision(tmp_repo, self._PENDING_BASE, "s2",
+                                        "architecture", replace_id=eid)
+        assert (ok, rid) == (True, eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["updated_at"] == stamp and entry["revision"] == 1
         assert "proposed_revision" not in entry
 
     def test_identical_proposal_not_duplicated(self, tmp_repo):
@@ -3356,6 +3404,55 @@ class TestContainmentCapture:
         assert "not stored" in ack.lower()
         assert "contexer review" in ack.lower()
         assert content3.lower() in ack.lower(), "new phrasing surfaced so the developer can fold it in"
+
+    _AI_UPDATE = "Always commit automatically once the CI pipeline is green"
+
+    def test_human_restatement_displaces_lower_trust_proposal(self, tmp_repo):
+        # Issue #200: an AI proposal held the single slot and the developer's own restatement
+        # bounced off it — with #193's dual injection the session then rendered the AI's
+        # unreviewed update while the higher-trust human correction was never recorded.
+        store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        ok, rid = store.update_decision(tmp_repo, self._AI_UPDATE, "sAI", "constraint",
+                                        replace_id=eid)
+        assert (ok, rid) == (True, eid)
+        assert next(e for e in store._load(tmp_repo)["entries"]
+                    if e["id"] == eid)["proposed_revision"]["source"] == "ai"
+        assert store.record_conflict_memo(tmp_repo, eid, "update", "sAI")[0]
+        store.pending_review_nudge(tmp_repo)      # consume the flag the AI proposal armed
+
+        eid3, _content3, status3 = store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
+        assert (eid3, status3) == (eid, "revision_proposed")
+        target = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert target["proposed_revision"]["source"] == "human"
+        assert "cfonirm" in target["proposed_revision"]["content"]
+        archived = target["superseded_proposals"]
+        assert len(archived) == 1 and archived[0]["content"] == self._AI_UPDATE
+        assert archived[0]["superseded_at"], "displaced, not discarded"
+        assert "conflict_memo" not in target, "the memo's referent was replaced"
+        assert store.pending_review_nudge(tmp_repo), "a displaced proposal arms the nudge"
+
+    def test_human_proposal_is_never_displaced(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
+        eid, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
+        store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")   # human proposal
+        different = "Always commit automatically after every merge to keep history clean"
+        eid3, _content3, status3 = store.capture_user_constraint(tmp_repo, different, "s3")
+        assert (eid3, status3) == (eid, "revision_already_pending")
+        target = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert "cfonirm" in target["proposed_revision"]["content"], "equal trust never displaces"
+        assert "superseded_proposals" not in target
+
+    def test_proposal_slot_trust_order(self):
+        def outranks(new: str, existing: str) -> bool:
+            return store._outranks_proposal(new, {"source": existing})
+
+        assert outranks("human", "ai") and outranks("human", "scan") and outranks("plan", "ai")
+        assert not (outranks("ai", "human") or outranks("scan", "ai")
+                    or outranks("plan", "human"))
+        assert not (outranks("ai", "ai") or outranks("human", "human")), "equal trust refuses"
+        assert not outranks("mystery", "scan"), "an unknown source never displaces"
+        assert outranks("scan", "mystery"), "an unknown source is itself displaceable"
 
     def test_identical_superset_recapture_stays_idempotent_with_pending_proposal(self, tmp_repo):
         # Companion to test_superset_capture_is_idempotent: pins that a byte-identical
