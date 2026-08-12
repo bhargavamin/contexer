@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.1](https://github.com/bhargavamin/contexer/compare/v0.33.0...v0.33.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **bench:** close the TOCTOU race in the --out-reuse guard ([eae1b9e](https://github.com/bhargavamin/contexer/commit/eae1b9e1bd2b9ff258ffeadd123adb95859c4e21))
+* **bench:** close TOCTOU race in the memory-campaign --out-reuse guard ([15ae33e](https://github.com/bhargavamin/contexer/commit/15ae33efa80ec84e7ef96037ff7208d3291c3c79))
+
 ## [0.33.0](https://github.com/bhargavamin/contexer/compare/v0.32.0...v0.33.0) (2026-08-12)
 
 
