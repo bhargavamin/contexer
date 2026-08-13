@@ -2171,6 +2171,20 @@ class TestSuggestedUpdate:
         assert "proposed_revision" not in entry, "no proposal on an unreviewed base"
         assert entry["revision"] == 1 and len(entry["revisions"]) == 1, "pre-approval amend"
 
+    def test_amend_applies_subtype_and_anchors_source_files(self, tmp_repo):
+        # The amend is the draft's LIVE revision, so it carries the caller's subtype and its
+        # anchor vouches for what renders — the sibling branches do both; this one dropped them.
+        eid = self._pending(tmp_repo)
+        ok, rid = store.update_decision(
+            tmp_repo, "Never stream events through Kafka without a dead-letter queue", "s2",
+            "constraint", replace_id=eid, source_files=["messaging/kafka.py"])
+        assert (ok, rid) == (True, eid)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        assert entry["subtype"] == "constraint"
+        assert entry["source_files"] == ["messaging/kafka.py"]
+        assert "anchor_commit" in entry
+        assert entry["status"] == "pending_approval" and "proposed_revision" not in entry
+
     def test_amended_pending_draft_surfaces_the_new_content_for_review(self, tmp_repo):
         eid = self._pending(tmp_repo)
         store.update_decision(tmp_repo, "Use DynamoDB instead of Kafka for event streaming",

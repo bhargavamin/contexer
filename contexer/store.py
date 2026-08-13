@@ -547,10 +547,15 @@ def _matches_query(pat: "re.Pattern", row: dict) -> bool:
     query that hits only the title must not silently drop the row (an authored title can be
     wholly different words from the body). Mirrors the web app's search rule.
 
-    An open proposal's content counts too (#193): it now RENDERS as a labeled unreviewed
-    update, so a query using only the update's terms must reach the row that shows it."""
+    An OPEN CONFLICT's proposal content counts too (#193): it RENDERS as a labeled unreviewed
+    update, so a query using only the update's terms must reach the row that shows it. A
+    bookkeeping or title-only proposal never renders, so its terms must not match — that
+    would return a row showing none of the words asked for."""
+    from contexer import conflicts   # function-level (import cycle); a sys.modules hit per row
+    prop = ((row.get("proposed_revision") or {}).get("content", "")
+            if conflicts._has_open_conflict(row) else "")
     return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or "")
-                or pat.search((row.get("proposed_revision") or {}).get("content", "")))
+                or (prop and pat.search(prop)))
 
 
 def _find_match(content: str, existing: list) -> dict | None:
@@ -1261,6 +1266,31 @@ def _outranks_proposal(source: str, prop: dict) -> bool:
     auto-replaced, and an equal-trust collision keeps the refusal. An unrecognised source
     ranks below every known one — it never displaces, and is itself displaceable."""
     return _PROPOSAL_TRUST.get(source, -1) > _PROPOSAL_TRUST.get(prop.get("source", ""), -1)
+
+
+def _claim_proposal_slot(entry: dict, source: str, now: str) -> bool:
+    """Whether a new `source`-sourced proposal may take the entry's ONE proposal slot,
+    archiving whatever DIFFERENT proposal already holds it (issue #200's trust order, which
+    the update_decision write sites must honour too — an ai correction there used to clobber
+    a human's unreviewed Suggested Update). False = the sitting proposal STRICTLY outranks
+    the incoming one and is left untouched; the caller returns success so the flow still
+    shows the pending prompt, failing toward review of the higher-trust proposal rather than
+    losing it.
+
+    A TIE claims the slot, unlike `_route_containment`'s refusal: there the two sides are
+    separate developer statements, each owed a review, while here they are the same
+    automated source retrying — refusing would silently drop a model's own correction of the
+    proposal it just wrote. Identical-content dedup belongs BEFORE this call."""
+    prop = entry.get("proposed_revision")
+    if not prop:
+        return True
+    if _PROPOSAL_TRUST.get(prop.get("source", ""), -1) > _PROPOSAL_TRUST.get(source, -1):
+        return False
+    # Displaced, not discarded — same archival shape as _route_containment/edit_decision.
+    entry.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
+    entry.pop("proposed_revision", None)
+    entry.pop("conflict_memo", None)   # it referenced the proposal just replaced
+    return True
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
@@ -2034,6 +2064,13 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                             if source_files:
                                 _save(repo_path, data)
                             return True, target["id"]  # identical title proposal already pending
+                        # The slot is trust-ordered (#200). "ai" is what _build_proposal stamps
+                        # on the proposal this branch is about to write, so it is what has to
+                        # outrank the sitting one; a human/plan Suggested Update is kept instead.
+                        if not _claim_proposal_slot(target, "ai", now):
+                            if source_files:
+                                _save(repo_path, data)
+                            return True, target["id"]
                         target["proposed_revision"] = _build_proposal(
                             target, content, subtype, session_id, now, title=title)
                         _save(repo_path, data)
@@ -2075,8 +2112,14 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         if rev is not None:
                             rev["content"] = content
                             rev["title"] = _normalize_title(title) or _derive_title(content)
+                            if subtype:
+                                target["subtype"] = subtype
                             target["updated_at"] = now
                             _sync_decision_cache(target)
+                            # The amended text IS this draft's live revision, so the anchor
+                            # describes what renders — re-anchor now, like the trivial path.
+                            if source_files:
+                                _anchor_sources(repo_path, target, source_files)
                             _save(repo_path, data)
                         return True, target["id"]
                     # Fix: don't overwrite an existing proposal if the new content AND its
@@ -2087,6 +2130,9 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     new_prop_title = _normalize_title(title) or _derive_title(content)
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title):
+                        return True, target["id"]
+                    # Same trust-ordered slot as the title-only branch above (#200).
+                    if not _claim_proposal_slot(target, "ai", now):
                         return True, target["id"]
                     # source_files is stashed on the proposal, NOT applied to the live entry —
                     # the current revision (the old, genuinely stale text) keeps rendering until
@@ -2410,15 +2456,9 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
             lines.append(f'    detected: "{detected}"')
-            memo = d.get("conflict_memo")
-            if memo and memo.get("pair") == conflicts._conflict_pair_key(d):
-                memo_date = (memo.get("created_at") or "")[:10]
-                if memo.get("choice") == "update":
-                    lines.append(f"    the update was picked with the developer on {memo_date}"
-                                 f" — approve to formalize (dismiss drops it)")
-                else:
-                    lines.append(f"    the update was declined with the developer on {memo_date}"
-                                 f" — dismiss to formalize (approve applies it instead)")
+            steer = conflicts.memo_steer_line(d)
+            if steer:
+                lines.append(f"    {steer}")
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
@@ -4428,8 +4468,11 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
+            entry_id = d.get("id", "")[:8]
+            id_tag = f" (id={entry_id})" if entry_id else ""   # _CONFLICT_GUIDE points at it
             title, body, extras = conflicts._conflict_view(d)
-            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}")
+            sys_parts.append(
+                f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
             if body is not None:
                 sys_parts.append(f"    {body}")
             for extra in extras:
@@ -4793,7 +4836,7 @@ def _build_retrieval_index(data: dict) -> dict:
     only at `_save`, same as every other index field. Function-level import for the same
     store<->guard_engine load-order reason documented throughout this file (e.g.
     `_anchor_sources`, `get_context`)."""
-    from contexer import guard_engine
+    from contexer import conflicts, guard_engine
     docs: dict[str, dict] = {}
     df: dict[str, int] = {}
     total_len = 0
@@ -4812,10 +4855,13 @@ def _build_retrieval_index(data: dict) -> dict:
         if status == "ignored":
             continue
         content = _current_content(e)
-        # #193: an open proposal renders alongside the standing content as a labeled
-        # unreviewed update, so its terms must be rankable too. Tokens only — topics,
-        # artifacts and title stay derived from the standing content.
-        prop_content = (e.get("proposed_revision") or {}).get("content", "")
+        # #193: an OPEN CONFLICT's proposal renders alongside the standing content as a
+        # labeled unreviewed update, so its terms must be rankable too. Tokens only — topics,
+        # artifacts and title stay derived from the standing content. A bookkeeping or
+        # title-only proposal never renders, so ranking on its terms would inject a decision
+        # showing none of them.
+        prop_content = ((e.get("proposed_revision") or {}).get("content", "")
+                        if conflicts._has_open_conflict(e) else "")
         toks = _index_tokens(f"{content} {prop_content}" if prop_content else content)
         tf: dict[str, int] = {}
         for t in toks:
@@ -5123,8 +5169,10 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
         if not e or _entry_status(e) not in ("approved", "suggested"):
             continue
         subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
+        entry_id = e.get("id", "")[:8]
+        id_tag = f" (id={entry_id})" if entry_id else ""   # _CONFLICT_GUIDE points at it
         title, body, extras = conflicts._conflict_view(e)
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}")
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}{id_tag}")
         if body is not None:
             lines.append(f"    {body}")
         for extra in extras:

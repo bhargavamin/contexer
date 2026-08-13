@@ -76,13 +76,14 @@ class TestConflictDualInjection:
     def test_session_start_project_rules_carry_both_sides(self, tmp_repo):
         # Deliberate pin: an `ai` replace_id proposal on an APPROVED constraint now renders,
         # labeled, inside the trusted project-rules block — the trust call made visible.
-        _conflicted(tmp_repo, "Never log secrets to stdout",
-                    "Never log secrets or bearer tokens to stdout or stderr", "constraint")
+        eid = _conflicted(tmp_repo, "Never log secrets to stdout",
+                          "Never log secrets or bearer tokens to stdout or stderr", "constraint")
         ctx = store.session_start_payload(tmp_repo)["context"]
         rules = ctx.split("## Project rules")[1]
         assert "Never log secrets to stdout" in rules
         assert "Unreviewed update" in rules and "bearer tokens" in rules
         assert "resolve_conflict(" in rules
+        assert f"(id={eid[:8]})" in rules, "the guide tells the model to pass the id shown"
 
     def test_rehydrated_working_set_carries_both_sides(self, tmp_repo):
         eid = _conflicted(tmp_repo)
@@ -91,6 +92,7 @@ class TestConflictDualInjection:
         assert "SQLite won't handle concurrent sessions" in out
         assert "Unreviewed update" in out and "DynamoDB" in out
         assert "resolve_conflict(" in out
+        assert f"(id={eid[:8]})" in out, "the guide tells the model to pass the id shown"
 
     def test_scan_sourced_proposal_renders_flag_only(self, tmp_repo):
         eid = _conflicted(tmp_repo)
@@ -275,6 +277,22 @@ class TestConflictRetrieval:
         out = store.get_context_for_prompt(tmp_repo, "why are we using dynamodb here?")
         assert "DynamoDB" in out and "Unreviewed update" in out
 
+    def test_query_on_a_non_rendering_proposal_does_not_match(self, tmp_repo):
+        # A scan/bookkeeping proposal never renders, so matching its terms would return a
+        # decision showing none of the words asked for.
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="scan")
+        out = store.get_context(tmp_repo, query="dynamodb")
+        assert "No matching" in out and "DynamoDB" not in out
+
+    def test_bm25_does_not_rank_a_non_rendering_proposal(self, tmp_repo):
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="scan")   # _save rebuilds the retrieval index
+        out = store.get_context_for_prompt(tmp_repo, "why are we using dynamodb here?")
+        # The row used to rank on the hidden proposal's terms and inject its STANDING content —
+        # an answer about Postgres to a question about DynamoDB.
+        assert "SQLite" not in out and "DynamoDB" not in out
+
 
 class TestConflictReviewLines:
     """The memo lines format_pending_review renders under a Suggested Update."""
@@ -327,3 +345,45 @@ class TestConflictProposalDisplaced:
         assert "Unreviewed update" in out and "cfonirm" in out
         assert "CI pipeline" not in out, "the displaced proposal is archived, not rendered"
         assert "picked with the developer" not in out, "the memo's referent is gone"
+
+
+class TestProposalSlotAtReplaceId:
+    """The same trust-ordered slot (#200) at update_decision's replace_id write sites: an ai
+    correction there used to clobber whatever Suggested Update was already awaiting review."""
+
+    def test_ai_correction_keeps_a_human_proposal(self, tmp_repo):
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="human")
+        before = dict(_entry(tmp_repo, eid)["proposed_revision"])
+        ok, rid = store.update_decision(tmp_repo, "Switch to Cassandra for the decision store",
+                                        "s3", "architecture", replace_id=eid)
+        assert (ok, rid) == (True, eid), "still returns success, so the pending prompt shows"
+        entry = _entry(tmp_repo, eid)
+        assert entry["proposed_revision"] == before, "a human proposal is never auto-replaced"
+        assert "superseded_proposals" not in entry, "nothing was displaced, nothing archived"
+
+    def test_ai_retitle_keeps_a_human_proposal(self, tmp_repo):
+        # The title-only gated branch writes the same slot and needs the same guard.
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="human")
+        before = dict(_entry(tmp_repo, eid)["proposed_revision"])
+        ok, rid = store.update_decision(tmp_repo, store._current_content(_entry(tmp_repo, eid)),
+                                        "s3", "architecture", replace_id=eid,
+                                        title="Postgres over SQLite")
+        assert (ok, rid) == (True, eid)
+        entry = _entry(tmp_repo, eid)
+        assert entry["proposed_revision"] == before
+        assert "superseded_proposals" not in entry
+
+    def test_allowed_overwrite_archives_the_displaced_proposal_and_pops_the_memo(self, tmp_repo):
+        eid = _conflicted(tmp_repo)
+        assert store.record_conflict_memo(tmp_repo, eid, "update")[0]
+        displaced = dict(_entry(tmp_repo, eid)["proposed_revision"])
+        assert store.update_decision(tmp_repo, "Switch to Cassandra for the decision store",
+                                     "s3", "architecture", replace_id=eid) == (True, eid)
+        entry = _entry(tmp_repo, eid)
+        assert "Cassandra" in entry["proposed_revision"]["content"]
+        archived = entry["superseded_proposals"]
+        assert [p["content"] for p in archived] == [displaced["content"]]
+        assert "superseded_at" in archived[0]
+        assert "conflict_memo" not in entry, "it referenced the proposal just replaced"

@@ -292,15 +292,9 @@ def review() -> None:
             print(f"[{subtype}] Suggested update")
             print(f'  Current (revision {rev}): "{store._clip_body(entry["content"])}"')
             print(f'  Detected:                "{store._clip_body(prop.get("content", ""))}"')
-            memo = entry.get("conflict_memo")
-            if memo and memo.get("pair") == conflicts._conflict_pair_key(entry):
-                memo_date = (memo.get("created_at") or "")[:10]
-                if memo.get("choice") == "update":
-                    print(f"  The update was picked with the developer on {memo_date}"
-                          f" — approve to formalize (dismiss drops it)")
-                else:
-                    print(f"  The update was declined with the developer on {memo_date}"
-                          f" — dismiss to formalize (approve applies it instead)")
+            steer = conflicts.memo_steer_line(entry)
+            if steer:
+                print(f"  {steer[:1].upper()}{steer[1:]}")
             print()
         else:
             score, factors = store._compute_confidence(entry)

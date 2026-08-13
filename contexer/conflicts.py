@@ -113,6 +113,22 @@ def _conflict_view(entry: dict) -> tuple[str, str | None, list[str]]:
     ]
 
 
+def memo_steer_line(entry: dict) -> str | None:
+    """The one-line steer a still-valid resolution memo adds to a REVIEW surface — shared by
+    `store.format_pending_review` and `contexer review`, which render the same sentence with
+    their own indentation and leading capital. None when there is no memo, or it is bound to
+    a pair that no longer exists (same staleness rule as `_conflict_view`)."""
+    memo = entry.get("conflict_memo") or {}
+    if not memo or memo.get("pair") != _conflict_pair_key(entry):
+        return None
+    date = (memo.get("created_at") or "")[:10]
+    if memo.get("choice") == "update":
+        return (f"the update was picked with the developer on {date}"
+                " — approve to formalize (dismiss drops it)")
+    return (f"the update was declined with the developer on {date}"
+            " — dismiss to formalize (approve applies it instead)")
+
+
 def record_conflict_memo(repo_path: str, entry_id: str, choice: str,
                          session_id: str = "") -> tuple[bool, str]:
     """Record which side of a rendered conflict (issue #193) the developer picked, so future
