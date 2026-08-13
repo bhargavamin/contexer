@@ -545,8 +545,17 @@ def _matches_query(pat: "re.Pattern", row: dict) -> bool:
 
     Decisions render title-led, so the heading is often the part a developer remembers - a
     query that hits only the title must not silently drop the row (an authored title can be
-    wholly different words from the body). Mirrors the web app's search rule."""
-    return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or ""))
+    wholly different words from the body). Mirrors the web app's search rule.
+
+    An OPEN CONFLICT's proposal content counts too (#193): it RENDERS as a labeled unreviewed
+    update, so a query using only the update's terms must reach the row that shows it. A
+    bookkeeping or title-only proposal never renders, so its terms must not match — that
+    would return a row showing none of the words asked for."""
+    from contexer import conflicts   # function-level (import cycle); a sys.modules hit per row
+    prop = ((row.get("proposed_revision") or {}).get("content", "")
+            if conflicts._has_open_conflict(row) else "")
+    return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or "")
+                or (prop and pat.search(prop)))
 
 
 def _find_match(content: str, existing: list) -> dict | None:
@@ -1245,6 +1254,45 @@ def capture_user_constraint(
         return entry["id"], content, status
 
 
+# Trust order for the single proposal slot (issue #200): a developer restatement is the
+# highest-trust signal in the system, a plan-sourced value survived reconciliation, an AI
+# guess is inferred, and a scan proposal is bookkeeping that re-proposes on its own TTL.
+_PROPOSAL_TRUST = {"human": 3, "plan": 2, "ai": 1, "scan": 0}
+
+
+def _outranks_proposal(source: str, prop: dict) -> bool:
+    """Whether a new proposal from `source` may displace the unreviewed `prop` already
+    holding the entry's one proposal slot. STRICTLY greater only: a human proposal is never
+    auto-replaced, and an equal-trust collision keeps the refusal. An unrecognised source
+    ranks below every known one — it never displaces, and is itself displaceable."""
+    return _PROPOSAL_TRUST.get(source, -1) > _PROPOSAL_TRUST.get(prop.get("source", ""), -1)
+
+
+def _claim_proposal_slot(entry: dict, source: str, now: str) -> bool:
+    """Whether a new `source`-sourced proposal may take the entry's ONE proposal slot,
+    archiving whatever DIFFERENT proposal already holds it (issue #200's trust order, which
+    the update_decision write sites must honour too — an ai correction there used to clobber
+    a human's unreviewed Suggested Update). False = the sitting proposal STRICTLY outranks
+    the incoming one and is left untouched; the caller returns success so the flow still
+    shows the pending prompt, failing toward review of the higher-trust proposal rather than
+    losing it.
+
+    A TIE claims the slot, unlike `_route_containment`'s refusal: there the two sides are
+    separate developer statements, each owed a review, while here they are the same
+    automated source retrying — refusing would silently drop a model's own correction of the
+    proposal it just wrote. Identical-content dedup belongs BEFORE this call."""
+    prop = entry.get("proposed_revision")
+    if not prop:
+        return True
+    if _PROPOSAL_TRUST.get(prop.get("source", ""), -1) > _PROPOSAL_TRUST.get(source, -1):
+        return False
+    # Displaced, not discarded — same archival shape as _route_containment/edit_decision.
+    entry.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
+    entry.pop("proposed_revision", None)
+    entry.pop("conflict_memo", None)   # it referenced the proposal just replaced
+    return True
+
+
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
                        deictic: bool, session_id: str) -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
@@ -1258,9 +1306,13 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
       - approved/suggested, no unresolved proposal → attach a proposed_revision (Suggested
                                                     Update — approval promotes it)
       - approved/suggested, DIFFERENT proposal
-        already pending                            → leave the existing proposal untouched,
-                                                    return "revision_already_pending" (never
-                                                    clobber an unreviewed Suggested Update)
+        already pending                            → trust-ordered slot (_outranks_proposal):
+                                                    this restatement is human-sourced, so it
+                                                    DISPLACES a lower-trust (ai/scan) proposal
+                                                    — archived to superseded_proposals — and
+                                                    bounces off an equal-or-higher one with
+                                                    "revision_already_pending" (never clobber
+                                                    a human's unreviewed Suggested Update)
     New content SHORTER (user re-types the terse version):
       - pending twin + clean → promote keeping the fuller existing content
       - otherwise            → recurrence, silent no-op like an ordinary duplicate."""
@@ -1297,17 +1349,33 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             return _recur_silently()  # never propose on an unreviewed base
         norm = _normalize_content(content)
         prop = hit.get("proposed_revision")
+        displaced = False
         if prop and prop.get("content") != norm:
-            # A DIFFERENT Suggested Update is already awaiting review on this entry —
-            # never clobber it (it would vanish unreviewed). Leave it untouched and
-            # surface the new phrasing to the developer instead of silently dropping it.
-            return hit["id"], norm, "revision_already_pending"
+            # A DIFFERENT Suggested Update is already awaiting review on this entry. The slot
+            # is trust-ordered (issue #200): this path IS the developer restating the rule,
+            # the highest-trust source there is, so it displaces a lower-trust (ai/scan)
+            # proposal rather than bouncing off it — otherwise the session renders the AI's
+            # unreviewed update while the developer's own correction was never recorded.
+            # Equal-or-higher trust keeps the refusal: never clobber it (it would vanish
+            # unreviewed); surface the new phrasing to the developer instead.
+            if not _outranks_proposal("human", prop):
+                return hit["id"], norm, "revision_already_pending"
+            # Displaced, not discarded — same archival shape as edit_decision's dropped
+            # proposal, so the timeline can still show what was suggested.
+            hit.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
+            hit.pop("proposed_revision", None)
+            hit.pop("conflict_memo", None)   # it referenced the proposal just replaced
+            prop, displaced = None, True
         if not prop:
             hit["proposed_revision"] = _build_proposal(
                 hit, content, subtype, session_id, now, source="human")
             _save(repo_path, data)
-        # No .pending_review flag here for the same reason as new captures: the
-        # in-band revision_proposed ack already notifies the developer.
+            # No .pending_review flag on a FRESH attach, for the same reason as new captures:
+            # the in-band revision_proposed ack already notifies the developer. A displaced
+            # proposal is heavier — something already awaiting review just changed — so that
+            # one arms the deterministic nudge too.
+            if displaced:
+                _touch_pending_review(repo_path)
         return hit["id"], norm, "revision_proposed"
 
     if pending_twin and not deictic:
@@ -1724,6 +1792,7 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
     entry.pop("proposed_revision", None)
+    entry.pop("conflict_memo", None)          # the pair it resolved no longer exists
     if prop.get("clear_anchors"):
         entry.pop("source_files", None)
         entry.pop("anchor_commit", None)
@@ -1995,6 +2064,13 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                             if source_files:
                                 _save(repo_path, data)
                             return True, target["id"]  # identical title proposal already pending
+                        # The slot is trust-ordered (#200). "ai" is what _build_proposal stamps
+                        # on the proposal this branch is about to write, so it is what has to
+                        # outrank the sitting one; a human/plan Suggested Update is kept instead.
+                        if not _claim_proposal_slot(target, "ai", now):
+                            if source_files:
+                                _save(repo_path, data)
+                            return True, target["id"]
                         target["proposed_revision"] = _build_proposal(
                             target, content, subtype, session_id, now, title=title)
                         _save(repo_path, data)
@@ -2021,9 +2097,30 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # still a change to a constraint.
                 if (_update_needs_approval(new_subtype, created_by)
                         or _update_needs_approval(old_subtype, created_by)):
-                    # Fix: don't attach a proposal to an entry that isn't approved yet -
-                    # the developer needs to review the base first.
+                    # Don't attach a proposal to an entry that isn't approved yet - the
+                    # developer reviews the base first, and a proposal on it would need two
+                    # approvals for one still-unreviewed draft. AMEND THE DRAFT IN PLACE
+                    # instead (issue #199): the refusal used to drop the correction entirely,
+                    # and a capture misfire must fail toward review, never toward silent loss.
+                    # Same pre-approval amend precedent as _route_containment's deictic path
+                    # and _apply_approval's pending edit: rewrite the current revision, mint
+                    # no new version, stay pending_approval so the WHOLE amended draft still
+                    # gets its one human review. anchor_candidates/memory_key are untouched -
+                    # candidates are blessed at approval, not here.
                     if _entry_status(target) == "pending_approval":
+                        rev = _current_revision(target)
+                        if rev is not None:
+                            rev["content"] = content
+                            rev["title"] = _normalize_title(title) or _derive_title(content)
+                            if subtype:
+                                target["subtype"] = subtype
+                            target["updated_at"] = now
+                            _sync_decision_cache(target)
+                            # The amended text IS this draft's live revision, so the anchor
+                            # describes what renders — re-anchor now, like the trivial path.
+                            if source_files:
+                                _anchor_sources(repo_path, target, source_files)
+                            _save(repo_path, data)
                         return True, target["id"]
                     # Fix: don't overwrite an existing proposal if the new content AND its
                     # effective title are identical - the proposal is already pending for the same
@@ -2033,6 +2130,9 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     new_prop_title = _normalize_title(title) or _derive_title(content)
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title):
+                        return True, target["id"]
+                    # Same trust-ordered slot as the title-only branch above (#200).
+                    if not _claim_proposal_slot(target, "ai", now):
                         return True, target["id"]
                     # source_files is stashed on the proposal, NOT applied to the live entry —
                     # the current revision (the old, genuinely stale text) keeps rendering until
@@ -2182,6 +2282,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if action in ("dismiss", "ignore"):
             rev = entry.get("revision", 1)
             entry.pop("proposed_revision", None)
+            entry.pop("conflict_memo", None)  # the pair it resolved no longer exists
             return True, f"Dismissed - kept current revision {rev}.", True
         # approve or edit → promote the proposal to a new revision (history preserved).
         entry["status"] = "approved"
@@ -2331,6 +2432,7 @@ def format_pending_review(repo_path: str) -> str:
     twin of the `contexer review` terminal command). Content IS shown here: this is the
     on-demand surface, pulled only when the developer asks to review, so it is where the detail
     belongs (unlike the deliberately terse SessionStart count)."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     pending = get_pending_decisions(repo_path)
     if not pending:
         return "Nothing pending review."
@@ -2354,6 +2456,9 @@ def format_pending_review(repo_path: str) -> str:
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
             lines.append(f'    detected: "{detected}"')
+            steer = conflicts.memo_steer_line(d)
+            if steer:
+                lines.append(f"    {steer}")
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
@@ -4231,6 +4336,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     (content of the most-recently-injected decisions) after the normal rules injection —
     additionalContext re-injection doesn't otherwise know what the pre-compaction router
     already surfaced this session."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     # Fold any pre-fix stray worktree stores into the canonical store BEFORE the store
     # read below: the first post-upgrade session must render the merged context (and must
     # not show the bootstrap offer over a repo whose context was just recovered).
@@ -4362,11 +4468,18 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
-            title, body = _title_and_body(d)
-            sys_parts.append(f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}")
+            entry_id = d.get("id", "")[:8]
+            id_tag = f" (id={entry_id})" if entry_id else ""   # _CONFLICT_GUIDE points at it
+            title, body, extras = conflicts._conflict_view(d)
+            sys_parts.append(
+                f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
             if body is not None:
                 sys_parts.append(f"    {body}")
+            for extra in extras:
+                sys_parts.append(f"    {extra}")
     if global_rules or pre_loaded:
+        if any(conflicts._has_open_conflict(d) for d in pre_loaded):
+            sys_parts.append(f"\n{conflicts._CONFLICT_GUIDE}")  # blank line off the decision bullets
         sys_parts.append(
             "If the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
@@ -4723,7 +4836,7 @@ def _build_retrieval_index(data: dict) -> dict:
     only at `_save`, same as every other index field. Function-level import for the same
     store<->guard_engine load-order reason documented throughout this file (e.g.
     `_anchor_sources`, `get_context`)."""
-    from contexer import guard_engine
+    from contexer import conflicts, guard_engine
     docs: dict[str, dict] = {}
     df: dict[str, int] = {}
     total_len = 0
@@ -4742,7 +4855,14 @@ def _build_retrieval_index(data: dict) -> dict:
         if status == "ignored":
             continue
         content = _current_content(e)
-        toks = _index_tokens(content)
+        # #193: an OPEN CONFLICT's proposal renders alongside the standing content as a
+        # labeled unreviewed update, so its terms must be rankable too. Tokens only — topics,
+        # artifacts and title stay derived from the standing content. A bookkeeping or
+        # title-only proposal never renders, so ranking on its terms would inject a decision
+        # showing none of them.
+        prop_content = ((e.get("proposed_revision") or {}).get("content", "")
+                        if conflicts._has_open_conflict(e) else "")
+        toks = _index_tokens(f"{content} {prop_content}" if prop_content else content)
         tf: dict[str, int] = {}
         for t in toks:
             tf[t] = tf.get(t, 0) + 1
@@ -5035,6 +5155,7 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
     """The content of at most the _REHYDRATE_CAP most-recently-injected working-set
     decisions (current content, active statuses only), under a heading. '' when there is
     no session id / working set / nothing still active to show."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     ids = working_set_ids(repo_path, session_id)
     if not ids:
         return ""
@@ -5042,17 +5163,25 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
     lines = []
+    conflicted = False
     for did in recent:
         e = by_id.get(did)
         if not e or _entry_status(e) not in ("approved", "suggested"):
             continue
         subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
-        title, body = _title_and_body(e)
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}")
+        entry_id = e.get("id", "")[:8]
+        id_tag = f" (id={entry_id})" if entry_id else ""   # _CONFLICT_GUIDE points at it
+        title, body, extras = conflicts._conflict_view(e)
+        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}{id_tag}")
         if body is not None:
             lines.append(f"    {body}")
+        for extra in extras:
+            lines.append(f"    {extra}")
+        conflicted = conflicted or bool(extras)
     if not lines:
         return ""
+    if conflicted:
+        lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
     return "## Rehydrated working context:\n" + "\n".join(lines)
 
 
@@ -5226,6 +5355,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
     `files=` two-store merge. A no-op extra read for the pure-BM25 case (nothing is ever
     missing there)."""
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     data = _load(repo_path)
     by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
     missing = [d for d in ids if d not in by_id]
@@ -5236,6 +5366,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
     stale = _staleness_notes(repo_path, [by_id[d] for d in ids
                                          if d in by_id and _entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
+    conflicted = False
     for did in ids:
         e = by_id.get(did)
         if not e or _entry_status(e) == "ignored":
@@ -5245,11 +5376,16 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
-        title, body = _title_and_body(e)
+        title, body, extras = conflicts._conflict_view(e)
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
                      f"{title}{id_tag}{stale.get(did, '')}")
         if body is not None:
             lines.append(f"    {body}")
+        for extra in extras:
+            lines.append(f"    {extra}")
+        conflicted = conflicted or bool(extras)
+    if conflicted:
+        lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
     return "\n".join(lines)
 
 
@@ -5669,6 +5805,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     Team context (pulled by C5 and cached separately) is appended as its own section so
     the agent reads local (personal) and team decisions together, scope-tagged.
     """
+    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
     data = _load(repo_path)
     entries = data.get("entries", [])
 
@@ -5751,13 +5888,19 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             update_tag = " [update pending approval]" if d.get("proposed_revision") else ""
             entry_id = d.get("id", "")[:8]
             id_tag = f" (id={entry_id})" if entry_id else ""
-            title, body = _title_and_body(d)
+            # Global-scope hits (files= route) never carry a proposal — update_global_decision
+            # has no replace_id path — so _conflict_view can only ever plain-render them.
+            title, body, extras = conflicts._conflict_view(d)
             hit = file_hits.get(d.get("id")) if files else None
             scope = hit["scope"] if hit else "personal"
             lines.append(f"- [scope={scope}] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
                          f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
                 lines.append(f"    {body}")
+            for extra in extras:
+                lines.append(f"    {extra}")
+        if any(conflicts._has_open_conflict(d) for d in shown):
+            lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
@@ -6612,9 +6755,10 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
         return changed
 
 
-# ── Commit-time guard: backward-compat re-export ──────────────────────────────
+# ── Extracted-module public re-exports ────────────────────────────────────────
 # The guard engine (staged-file plumbing, Tier-1 advisory pairing, Tier-2 armed
-# rules) lives in contexer/guard_engine.py; store.py stays the public facade.
+# rules) lives in contexer/guard_engine.py, and conflict resolution memos (#193)
+# in contexer/conflicts.py; store.py stays the public facade.
 # A PEP 562 module __getattr__, not an eager `from contexer.guard_engine import
 # ...`, on purpose: guard_engine imports `store` at ITS top for the store-owned
 # helpers it needs (STORE_DIR, _load, _save, ...), so an eager import here would
@@ -6628,12 +6772,20 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
 _GUARD_EXPORTS = frozenset({
     "guard_staged", "guard_candidates", "arm_guard", "disarm_guard", "dismiss_guard",
 })
+# Same mechanism, same reason, for the one PUBLIC entrypoint conflicts.py owns
+# (server.py's resolve_conflict tool calls it as store.record_conflict_memo).
+# The private conflict helpers are NOT re-exported — a private helper's caller
+# imports the module that owns it (cli.py's review branch does exactly that).
+_CONFLICT_EXPORTS = frozenset({"record_conflict_memo"})
 
 
 def __getattr__(name):
     if name in _GUARD_EXPORTS:
         from contexer import guard_engine
         return getattr(guard_engine, name)
+    if name in _CONFLICT_EXPORTS:
+        from contexer import conflicts
+        return getattr(conflicts, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

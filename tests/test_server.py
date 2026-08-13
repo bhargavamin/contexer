@@ -218,6 +218,25 @@ def test_review_pending_no_repo(monkeypatch):
     assert server.review_pending("") == "No repo path detected."
 
 
+def test_resolve_conflict_delegates(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    seen = {}
+
+    def fake_record(repo, entry_id, choice, session_id=""):
+        seen["args"] = (repo, entry_id, choice, session_id)
+        return True, "MEMO-RECORDED"
+
+    monkeypatch.setattr(server.store, "record_conflict_memo", fake_record)
+    result = server.resolve_conflict("ab12cd34", "update", "/repo")
+    assert result == "MEMO-RECORDED"
+    assert seen["args"] == ("/repo", "ab12cd34", "update", server.SESSION_ID)
+
+
+def test_resolve_conflict_no_repo(monkeypatch):
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "")
+    assert server.resolve_conflict("ab12cd34", "update", "") == "Skipped — repo path not detected."
+
+
 def test_approve_decision_bulk_ids_and_all(monkeypatch, tmp_path):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
