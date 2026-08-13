@@ -387,3 +387,55 @@ class TestProposalSlotAtReplaceId:
         assert [p["content"] for p in archived] == [displaced["content"]]
         assert "superseded_at" in archived[0]
         assert "conflict_memo" not in entry, "it referenced the proposal just replaced"
+
+
+class TestRefusedCorrectionAck:
+    """Issue #202: a refused claim returns success, so the refusal has to be reported in band
+    (`meta['refusal_ack']`) or the model is told its correction is pending when it was dropped."""
+
+    def test_content_branch_refusal_acks(self, tmp_repo):
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="human")
+        before = dict(_entry(tmp_repo, eid)["proposed_revision"])
+        stored, rid, meta = store.update_decision_with_meta(
+            tmp_repo, "Switch to Cassandra for the decision store", "s3", "architecture",
+            replace_id=eid)
+        assert (stored, rid) == (True, eid)
+        ack = meta["refusal_ack"]
+        assert eid[:8] in ack and "NOT stored" in ack
+        assert "human" in ack and before["title"] in ack
+        assert _entry(tmp_repo, eid)["proposed_revision"] == before
+
+    def test_title_only_branch_refusal_acks(self, tmp_repo):
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="human")
+        before = dict(_entry(tmp_repo, eid)["proposed_revision"])
+        stored, rid, meta = store.update_decision_with_meta(
+            tmp_repo, store._current_content(_entry(tmp_repo, eid)), "s3", "architecture",
+            replace_id=eid, title="Postgres over SQLite")
+        assert (stored, rid) == (True, eid)
+        assert eid[:8] in meta["refusal_ack"] and "NOT stored" in meta["refusal_ack"]
+        assert _entry(tmp_repo, eid)["proposed_revision"] == before
+
+    def test_tie_claim_acks_nothing(self, tmp_repo):
+        eid = _conflicted(tmp_repo)                     # the sitting proposal is ai-sourced
+        stored, rid, meta = store.update_decision_with_meta(
+            tmp_repo, "Switch to Cassandra for the decision store", "s3", "architecture",
+            replace_id=eid)
+        assert (stored, rid, meta) == (True, eid, {})
+
+    def test_empty_slot_acks_nothing(self, tmp_repo):
+        store.update_decision(tmp_repo, CONFLICT_STANDING, "s1", "architecture")
+        data = store._load(tmp_repo)
+        entry = data["entries"][0]
+        entry["status"] = "approved"
+        store._save(tmp_repo, data)
+        stored, rid, meta = store.update_decision_with_meta(
+            tmp_repo, CONFLICT_UPDATE, "s2", "architecture", replace_id=entry["id"])
+        assert (stored, rid, meta) == (True, entry["id"], {})
+
+    def test_wrapper_still_returns_two_elements_on_the_refusal_path(self, tmp_repo):
+        eid = _conflicted(tmp_repo)
+        _poke_proposal(tmp_repo, eid, source="human")
+        assert store.update_decision(tmp_repo, "Switch to Cassandra for the decision store",
+                                     "s3", "architecture", replace_id=eid) == (True, eid)

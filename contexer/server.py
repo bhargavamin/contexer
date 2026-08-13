@@ -80,6 +80,9 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     does not block your work — keep going. Surface it to the developer for approval at a natural
     point (call approve_decision when they respond, or they can run `contexer review`); never
     discard it silently. Use review_pending to list everything awaiting review with its content.
+    If instead this returns a 'Correction NOT stored' notice, a higher-trust update already holds
+    the decision's one proposal slot — do not retry the call; relay both versions to the developer
+    that turn so they can review with full context.
     """
     resolved = store._resolve_repo(repo_path)
     if not resolved:
@@ -87,11 +90,13 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     lint = store.capture_lint(content, created_by=created_by, replace_id=replace_id)
     if lint:
         return lint
-    stored, entry_id = store.update_decision(resolved, content, SESSION_ID, subtype,
-                                             created_by=created_by, replace_id=replace_id,
-                                             title=title, source_files=source_files)
+    stored, entry_id, meta = store.update_decision_with_meta(
+        resolved, content, SESSION_ID, subtype, created_by=created_by,
+        replace_id=replace_id, title=title, source_files=source_files)
     if not stored:
         return "Filtered — did not meet storage criteria."
+    if meta.get("refusal_ack"):
+        return meta["refusal_ack"]
     prompt = store.get_pending_approval_prompt(resolved, entry_id)
     if prompt:
         return prompt
