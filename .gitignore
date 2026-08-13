@@ -26,6 +26,9 @@ assets/demo.tape
 # macOS
 .DS_Store
 
+# Editor-local config
+.zed/
+
 # Claude Code local overrides (project .claude/settings.json is tracked on purpose)
 .claude/settings.local.json
 

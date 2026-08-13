@@ -4375,6 +4375,14 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         migrate_worktree_strays(repo_path)
     except Exception:
         pass
+    # Self-heal a missing / corrupt / wrong-version retrieval index before this session
+    # routes its first prompt (a readable v2 index whose CONTENT has drifted is not detected
+    # here — that is _save's job). Deliberately ahead of the `resume` early-return below and
+    # unconditional on `source`: a resumed or compacted session injects nothing here, but its
+    # LATER prompts still go through the router, so it needs a usable index just as much as a
+    # fresh one. Fail-soft end to end (log write included), and a no-op read when the index
+    # is healthy — no guard needed here.
+    ensure_retrieval_index(repo_path)
     data = _load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
@@ -4863,7 +4871,8 @@ def _build_retrieval_index(data: dict) -> dict:
     entries (over the ~5ms budget) for the live scan vs. ~0.91ms p50 / ~0.93ms p95 for this
     index-backed lookup at the same scale, ~8x faster (both numbers: `_index_file_lookup`'s
     own docstring). No extra I/O — rebuilt
-    only at `_save`, same as every other index field. Function-level import for the same
+    at `_save` (and, when the sidecar is missing or wrong-version, by
+    `ensure_retrieval_index` at session start), same as every other index field. Function-level import for the same
     store<->guard_engine load-order reason documented throughout this file (e.g.
     `_anchor_sources`, `get_context`)."""
     from contexer import conflicts, guard_engine
@@ -4912,8 +4921,11 @@ def _build_retrieval_index(data: dict) -> dict:
     # (not left at v1 with new optional keys) so a pre-#187 v1 index on disk is rejected by
     # _read_retrieval_index as "wrong version" and the WHOLE per-prompt path falls back to
     # legacy — not just the file route half-served against docs missing the new fields. The
-    # established pattern (see _read_retrieval_index's docstring): never rebuild inline, self-
-    # heals on the repo's next _save (every write rebuilds every doc's fields from scratch).
+    # established pattern (see _read_retrieval_index's docstring): never rebuild inline. Repair
+    # comes from the repo's next _save (every write rebuilds every doc's fields from scratch)
+    # or, for a repo nobody writes to, from ensure_retrieval_index at the next session start —
+    # a version bump strands EVERY already-indexed repo at once, so _save alone is not a
+    # sufficient self-heal.
     return {"v": 2, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
 
 
@@ -4940,6 +4952,74 @@ def _read_retrieval_index(repo_path: str) -> dict | None:
     if not isinstance(data, dict) or data.get("v") != 2 or not isinstance(data.get("docs"), dict):
         return None
     return data
+
+
+def ensure_retrieval_index(repo_path: str) -> bool:
+    """Rebuild the index sidecar when it is missing / corrupt / wrong-version. True only
+    when this call actually produced a readable v2 index.
+
+    Why this exists, and why it is NOT in `_read_retrieval_index`: the per-prompt reader
+    stays strictly read-only, because rebuilding inline would put a whole-store scan on the
+    prompt path. The documented self-heal was "the repo's next `_save` rebuilds it", which
+    is right for a fresh repo but strands an EXISTING one the moment the index VERSION is
+    bumped (v1 -> v2 at #187 fix round 1): every already-indexed repo is rejected as
+    wrong-version and silently demoted to `_legacy_prompt_context` — whose keyword pick is
+    the three LONGEST words of the prompt — until someone happens to capture a decision
+    there. A repo nobody writes to never recovers at all. So the rebuild runs once per
+    session start, alongside the other maintenance passes there.
+
+    Cost when the index is healthy is one read + version check, which is the same read the
+    router already does per prompt. Both bail-out conditions are also tested UNLOCKED first,
+    and the store lock is taken only around the write: `_store_lock` is `flock(LOCK_EX)` with
+    no timeout, and other session-start passes hold that same per-store lock across genuinely
+    long work (`verify_scan_conventions` across a whole-repo mine, `anchors.verify_anchors`
+    across up to `_ANCHOR_GIT_BUDGET` git subprocesses, `bootstrap_apply` across another
+    mine). Locking before the bail-outs would make a second session on the same repo — and,
+    on `resume`/`compact`, a session start that used to take no store lock at all — block
+    behind that work every single time, forever for a repo that can never satisfy the
+    condition (no decisions, or an unwritable `~/.contexer`). The conditions are then
+    re-tested under the lock, so the unlocked pass is purely contention avoidance and the
+    locked pass remains the authority.
+
+    Fail-soft throughout — INCLUDING the log write, which is inside the guard on purpose:
+    the session-start call site is deliberately unguarded on the strength of that promise,
+    and `store.get_session_start_context` is called by the SessionStart hook with no
+    try/except of its own, so one escaping exception here would cost the session its entire
+    context injection over a bookkeeping file. Any failure leaves the sidecar exactly as it
+    was and the router falls back to legacy, precisely as before this function existed."""
+    def _indexable(data: dict) -> bool:
+        # Mirror _build_retrieval_index's own participation filter exactly (decisions, minus
+        # permanently-suppressed ones) so "nothing indexable" means what it says: an
+        # all-ignored store would otherwise write a zero-doc sidecar this guard exists to
+        # avoid. An empty sidecar buys nothing — the legacy path answers such a repo with
+        # the same silence, and the first real capture writes a real index anyway.
+        return any(e.get("type") == "decision" and _entry_status(e) != "ignored"
+                   for e in data.get("entries", []))
+
+    try:
+        if _read_retrieval_index(repo_path) is not None:
+            return False
+        if not _indexable(_load(repo_path)):
+            return False
+        with _store_lock(_slug(repo_path)):
+            # Re-check under the lock: a concurrent _save (or a parallel session start on
+            # the same repo) may have rebuilt it since the unlocked read above.
+            if _read_retrieval_index(repo_path) is not None:
+                return False
+            data = _load(repo_path)
+            if not _indexable(data):
+                return False
+            _write_retrieval_index(repo_path, data)
+            # Verify rather than assume: _write_retrieval_index is itself fail-soft, so a
+            # read-back is the only honest evidence a usable index now exists.
+            index = _read_retrieval_index(repo_path)
+        if index is None:
+            return False
+        _retrieval_log(repo_path, {"e": "index_rebuild", "docs": index.get("n_docs", 0),
+                                   "ts": time.time()})
+        return True
+    except Exception:
+        return False
 
 
 def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, int]]:
@@ -5146,7 +5226,10 @@ def _retrieval_log(repo_path: str, event: dict) -> None:
         if len(lines) > _RETRIEVAL_LOG_CAP:
             lines = lines[-_RETRIEVAL_LOG_CAP:]
         _atomic_write(path, "\n".join(lines) + "\n")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError: read_text on a log that has
+        # picked up non-UTF-8 bytes would escape an OSError-only guard and break the caller
+        # over a log line. Same widening _load and _read_retrieval_index already carry.
         pass
 
 

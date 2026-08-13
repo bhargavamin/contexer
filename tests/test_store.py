@@ -1,4 +1,5 @@
 """Tests for core store.py logic — filtering, storage, context output, and bootstrap scan."""
+import contextlib
 import json
 import os
 import subprocess
@@ -3964,6 +3965,189 @@ class TestRetrievalIndex:
         assert "task-1" not in idx["docs"]
 
 
+def _downgrade_index_to_v1(repo):
+    """Rewrite the on-disk index as a pre-#187 v1 payload — exactly what every already-
+    indexed repo had on disk the moment the version was bumped."""
+    p = store._index_path(repo)
+    payload = json.loads(p.read_text())
+    payload["v"] = 1
+    for doc in payload["docs"].values():
+        doc.pop("source_files", None)
+        doc.pop("path_artifacts", None)
+        doc.pop("title", None)
+    p.write_text(json.dumps(payload))
+
+
+class TestIndexSelfHeal:
+    """`ensure_retrieval_index`: the session-start rebuild that stops a version bump from
+    silently demoting an existing repo to the legacy longest-word keyword path forever."""
+
+    def test_rebuilds_wrong_version_index(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        _downgrade_index_to_v1(tmp_repo)
+        assert store._read_retrieval_index(tmp_repo) is None      # demoted to legacy
+
+        assert store.ensure_retrieval_index(tmp_repo) is True
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx is not None and idx["v"] == 2 and idx["n_docs"] == 1
+        (doc,) = idx["docs"].values()
+        assert "source_files" in doc and "path_artifacts" in doc and "title" in doc
+
+    def test_rebuilds_missing_index(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        store._index_path(tmp_repo).unlink()
+
+        assert store.ensure_retrieval_index(tmp_repo) is True
+        assert store._read_retrieval_index(tmp_repo)["n_docs"] == 1
+
+    def test_rebuilds_corrupt_index(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        store._index_path(tmp_repo).write_text("{ not json")
+
+        assert store.ensure_retrieval_index(tmp_repo) is True
+        assert store._read_retrieval_index(tmp_repo)["n_docs"] == 1
+
+    def test_healthy_index_is_left_untouched(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        before = store._index_path(tmp_repo).read_bytes()
+
+        assert store.ensure_retrieval_index(tmp_repo) is False
+        assert store._index_path(tmp_repo).read_bytes() == before
+
+    def test_empty_store_creates_no_index(self, tmp_repo):
+        # A repo holding no decisions gets the same silence from the legacy path, so an
+        # empty sidecar would be a file for nothing. The first capture writes a real one.
+        assert store.ensure_retrieval_index(tmp_repo) is False
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_task_only_store_creates_no_index(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        data = store._load(tmp_repo)
+        data["entries"] = [{"type": "task", "id": "task-1", "content": "a task not a decision"}]
+        store._save(tmp_repo, data)
+        store._index_path(tmp_repo).unlink()
+
+        assert store.ensure_retrieval_index(tmp_repo) is False
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_all_ignored_store_creates_no_index(self, tmp_repo):
+        # "Nothing indexable" must mean what _build_retrieval_index means by it: an
+        # all-ignored store would otherwise write a zero-doc sidecar.
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        data = store._load(tmp_repo)
+        data["entries"][0]["status"] = "ignored"
+        store._save(tmp_repo, data)
+        store._index_path(tmp_repo).unlink()
+
+        assert store.ensure_retrieval_index(tmp_repo) is False
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_no_store_lock_taken_when_there_is_nothing_to_index(self, tmp_repo, monkeypatch):
+        # The store lock is flock(LOCK_EX) with no timeout, and other session-start passes
+        # hold it across whole-repo mines. A repo that can never satisfy the rebuild
+        # condition must not queue behind that on every single session start.
+        taken = []
+        real_lock = store._store_lock
+
+        @contextlib.contextmanager
+        def counting_lock(slug):
+            taken.append(slug)
+            with real_lock(slug):
+                yield
+
+        monkeypatch.setattr(store, "_store_lock", counting_lock)
+        assert store.ensure_retrieval_index(tmp_repo) is False   # empty store
+        assert taken == []
+
+    def test_no_store_lock_taken_when_index_is_healthy(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        taken = []
+        real_lock = store._store_lock
+
+        @contextlib.contextmanager
+        def counting_lock(slug):
+            taken.append(slug)
+            with real_lock(slug):
+                yield
+
+        monkeypatch.setattr(store, "_store_lock", counting_lock)
+        assert store.ensure_retrieval_index(tmp_repo) is False
+        assert taken == []
+
+    def test_log_failure_cannot_break_session_start(self, tmp_repo, monkeypatch):
+        # The call site is unguarded on the strength of this function's fail-soft promise,
+        # and the SessionStart hook has no try/except of its own — so an exception from the
+        # log write would cost the session its whole context injection.
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        _downgrade_index_to_v1(tmp_repo)
+
+        def boom(*_a, **_k):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        monkeypatch.setattr(store, "_retrieval_log", boom)
+        assert store.ensure_retrieval_index(tmp_repo) is False   # never raises
+        assert store._read_retrieval_index(tmp_repo)["v"] == 2   # rebuild still landed
+
+    def test_retrieval_log_survives_a_non_utf8_log_file(self, tmp_repo):
+        store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        log.write_bytes(b"\xff\xfe not utf-8\n")
+        store._retrieval_log(tmp_repo, {"e": "index_rebuild", "docs": 1})   # must not raise
+
+    def test_write_failure_is_soft_and_reports_no_rebuild(self, tmp_repo, monkeypatch):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        store._index_path(tmp_repo).unlink()
+
+        def boom(*_a, **_k):
+            raise RuntimeError("disk on fire")
+
+        monkeypatch.setattr(store, "_write_retrieval_index", boom)
+        assert store.ensure_retrieval_index(tmp_repo) is False    # never raises
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_logs_the_rebuild(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        _downgrade_index_to_v1(tmp_repo)
+        store.ensure_retrieval_index(tmp_repo)
+
+        log = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        events = [json.loads(line) for line in log.read_text().splitlines() if line]
+        assert [e for e in events if e.get("e") == "index_rebuild" and e.get("docs") == 1]
+
+    def test_session_start_heals_a_stranded_repo(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
+        _downgrade_index_to_v1(tmp_repo)
+
+        store.session_start_payload(tmp_repo)
+        assert store._read_retrieval_index(tmp_repo)["v"] == 2
+
+    def test_session_start_heals_on_resume_and_compact(self, tmp_repo):
+        # Both sources return early / take shortened paths, but their LATER prompts still
+        # route through BM25 — so the rebuild must sit ahead of those branches.
+        for source in ("resume", "compact"):
+            store.update_decision(tmp_repo, f"Use postgres for the {source} layer",
+                                  RV1_SESSION, "architecture")
+            _downgrade_index_to_v1(tmp_repo)
+            store.session_start_payload(tmp_repo, source=source)
+            assert store._read_retrieval_index(tmp_repo)["v"] == 2, source
+
+    def test_healed_index_restores_bm25_ranking_over_longest_word_lookup(self, tmp_repo):
+        # The behaviour the fix exists for. Legacy renders through get_context(query=<the
+        # longest word>) and carries its filter note; the BM25 path renders decisions
+        # directly and adds the no-refetch suffix. The marker tells the two apart.
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        _downgrade_index_to_v1(tmp_repo)
+
+        legacy = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens live in cookies?")
+        assert "(filtered: query=" in legacy          # longest-word keyword lookup
+
+        store.session_start_payload(tmp_repo)
+        healed = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens live in cookies?")
+        assert "(filtered: query=" not in healed
+        assert "already in context" in healed
+        assert "JWT" in healed and "cookies" in healed
+
+
 class TestBM25Router:
     def _id_by(self, ids, needle):
         return next(v for k, v in ids.items() if needle in k)
@@ -5163,12 +5347,23 @@ class TestStandingTopicMap:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "Stored decisions by topic:" not in ctx
 
-    def test_map_absent_when_index_missing(self, tmp_repo):
+    def test_map_absent_when_index_unreadable(self, tmp_repo, monkeypatch):
+        # The map is index-backed and must degrade to silence when the index cannot be
+        # read. Patched at the reader rather than by deleting the file: session start now
+        # self-heals a missing sidecar (ensure_retrieval_index), so an unlinked file no
+        # longer models an unreadable index — it models one that gets rebuilt.
         _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
-        store._index_path(tmp_repo).unlink()  # simulate a missing index sidecar
+        monkeypatch.setattr(store, "_read_retrieval_index", lambda repo: None)
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "Stored decisions by topic:" not in ctx
+
+    def test_map_returns_after_session_start_heals_a_missing_index(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
+        store._index_path(tmp_repo).unlink()
+        result = store.get_session_start_context(tmp_repo)
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "Stored decisions by topic:" in ctx
 
 
 class TestCompactRehydration:
