@@ -5623,8 +5623,8 @@ class TestServerTitleParam:
         seen = {}
         def fake_update(repo, content, sid, subtype="", created_by="ai", replace_id="", title="", **kw):
             seen.update(title=title, content=content)
-            return True, "id123"
-        monkeypatch.setattr(server.store, "update_decision", fake_update)
+            return True, "id123", {}
+        monkeypatch.setattr(server.store, "update_decision_with_meta", fake_update)
         monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
         server.update_context("body", subtype="architecture", title="My Title")
         assert seen["title"] == "My Title"

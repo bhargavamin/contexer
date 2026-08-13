@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 import threading
+from datetime import datetime, timezone
 
 import pytest
 
@@ -438,6 +439,24 @@ def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
     assert "Not stored" in out
     # nothing was written
     assert store.get_pending_decisions(tmp_repo) == []
+
+
+def test_update_context_relays_the_refusal_ack(tmp_repo, monkeypatch):
+    # Issue #202: the refused correction must not come back as a "pending review" prompt.
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: tmp_repo)
+    standing = "Use Postgres for the decision store; SQLite won't handle concurrent sessions"
+    store.update_decision(tmp_repo, standing, "s1", "architecture")
+    data = store._load(tmp_repo)
+    entry = data["entries"][0]
+    entry["status"] = "approved"
+    entry["proposed_revision"] = store._build_proposal(
+        entry, "Switch to DynamoDB for the decision store", "architecture", "s2",
+        datetime.now(timezone.utc).isoformat(), source="human")
+    store._save(tmp_repo, data)
+    out = server.update_context(content="Switch to Cassandra for the decision store",
+                                subtype="architecture", replace_id=entry["id"])
+    assert "Correction NOT stored" in out and entry["id"][:8] in out
+    assert "Cassandra" not in out, "the approval prompt for a stored correction, not this"
 
 
 def test_update_global_context_bounce_names_itself(monkeypatch):
