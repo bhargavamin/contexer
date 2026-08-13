@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.2](https://github.com/bhargavamin/contexer/compare/v0.33.1...v0.33.2) (2026-08-13)
+
+
+### Bug Fixes
+
+* address code-review findings on conflict rendering and the proposal slot ([41689fd](https://github.com/bhargavamin/contexer/commit/41689fd573065e6821e51c54398862a53353fa73))
+* amend pending drafts in place ([#199](https://github.com/bhargavamin/contexer/issues/199)); trust-order the proposal slot ([#200](https://github.com/bhargavamin/contexer/issues/200)) ([e4c777b](https://github.com/bhargavamin/contexer/commit/e4c777b5bf7bc257cccf26a73b3506c8c683cd56))
+
 ## [0.33.1](https://github.com/bhargavamin/contexer/compare/v0.33.0...v0.33.1) (2026-08-12)
 
 
