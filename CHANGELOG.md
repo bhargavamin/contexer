@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.3](https://github.com/bhargavamin/contexer/compare/v0.33.2...v0.33.3) (2026-08-13)
+
+
+### Bug Fixes
+
+* ack a refused lower-trust correction in band instead of a false success ([2f65c13](https://github.com/bhargavamin/contexer/commit/2f65c133ff43601d6d7b6507c8a5849fd6e6dacc))
+* ack a refused lower-trust correction in band instead of a false success ([a3d4c72](https://github.com/bhargavamin/contexer/commit/a3d4c721b7bcbc769d5383b4747d7bdc102de2a7)), closes [#202](https://github.com/bhargavamin/contexer/issues/202)
+
 ## [0.33.2](https://github.com/bhargavamin/contexer/compare/v0.33.1...v0.33.2) (2026-08-13)
 
 

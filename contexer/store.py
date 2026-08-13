@@ -1293,6 +1293,23 @@ def _claim_proposal_slot(entry: dict, source: str, now: str) -> bool:
     return True
 
 
+def _refusal_ack(entry: dict) -> str:
+    """Model-facing ack for a refused slot claim (issue #202). A refusal returns success to
+    the caller (the higher-trust proposal still awaits review), so without this the calling
+    model is told its correction is pending when it was dropped — same in-band-ack precedent
+    as capture_lint/constraint_ack, where silence loses the information."""
+    prop = entry.get("proposed_revision") or {}
+    return (
+        f"Correction NOT stored: decision {entry.get('id', '')[:8]} already has a "
+        f"higher-trust Suggested Update pending review (from {prop.get('source', 'unknown')}: "
+        f"'{prop.get('title', '')}'). The one proposal slot keeps the higher-trust version — "
+        "your correction was refused, not queued, and will not be reviewed. Do NOT retry this "
+        "call and do NOT approve anything yourself. This turn, tell the developer both "
+        "versions — the pending update and your refused correction — so they can review with "
+        "full context (approve_decision action='edit' can merge them)."
+    )
+
+
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
                        deictic: bool, session_id: str) -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
@@ -2000,7 +2017,20 @@ def _staleness_notes(repo_path: str, entries: list) -> dict:
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
                     created_by: str = "ai", replace_id: str = "", title: str = "", *,
                     source_files: list | None = None) -> tuple[bool, str | None]:
-    """Store (or route) one decision. `source_files` anchors a NEWLY CREATED entry to the
+    """`update_decision_with_meta` without the meta — the 2-tuple every non-MCP caller wants."""
+    stored, entry_id, _ = update_decision_with_meta(
+        repo_path, content, session_id, subtype, created_by=created_by,
+        replace_id=replace_id, title=title, source_files=source_files)
+    return stored, entry_id
+
+
+def update_decision_with_meta(repo_path: str, content: str, session_id: str, subtype: str = "",
+                              created_by: str = "ai", replace_id: str = "", title: str = "", *,
+                              source_files: list | None = None) -> tuple[bool, str | None, dict]:
+    """Store (or route) one decision, plus a `meta` dict — `{}` except on a refused proposal
+    slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
+
+    `source_files` anchors a NEWLY CREATED entry to the
     repo-relative files it describes plus the current git HEAD, so later injections can flag
     it as possibly stale; capped at _MAX_SOURCE_FILES. Recurrences and containment routes
     never gain or overwrite an anchor. A `replace_id` correction that passes non-empty
@@ -2028,7 +2058,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 # downstream _is_storable check, so guard here to prevent blank content
                 # from wiping a trusted decision.
                 if not _is_storable(content):
-                    return False, None
+                    return False, None, {}
                 # No-op guard - identical content creates no revision. A title-only correction
                 # (same content, new title) is still handled, but must respect the SAME approval
                 # gate as any change: the title renders as a trusted leading heading, so an AI
@@ -2046,7 +2076,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     if not new_title or new_title == target.get("title", ""):
                         if source_files:
                             _save(repo_path, data)
-                        return True, target["id"]  # nothing meaningful changed
+                        return True, target["id"], {}  # nothing meaningful changed
                     now = datetime.now(timezone.utc).isoformat()
                     st = target.get("subtype", "")
                     gated = (_update_needs_approval(subtype or st, created_by)
@@ -2063,19 +2093,19 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                                 and existing_prop.get("title", "") == new_title):
                             if source_files:
                                 _save(repo_path, data)
-                            return True, target["id"]  # identical title proposal already pending
+                            return True, target["id"], {}  # identical title proposal already pending
                         # The slot is trust-ordered (#200). "ai" is what _build_proposal stamps
                         # on the proposal this branch is about to write, so it is what has to
                         # outrank the sitting one; a human/plan Suggested Update is kept instead.
                         if not _claim_proposal_slot(target, "ai", now):
                             if source_files:
                                 _save(repo_path, data)
-                            return True, target["id"]
+                            return True, target["id"], {"refusal_ack": _refusal_ack(target)}
                         target["proposed_revision"] = _build_proposal(
                             target, content, subtype, session_id, now, title=title)
                         _save(repo_path, data)
                         _touch_pending_review(repo_path)
-                        return True, target["id"]
+                        return True, target["id"], {}
                     # Non-gated (human/scan/bootstrap, or pattern/convention) OR pending/untrusted:
                     # correct the current revision's title in place - no new revision.
                     cur = _current_revision(target)
@@ -2086,7 +2116,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         _save(repo_path, data)
                     elif source_files:
                         _save(repo_path, data)  # no revision to retitle, but the anchor still moved
-                    return True, target["id"]
+                    return True, target["id"], {}
                 now = datetime.now(timezone.utc).isoformat()
                 new_subtype = subtype or target.get("subtype", "")
                 old_subtype = target.get("subtype", "")
@@ -2121,7 +2151,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                             if source_files:
                                 _anchor_sources(repo_path, target, source_files)
                             _save(repo_path, data)
-                        return True, target["id"]
+                        return True, target["id"], {}
                     # Fix: don't overwrite an existing proposal if the new content AND its
                     # effective title are identical - the proposal is already pending for the same
                     # change. A same-content retry with a CHANGED title must rebuild it, or approval
@@ -2130,10 +2160,10 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     new_prop_title = _normalize_title(title) or _derive_title(content)
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title):
-                        return True, target["id"]
+                        return True, target["id"], {}
                     # Same trust-ordered slot as the title-only branch above (#200).
                     if not _claim_proposal_slot(target, "ai", now):
-                        return True, target["id"]
+                        return True, target["id"], {"refusal_ack": _refusal_ack(target)}
                     # source_files is stashed on the proposal, NOT applied to the live entry —
                     # the current revision (the old, genuinely stale text) keeps rendering until
                     # a developer approves, so the anchor must not refresh yet (_promote_proposal
@@ -2143,7 +2173,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                         source_files=source_files)
                     _save(repo_path, data)
                     _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
-                    return True, target["id"]
+                    return True, target["id"], {}
                 # Trivial change (pattern/convention, or any human/scan/bootstrap change) →
                 # apply immediately as a new approved revision. History is preserved: the
                 # prior revision stays in revisions[]; current_revision_id moves forward. This IS
@@ -2154,18 +2184,18 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                 if source_files:
                     _anchor_sources(repo_path, target, source_files)
                 _save(repo_path, data)
-                return True, target["id"]
+                return True, target["id"], {}
             # replace_id not found — fall through to normal storage
         if not _is_storable(content):
-            return False, None
+            return False, None, {}
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
         match = _find_match(content, decisions_only)
         if match is not None:
             _record_recurrence(match, session_id)
             _save(repo_path, data)
-            return False, None
+            return False, None, {}
         if _is_tombstoned(repo_path, content):
-            return False, None          # discarded silently, like any other filtered capture
+            return False, None, {}          # discarded silently, like any other filtered capture
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
         _anchor_sources(repo_path, entry, source_files)
         # Guard anchor accrual (issue #175 Task 3): when the model didn't name source_files
@@ -2195,7 +2225,7 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
         _save(repo_path, data)
         if _entry_status(entry) == "pending_approval":
             _touch_pending_review(repo_path)  # a brand-new decision awaits review (after save)
-        return True, entry["id"]
+        return True, entry["id"], {}
 
 
 def approve_decision(repo_path: str, entry_id: str, action: str,
