@@ -1349,6 +1349,15 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
         assert subtype == "constraint"
 
+    def test_never_mind_clause_without_punctuation_does_not_swallow_directive(self):
+        # Greptile #211 P1: no comma/period boundary between the dismissal and the
+        # directive — a greedy "until punctuation" strip consumed the whole message.
+        is_c, subtype = store._is_prescriptive_constraint(
+            "Never mind the perf concerns and always validate input before writing to disk"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
     def test_will_never_prediction_excluded(self):
         is_c, _ = store._is_prescriptive_constraint(
             "This will never work, let's try another approach"

@@ -1207,8 +1207,14 @@ _PERSONAL_DESCRIPTOR = re.compile(
 
 # "never mind X," is a dismissal, not a prohibition — but only the clause it introduces,
 # so a genuine trailing directive in the same message ("never mind the perf concerns,
-# always validate input") still gets through. Strips up to the next punctuation mark.
-_IDIOM_STRIP = re.compile(r"\bnever\s+mind\b[^,.;!?]*[,.;!?]?\s*", re.IGNORECASE)
+# always validate input") still gets through. Strips up to the next punctuation mark OR
+# coordinating conjunction (and/but/so/or) — Greptile #211 P1: without the conjunction
+# boundary, a dismissal joined to a directive with no punctuation ("never mind the perf
+# concerns and always validate input") had nothing to stop the greedy strip, which
+# consumed through the end of the message and silently dropped the trailing directive.
+_IDIOM_STRIP = re.compile(
+    r"\bnever\s+mind\b(?:(?!,|\.|;|!|\?|\b(?:and|but|so|or)\b).)*[,.;!?]?\s*",
+    re.IGNORECASE)
 
 # "this/that/it will never work", "will always fail" describe anticipated behaviour, not a
 # command — EXCEPT "you will/would (always|never)", which reads as an imperative ("you will
