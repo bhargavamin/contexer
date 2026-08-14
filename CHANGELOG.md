@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.34.2](https://github.com/bhargavamin/contexer/compare/v0.34.1...v0.34.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* bound the never-mind clause strip on conjunctions, not just punctuation ([7e24d64](https://github.com/bhargavamin/contexer/commit/7e24d64865d79127d1f58f171994f05560a74f84))
+* reduce false positives in the per-prompt constraint auto-capture ([a3ebede](https://github.com/bhargavamin/contexer/commit/a3ebedeccca11bc8a3ff5a11b8d0d1d024844de9))
+* reduce false positives in the per-prompt constraint auto-capture ([bcdb6f6](https://github.com/bhargavamin/contexer/commit/bcdb6f69727d48130e3863118c9e0cd261a111be))
+
 ## [0.34.1](https://github.com/bhargavamin/contexer/compare/v0.34.0...v0.34.1) (2026-08-14)
 
 
