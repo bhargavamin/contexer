@@ -4639,6 +4639,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                 sys_parts.append(f"    {body}")
     if pre_loaded:
         sys_parts.append("## Project rules — apply to ALL tasks in this repo:")
+        any_clipped = False
         for d in pre_loaded:
             st = _entry_status(d)
             status_tag = " [suggested]" if st == "suggested" else ""
@@ -4648,10 +4649,22 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             title, body, extras = conflicts._conflict_view(d)
             sys_parts.append(
                 f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
-            if body is not None:
+            # Startup-size guard: full bodies for every rule once overflowed the host's
+            # additionalContext limit, which silently truncates the whole injection.
+            # Constraints keep their body (the "never do X" detail must be present before
+            # any prompt fires); an open conflict keeps it too (the dual-injection render
+            # is meaningless without the standing side). Everything else is title-only —
+            # full content stays one get_context / router fetch away.
+            if body is not None and (d.get("subtype") == "constraint" or extras):
                 sys_parts.append(f"    {body}")
+            elif body is not None:
+                any_clipped = True
             for extra in extras:
                 sys_parts.append(f"    {extra}")
+        if any_clipped:
+            sys_parts.append(
+                "(Convention/pattern rules are titles only — call get_context for any rule's "
+                "full reasoning.)")
     if global_rules or pre_loaded:
         if any(conflicts._has_open_conflict(d) for d in pre_loaded):
             sys_parts.append(f"\n{conflicts._CONFLICT_GUIDE}")  # blank line off the decision bullets
