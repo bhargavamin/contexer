@@ -151,6 +151,59 @@ class TestAuditSessions:
         sources = {e["repo_source"] for s in row["stores"] for e in s["entries"]}
         assert sources == {"session", "pointer"}
 
+    def test_unhashable_session_id_does_not_raise(self, store_dir):
+        # A raw store can hold anything here; an unhashable value used as a dict key would
+        # terminate the whole read-only audit on one malformed entry.
+        _write_store(store_dir, "/repo/a", [_decision("a1", ["not", "a", "string"])])
+        _write_store(store_dir, "/repo/b", [_decision("b1", "sess-1")])
+        assert scope_audit.audit_sessions() == []
+
+    def test_numeric_session_id_does_not_reach_the_report(self, store_dir):
+        # An int IS hashable, so it survives the grouping and only breaks later, in the
+        # report's slicing — coerced away at the same point as the unhashable case.
+        _write_store(store_dir, "/repo/a", [_decision("a1", 12345)])
+        _write_store(store_dir, "/repo/b", [_decision("b1", 12345)])
+        assert scope_audit.audit_sessions() == []
+        scope_audit.format_audit(scope_audit.audit_sessions())
+
+    def _stray_worktree_pair(self, store_dir, monkeypatch):
+        """A pre-fix stray worktree store sitting beside its canonical file.
+
+        Written under EXPLICIT filenames, not via `_slug`: `_slug` itself canonicalizes
+        through `_canonical_store_key`, so patching that helper would collapse both writes
+        onto one filename and the fixture would silently test nothing. A real pre-fix stray
+        has its own slug precisely because it was written before that canonicalization.
+        """
+        monkeypatch.setattr(store, "_canonical_store_key",
+                            lambda p: "/repo/main" if p in ("/repo/main", "/repo/wt") else p)
+        (store_dir / "canonical.json").write_text(json.dumps(
+            {"repo_path": "/repo/main", "entries": [_decision("m1", "sess-1")]}))
+        (store_dir / "stray.json").write_text(json.dumps(
+            {"repo_path": "/repo/wt", "entries": [_decision("w1", "sess-1")]}))
+
+    def test_two_store_files_for_one_repo_are_one_store(self, store_dir, monkeypatch):
+        # Both files describe ONE repo, so a session writing to both is correctly scoped —
+        # reporting it would send the developer to retire records that are fine.
+        self._stray_worktree_pair(store_dir, monkeypatch)
+        assert scope_audit.audit_sessions() == []
+
+    def test_merged_repo_still_pairs_with_a_genuinely_different_one(self, store_dir, monkeypatch):
+        self._stray_worktree_pair(store_dir, monkeypatch)
+        (store_dir / "other.json").write_text(json.dumps(
+            {"repo_path": "/repo/other", "entries": [_decision("o1", "sess-1")]}))
+
+        (row,) = scope_audit.audit_sessions()
+        assert len(row["stores"]) == 2                       # merged pair + the real other
+        merged = next(s for s in row["stores"] if len(s["paths"]) == 2)
+        assert [e["id"] for e in merged["entries"]] == ["m1", "w1"]
+
+    def test_store_with_an_unreadable_repo_path_is_never_merged_blindly(self, store_dir):
+        for name, eid in (("one.json", "a1"), ("two.json", "b1")):
+            (store_dir / name).write_text(
+                json.dumps({"entries": [_decision(eid, "sess-1")]}))   # no repo_path
+        (row,) = scope_audit.audit_sessions()
+        assert len(row["stores"]) == 2
+
     def test_null_timestamp_does_not_raise(self, store_dir):
         # `.get("timestamp", "")` still returns None for a key present with a JSON null, and
         # None then blows up the sort and the max() below it. Entries are read raw.

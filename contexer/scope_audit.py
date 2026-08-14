@@ -24,6 +24,7 @@ imports it back.
 """
 
 import json
+import os
 from pathlib import Path
 
 from contexer import store
@@ -84,7 +85,11 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
         # (a recurrence from a second session is normal and not evidence of anything), so
         # only the ORIGINATING `session_id` — the session that actually wrote it here —
         # can indicate a misrouted write.
-        sid = e.get("session_id") or ""
+        # `_text`, not `or ""`: a raw store can hold a list or dict here, and an unhashable
+        # value would raise straight out of the dict key below — terminating a read-only
+        # audit on one malformed entry. A number is hashable and would survive that far only
+        # to break the slicing in format_audit, so both are coerced away at the same point.
+        sid = _text(e.get("session_id"))
         if not sid or _is_memory_import(e):
             continue
         # Per-entry guard, not just around the parse: these entries are RAW json, never run
@@ -108,24 +113,63 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
     return repo, by_session
 
 
+def _repo_identity(repo: str, path: Path) -> str:
+    """The LOGICAL repo a store file belongs to — two files that resolve here to the same
+    string are one repo, not two.
+
+    Needed because a store file is not the unit of identity. A linked git worktree shares the
+    main worktree's store via `_canonical_store_key`, but a PRE-FIX stray (written before that
+    canonicalization, in a repo nobody has reopened since — `migrate_worktree_strays` only
+    folds it in at that repo's next session start) still sits beside the canonical file under
+    its own slug. Counting both would report a session as split across two stores when every
+    decision is correctly scoped, and send the developer off to retire records that are fine.
+
+    `realpath` on top of the canonical key is load-bearing, not belt-and-braces: the two sides
+    resolve differently. A main worktree fast-paths out of `_canonical_store_key` with its
+    path UNCHANGED, while a linked worktree goes through `git rev-parse --path-format=absolute`,
+    which returns the fully resolved path — so on a host where the repo lives under a symlink
+    (`/tmp` -> `/private/tmp` on macOS) the canonical keys differ by that prefix alone and
+    would not merge. Fail-soft: anything unresolvable falls back to the raw repo path, and a
+    store whose own `repo_path` is unreadable stays keyed by its file, never merged blindly."""
+    if not repo:
+        return str(path)
+    try:
+        return os.path.realpath(store._canonical_store_key(repo)) or repo
+    except Exception:
+        return repo
+
+
 def audit_sessions() -> list[dict]:
     """Sessions whose decisions are split across two or more repo stores, newest first.
 
-    Each row: {"session_id", "stores": [{"repo", "path", "entries": [...]}, ...]}. An empty
-    list means no session wrote into more than one store — the clean state."""
-    seen: dict[str, list[dict]] = {}
+    Each row: {"session_id", "stores": [{"repo", "paths": [...], "entries": [...]}, ...]}.
+    `paths` is a list because one logical repo can legitimately have more than one store FILE
+    (see `_repo_identity`). An empty list means no session wrote into more than one store —
+    the clean state."""
+    # (session id, logical repo) -> store record. Keyed on the repo IDENTITY rather than the
+    # file so several files for one repo collapse into a single store here.
+    seen: dict[str, dict[str, dict]] = {}
     # `store._store_files()`, never a local re-glob: its predicate already knows what else
     # shares STORE_DIR, and the `<slug>.deleted.json` tombstones are the trap — same
     # {"repo_path", "entries"} shape as a real store, so a hand-rolled "skip dotfiles and
     # _global" filter reads a repo's DELETED decisions as a second store for that same repo.
     for path in store._store_files():
         repo, by_session = _sessions_in(path)
+        identity = _repo_identity(repo, path)
         for sid, entries in by_session.items():
-            entries.sort(key=lambda e: e.get("timestamp", ""))
-            seen.setdefault(sid, []).append(
-                {"repo": repo or path.stem, "path": str(path), "entries": entries})
-    rows = [{"session_id": sid, "stores": stores}
-            for sid, stores in seen.items() if len(stores) >= _MIN_STORES]
+            record = seen.setdefault(sid, {}).setdefault(
+                identity, {"repo": repo or path.stem, "paths": [], "entries": []})
+            record["paths"].append(str(path))
+            record["entries"].extend(entries)
+    rows = []
+    for sid, by_identity in seen.items():
+        if len(by_identity) < _MIN_STORES:
+            continue
+        stores = list(by_identity.values())
+        for st in stores:
+            st["entries"].sort(key=lambda e: e.get("timestamp", ""))
+            st["paths"].sort()
+        rows.append({"session_id": sid, "stores": stores})
     rows.sort(key=lambda r: max((e.get("timestamp", "")
                                  for s in r["stores"] for e in s["entries"]), default=""),
               reverse=True)
@@ -151,7 +195,8 @@ def format_audit(rows: list[dict]) -> str:
         out.append(f"session {row['session_id'][:8]} — {len(row['stores'])} stores")
         for st in row["stores"]:
             out.append(f"  {st['repo']}")
-            out.append(f"    {st['path']}")
+            for p in st["paths"]:
+                out.append(f"    {p}")
             shown = st["entries"][:_MAX_ENTRIES_SHOWN]
             for e in shown:
                 src = f" [via {e['repo_source']}]" if e.get("repo_source") else ""
