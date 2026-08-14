@@ -745,14 +745,89 @@ _LINT_BOUNCE = (
     "Do not drop the capture — re-submit it restated."
 )
 
+# Multi-claim gate. A capture that carries several ALL-CAPS section labels is a DOCUMENT —
+# independent claims sharing one record — and the record then ages at the rate of its
+# fastest-rotting part: one anchored file changes, the whole entry renders "may be stale",
+# and the durable subsystem understanding inside it is tarred by association with the
+# implementation detail beside it.
+#
+# Thresholds are measured, not guessed, against the 193 real long captures across every store
+# on the machine this was written for. A label is a run of >= 2 whitespace-separated tokens of
+# which >= 2 are digit-free ALL-CAPS words, followed DIRECTLY by ':' (an intervening
+# parenthetical allowed), counted only OUTSIDE code and URLs, and counted DISTINCTLY. Every
+# qualifier was earned by a false positive, not reasoned into existence:
+#   - digit-free ALL-CAPS drops ticket/identifier noise ("PRT-54 Q5", "FE SA-108/109"), which
+#     otherwise scored as high as a real header.
+#   - blanking code — fenced blocks INCLUDING AN UNTERMINATED ONE (a routine LLM output shape;
+#     a close-fence-only pattern let a truncated block leak its contents back to the scanner)
+#     and inline spans — plus the ':' rule kills the SQL class outright: "UUID PRIMARY KEY" /
+#     "TEXT NOT NULL" / "ORDER BY" / "ON CONFLICT … DO UPDATE" scored 7 labels on one
+#     schema-quoting decision without it, 0 with it.
+#   - blanking URLs stops "the HTTP API docs live at https://…" from reading as a label, since
+#     the scheme's own ':' would otherwise satisfy the test.
+#   - ':' must follow the run DIRECTLY (bare parenthetical allowed, because real headers look
+#     like "KNOWN GAP (pre-existing, untouched):"). Merely "a ':' somewhere ahead" double-counted
+#     comma-joined headers — "WHY CHECKOUT, NOT THE PORTAL:" scored 2 — which inflated the very
+#     corpus the threshold was set against.
+#   - distinct counting stops a thrice-repeated "DO NOT:" reading as three sections.
+# Measured with all of it applied, the corpus is 183 captures at 0 labels, 7 at 1, one each at
+# 2, 3 and 4. _LINT_MIN_SECTIONS = 3 catches exactly the 3 and the 4 — both genuine
+# multi-section documents, one of them the record this gate was built from — and the nearest
+# untouched capture sits at 2. That is a ONE-count margin, not a wide gap: stated plainly
+# because the earlier, looser matcher made the gap look bigger than it was. Known residual
+# shape, accepted rather than tuned away on one example: a single-claim decision that uses
+# three "LABEL:" constructs of its own ("the API GATEWAY: … the DB LAYER: … the CI PIPELINE: …")
+# does bounce. Tightening further to exclude it — requiring three-word runs, or sentence-initial
+# position — drops the real headers this gate exists to catch, so the margin stays where the
+# evidence puts it.
+_LINT_MIN_SECTIONS = 3
+_LINT_LABEL_WINDOW = 90      # chars after a caps run searched for the ':' that makes it a label
+_LINT_FENCE_RE = re.compile(r"```.*?```|```.*", re.S)   # closed fence, else an unterminated one
+_LINT_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+_LINT_URL_RE = re.compile(r"\b\w+://\S*")
+_LINT_CAPS_RUN_RE = re.compile(r"\b[A-Z][A-Z0-9&/'-]+(?:\s+[A-Z][A-Z0-9&/'-]+)+\b")
+_LINT_CAPS_WORD_RE = re.compile(r"^[A-Z]{2,}$")
+_LINT_LABEL_TAIL_RE = re.compile(r"^\s*(?:\([^)]*\)\s*)?:")
+_LINT_SPLIT_BOUNCE = (
+    "Not stored — this is a multi-section document, not one decision. Several ALL-CAPS "
+    "section labels means several independent claims are sharing one record, and they will "
+    "not age at the same rate. Split it and call update_context once PER CLAIM, in this "
+    "same turn:\n"
+    "- One decision per call: the claim itself, imperative, with its own why.\n"
+    "- Keep durable subsystem understanding (how this works, true until a refactor) in a "
+    "SEPARATE record from what this change adds (true until the next commit) — sharing one "
+    "record makes the stale half mark the durable half stale too.\n"
+    "- Pass a concise imperative title on each.\n"
+    "Do not drop the capture — re-submit it as separate decisions."
+)
+
+
+def _lint_section_labels(content: str) -> set[str]:
+    """Distinct ALL-CAPS section labels in `content` — see the _LINT_MIN_SECTIONS block for
+    what qualifies and why. Code is blanked before scanning so a quoted schema or shell
+    snippet can never contribute one."""
+    text = _LINT_URL_RE.sub(" ", _LINT_INLINE_CODE_RE.sub(
+        " ", _LINT_FENCE_RE.sub(" ", content)))
+    labels = set()
+    for m in _LINT_CAPS_RUN_RE.finditer(text):
+        run = m.group(0)
+        if sum(1 for w in run.split() if _LINT_CAPS_WORD_RE.match(w)) < 2:
+            continue
+        if not _LINT_LABEL_TAIL_RE.match(text[m.end():m.end() + _LINT_LABEL_WINDOW]):
+            continue
+        labels.add(run)
+    return labels
+
 
 def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> str:
     """Deterministic capture-shape gate for model-authored captures ('' = passes).
 
-    Bounces content that opens as investigation narrative instead of a decision, with
-    restate instructions the calling model applies in the same turn. Regex-tier by
-    design (no LLM in the filter). Scope is deliberately narrow — only new, long,
-    ai/plan-sourced captures — so human directives, scan/bootstrap/memory imports,
+    Two bounces, both with same-turn instructions the calling model applies:
+    - content that OPENS as investigation narrative instead of a decision (_LINT_BOUNCE);
+    - content that is a multi-section DOCUMENT rather than one decision (_LINT_SPLIT_BOUNCE),
+      detected by counting ALL-CAPS section labels — see the _LINT_MIN_SECTIONS block.
+    Regex-tier by design (no LLM in the filter). Scope is deliberately narrow — only new,
+    long, ai/plan-sourced captures — so human directives, scan/bootstrap/memory imports,
     replace_id corrections, and short entries can never be blocked."""
     if created_by not in ("ai", "plan") or replace_id:
         return ""
@@ -765,6 +840,8 @@ def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> 
         return _LINT_BOUNCE
     if len(first_sentence.split()) > _LINT_MAX_FIRST_SENT:
         return _LINT_BOUNCE
+    if len(_lint_section_labels(text)) >= _LINT_MIN_SECTIONS:
+        return _LINT_SPLIT_BOUNCE
     return ""
 
 

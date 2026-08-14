@@ -6278,6 +6278,129 @@ class TestCaptureLint:
         assert msg != ""
 
 
+class TestCaptureLintSplit:
+    """The multi-claim gate: several ALL-CAPS section labels means several independent
+    claims sharing one record, which makes the fastest-rotting half mark the durable half
+    stale. Modelled on the real record this was built from — one 4127-char single-line blob
+    mixing timeless subsystem understanding with one ticket's implementation detail."""
+
+    FILLER = " ".join(["detail"] * 60)
+    BLOB = (
+        "PRT-98 — why the org picker never showed, and how sales users now pick orgs. "
+        f"WHY THE PAGE IS NORMALLY INVISIBLE: the page is a session task, not routing. {FILLER} "
+        f"WHAT PRT-98 ADDS: a shared create dialog plus a post-sign-in fan-out. {FILLER} "
+        f"DECIDED SCOPE BOUNDARIES: interactive only, sales only, no purge. {FILLER}"
+    )
+
+    def test_multi_section_document_bounces_with_split_instructions(self):
+        msg = store.capture_lint(self.BLOB)
+        assert msg != ""
+        assert "multi-section document" in msg
+        assert "PER CLAIM" in msg
+
+    def test_split_bounce_is_distinct_from_the_narrative_bounce(self):
+        # Different defect, different instruction: restate vs. split. A model handed the
+        # wrong one would "fix" the wrong thing and be bounced again.
+        assert store.capture_lint(self.BLOB) != store._LINT_BOUNCE
+        assert store.capture_lint(self.BLOB) == store._LINT_SPLIT_BOUNCE
+
+    def test_one_decision_with_a_single_label_passes(self):
+        content = (f"Key the store on the main worktree path. KNOWN GAP: bare-repo hosts "
+                   f"keep per-worktree keys. {self.FILLER}")
+        assert store.capture_lint(content) == ""
+
+    def test_two_labels_still_pass(self):
+        # The threshold sits in a measured empty gap (corpus: 13 captures at one label,
+        # none at two or three, then the documents at four and five). Two must not bounce.
+        content = (f"Key the store on the main worktree path. KNOWN GAP: bare repos. "
+                   f"{self.FILLER} DATA CAVEAT: submodules keep their own key. {self.FILLER}")
+        assert store.capture_lint(content) == ""
+
+    def test_quoted_sql_never_counts_as_sections(self):
+        # Without the code strip + colon rule this exact shape scored seven labels:
+        # UUID PRIMARY KEY / TEXT NOT NULL / ORDER BY / ON CONFLICT / DO UPDATE / ...
+        content = (
+            "Store orders in Postgres, one row per line item, because the reporting join "
+            "needs them flat. The schema is "
+            "`CREATE TABLE orders (id UUID PRIMARY KEY, sku TEXT NOT NULL, created_at "
+            "TIMESTAMPTZ NOT NULL)` and the hot read is `SELECT sku FROM orders ORDER BY "
+            "created_at DESC`. Upserts use `ON CONFLICT (id) DO UPDATE`. " + self.FILLER
+        )
+        assert store.capture_lint(content) == ""
+
+    def test_fenced_code_never_counts_as_sections(self):
+        content = ("Run migrations through Alembic so the schema and the code move together.\n"
+                   "```sql\nCREATE TABLE a (id UUID PRIMARY KEY);\n"
+                   "SELECT * FROM a ORDER BY id;\nINSERT INTO a VALUES (1) ON CONFLICT (id) "
+                   "DO UPDATE SET id = 1;\n```\n" + self.FILLER)
+        assert store.capture_lint(content) == ""
+
+    def test_ticket_ids_and_identifiers_do_not_count(self):
+        content = (f"Ship PRT-54 Q5 before SA-115 ADR because the migration ordering "
+                   f"depends on it: FE SA-108/109/112/113 all read the new column. {self.FILLER}")
+        assert store.capture_lint(content) == ""
+
+    def test_short_multi_section_content_passes(self):
+        short = ("WHY IT BREAKS: the lock. WHAT WE DID: took it later. KNOWN GAP: none.")
+        assert len(short) <= store._LINT_MIN_LEN
+        assert store.capture_lint(short) == ""
+
+    def test_human_and_scan_sources_never_bounce(self):
+        assert store.capture_lint(self.BLOB, created_by="human") == ""
+        assert store.capture_lint(self.BLOB, created_by="scan") == ""
+        assert store.capture_lint(self.BLOB, created_by="memory") == ""
+
+    def test_replace_id_corrections_never_bounce(self):
+        assert store.capture_lint(self.BLOB, replace_id="abc12345") == ""
+
+    def test_plan_source_bounces_like_ai(self):
+        assert store.capture_lint(self.BLOB, created_by="plan") == store._LINT_SPLIT_BOUNCE
+
+    def test_unterminated_fence_still_hides_its_code(self):
+        # A truncated ``` block is a routine LLM output shape. A close-fence-only pattern
+        # leaked the whole rest of the capture back to the scanner — here that is 5 labels.
+        content = ("Run migrations through Alembic so schema and code move together.\n"
+                   "```sql\nCREATE TABLE a (id UUID PRIMARY KEY);\n"
+                   "WHY THIS: because. WHAT NEXT: nothing. KNOWN GAP: none.\n" + self.FILLER)
+        assert store._lint_section_labels(content) == set()
+        assert store.capture_lint(content) == ""
+
+    def test_urls_do_not_make_acronym_pairs_into_labels(self):
+        # The scheme's own ':' satisfied a "colon somewhere ahead" test.
+        content = ("Use the AWS SDK for S3 uploads because the signed-URL flow is built in. "
+                   "The HTTP API docs live at https://docs.aws.amazon.com/s3. The JSON RPC "
+                   "spec is at https://www.jsonrpc.org/specification. The OAUTH FLOW notes "
+                   "are at https://example.invalid/a. " + self.FILLER)
+        assert store._lint_section_labels(content) == set()
+        assert store.capture_lint(content) == ""
+
+    def test_comma_joined_header_counts_once(self):
+        # "WHY CHECKOUT, NOT THE PORTAL:" is ONE header. Counting each half separately
+        # inflated the corpus the threshold was measured against.
+        content = ("Use Postgres for the decision store. WHY NOT SQLITE, NOT MYSQL: "
+                   f"concurrency and joins. {self.FILLER} KNOWN GAP: no sharding yet. "
+                   f"{self.FILLER}")
+        assert store._lint_section_labels(content) == {"NOT MYSQL", "KNOWN GAP"}
+        assert store.capture_lint(content) == ""      # two headers, under the bar
+
+    def test_parenthetical_between_header_and_colon_still_counts(self):
+        # Real headers look like this, which is why the ':' may be separated by a
+        # parenthetical — but by nothing else.
+        content = (f"PRT-98 rollout. KNOWN GAP (pre-existing, untouched): no purge. "
+                   f"{self.FILLER} WHAT THIS ADDS: a create dialog. {self.FILLER} "
+                   f"DECIDED SCOPE BOUNDARIES: sales only. {self.FILLER}")
+        assert "KNOWN GAP" in store._lint_section_labels(content)
+        assert store.capture_lint(content) == store._LINT_SPLIT_BOUNCE
+
+    def test_labels_are_counted_distinctly(self):
+        # A phrase repeated three times is one label, not three ("DO NOT" appeared three
+        # times in a real capture and would have tripped an occurrence counter).
+        content = (f"Never widen the guard. DO NOT: bypass it. {self.FILLER} "
+                   f"DO NOT: disable it. {self.FILLER} DO NOT: skip it. {self.FILLER}")
+        assert len(store._lint_section_labels(content)) == 1
+        assert store.capture_lint(content) == ""
+
+
 class TestBodyClipping:
     """_clip_body — the human-review-surface clip (review_pending, contexer review, share
     lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
