@@ -171,7 +171,13 @@ def before_agent(repo_path: str, raw: str) -> str:
                 _flag_set(marker)
 
         near: list = []
-        entry_id, content, status = store.capture_user_constraint(repo, prompt, session_id, near)
+        # Provenance for the wrong-store audit. Derived from which signal `_hook_cwd_repo`
+        # used rather than by re-resolving: this host deliberately does NOT run the
+        # `_resolve_repo` chain here (see the docstring above), and a stamp must never change
+        # what it is describing.
+        repo_source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
+        entry_id, content, status = store.capture_user_constraint(
+            repo, prompt, session_id, near, repo_source=repo_source)
         if entry_id is not None:
             contexts.append(store.constraint_ack(content, status, entry_id, near))
 

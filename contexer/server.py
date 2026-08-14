@@ -84,7 +84,10 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     the decision's one proposal slot — do not retry the call; relay both versions to the developer
     that turn so they can review with full context.
     """
-    resolved = store._resolve_repo(repo_path)
+    # Verbose resolve on the WRITE path only: the branch that chose this store is stamped
+    # onto the new entry, so a decision that lands in the wrong repo is diagnosable after
+    # the fact instead of indistinguishable. Read tools keep the plain _resolve_repo.
+    resolved, repo_source = store._resolve_repo_verbose(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
     lint = store.capture_lint(content, created_by=created_by, replace_id=replace_id)
@@ -92,7 +95,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
         return lint
     stored, entry_id, meta = store.update_decision_with_meta(
         resolved, content, SESSION_ID, subtype, created_by=created_by,
-        replace_id=replace_id, title=title, source_files=source_files)
+        replace_id=replace_id, title=title, source_files=source_files,
+        repo_source=repo_source)
     if not stored:
         return "Filtered — did not meet storage criteria."
     if meta.get("refusal_ack"):
@@ -327,11 +331,14 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
     Empty — auto-detect from git history. The result includes 'insight' and 'decisive';
     if decisive is false, ask the user how well they know the repo, then re-call
     with their answer."""
-    resolved = store._resolve_repo(repo_path)
+    # Verbose resolve: bootstrap is the largest bulk write in the system (one consolidated
+    # Stack entry plus every mined convention, in a single save), so a misroute here plants
+    # the most content in the wrong store — the write that most needs its branch recorded.
+    resolved, repo_source = store._resolve_repo_verbose(repo_path)
     if not resolved:
         return json.dumps({"error": "repo path not detected"})
-    result = (store.bootstrap_apply(resolved, SESSION_ID, insight) if apply
-              else store.bootstrap_scan(resolved, insight))
+    result = (store.bootstrap_apply(resolved, SESSION_ID, insight, repo_source=repo_source)
+              if apply else store.bootstrap_scan(resolved, insight))
     # Ask-shape rides the result, not the session-start injection: it is only usable when
     # there are gaps to ask, and this is the one place the model reads them.
     if result.get("gaps"):
@@ -343,11 +350,12 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
 def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
     """Called on every UserPromptSubmit. Detects prescriptive directives ('always X', 'never Y',
     'from now on Z') and stores them as constraint or convention decisions automatically."""
-    resolved = store._resolve_repo(repo_path)
+    resolved, repo_source = store._resolve_repo_verbose(repo_path)
     if not resolved:
         return ""
     near: list = []
-    entry_id, content, status = store.capture_user_constraint(resolved, prompt, SESSION_ID, near)
+    entry_id, content, status = store.capture_user_constraint(
+        resolved, prompt, SESSION_ID, near, repo_source=repo_source)
     if entry_id is None:
         return ""
     return store.constraint_ack(content, status, entry_id, near)

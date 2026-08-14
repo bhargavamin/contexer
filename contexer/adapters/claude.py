@@ -136,12 +136,19 @@ def capture_constraint(repo_path: str, raw: str) -> str:
     A deictic directive ('this feature', 'it could be') lands pending_approval, not trusted -
     the ack tells the user to generalize/approve/discard it rather than treating it as stored."""
     try:
-        repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
+        # Verbose resolve: this hook process has no MCP server binding of its own, so it is
+        # the capture path most exposed to a wrong repo — exactly the provenance the stamp
+        # exists to make visible. `_hook_repo_verbose`, not `_resolve_repo_verbose`: the hook
+        # always supplies a path (its shell's git root, or cwd), which the plain resolver
+        # would label `argument` — the one label the audit reads as a DELIBERATE cross-repo
+        # write, dismissing the very misroute this is meant to surface.
+        repo, repo_source = store._hook_repo_verbose(repo_path)
         if not repo:
             return "{}"
         near: list = []
         entry_id, content, status = store.capture_user_constraint(
-            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw), near)
+            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw), near,
+            repo_source=repo_source)
         if entry_id is None:
             return "{}"
         msg = store.constraint_ack(content, status, entry_id, near)

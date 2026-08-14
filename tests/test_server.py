@@ -432,7 +432,9 @@ def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────
 
 def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: tmp_repo)
+    # The WRITE path resolves verbosely (it stamps repo_source onto the new entry), so the
+    # double has to mirror that — patching _resolve_repo alone no longer intercepts it.
+    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     narrative = ("Investigated (2026-08-05) the loader bug at length. " +
                  " ".join(["detail"] * 150))
     out = server.update_context(content=narrative)
@@ -443,7 +445,7 @@ def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
 
 def test_update_context_relays_the_refusal_ack(tmp_repo, monkeypatch):
     # Issue #202: the refused correction must not come back as a "pending review" prompt.
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: tmp_repo)
+    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     standing = "Use Postgres for the decision store; SQLite won't handle concurrent sessions"
     store.update_decision(tmp_repo, standing, "s1", "architecture")
     data = store._load(tmp_repo)
@@ -469,3 +471,23 @@ def test_update_global_context_bounce_names_itself(monkeypatch):
     assert "Not stored" in out
     assert "call update_global_context again" in out
     assert "call update_context again" not in out
+
+
+def test_update_context_stamps_which_signal_chose_the_store(tmp_repo, monkeypatch):
+    # End-to-end: the branch that picked this store is recorded on the entry, so a decision
+    # that lands in the wrong repo is diagnosable (scope_audit reads it back).
+    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "pointer"))
+    server.update_context(content="Use Postgres for the orders schema", subtype="architecture")
+    (entry,) = store._load(tmp_repo)["entries"]
+    assert entry["repo_source"] == "pointer"
+
+
+def test_update_context_bounces_a_multi_section_document(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
+    filler = " ".join(["detail"] * 60)
+    blob = (f"PRT-98 — why the picker never showed. WHY IT IS INVISIBLE: it is a session "
+            f"task. {filler} WHAT THIS ADDS: a create dialog. {filler} "
+            f"DECIDED SCOPE BOUNDARIES: sales only. {filler}")
+    out = server.update_context(content=blob)
+    assert "multi-section document" in out
+    assert store._load(tmp_repo)["entries"] == []      # nothing written

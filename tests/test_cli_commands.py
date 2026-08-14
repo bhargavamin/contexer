@@ -1674,3 +1674,61 @@ class TestPreCommitFrameworkSpec:
         assert "verbose: true" in content
         assert "pass_filenames: false" in content
         assert "always_run: true" in content
+
+
+# ── scope-audit ─────────────────────────────────────────────────────────────
+
+class TestScopeAudit:
+    """`contexer scope-audit` — read-only report of decisions saved into the wrong store."""
+
+    def _store_dir(self, tmp_path, monkeypatch):
+        from contexer import store
+        d = tmp_path / ".contexer"
+        d.mkdir()
+        monkeypatch.setattr(store, "STORE_DIR", d)
+        return d, store
+
+    def _write(self, d, store, repo, eid, sid, **extra):
+        entry = {"type": "decision", "id": eid, "session_id": sid,
+                 "timestamp": "2026-08-03T12:00:00+00:00", "content": f"content {eid}",
+                 "title": f"title {eid}"}
+        entry.update(extra)
+        (d / f"{store._slug(repo)}.json").write_text(
+            json.dumps({"repo_path": repo, "entries": [entry]}))
+
+    def test_reports_a_split_session(self, tmp_path, monkeypatch, capsys):
+        d, store = self._store_dir(tmp_path, monkeypatch)
+        self._write(d, store, "/repo/right", "r1", "sess-1")
+        self._write(d, store, "/repo/wrong", "w1", "sess-1", repo_source="pointer")
+
+        _run_main(monkeypatch, "scope-audit")
+        out = capsys.readouterr().out
+        assert "/repo/right" in out and "/repo/wrong" in out
+        assert "[via pointer]" in out
+
+    def test_clean_store_reports_clean(self, tmp_path, monkeypatch, capsys):
+        d, store = self._store_dir(tmp_path, monkeypatch)
+        self._write(d, store, "/repo/a", "a1", "sess-a")
+        _run_main(monkeypatch, "scope-audit")
+        assert "No cross-store sessions" in capsys.readouterr().out
+
+    def test_writes_nothing(self, tmp_path, monkeypatch):
+        d, store = self._store_dir(tmp_path, monkeypatch)
+        self._write(d, store, "/repo/right", "r1", "sess-1")
+        self._write(d, store, "/repo/wrong", "w1", "sess-1")
+        before = {p.name: p.read_bytes() for p in d.iterdir()}
+
+        _run_main(monkeypatch, "scope-audit")
+        assert {p.name: p.read_bytes() for p in d.iterdir()} == before
+
+    def test_unknown_argument_exits_1_instead_of_running(self, tmp_path, monkeypatch, capsys):
+        # A read-only-sounding flag must never fall through into a run that ignores it.
+        self._store_dir(tmp_path, monkeypatch)
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "scope-audit", "--fix")
+        assert exc.value.code == 1
+        assert "Unknown argument" in capsys.readouterr().err
+
+    def test_listed_in_help(self, monkeypatch, capsys):
+        _run_main(monkeypatch, "help")
+        assert "scope-audit" in capsys.readouterr().out

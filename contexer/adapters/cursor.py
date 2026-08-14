@@ -97,15 +97,25 @@ def format_prompt_passthrough() -> dict:
 
 def _repo_from(raw: str, repo_path: str) -> str:
     """Cursor sessionStart provides workspace_roots[]; fall back to .current_repo."""
+    return _repo_from_verbose(raw, repo_path)[0]
+
+
+def _repo_from_verbose(raw: str, repo_path: str) -> tuple[str, str]:
+    """`_repo_from` plus WHICH of its signals produced the repo — the provenance the
+    wrong-store audit reads (`scope_audit.py`). Cursor has one signal the other hosts do not
+    (`workspace_roots`), so it gets its own label rather than being flattened into
+    `argument`, which the audit reads as a deliberate cross-repo write."""
     if repo_path:
-        return store._resolve_repo(repo_path)
+        repo, source = store._resolve_repo_verbose(repo_path)
+        return repo, ("hook-arg" if source == "argument" else source)
     try:
         roots = json.loads(raw).get("workspace_roots") or []
         if roots:
-            return store._resolve_repo(roots[0])
+            repo, source = store._resolve_repo_verbose(roots[0])
+            return repo, ("workspace-root" if source == "argument" else source)
     except Exception:
         pass
-    return store._resolve_repo("")
+    return store._resolve_repo_verbose("")
 
 
 def _ensure_rule_file(repo_dir: str) -> None:
@@ -167,11 +177,12 @@ def _anchor_current_repo(repo: str) -> None:
 def capture_constraint(repo_path: str, raw: str) -> str:
     """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
     try:
-        repo = _repo_from(raw, repo_path)
+        repo, repo_source = _repo_from_verbose(raw, repo_path)
         if repo:
             _anchor_current_repo(repo)
             store.capture_user_constraint(repo, store.prompt_from_hook_stdin(raw),
-                                          store.session_from_hook_stdin(raw))
+                                          store.session_from_hook_stdin(raw),
+                                          repo_source=repo_source)
     except Exception:
         pass
     return json.dumps(format_prompt_passthrough())
