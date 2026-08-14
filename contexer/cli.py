@@ -32,6 +32,8 @@ Commands:
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook — see below).
+  scope-audit   Read-only: find decisions saved into the wrong repo's store (a session
+                whose decisions are split across two or more stores). Changes nothing.
   status        Show install state: version, binary path, MCP/hooks, store summary.
   version       Print the installed version.
   help          Show this message.
@@ -1097,6 +1099,20 @@ def _cli_repo() -> str:
     return store._git_root(os.getcwd()) or store._resolve_repo("")
 
 
+def scope_audit_cmd(rest: list) -> None:
+    """`contexer scope-audit` — report decisions that landed in the wrong repo's store.
+
+    Read-only, and takes no arguments: anything else exits 1 rather than being ignored, the
+    same rule `guard anchors` follows so a mistyped flag can never read as consent to
+    something this command does not do."""
+    if rest:
+        print(f"Unknown argument: {' '.join(rest)}\nUsage: contexer scope-audit",
+              file=sys.stderr)
+        sys.exit(1)
+    from contexer import scope_audit
+    print(scope_audit.format_audit(scope_audit.audit_sessions()))
+
+
 def _guard_run(rest: list) -> None:
     """`contexer guard [path…] [--explain]` — the commit-time run path.
 
@@ -1785,6 +1801,8 @@ def main() -> None:
         _run_guarded(lambda: logout_cmd(rest))
     elif cmd == "guard":
         guard(rest)
+    elif cmd == "scope-audit":
+        _run_guarded(lambda: scope_audit_cmd(rest))
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)

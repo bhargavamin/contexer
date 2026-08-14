@@ -381,6 +381,115 @@ class TestResolveRepo:
         assert store._resolve_repo(tmp_repo) == tmp_repo
 
 
+class TestResolveRepoProvenance:
+    """`_resolve_repo_verbose` names WHICH signal chose the store. Precedence is unchanged —
+    these pin that the verbose form is the plain one plus a label, so a decision landing in
+    the wrong store is diagnosable rather than indistinguishable."""
+
+    def _isolate(self, tmp_path, monkeypatch, pointer=None, session=""):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir(exist_ok=True)
+        monkeypatch.setattr(store, "_SESSION_REPO", session)
+        if pointer is not None:
+            (store.STORE_DIR / ".current_repo").write_text(pointer)
+
+    def test_explicit_argument(self, tmp_repo, monkeypatch, tmp_path):
+        self._isolate(tmp_path, monkeypatch, session=str(tmp_path / "other"))
+        assert store._resolve_repo_verbose(tmp_repo) == (tmp_repo, "argument")
+
+    def test_session_binding(self, tmp_path, monkeypatch):
+        session = str(tmp_path / "realproject")
+        self._isolate(tmp_path, monkeypatch, pointer=str(tmp_path / "elsewhere"), session=session)
+        assert store._resolve_repo_verbose("") == (session, "session")
+
+    def test_shared_pointer_is_the_last_resort(self, tmp_path, monkeypatch):
+        pointer = str(tmp_path / "whoever-wrote-last")
+        self._isolate(tmp_path, monkeypatch, pointer=pointer)
+        assert store._resolve_repo_verbose("") == (pointer, "pointer")
+
+    def test_nothing_resolvable(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert store._resolve_repo_verbose("") == ("", "none")
+
+    def test_non_sane_argument_falls_through_and_is_not_labelled_argument(self, tmp_path, monkeypatch):
+        session = str(tmp_path / "realproject")
+        self._isolate(tmp_path, monkeypatch, session=session)
+        repo, source = store._resolve_repo_verbose(str(Path.home() / ".claude"))
+        assert (repo, source) == (session, "session")
+
+    @pytest.mark.parametrize("arg", ["", "/abs/given", "relative/path"])
+    def test_plain_resolver_is_the_verbose_one_unchanged(self, arg, tmp_path, monkeypatch):
+        # The refactor must not move a single resolution: same input, same repo out.
+        self._isolate(tmp_path, monkeypatch, pointer=str(tmp_path / "ptr"),
+                      session=str(tmp_path / "sess"))
+        assert store._resolve_repo(arg) == store._resolve_repo_verbose(arg)[0]
+
+
+class TestRepoSourceStamp:
+    def test_new_entry_records_which_signal_chose_the_store(self, tmp_repo):
+        store.update_decision(tmp_repo, "Use Postgres for the orders schema", "s1",
+                              "architecture", repo_source="pointer")
+        (entry,) = store._load(tmp_repo)["entries"]
+        assert entry["repo_source"] == "pointer"
+
+    def test_absent_when_the_caller_does_not_resolve_verbosely(self, tmp_repo):
+        # Every pre-existing caller omits it and must be completely unaffected.
+        store.update_decision(tmp_repo, "Use Postgres for the orders schema", "s1",
+                              "architecture")
+        (entry,) = store._load(tmp_repo)["entries"]
+        assert "repo_source" not in entry
+
+    def test_recurrence_does_not_overwrite_the_original_provenance(self, tmp_repo):
+        content = "Use Postgres for the orders schema because reporting needs joins"
+        store.update_decision(tmp_repo, content, "s1", "architecture", repo_source="session")
+        store.update_decision(tmp_repo, content, "s2", "architecture", repo_source="pointer")
+
+        (entry,) = store._load(tmp_repo)["entries"]
+        assert entry["repo_source"] == "session"      # the write that created it
+        assert entry["occurrence_count"] == 2         # and it WAS seen again
+
+    def test_hook_resolution_never_reports_a_deliberate_argument(self, tmp_repo, tmp_path,
+                                                                 monkeypatch):
+        # A hook ALWAYS supplies a path (its shell's git root, or cwd), so the plain resolver
+        # could only ever say "argument" — the label the audit reads as a deliberate
+        # cross-repo write. That would dismiss the exact misroute this exists to surface.
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir(exist_ok=True)
+        monkeypatch.setattr(store, "_SESSION_REPO", "")
+
+        assert store._hook_repo_verbose(tmp_repo) == (tmp_repo, "hook-arg")
+        monkeypatch.chdir(tmp_path)
+        assert store._hook_repo_verbose("") == (str(tmp_path), "hook-cwd")
+
+    def test_hook_resolution_falls_through_for_an_unusable_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        store.STORE_DIR.mkdir(exist_ok=True)
+        session = str(tmp_path / "realproject")
+        monkeypatch.setattr(store, "_SESSION_REPO", session)
+        assert store._hook_repo_verbose(str(Path.home() / ".claude")) == (session, "session")
+
+    def test_bootstrap_stamps_its_bulk_write(self, tmp_repo, monkeypatch):
+        # The largest bulk write in the system — a misroute here plants the most content in
+        # the wrong store, so it is the write that most needs its branch recorded.
+        monkeypatch.setattr(store, "bootstrap_scan",
+                            lambda *a, **k: {"inferred": ["Python 3.12", "uv"], "gaps": []})
+        monkeypatch.setattr("contexer.miner.mine_conventions",
+                            lambda *a, **k: [{"content": "Functions use snake_case (98% of 412)",
+                                              "subtype": "convention", "tier": "high"}])
+        store.bootstrap_apply(tmp_repo, "s1", "high", repo_source="pointer")
+
+        entries = store._load(tmp_repo)["entries"]
+        assert entries and all(e["repo_source"] == "pointer" for e in entries)
+
+    def test_constraint_capture_stamps_too(self, tmp_repo):
+        # The hook-driven surface: no MCP server binding of its own, so it is the path most
+        # exposed to the shared pointer and the one the stamp matters most on.
+        store.capture_user_constraint(tmp_repo, "always run the linter before committing",
+                                      "s1", repo_source="pointer")
+        (entry,) = store._load(tmp_repo)["entries"]
+        assert entry["repo_source"] == "pointer"
+
+
 # ── get_session_start_context ─────────────────────────────────────────────────
 
 class TestGetSessionStartContext:
@@ -5820,7 +5929,8 @@ class TestServerTitleParam:
             seen.update(title=title, content=content)
             return True, "id123", {}
         monkeypatch.setattr(server.store, "update_decision_with_meta", fake_update)
-        monkeypatch.setattr(server.store, "_resolve_repo", lambda p: tmp_repo)
+        monkeypatch.setattr(server.store, "_resolve_repo_verbose",
+                            lambda p: (tmp_repo, "argument"))
         server.update_context("body", subtype="architecture", title="My Title")
         assert seen["title"] == "My Title"
 

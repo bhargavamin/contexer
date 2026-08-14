@@ -130,17 +130,57 @@ def _current_repo_path() -> str:
     return ""
 
 
-def _resolve_repo(repo_path: str) -> str:
-    # Precedence: an explicit caller argument always wins; then the repo bound to this
-    # server process (cwd-derived, per-session — cannot be cross-contaminated); then the
-    # shared .current_repo pointer as a last resort. Each is sanity-checked.
+def _resolve_repo_verbose(repo_path: str) -> tuple[str, str]:
+    """(resolved repo, WHICH signal produced it) — `argument` | `session` | `pointer` | `none`.
+
+    Precedence is unchanged and deliberately so: an explicit caller argument always wins;
+    then the repo bound to this server process (cwd-derived at startup); then the shared
+    `.current_repo` pointer as a last resort. Each is sanity-checked.
+
+    The second element exists because decisions have been observed landing in the WRONG
+    repo's store — one session's captures split across two store files — and today the
+    three branches are indistinguishable after the fact, so the store cannot say which
+    signal misfired. `update_decision` stamps it onto new entries as `repo_source`
+    (see `scope_audit.py`, which detects the cross-store fingerprint itself).
+
+    Note what is deliberately NOT done here: refusing the pointer when it disagrees with
+    the server process's own cwd. Disagreement is the NORMAL state whenever two projects
+    are open at once (the pointer is one global file every session overwrites), and hosts
+    that launch the server outside the workspace — Cursor does, documented in CLAUDE.md —
+    have no sane cwd to corroborate against, so that rule would resolve to nothing at all
+    for them. The policy stays as-is until the stamped provenance says which branch
+    actually fires; guessing at a new policy risks misrouting differently, not less."""
     if _is_sane_repo(repo_path):
-        return repo_path
-    if repo_path:  # caller passed something non-sane (e.g. ~/.claude) — never honor it
-        return _SESSION_REPO or _current_repo_path()
+        return repo_path, "argument"
+    # A non-sane but non-empty argument (e.g. ~/.claude) is never honored — it falls
+    # through to the same chain as an omitted one.
     if _SESSION_REPO:
-        return _SESSION_REPO
-    return _current_repo_path()
+        return _SESSION_REPO, "session"
+    pointer = _current_repo_path()
+    return (pointer, "pointer") if pointer else ("", "none")
+
+
+def _resolve_repo(repo_path: str) -> str:
+    return _resolve_repo_verbose(repo_path)[0]
+
+
+def _hook_repo_verbose(repo_path: str) -> tuple[str, str]:
+    """`_resolve_repo_verbose` for a HOOK process, with honest labels for its two extra
+    signals: `hook-arg` | `hook-cwd` | `session` | `pointer` | `none`.
+
+    A hook never arrives with an empty argument the way an MCP tool call does — the installed
+    shell wrapper runs `git rev-parse --show-toplevel` and passes the result, and
+    `_hook_cwd_repo` substitutes the process cwd when that comes back empty. Both therefore
+    reach `_resolve_repo_verbose` as a sane ARGUMENT, so a hook could only ever report
+    `argument` — the one label the audit reads as "a caller deliberately named this repo",
+    i.e. exactly the reading that would dismiss a misroute as intentional. Splitting them
+    keeps that word meaning what the audit claims it means, and names the two signals a hook
+    actually has: the shell's git root, and the process cwd."""
+    hooked = _hook_cwd_repo(repo_path)
+    repo, source = _resolve_repo_verbose(hooked)
+    if source == "argument":
+        source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
+    return repo, source
 
 # _canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
 # functools.lru_cache: failures must return uncached (a transient git timeout would
@@ -1240,7 +1280,7 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
 
 def capture_user_constraint(
     repo_path: str, prompt: str, session_id: str,
-    near_misses: list | None = None,
+    near_misses: list | None = None, repo_source: str = "",
 ) -> tuple[str, str, str] | tuple[None, None, None]:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
@@ -1310,6 +1350,12 @@ def capture_user_constraint(
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
                                     created_by="human", status=status)
+        # Which signal chose this store — see _resolve_repo_verbose. This surface matters
+        # MORE than update_context's, not less: it is driven from a per-prompt HOOK process,
+        # which has no MCP server binding of its own and so is the path most likely to fall
+        # through to the shared .current_repo pointer, the very branch under suspicion.
+        if repo_source:
+            entry["repo_source"] = repo_source
         # Guard anchor accrual (issue #175): a deictic directive lands pending_approval and
         # created_by="human" — the ONE provenance that is guard-TRUSTED the moment it is
         # approved — so it is the highest-value candidate carrier there is. Same status gate
@@ -2093,17 +2139,20 @@ def _staleness_notes(repo_path: str, entries: list) -> dict:
 
 def update_decision(repo_path: str, content: str, session_id: str, subtype: str = "",
                     created_by: str = "ai", replace_id: str = "", title: str = "", *,
-                    source_files: list | None = None) -> tuple[bool, str | None]:
+                    source_files: list | None = None,
+                    repo_source: str = "") -> tuple[bool, str | None]:
     """`update_decision_with_meta` without the meta — the 2-tuple every non-MCP caller wants."""
     stored, entry_id, _ = update_decision_with_meta(
         repo_path, content, session_id, subtype, created_by=created_by,
-        replace_id=replace_id, title=title, source_files=source_files)
+        replace_id=replace_id, title=title, source_files=source_files,
+        repo_source=repo_source)
     return stored, entry_id
 
 
 def update_decision_with_meta(repo_path: str, content: str, session_id: str, subtype: str = "",
                               created_by: str = "ai", replace_id: str = "", title: str = "", *,
-                              source_files: list | None = None) -> tuple[bool, str | None, dict]:
+                              source_files: list | None = None,
+                              repo_source: str = "") -> tuple[bool, str | None, dict]:
     """Store (or route) one decision, plus a `meta` dict — `{}` except on a refused proposal
     slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
 
@@ -2118,7 +2167,12 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
     on the Suggested Update instead and only re-anchors when a developer approves it (see
     _promote_proposal) — the live entry keeps rendering its OLD content until then, so its
     anchor must keep describing that old content, not the pending correction. Omitting
-    `source_files` on any correction leaves the existing anchor untouched."""
+    `source_files` on any correction leaves the existing anchor untouched.
+
+    `repo_source` is the diagnostic half of the wrong-store problem: which signal in
+    `_resolve_repo_verbose` picked the store this write is landing in. Recorded on new
+    entries only, and only when the caller actually resolved verbosely — every existing
+    caller omits it and is unaffected."""
     content = _normalize_content(content)
     with _store_lock(_slug(repo_path)):
         data = _load(repo_path)
@@ -2274,6 +2328,12 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         if _is_tombstoned(repo_path, content):
             return False, None, {}          # discarded silently, like any other filtered capture
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
+        # Which signal chose THIS store (see _resolve_repo_verbose). Stamped only when the
+        # caller resolved verbosely and passed it on, and only on a brand-new entry — a
+        # recurrence or containment route above has already returned, and re-stamping an
+        # existing entry would overwrite the provenance of the write that created it.
+        if repo_source:
+            entry["repo_source"] = repo_source
         _anchor_sources(repo_path, entry, source_files)
         # Guard anchor accrual (issue #175 Task 3): when the model didn't name source_files
         # itself, the session's recently-edited files are a candidate anchor — NOT a real one.
@@ -6687,7 +6747,8 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     }
 
 
-def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
+def bootstrap_apply(repo_path: str, session_id: str, insight: str = "",
+                    repo_source: str = "") -> dict:
     """Scan + mine + persist in one step: bootstrap_scan's read-only preview, made
     idempotent and self-storing. This is the core-wiring entrypoint bootstrap_context
     calls by default (apply=True) so a bootstrap actually writes something instead of
@@ -6736,6 +6797,8 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
             if (_find_match(sentence, decisions) is None
                     and _find_match(sentence, tombstoned) is None):
                 entry = _new_decision_entry(sentence, session_id, "architecture", created_by="scan")
+                if repo_source:
+                    entry["repo_source"] = repo_source
                 data["entries"].append(entry)
                 decisions.append(entry)
                 new_approved.append(entry["id"])
@@ -6754,6 +6817,8 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "") -> dict:
             status = "" if item["tier"] == "high" else "pending_approval"
             entry = _new_decision_entry(item["content"], session_id, item["subtype"],
                                         created_by="scan", status=status)
+            if repo_source:
+                entry["repo_source"] = repo_source
             data["entries"].append(entry)
             decisions.append(entry)
             changed = True
