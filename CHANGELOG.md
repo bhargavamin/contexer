@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.34.1](https://github.com/bhargavamin/contexer/compare/v0.34.0...v0.34.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* only footer session-start title-only note when a body was clipped ([9400246](https://github.com/bhargavamin/contexer/commit/9400246cdb986a139d3735f08460b228e3476ef0))
+* only footer the convention/pattern title-only note when a body was actually clipped ([46a327d](https://github.com/bhargavamin/contexer/commit/46a327dc445a1403e82709b186ae34127507397f))
+
+
+### Documentation
+
+* describe title-only convention/pattern rendering in SessionStart bullet ([250746b](https://github.com/bhargavamin/contexer/commit/250746b35209a141e2078d975cae291fde5db4ee))
+
 ## [0.34.0](https://github.com/bhargavamin/contexer/compare/v0.33.3...v0.34.0) (2026-08-14)
 
 
