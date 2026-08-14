@@ -1205,6 +1205,29 @@ _PERSONAL_DESCRIPTOR = re.compile(
     re.IGNORECASE,
 )
 
+# "never mind X," is a dismissal, not a prohibition — but only the clause it introduces,
+# so a genuine trailing directive in the same message ("never mind the perf concerns,
+# always validate input") still gets through. Strips up to the next punctuation mark OR
+# coordinating conjunction (and/but/so/or) — Greptile #211 P1: without the conjunction
+# boundary, a dismissal joined to a directive with no punctuation ("never mind the perf
+# concerns and always validate input") had nothing to stop the greedy strip, which
+# consumed through the end of the message and silently dropped the trailing directive.
+_IDIOM_STRIP = re.compile(
+    r"\bnever\s+mind\b(?:(?!,|\.|;|!|\?|\b(?:and|but|so|or)\b).)*[,.;!?]?\s*",
+    re.IGNORECASE)
+
+# "this/that/it will never work", "will always fail" describe anticipated behaviour, not a
+# command — EXCEPT "you will/would (always|never)", which reads as an imperative ("you will
+# always run X" = a command), not a prediction. Only strip the predictive form when the
+# imperative "you" construction isn't present anywhere in the text.
+_IMPERATIVE_YOU_MODAL = re.compile(
+    r"\byou\s*(?:'ll|'d)?\s*(?:will|would)?\s+(?:always|never)\b", re.IGNORECASE)
+_MODAL_PREDICTIVE = re.compile(r"\b(?:will|would|'ll|'d)\s+(?:always|never)\b", re.IGNORECASE)
+
+# "could/might/may always|never" is a hedged suggestion, not a commitment — unlike
+# "should"/"must", which stay hard triggers.
+_HEDGE_MODAL = re.compile(r"\b(?:could|might|may)\s+(?:always|never)\b", re.IGNORECASE)
+
 
 # A genuine directive is short and standalone ("always use conventional commits").
 # Anything longer is a pasted blob (a README, an issue dump, a multi-step task) that
@@ -1234,13 +1257,17 @@ _DEICTIC_THIS_THESE_THOSE = re.compile(
     r"\b(?:this|these|those)\b(?!\s+(?:repo|repository|project|codebase)\b)", re.IGNORECASE)
 _DEICTIC_IT = re.compile(r"(?<!make\s)\bit\b(?!\s+a\s+\w)", re.IGNORECASE)
 _DEICTIC_HERE = re.compile(r"\bhere\b(?!\W*$)", re.IGNORECASE)
+# "for now" scopes a directive to the current moment, same conversation-local signal as
+# this/it/here — land pending_approval rather than silently trusting it as a standing rule.
+_TEMPORAL_SCOPE = re.compile(r"\bfor\s+now\b", re.IGNORECASE)
 
 
 def _is_deictic(content: str) -> bool:
     """True if `content` carries a conversation-local referent (see _DEICTIC_* above)."""
     return bool(_DEICTIC_IT.search(content)
                 or _DEICTIC_HERE.search(content)
-                or _DEICTIC_THIS_THESE_THOSE.search(content))
+                or _DEICTIC_THIS_THESE_THOSE.search(content)
+                or _TEMPORAL_SCOPE.search(content))
 
 
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
@@ -1266,6 +1293,20 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
         return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive
     cleaned = _PERSONAL_DESCRIPTOR.sub("", deprosed)
+    if not _CONSTRAINT_TRIGGER.search(cleaned):
+        return False, ""
+    # Strip a "never mind ..." dismissal clause; a genuine directive elsewhere in the same
+    # message still gets through since only the dismissed clause is removed.
+    cleaned = _IDIOM_STRIP.sub("", cleaned)
+    if not _CONSTRAINT_TRIGGER.search(cleaned):
+        return False, ""
+    # Strip predictive "will/would (always|never)", unless it's the imperative "you will/would".
+    if not _IMPERATIVE_YOU_MODAL.search(cleaned):
+        cleaned = _MODAL_PREDICTIVE.sub("", cleaned)
+    if not _CONSTRAINT_TRIGGER.search(cleaned):
+        return False, ""
+    # Strip hedged "could/might/may (always|never)" — a suggestion, not a commitment.
+    cleaned = _HEDGE_MODAL.sub("", cleaned)
     if not _CONSTRAINT_TRIGGER.search(cleaned):
         return False, ""
     # Pure forward-looking practice signals (no always/never) → convention

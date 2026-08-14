@@ -1338,6 +1338,68 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint("oh sure always commit broken code")
         assert is_c is False
 
+    def test_never_mind_idiom_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("Never mind, let's use Postgres instead")
+        assert is_c is False
+
+    def test_never_mind_clause_does_not_swallow_trailing_directive(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "Never mind the perf concerns, always validate input before writing to disk"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_never_mind_clause_without_punctuation_does_not_swallow_directive(self):
+        # Greptile #211 P1: no comma/period boundary between the dismissal and the
+        # directive — a greedy "until punctuation" strip consumed the whole message.
+        is_c, subtype = store._is_prescriptive_constraint(
+            "Never mind the perf concerns and always validate input before writing to disk"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_will_never_prediction_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "This will never work, let's try another approach"
+        )
+        assert is_c is False
+
+    def test_would_always_prediction_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "That will never happen in production"
+        )
+        assert is_c is False
+
+    def test_you_will_always_imperative_not_excluded(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "You will always run migrations inside a transaction"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_you_apostrophe_ll_always_imperative_not_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "you'll always need to rebase before merging"
+        )
+        assert is_c is True
+
+    def test_could_always_hedge_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "I guess we could always fall back to json"
+        )
+        assert is_c is False
+
+    def test_might_never_hedge_excluded(self):
+        is_c, _ = store._is_prescriptive_constraint("We might never need this fallback")
+        assert is_c is False
+
+    def test_should_always_hedge_not_excluded(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "We should never trust client input"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
     def test_genuine_always_still_detected(self):
         # Sarcasm exclusion should not affect real directives
         is_c, _ = store._is_prescriptive_constraint("always use uv not pip")
@@ -3229,6 +3291,8 @@ class TestDeicticConstraintScope:
         "always apply it before deployment",
         # Greptile #125 P2 counter-case: mid-directive here is conversation-local.
         "the pattern used here must always be followed",
+        # "for now" is a temporal-scope signal, same treatment as this/it/here.
+        "stop running the flaky test for now",
     ])
     def test_deictic_directive_stored_pending_not_trusted(self, tmp_repo, prompt):
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
