@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.34.0](https://github.com/bhargavamin/contexer/compare/v0.33.3...v0.34.0) (2026-08-14)
+
+
+### Features
+
+* **capture:** bounce a multi-section document into one decision per claim ([3e14c15](https://github.com/bhargavamin/contexer/commit/3e14c154d08e03335063bb7c84159cdf63f3e63d))
+* **scope:** diagnose wrong-store writes; split multi-claim captures ([ce61c88](https://github.com/bhargavamin/contexer/commit/ce61c8888f09e396596bbec8c9c09c4bc7bdc274))
+* **scope:** stamp which signal chose a decision's store, and audit for wrong ones ([4a312fc](https://github.com/bhargavamin/contexer/commit/4a312fc8d856b4bfec97b652e9e616d93237c388))
+
+
+### Bug Fixes
+
+* **retrieval:** rebuild a stale index sidecar at session start ([93bb92d](https://github.com/bhargavamin/contexer/commit/93bb92d6219109a391356fa87026fd8aaba43c26))
+* **scope:** label a store whose repo directory is gone ([1717f31](https://github.com/bhargavamin/contexer/commit/1717f315ac0cc1ad5c083689c7a027e523dc8828))
+
 ## [0.33.3](https://github.com/bhargavamin/contexer/compare/v0.33.2...v0.33.3) (2026-08-13)
 
 
