@@ -113,6 +113,16 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
     return repo, by_session
 
 
+def _exists(repo: str) -> bool:
+    """Whether the repo directory is still on disk. Fail-soft — an unstattable path (a dead
+    network mount, a permission wall) reports as present, so the report never accuses a repo
+    of being gone on the strength of an error."""
+    try:
+        return os.path.exists(repo)
+    except Exception:
+        return True
+
+
 def _repo_identity(repo: str, path: Path) -> str:
     """The LOGICAL repo a store file belongs to — two files that resolve here to the same
     string are one repo, not two.
@@ -130,7 +140,16 @@ def _repo_identity(repo: str, path: Path) -> str:
     which returns the fully resolved path — so on a host where the repo lives under a symlink
     (`/tmp` -> `/private/tmp` on macOS) the canonical keys differ by that prefix alone and
     would not merge. Fail-soft: anything unresolvable falls back to the raw repo path, and a
-    store whose own `repo_path` is unreadable stays keyed by its file, never merged blindly."""
+    store whose own `repo_path` is unreadable stays keyed by its file, never merged blindly.
+
+    KNOWN LIMIT, deliberately not papered over: this can only merge a worktree that still
+    EXISTS. Once the directory is removed or pruned there is no `.git` file to read and
+    `git worktree list` no longer enumerates it, so nothing on disk ties the stray back to its
+    main worktree — `_canonical_store_key` returns the dead path unchanged and the stray stays
+    a separate identity. `migrate_worktree_strays` cannot fold such a stray either, for the
+    same reason. Merging it would mean guessing from path shape, and worktrees can live
+    anywhere. So the report labels that store as missing instead (see `format_audit`) and lets
+    the reader recognise it, rather than inventing a link the filesystem no longer records."""
     if not repo:
         return str(path)
     try:
@@ -158,7 +177,8 @@ def audit_sessions() -> list[dict]:
         identity = _repo_identity(repo, path)
         for sid, entries in by_session.items():
             record = seen.setdefault(sid, {}).setdefault(
-                identity, {"repo": repo or path.stem, "paths": [], "entries": []})
+                identity, {"repo": repo or path.stem, "paths": [], "entries": [],
+                           "missing": bool(repo) and not _exists(repo)})
             record["paths"].append(str(path))
             record["entries"].extend(entries)
     rows = []
@@ -194,7 +214,13 @@ def format_audit(rows: list[dict]) -> str:
     for row in rows:
         out.append(f"session {row['session_id'][:8]} — {len(row['stores'])} stores")
         for st in row["stores"]:
-            out.append(f"  {st['repo']}")
+            # A store whose repo directory is gone cannot be merged with the repo it belonged
+            # to — see `_repo_identity`'s known limit — so name the condition instead of
+            # leaving the reader to work out why a dead path is listed as its own project.
+            gone = ("  (path no longer exists — a removed worktree or deleted checkout; its "
+                    "decisions may already live in the surviving store)" if st.get("missing")
+                    else "")
+            out.append(f"  {st['repo']}{gone}")
             for p in st["paths"]:
                 out.append(f"    {p}")
             shown = st["entries"][:_MAX_ENTRIES_SHOWN]

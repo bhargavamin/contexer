@@ -197,6 +197,28 @@ class TestAuditSessions:
         merged = next(s for s in row["stores"] if len(s["paths"]) == 2)
         assert [e["id"] for e in merged["entries"]] == ["m1", "w1"]
 
+    def test_a_repo_that_no_longer_exists_is_labelled(self, store_dir):
+        # A stray from a REMOVED worktree cannot be merged with its main worktree — the .git
+        # file is gone and `git worktree list` no longer enumerates it, so nothing on disk
+        # records the link. The row is labelled rather than guessed at.
+        _write_store(store_dir, "/repo/gone-worktree", [_decision("g1", "sess-1")])
+        _write_store(store_dir, str(store_dir), [_decision("h1", "sess-1")])
+
+        rows = scope_audit.audit_sessions()
+        by_repo = {s["repo"]: s for r in rows for s in r["stores"]}
+        assert by_repo["/repo/gone-worktree"]["missing"] is True
+        assert by_repo[str(store_dir)]["missing"] is False       # this one is on disk
+        assert "path no longer exists" in scope_audit.format_audit(rows)
+
+    def test_unstattable_path_is_not_accused_of_being_gone(self, store_dir, monkeypatch):
+        monkeypatch.setattr(scope_audit.os.path, "exists",
+                            lambda p: (_ for _ in ()).throw(OSError("dead mount")))
+        _write_store(store_dir, "/repo/a", [_decision("a1", "sess-1")])
+        _write_store(store_dir, "/repo/b", [_decision("b1", "sess-1")])
+
+        rows = scope_audit.audit_sessions()
+        assert all(s["missing"] is False for r in rows for s in r["stores"])
+
     def test_store_with_an_unreadable_repo_path_is_never_merged_blindly(self, store_dir):
         for name, eid in (("one.json", "a1"), ("two.json", "b1")):
             (store_dir / name).write_text(
