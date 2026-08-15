@@ -1351,11 +1351,23 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
         assert subtype == "constraint"
 
-    def test_make_sure_you_with_scope_quantifier_stays_rule(self):
+    def test_ensure_you_with_each_recurrence_stays_rule(self):
         is_c, _ = store._is_prescriptive_constraint(
-            "make sure you tag all releases with a version number"
+            "make sure you rerun the suite after each merge"
         )
         assert is_c is True
+
+    def test_ensure_you_with_object_quantifier_not_detected(self):
+        # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they
+        # carry no recurrence, so they must not satisfy the durability requirement.
+        is_c, _ = store._is_prescriptive_constraint("ensure you fix any failing tests")
+        assert is_c is False
+
+    def test_ensure_you_with_all_quantifier_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "ensure you fix all the failing tests before the demo"
+        )
+        assert is_c is False
 
     def test_love_always_irony_excluded(self):
         is_c, _ = store._is_prescriptive_constraint("love always use pip")

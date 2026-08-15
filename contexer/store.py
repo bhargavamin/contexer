@@ -1234,11 +1234,15 @@ _HEDGE_MODAL = re.compile(r"\b(?:could|might|may)\s+(?:always|never)\b", re.IGNO
 # "ensure you never commit to main"). They were added as triggers to close a real gap,
 # but on their own they fire on ordinary session work. So when a weak wrapper is the ONLY
 # thing that matched, require a durability signal before treating it as a standing rule:
-# a prohibition ("not") or a frequency/scope quantifier (every/each/all/any). Any other
-# trigger word in the sentence (always, never, from now on, avoid, …) already carries its
-# own durability and reaches this check having satisfied it.
+# a prohibition ("not") or a RECURRENCE marker (every/each — "before every commit", "after
+# each merge"). Any other trigger word in the sentence (always, never, from now on, avoid,
+# …) already carries its own durability and reaches this check having satisfied it.
+# Deliberately NOT "all"/"any": those are OBJECT quantifiers, sizing what to act on rather
+# than how often, so they read identically in a rule and a one-off task ("fix any failing
+# tests", "fix all the failing tests before the demo") and let a task through as a trusted
+# standing constraint.
 _WEAK_EMPHASIS = re.compile(r"\b(?:ensure|make\s+sure)\s+(?:that\s+)?you\s+", re.IGNORECASE)
-_DURABILITY_SIGNAL = re.compile(r"\b(?:not|every|each|all|any)\b", re.IGNORECASE)
+_DURABILITY_SIGNAL = re.compile(r"\b(?:not|every|each)\b", re.IGNORECASE)
 
 
 # A genuine directive is short and standalone ("always use conventional commits").
