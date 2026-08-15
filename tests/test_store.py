@@ -1322,6 +1322,41 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint("make sure the API is RESTful")
         assert is_c is False
 
+    def test_ensure_you_one_off_task_request_not_detected(self):
+        # Live misfire from 2026-08-16: a session task request, captured as a standing rule
+        # solely because "ensure you" matched. No durability signal anywhere in it.
+        is_c, _ = store._is_prescriptive_constraint(
+            "I want you to lead the orchestration and ensure you ship full github and md "
+            "file rendering and extraction to contexer. I want it in ui, get it done with "
+            "subagents and ensure it works no shortcuts"
+        )
+        assert is_c is False
+
+    def test_ensure_you_deliverable_task_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "ensure you ship the new dashboard by Friday"
+        )
+        assert is_c is False
+
+    def test_make_sure_you_deliverable_task_not_detected(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "make sure you add the migration script to the repo"
+        )
+        assert is_c is False
+
+    def test_ensure_you_with_frequency_quantifier_stays_rule(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "ensure you run lint before every commit"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_make_sure_you_with_scope_quantifier_stays_rule(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "make sure you tag all releases with a version number"
+        )
+        assert is_c is True
+
     def test_love_always_irony_excluded(self):
         is_c, _ = store._is_prescriptive_constraint("love always use pip")
         assert is_c is False
