@@ -1142,8 +1142,11 @@
   // An unterminated fence (a routine LLM output shape) runs to the end of the text on purpose.
   const FENCE_RE = /```[\s\S]*?```|```[\s\S]*$/g;
   // "1." / "(3)" / "2)" — a list marker, not the end of a sentence. Matched at the tail of the
-  // chunk built so far, so the period that follows a bare number never ends a row.
-  const ENUM_TAIL_RE = /(^|[\s(\[])\d+[.)]$/;
+  // chunk built so far, so the period that follows the number never ends a row. POSITION is what
+  // separates a marker from a count: a marker opens its chunk, follows the colon that introduces
+  // the list, or sits in brackets. Any digit-final sentence would otherwise qualify — "There are
+  // 3. Continue with rollout." would swallow the next claim into the same row.
+  const ENUM_TAIL_RE = /(?:^\s*|:\s+|[(\[])\d+[.)]$/;
 
   /** Sentence-ish chunks, the row unit of the split view. Splits after . ! ? ; when whitespace
    *  follows, and on newlines. Deliberately NOT on `:` — a label ("Rationale:", "Guard:") belongs

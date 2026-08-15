@@ -654,6 +654,8 @@ SPLIT_CASES = [
     ("Set `a: 1; b: 2` now. Then stop.", "inline code span"),
     ("head:\n    indented line\n    another line", "indentation"),
     ("Rate is 0.5 per sec. Next.", "decimal"),
+    ("There are 3. Continue with rollout.", "digit-final sentence"),
+    ("Steps: 1) ship it. 2) watch it.", "paren markers"),
     ("", "empty"),
     ("no terminator at all", "no sentence end"),
 ]
@@ -714,6 +716,11 @@ console.log(JSON.stringify(cases.map((c) => splitSentences(c))));
         "leading whitespace is content in a quoted block; only trailing whitespace may be trimmed"
     )
     assert rows["decimal"] == ["Rate is 0.5 per sec.", "Next."], rows["decimal"]
+    assert rows["digit-final sentence"] == ["There are 3.", "Continue with rollout."], (
+        "position is what makes a number a list marker: one that merely ENDS a sentence is a "
+        "count, and suppressing its boundary swallowed the next claim into the same row"
+    )
+    assert rows["paren markers"] == ["Steps: 1) ship it.", "2) watch it."], rows["paren markers"]
     assert rows["empty"] == [] and rows["no sentence end"] == ["no terminator at all"]
 
 
