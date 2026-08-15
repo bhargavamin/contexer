@@ -1228,6 +1228,22 @@ _MODAL_PREDICTIVE = re.compile(r"\b(?:will|would|'ll|'d)\s+(?:always|never)\b", 
 # "should"/"must", which stay hard triggers.
 _HEDGE_MODAL = re.compile(r"\b(?:could|might|may)\s+(?:always|never)\b", re.IGNORECASE)
 
+# "ensure you" / "make sure you" are EMPHASIS WRAPPERS, not durability markers. Unlike
+# always/never/from now on — which mean "standing rule" on their own — these introduce
+# one-off task requests just as readily as rules ("ensure you ship the dashboard" vs
+# "ensure you never commit to main"). They were added as triggers to close a real gap,
+# but on their own they fire on ordinary session work. So when a weak wrapper is the ONLY
+# thing that matched, require a durability signal before treating it as a standing rule:
+# a prohibition ("not") or a RECURRENCE marker (every/each — "before every commit", "after
+# each merge"). Any other trigger word in the sentence (always, never, from now on, avoid,
+# …) already carries its own durability and reaches this check having satisfied it.
+# Deliberately NOT "all"/"any": those are OBJECT quantifiers, sizing what to act on rather
+# than how often, so they read identically in a rule and a one-off task ("fix any failing
+# tests", "fix all the failing tests before the demo") and let a task through as a trusted
+# standing constraint.
+_WEAK_EMPHASIS = re.compile(r"\b(?:ensure|make\s+sure)\s+(?:that\s+)?you\s+", re.IGNORECASE)
+_DURABILITY_SIGNAL = re.compile(r"\b(?:not|every|each)\b", re.IGNORECASE)
+
 
 # A genuine directive is short and standalone ("always use conventional commits").
 # Anything longer is a pasted blob (a README, an issue dump, a multi-step task) that
@@ -1308,6 +1324,13 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     # Strip hedged "could/might/may (always|never)" — a suggestion, not a commitment.
     cleaned = _HEDGE_MODAL.sub("", cleaned)
     if not _CONSTRAINT_TRIGGER.search(cleaned):
+        return False, ""
+    # If the ONLY trigger was a weak emphasis wrapper, it needs a durability signal to be
+    # a standing rule rather than this session's task ("ensure you ship X" vs "ensure you
+    # never commit to main"). Removing the wrapper and re-checking is what distinguishes
+    # "weak-only" from "weak alongside a real trigger".
+    if (not _CONSTRAINT_TRIGGER.search(_WEAK_EMPHASIS.sub("", cleaned))
+            and not _DURABILITY_SIGNAL.search(cleaned)):
         return False, ""
     # Pure forward-looking practice signals (no always/never) → convention
     # Everything else (mandatory requirements, prohibitions) → constraint
