@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0](https://github.com/bhargavamin/contexer/compare/v0.34.2...v0.35.0) (2026-08-15)
+
+
+### Features
+
+* **ui:** render a rewritten proposal as a sentence-aligned side-by-side diff ([5536014](https://github.com/bhargavamin/contexer/commit/5536014f040779e864c74d96dd115656abe6f3f6))
+* **ui:** render a rewritten proposal as a side-by-side diff ([1f23971](https://github.com/bhargavamin/contexer/commit/1f23971130b287787c06e53dfe96607a9c60a194))
+
+
+### Bug Fixes
+
+* **ui:** tell a list marker from a sentence that ends in a number ([8ed0bfd](https://github.com/bhargavamin/contexer/commit/8ed0bfd698bb497fc57007d786464025464feaf7))
+
 ## [0.34.2](https://github.com/bhargavamin/contexer/compare/v0.34.1...v0.34.2) (2026-08-14)
 
 
