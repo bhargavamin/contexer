@@ -46,7 +46,32 @@
   // backstop for the cases where no job answers: an older daemon whose 409 names no job to poll,
   // or a daemon that went away mid-flow.
   const LOGIN_MAX_MS = 360000;
-  const DIFF_BUDGET = 250000; // LCS cells; beyond this the diff degrades to before/after columns
+  const DIFF_BUDGET = 250000; // WORD-LCS cells; beyond this the inline word diff is not attempted
+  // SENTENCE-LCS cells. A separate constant on purpose: the two tables are counted in different
+  // units (~2 tokens per word vs ~1 per sentence), so one number governing both would mean a
+  // retune of the word budget silently moved a sentence limit nobody was looking at. Sentence
+  // counts are small — 5 to 29 per side over the real store — so this bound is the "someone
+  // pasted a book" backstop, and it is not reached by anything a decision plausibly holds.
+  const SENTENCE_BUDGET = 250000;
+  // Share of a proposal's characters that must survive unchanged for the INLINE word diff to be
+  // readable. Below it every line interleaves struck-out and inserted words — a rewrite rendered
+  // inline is confetti, not a diff — so the side-by-side view takes over. Measured against the
+  // real store: a total rewrite lands near 0.2, a hardening pass that keeps the original prose
+  // near 0.7. The old switch was DIFF_BUDGET alone, i.e. size, which is unrelated to churn: two
+  // proposals differing by 0.8% in LCS cells rendered in two different views.
+  const DIFF_INLINE_MIN_SAME = 0.5;
+  // Share two PAIRED sentences must have in common before the word-level highlight is drawn
+  // inside them. Rows are paired by position within a replaced run, so on a rewrite the pair is
+  // usually two unrelated sentences: over the real store's 62 replaced rows, 58 sit below 0.3
+  // (median 0.04). Highlighting those would re-import the very confetti the split view exists to
+  // kill, so below this the cell renders as plain text — the tint alone says removed/added.
+  const DIFF_PAIR_MIN_SAME = 0.3;
+  // Combined length below which the inline diff is kept whatever the similarity says. A short
+  // rewrite scores like a long one — "Store decisions in JSON." -> "Persist decisions to SQLite."
+  // shares 0.30 — but a few interleaved words are not confetti, and sending it to the split view
+  // costs it the word-level highlight for no gain. The smallest real proposal pair is 2324 chars,
+  // so this only ever catches the genuinely small edit.
+  const DIFF_INLINE_MAX_CHARS = 500;
   // Rows one decisions request asks for. There is no pager, so the header says what is SHOWN
   // as well as what matched: "300 matching" over 200 rendered rows was a plain miscount.
   const PAGE_LIMIT = 200;
@@ -1046,11 +1071,15 @@
       .filter((t) => t !== "");
   }
 
-  function diffTokens(a, b) {
+  /** LCS edit script over two string arrays: [{kind: same|del|ins, v}], or null when the DP table
+   *  would exceed `budget` cells. ONE implementation — the word diff and the sentence diff differ
+   *  only in what they feed it and whether adjacent same-kind items are merged, so a fix to the
+   *  tie-break here can never apply to just one of them. */
+  function lcsOps(a, b, budget, merge) {
     const n = a.length;
     const m = b.length;
-    if ((n + 1) * (m + 1) > DIFF_BUDGET) return null;
     const w = m + 1;
+    if ((n + 1) * w > budget) return null;
     const dp = new Uint32Array((n + 1) * w);
     for (let i = n - 1; i >= 0; i--) {
       for (let j = m - 1; j >= 0; j--) {
@@ -1063,8 +1092,8 @@
     const out = [];
     const push = (kind, v) => {
       const last = out[out.length - 1];
-      if (last && last.kind === kind) last.v += v;
-      else out.push({ kind, v });
+      if (merge && last && last.kind === kind) last.v += v;
+      else out.push({ kind: kind, v: v });
     };
     let i = 0;
     let j = 0;
@@ -1086,20 +1115,192 @@
     return out;
   }
 
+  /** Word-level edit script, adjacent same-kind words merged into one run. Null = over budget. */
+  function diffTokens(a, b) {
+    return lcsOps(a, b, DIFF_BUDGET, true);
+  }
+
+  /** Share of a token diff's characters that are unchanged. 1 when there is nothing to compare. */
+  function sameShare(parts) {
+    let same = 0;
+    let total = 0;
+    for (const p of parts) {
+      total += p.v.length;
+      if (p.kind === "same") same += p.v.length;
+    }
+    return total ? same / total : 1;
+  }
+
+  // ── Side-by-side diff (GitHub-shaped, sentence-aligned) ───────────────────────────────
+  // Stored decisions are ONE long line of prose — every proposal in a real store has zero
+  // newlines — so a line diff has nothing to align on and degenerates to "one line removed, one
+  // line added", which is the unreadable before/after dump this replaces. Sentences are the row
+  // unit instead.
+
+  // A fenced code block is one row, whatever is inside it. Splitting it by newline turned every
+  // statement of a quoted schema into its own bordered cell and put ``` in cells of their own.
+  // An unterminated fence (a routine LLM output shape) runs to the end of the text on purpose.
+  const FENCE_RE = /```[\s\S]*?```|```[\s\S]*$/g;
+  // "1." / "(3)" / "2)" — a list marker, not the end of a sentence. Matched at the tail of the
+  // chunk built so far, so the period that follows the number never ends a row. POSITION is what
+  // separates a marker from a count: a marker opens its chunk, follows the colon that introduces
+  // the list, or sits in brackets. Any digit-final sentence would otherwise qualify — "There are
+  // 3. Continue with rollout." would swallow the next claim into the same row.
+  const ENUM_TAIL_RE = /(?:^\s*|:\s+|[(\[])\d+[.)]$/;
+
+  /** Sentence-ish chunks, the row unit of the split view. Splits after . ! ? ; when whitespace
+   *  follows, and on newlines. Deliberately NOT on `:` — a label ("Rationale:", "Guard:") belongs
+   *  with the clause it introduces, and splitting there stranded it in a bordered cell of its own.
+   *  Never splits inside a fenced block, an inline `code span`, or a "quoted phrase" (a `;` inside
+   *  a quote is not a sentence end); the span guards switch off when the text's own delimiters are
+   *  unbalanced, where "inside" is unknowable and tracking it would swallow the whole body.
+   *  Only trailing whitespace is trimmed: leading indentation is content in quoted code. */
+  function splitSentences(s) {
+    const text = String(s === null || s === undefined ? "" : s);
+    const out = [];
+    let last = 0;
+    FENCE_RE.lastIndex = 0;
+    let m;
+    while ((m = FENCE_RE.exec(text)) !== null) {
+      pushPlain(text.slice(last, m.index), out);
+      const fence = m[0].replace(/\s+$/, "");
+      if (fence) out.push(fence);
+      last = m.index + m[0].length;
+      if (m[0].length === 0) break;
+    }
+    pushPlain(text.slice(last), out);
+    return out;
+  }
+
+  /** Sentence-splits one fence-free stretch of prose into `out`. */
+  function pushPlain(text, out) {
+    if (!text) return;
+    const ticks = (text.split("`").length - 1) % 2 === 0;
+    const quotes = (text.split('"').length - 1) % 2 === 0;
+    let buf = "";
+    let inCode = false;
+    let inQuote = false;
+    // Whether the chunk being built started at the beginning of a line. Leading whitespace is
+    // indentation there (content, in a quoted block) and merely the space after the previous
+    // sentence otherwise, so only one of the two survives the trim.
+    let atLineStart = true;
+    const flush = (endedOnNewline) => {
+      let t = buf.replace(/\s+$/, "");
+      if (!atLineStart) t = t.replace(/^[^\S\n]+/, "");
+      if (t.trim()) out.push(t);
+      buf = "";
+      atLineStart = endedOnNewline;
+    };
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      buf += c;
+      if (c === "`" && ticks) inCode = !inCode;
+      else if (c === '"' && quotes && !inCode) inQuote = !inQuote;
+      if (inCode || inQuote) continue;
+      if (c === "\n") {
+        flush(true);
+        continue;
+      }
+      const next = text[i + 1];
+      const ends = ".!?;".indexOf(c) >= 0 && (next === undefined || /\s/.test(next));
+      if (ends && !ENUM_TAIL_RE.test(buf)) flush(false);
+    }
+    flush(false);
+  }
+
+  /** Sentence-level edit script; items stay separate (a merged run could not be laid out as rows).
+   *  Over budget it degrades to ONE removed row beside ONE added row — the honest "these two texts
+   *  could not be aligned". Emitting every sentence as del+ins instead would paint unchanged
+   *  sentences as changed, which is worse than not aligning: it asserts an edit that never
+   *  happened. */
+  function diffSeq(a, b) {
+    const ops = lcsOps(a, b, SENTENCE_BUDGET, false);
+    if (ops) return ops;
+    return [{ kind: "del", v: a.join("\n") }, { kind: "ins", v: b.join("\n") }];
+  }
+
+  /** Ops -> rendered rows. A run of removals is zipped against the run of insertions that follows
+   *  it, so a rewritten sentence sits opposite its replacement (GitHub's pairing) instead of the
+   *  two drifting apart; leftovers on either side get an empty cell opposite. */
+  function pairRows(ops) {
+    const rows = [];
+    let dels = [];
+    let inss = [];
+    const flush = () => {
+      const k = Math.max(dels.length, inss.length);
+      for (let x = 0; x < k; x++) {
+        rows.push({
+          left: x < dels.length ? dels[x] : null,
+          right: x < inss.length ? inss[x] : null,
+          same: false,
+        });
+      }
+      dels = [];
+      inss = [];
+    };
+    for (const op of ops) {
+      if (op.kind === "del") dels.push(op.v);
+      else if (op.kind === "ins") inss.push(op.v);
+      else {
+        flush();
+        rows.push({ left: op.v, right: op.v, same: true });
+      }
+    }
+    flush();
+    return rows;
+  }
+
+  /** One side of a paired row: unchanged words as text, this side's own edits highlighted. */
+  function sideParts(parts, keep) {
+    const out = [];
+    for (const p of parts) {
+      if (p.kind === "same") out.push(document.createTextNode(p.v));
+      else if (p.kind === keep)
+        out.push(h("span", { class: keep === "del" ? "diff-del" : "diff-ins", text: p.v }));
+    }
+    return out;
+  }
+
+  function diffCell(text, cls) {
+    return h("div", { class: "diff-side " + cls }, text);
+  }
+
+  function splitDiffView(before, after) {
+    const rows = pairRows(diffSeq(splitSentences(before), splitSentences(after)));
+    const cells = [
+      h("div", { class: "diff-col-label", text: "Stored now" }),
+      h("div", { class: "diff-col-label", text: "Proposed" }),
+    ];
+    for (const r of rows) {
+      if (r.same) {
+        cells.push(diffCell(r.left, "diff-side-same"));
+        cells.push(diffCell(r.right, "diff-side-same"));
+        continue;
+      }
+      if (r.left !== null && r.right !== null) {
+        const parts = diffTokens(tokenize(r.left), tokenize(r.right));
+        const related = parts && sameShare(parts) >= DIFF_PAIR_MIN_SAME;
+        cells.push(diffCell(related ? sideParts(parts, "del") : r.left, "diff-side-del"));
+        cells.push(diffCell(related ? sideParts(parts, "ins") : r.right, "diff-side-ins"));
+        continue;
+      }
+      cells.push(
+        r.left !== null ? diffCell(r.left, "diff-side-del") : diffCell(null, "diff-side-empty")
+      );
+      cells.push(
+        r.right !== null ? diffCell(r.right, "diff-side-ins") : diffCell(null, "diff-side-empty")
+      );
+    }
+    return h("div", { class: "diff-split" }, cells);
+  }
+
   function diffView(before, after) {
     const parts = diffTokens(tokenize(before), tokenize(after));
-    if (!parts) {
-      return h("div", { class: "diff-cols" }, [
-        h("div", {}, [
-          h("div", { class: "diff-col-label", text: "Stored now" }),
-          h("pre", { class: "code-block", text: String(before || "") }),
-        ]),
-        h("div", {}, [
-          h("div", { class: "diff-col-label", text: "Proposed" }),
-          h("pre", { class: "code-block", text: String(after || "") }),
-        ]),
-      ]);
-    }
+    const short = String(before || "").length + String(after || "").length <= DIFF_INLINE_MAX_CHARS;
+    // No parts = too big to diff inline. Low same-share = a rewrite, which inline renders as
+    // interleaved confetti — unless the whole thing is short, where interleaving is a few words.
+    if (!parts || (!short && sameShare(parts) < DIFF_INLINE_MIN_SAME))
+      return splitDiffView(before, after);
     return h(
       "div",
       { class: "diff" },

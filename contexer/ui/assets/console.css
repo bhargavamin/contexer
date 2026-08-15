@@ -866,6 +866,7 @@ a.stat-card:hover {
 .code-block,
 .rev-body,
 .diff,
+.diff-side,
 .factors li,
 .notice-body {
   unicode-bidi: isolate;
@@ -1201,10 +1202,62 @@ a.stat-card:hover {
   border-radius: 3px;
   padding: 0 2px;
 }
-.diff-cols {
+/* Side-by-side diff. Rows are sentences, not lines (stored decisions are one long line), and the
+   two cells of a row are consecutive grid children so the grid equalizes their heights — the pair
+   stays opposite each other however far the wording drifts. */
+.diff-split {
   display: grid;
-  gap: 10px;
   grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.diff-side {
+  position: relative;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 7px 10px 7px 22px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diff-side-same {
+  color: var(--muted-foreground);
+}
+.diff-side-del {
+  background: color-mix(in oklch, var(--destructive) 9%, var(--background));
+  border-color: color-mix(in oklch, var(--destructive) 32%, var(--border));
+}
+.diff-side-ins {
+  background: color-mix(in oklch, var(--signal) 9%, var(--background));
+  border-color: color-mix(in oklch, var(--signal) 32%, var(--border));
+}
+.diff-side-empty {
+  background: transparent;
+  border-style: dashed;
+  border-color: color-mix(in oklch, var(--border) 60%, transparent);
+  min-height: 20px;
+}
+.diff-side-del::before,
+.diff-side-ins::before {
+  position: absolute;
+  left: 8px;
+  top: 7px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.diff-side-del::before {
+  content: "\2212";
+  color: oklch(0.86 0.09 27);
+}
+.diff-side-ins::before {
+  content: "+";
+  color: var(--signal);
+}
+/* The whole cell already says "removed"; striking the words too is noise on a wall of prose. */
+.diff-split .diff-del {
+  text-decoration: none;
 }
 .diff-col-label {
   font-family: var(--font-mono);
@@ -1487,9 +1540,16 @@ a.stat-card:hover {
   .main-inner {
     padding: 22px 18px 60px;
   }
-  .grid-2,
-  .diff-cols {
+  .grid-2 {
     grid-template-columns: 1fr;
+  }
+  /* .diff-split deliberately stays two columns. Its children are a FLAT cell stream, so collapsing
+     to 1fr strands the two headers side by side at the top and then alternates unlabelled cells —
+     and an unchanged row, which holds the same text on both sides, would print itself twice in a
+     row. Narrower cells that stay attributable beat wider ones that do not. */
+  .diff-split {
+    gap: 5px 6px;
+    font-size: 11.5px;
   }
   .bar-row {
     grid-template-columns: 92px 1fr 34px;
