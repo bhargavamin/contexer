@@ -4208,6 +4208,21 @@ def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
 # paths where no gap is ever asked. Single source: `/bootstrap` (bootstrap_command.md) and the
 # docs point at this field rather than restating it, so the rule cannot drift between copies.
 GAP_ASK_GUIDE = (
+    "First read the repo's own context docs — the result's `context_docs` names them (README,"
+    " CLAUDE.md, AGENTS.md, CONTRIBUTING.md, .claude/rules/*.md, docs/). Start with the"
+    " smallest; for a large file read its headings rather than the whole text. Where one"
+    " already answers a gap, do NOT ask that gap open-ended: quote the line and ask the"
+    " developer to confirm or correct it — recognition is cheaper for them than recall. Store"
+    " the confirmed answer, never the quote: a rule doc is EVIDENCE FOR A QUESTION, never a"
+    " decision, and an unconfirmed line from it must not reach the store."
+    " Those docs may otherwise only reshape or drop the gaps below — never mine them for extra"
+    " questions, or a thirty-line rules file becomes a thirty-question interview. ONE addition"
+    " is allowed, and only this one: if a doc CONTRADICTS a sentence in `measured_conventions`"
+    " (a doc demanding full type hints beside a measured '61% of 556 functions'), ask about"
+    " that single contradiction — both sides are evidence and only the developer can settle"
+    " which is the rule. Store that answer as a `convention`, and say in the same sentence that"
+    " it supersedes the measurement, so the developer can retire the stale one from"
+    " `contexer review`; do not silently leave both standing as equals. "
     "Ask these gaps ONE question at a time, never batched — each answer can remove later gaps"
     " (a docs-only purpose answer drops the tests/CI/deploy ones). With an interactive"
     " multiple-choice tool (Claude Code: AskUserQuestion), render each gap as one question:"
@@ -6273,6 +6288,18 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     return "\n".join(lines)
 
 
+def _is_generated_doc(path: Path) -> bool:
+    """True for a doc Contexer (or another tool) generated, identified by its own header.
+
+    Fail-soft: an unreadable file is treated as NOT generated — enumerating a file the model
+    then skips costs one line, whereas hiding a developer's real rules file loses evidence."""
+    try:
+        head = path.read_text(encoding="utf-8", errors="ignore")[:400].lower()
+    except Exception:
+        return False
+    return "auto-generated" in head or "do not edit manually" in head
+
+
 _PURPOSE_KINDS = (
     ({"api", "server", "service", "backend"}, "Backend API or service"),
     ({"cli", "tool", "cmd"}, "CLI tool"),
@@ -6323,12 +6350,12 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     existing = [e for e in data.get("entries", []) if e["type"] == "decision"]
     inferred: list[str] = []
     found_files: list[str] = []
+    context_docs: list[str] = []   # the READABLE doc subset of found_files (see _keep_doc)
     all_deps: set[str] = set()
 
     # signals used only for question generation — not stored as inferred facts
     sig: dict = {
         "project_name": "",
-        "readme_summary": "",
         "has_tests": False,
         "has_ci": False,
         "has_container": False,
@@ -6602,54 +6629,85 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
             layer_str = ", ".join(layers[:3]) + ("..." if len(layers) > 3 else "")
             _add(f"Architecture: layered structure detected (src/{layer_str})")
 
-    # --- README summary (for purpose inference) ---
-    readme = root / "README.md"
-    if readme.exists():
-        found_files.append("README.md")
-        try:
-            text = readme.read_text(encoding="utf-8", errors="ignore")
-            lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
-            if lines:
-                sig["readme_summary"] = lines[0][:120]
-            if any(w in text.lower()[:2000] for w in _SIMPLE_REPO_SIGNALS):
-                sig["is_simple_repo"] = True
+    # --- Context docs: enumerated for the model; SOME also feed the simple-repo keyword ---
+    # These used to also yield `readme_summary` — the first non-heading line, offered to the
+    # developer as the repo's inferred PURPOSE. That line is as often markup as a tagline: on
+    # contexer's own README it evaluated to '<p align="center">', and a length filter cannot
+    # save it (badge lines run 60-70 chars). The model reads these files itself (GAP_ASK_GUIDE
+    # names them), so a deterministic first-line grab could only be a worse second opinion.
+    #
+    # Second element is the keyword-scan budget in chars; 0 means ENUMERATED ONLY, never
+    # scanned. The distinction is carried in the data rather than in two near-identical loops,
+    # because it is a real invariant: _SIMPLE_REPO_SIGNALS is an UNANCHORED substring test, so
+    # a CONTRIBUTING.md reading "see the example below" would set is_simple_repo and silently
+    # suppress the tests/CI/deploy/exclusions gaps on a real production service. The four
+    # scanned entries are grandfathered, not endorsed — they carry the same risk (a CLAUDE.md
+    # opening "For example, run `make deploy`" trips it) and narrowing that test is a separate,
+    # behaviour-changing decision, deliberately not folded into this change.
+    _CONTEXT_DOC_FILES = (
+        ("README.md", 2000),
+        ("CLAUDE.md", 3000),
+        (".cursorrules", 3000),
+        (".windsurfrules", 3000),
+        ("AGENTS.md", 0),
+        ("CONTRIBUTING.md", 0),
+        ("GEMINI.md", 0),
+        (".github/copilot-instructions.md", 0),
+    )
+    _MAX_RULE_DOCS = 5  # work bound on a rules dir, same spirit as the docs/ cap
+
+    def _keep_doc(rel: str, budget: int, path: Path) -> None:
+        found_files.append(rel)
+        context_docs.append(rel)
+        if budget <= 0:
+            return
+        try:  # slice BEFORE lowering: a 200KB README should not be copied twice to read 2KB
+            head = path.read_text(encoding="utf-8", errors="ignore")[:budget].lower()
         except Exception:
-            pass
-    # CLAUDE.md / .cursorrules / docs/ — read for purpose hints before asking questions
-    _CONTEXT_FILES = ["CLAUDE.md", ".cursorrules", ".windsurfrules"]
-    for cf in _CONTEXT_FILES:
-        cf_path = root / cf
-        if cf_path.exists():
-            found_files.append(cf)
-            try:
-                cf_text = cf_path.read_text(encoding="utf-8", errors="ignore")[:3000]
-                # Extract first meaningful non-heading line as summary if README had none
-                if not sig["readme_summary"]:
-                    lines = [line.strip() for line in cf_text.splitlines()
-                             if line.strip() and not line.startswith("#") and len(line.strip()) > 20]
-                    if lines:
-                        sig["readme_summary"] = lines[0][:120]
-                if any(w in cf_text.lower() for w in _SIMPLE_REPO_SIGNALS):
-                    sig["is_simple_repo"] = True
-            except Exception:
-                pass
+            return
+        if any(w in head for w in _SIMPLE_REPO_SIGNALS):
+            sig["is_simple_repo"] = True
+
+    for rel, budget in _CONTEXT_DOC_FILES:
+        path = root / rel
+        if path.exists():
+            _keep_doc(rel, budget, path)
 
     docs_dir = root / "docs"
     if docs_dir.is_dir():
         found_files.append("docs/")
-        # Scan first doc file for purpose hints
+        context_docs.append("docs/")
+        # Sampled for the simple-repo keyword only. WHICH three still matters — this is the
+        # only signal those files feed — so the sort stays deterministic; what changed is that
+        # no summary is extracted, so no ordering heuristic can improve the sample. The model
+        # is pointed at the directory itself and lists what it needs.
         for doc in sorted(docs_dir.glob("*.md"))[:3]:
             try:
                 doc_text = doc.read_text(encoding="utf-8", errors="ignore")[:1500]
-                if not sig["readme_summary"]:
-                    lines = [line.strip() for line in doc_text.splitlines()
-                             if line.strip() and not line.startswith("#") and len(line.strip()) > 20]
-                    if lines:
-                        sig["readme_summary"] = lines[0][:120]
                 if any(w in doc_text.lower() for w in _SIMPLE_REPO_SIGNALS):
                     sig["is_simple_repo"] = True
             except Exception:
                 pass
+
+    # .claude/rules/*.md is normally developer-authored, but Contexer writes its OWN
+    # auto-generated mirror there. Offering that back as evidence to confirm would round-trip
+    # Contexer's own (often stale) output in as a human-ratified decision — the loop this
+    # whole design exists to avoid — so a generated file is skipped by its own header.
+    rules_dir = root / ".claude" / "rules"
+    if rules_dir.is_dir():
+        try:
+            rules = [r for r in sorted(rules_dir.glob("*.md")) if not _is_generated_doc(r)]
+            for rule in rules[:_MAX_RULE_DOCS]:
+                found_files.append(f".claude/rules/{rule.name}")
+                context_docs.append(f".claude/rules/{rule.name}")
+            if len(rules) > _MAX_RULE_DOCS:
+                # Never truncate silently: every other capped surface here says "showing N of
+                # M", and a model told these ARE the context files would read a cut list as
+                # complete.
+                context_docs.append(
+                    f".claude/rules/ (showing {_MAX_RULE_DOCS} of {len(rules)}; read the rest on request)")
+        except OSError:
+            pass
 
     # Repos with no build/package config and no inferred stack facts are docs-only
     has_code_config = any([
@@ -6866,6 +6924,17 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         "inferred": inferred,
         "gaps": gaps,
         "existing_context_files": found_files,
+        # The readable doc subset. `existing_context_files` is every file the scan TOUCHED —
+        # lockfiles, CI dirs, and literal glob strings like ".eslintrc*" that are not paths at
+        # all — so pointing the model at it to READ would cost failed reads and wasted tokens.
+        "context_docs": context_docs,
+        # The measured conventions, so GAP_ASK_GUIDE's doc-vs-measurement contradiction check
+        # has both sides in one payload. bootstrap_apply already computes these and passes them
+        # in for gap suppression, but returned only its stored/pending counts — leaving the
+        # instruction to compare against "a measured convention in this same result"
+        # unexecutable, since no measurement was in the result. Empty on a direct
+        # bootstrap_scan call (apply=False), which mines nothing.
+        "measured_conventions": [m.get("content", "") for m in mined],
         "insight": insight,
         "insight_source": insight_source,
         "decisive": decisive,
