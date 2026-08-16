@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _dist_version
@@ -263,6 +264,75 @@ def version() -> None:
     print(f"contexer {_version()}")
 
 
+def _print_wrapped(text: str, indent: str = "  ", width: int = 64) -> None:
+    """Print a decision body IN FULL, wrapped to the terminal. Deliberately not clipped:
+    this is the interactive one-decision-at-a-time surface, so the whole point is that the
+    developer can judge without running a second command. (`_clip_body` still governs the
+    list-shaped surfaces, where a long body would flood the screen.)"""
+    for para in (text or "").split("\n"):
+        if not para.strip():
+            print()
+            continue
+        print(textwrap.fill(para.strip(), width=width,
+                            initial_indent=indent, subsequent_indent=indent))
+
+
+def _review_metadata(repo_path: str, entry: dict) -> list[tuple[str, str]]:
+    """The (label, value) rows that let a developer judge an approval accurately: where the
+    decision came from, how corroborated it is, what code it claims to describe, whether that
+    code has moved since, and what work was in flight when it was captured.
+
+    Everything here is already on the entry except the anchor-commit lookup and the staleness
+    check, both of which are fail-soft and budgeted (see store.review_anchor_note /
+    _staleness_note) — a git hiccup degrades a row, never the review."""
+    from contexer import store
+
+    rows: list[tuple[str, str]] = []
+    when = (entry.get("timestamp") or "")[:16].replace("T", " ")
+    origin = _ORIGIN_LABELS.get(entry.get("created_by") or "", entry.get("created_by") or "?")
+    rows.append(("Captured", f"{when} · {origin}" if when else origin))
+
+    occ = entry.get("occurrence_count") or 1
+    sessions = len(entry.get("session_ids") or [entry.get("session_id")])
+    if occ > 1 or sessions > 1:
+        rows.append(("Seen", f"{store._pl(occ, 'time')} across "
+                             f"{store._pl(sessions, 'session')}"))
+
+    files = entry.get("source_files") or []
+    if files:
+        rows.append(("Files", ", ".join(files)))
+        note = store._staleness_note(repo_path, entry)
+        if note:
+            # " [may be stale: x changed since capture, +N more]" -> the bare fact.
+            rows.append(("", "! " + note.strip().lstrip("[").rstrip("]")
+                         .replace("may be stale: ", "")))
+    candidates = entry.get("anchor_candidates")
+    if candidates:
+        rows.append(("Would anchor", ", ".join(candidates)))
+
+    anchor = store.review_anchor_note(repo_path, entry)
+    if anchor:
+        rows.append(("Anchor", anchor))
+
+    # Only worth screen space when it is the branch that can silently target the WRONG repo;
+    # every other value means a caller named this repo explicitly. See _resolve_repo_verbose.
+    if entry.get("repo_source") == "pointer":
+        rows.append(("Origin", "! resolved via the shared repo pointer — verify this is the "
+                               "right repo for this decision"))
+    return rows
+
+
+# How a decision got captured, in the developer's terms rather than the schema's.
+_ORIGIN_LABELS = {
+    "human": "your prompt",
+    "ai": "captured by the assistant",
+    "plan": "from an approved plan",
+    "scan": "measured from this repo",
+    "bootstrap": "repo bootstrap",
+    "memory": "imported from memory",
+}
+
+
 def review() -> None:
     """Interactively review and approve/ignore/edit pending engineering decisions."""
     from contexer import conflicts, store
@@ -283,46 +353,53 @@ def review() -> None:
     approved = ignored = dismissed = edited = skipped = 0
     for i, entry in enumerate(pending, 1):
         prop = entry.get("proposed_revision")
-        print("─" * 60)
-        print(f"Decision {i} of {len(pending)}\n")
+        print("─" * 66)
+        eid = (entry.get("id") or "")[:8]
+        heading = f"Decision {i} of {len(pending)}"
+        print(f"{heading}{('id ' + eid).rjust(66 - len(heading))}")
+        print("─" * 66)
         subtype = entry.get("subtype") or "decision"
         if prop:
-            # Suggested Update: show the current revision and the detected change.
+            # Suggested Update: show the standing revision and the detected change, both in
+            # full — deciding between two versions is exactly when truncation costs the most.
             score = prop.get("confidence", 0)
             factors = prop.get("confidence_factors") or []
             rev = entry.get("revision", 1)
-            print(f"[{subtype}] Suggested update")
-            print(f'  Current (revision {rev}): "{store._clip_body(entry["content"])}"')
-            print(f'  Detected:                "{store._clip_body(prop.get("content", ""))}"')
+            print(f"[{subtype}]  suggested update\n")
+            print(f"Current (revision {rev}):")
+            _print_wrapped(store._current_content(entry))
+            print("\nDetected:")
+            _print_wrapped(prop.get("content", ""))
             steer = conflicts.memo_steer_line(entry)
             if steer:
-                print(f"  {steer[:1].upper()}{steer[1:]}")
+                print(f"\n{steer[:1].upper()}{steer[1:]}")
             print()
         else:
             score, factors = store._compute_confidence(entry)
             title, body = store._title_and_body(entry)
-            print(f"[{subtype}] {title}")
+            print(f"[{subtype}]  {store._entry_status(entry).replace('_', ' ')}\n")
+            print(title)
             if body is not None:
-                print(f'  "{store._clip_body(body)}"')
+                print()
+                _print_wrapped(body)
             print()
-        print(f"Confidence: {score}%")
-        if factors:
-            print("Evidence:")
-            for f in factors:
-                print(f"  - {f}")
-        candidates = entry.get("anchor_candidates")
-        if candidates:
-            print(f"Would anchor: {', '.join(candidates)}")
+        for label, value in _review_metadata(repo_path, entry):
+            print(f"{label:<14}{value}")
+        print(f"{'Confidence':<14}{score}%" + (f"  ·  {'; '.join(factors)}" if factors else ""))
         print()
         if prop:
-            print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip")
+            print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip  [Q] Quit")
         else:
-            print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip")
+            print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip  [Q] Quit")
 
         try:
-            choice = input("Choice: ").strip().upper()
+            choice = input("> ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             print("\nAborted.")
+            break
+
+        if choice in ("Q", "QUIT"):
+            print("Stopped — the rest stay pending.")
             break
 
         if choice in ("Y", "YES"):

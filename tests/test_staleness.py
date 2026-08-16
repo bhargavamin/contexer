@@ -468,3 +468,87 @@ def test_outside_repo_path_dropped_but_in_repo_siblings_still_anchor(repo):
     entry = _entry(repo)
     assert entry["source_files"] == ["auth.py"]
     assert entry["anchor_commit"]
+
+
+# ── review anchor provenance (interactive review surface) ──────────────────────
+# `contexer review` shows which commit a decision was anchored to, so the developer
+# can see what work was in flight when it was captured. No PR number is stored
+# anywhere — it is read off the anchor commit's own subject, which squash/merge
+# commits carry as "(#123)" / "Merge pull request #123".
+
+def test_anchor_note_empty_without_anchor(repo):
+    assert store.review_anchor_note(repo, {}) == ""
+    assert store.review_anchor_note(repo, {"anchor_commit": ""}) == ""
+
+
+def test_anchor_note_renders_short_sha_and_subject(repo):
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                   source_files=["auth.py"])
+    entry = _entry(repo)
+    note = store.review_anchor_note(repo, entry)
+    assert entry["anchor_commit"][:7] in note
+    assert "initial" in note
+
+
+def test_anchor_note_surfaces_pr_number_from_subject(repo):
+    _touch_pr = Path(repo, "feature.py")
+    _touch_pr.write_text("x = 2\n", encoding="utf-8")
+    _commit(repo, "feat: add the thing (#211)")
+    _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
+                                   source_files=["auth.py"])
+    note = store.review_anchor_note(repo, _entry(repo))
+    assert "(#211)" in note
+
+
+def test_anchor_note_failsoft_on_unknown_commit(repo):
+    note = store.review_anchor_note(repo, {"anchor_commit": "0" * 40})
+    assert note == ""
+
+
+# ── review metadata rows (need a REAL git repo, hence this module) ─────────────
+# The CLI's tmp_repo fixture isn't a git checkout, so source_files/anchor_commit are
+# never stamped there and these branches would otherwise go untested.
+
+def _rows(repo, entry):
+    from contexer import cli
+    return dict(cli._review_metadata(repo, entry))
+
+
+def test_review_metadata_shows_files_and_staleness_warning(repo):
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+    assert _rows(repo, entry)["Files"] == "auth.py"
+    assert "changed since capture" not in " ".join(_rows(repo, entry).values())
+
+    _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
+    warning = [v for k, v in _rows(repo, entry).items() if k == ""]
+    assert warning and "auth.py changed since capture" in warning[0]
+
+
+def test_review_metadata_shows_anchor_commit(repo):
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+    assert entry["anchor_commit"][:7] in _rows(repo, entry)["Anchor"]
+
+
+def test_review_metadata_seen_row_only_once_corroborated(repo):
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+    assert "Seen" not in _rows(repo, entry)          # a single sighting says nothing
+
+    entry["occurrence_count"] = 3
+    entry["session_ids"] = ["s1", "s2"]
+    assert _rows(repo, entry)["Seen"] == "3 times across 2 sessions"
+
+
+def test_review_metadata_captured_row_humanises_origin(repo):
+    store.update_decision(repo, SUMMARY, "s1", "architecture")
+    assert "captured by the assistant" in _rows(repo, _entry(repo))["Captured"]
+
+
+def test_print_wrapped_preserves_paragraph_breaks(capsys):
+    from contexer import cli
+    cli._print_wrapped("First paragraph.\n\nSecond paragraph.")
+    out = capsys.readouterr().out
+    assert "First paragraph." in out and "Second paragraph." in out
+    assert "\n\n" in out          # the blank line between them survived

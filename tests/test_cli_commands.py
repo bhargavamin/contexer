@@ -689,8 +689,9 @@ class TestReviewTitleHeadline:
         cli.review()
 
         out = capsys.readouterr().out
-        assert "[constraint] Adopt outbox for retries" in out
-        assert '"Long body explaining the outbox pattern in detail for share retries."' in out
+        assert "[constraint]" in out
+        assert "Adopt outbox for retries" in out
+        assert "Long body explaining the outbox pattern" in out
         # title heading must come before the quoted body, on its own line
         head_idx = out.index("Adopt outbox for retries")
         body_idx = out.index("Long body explaining the outbox pattern")
@@ -715,7 +716,7 @@ class TestReviewAnchorCandidates:
         cli.review()
 
         out = capsys.readouterr().out
-        assert "Would anchor: auth/jwt.py" in out
+        assert "Would anchor" in out and "auth/jwt.py" in out
 
     def test_pending_decision_without_candidates_omits_would_anchor_line(
             self, tmp_repo, monkeypatch, capsys):
@@ -1732,3 +1733,73 @@ class TestScopeAudit:
     def test_listed_in_help(self, monkeypatch, capsys):
         _run_main(monkeypatch, "help")
         assert "scope-audit" in capsys.readouterr().out
+
+
+class TestReviewOneViewAccuracy:
+    """`contexer review` must let a developer judge an approval WITHOUT a second command:
+    full body inline, plus the provenance/anchor metadata that says whether the decision is
+    still true. Bulk approval was removed, so each of these screens is the whole decision."""
+
+    def _pending(self, tmp_repo, monkeypatch, content, **kw):
+        from contexer import store
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        stored, eid = store.update_decision(tmp_repo, content, "sess-1", "constraint", **kw)
+        assert stored
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")
+        return eid
+
+    def test_long_body_is_shown_in_full_not_clipped(self, tmp_repo, monkeypatch, capsys):
+        from contexer import store
+        tail = "the trailing sentence that a 400-char clip would have eaten entirely."
+        body = ("Always validate at the trust boundary. " + ("padding words here. " * 30)) + tail
+        assert len(body) > store._BODY_CLIP
+        self._pending(tmp_repo, monkeypatch, body)
+        cli.review()
+        out = capsys.readouterr().out
+        assert "[+" not in out                      # no "… [+N chars]" marker
+        assert "trailing sentence" in out           # the far end of the body survived
+
+    def test_shows_id_and_progress(self, tmp_repo, monkeypatch, capsys):
+        eid = self._pending(tmp_repo, monkeypatch, "Never commit secrets to the repo")
+        cli.review()
+        out = capsys.readouterr().out
+        assert f"id {eid[:8]}" in out
+        assert "Decision 1 of 1" in out
+
+    def test_shows_capture_origin(self, tmp_repo, monkeypatch, capsys):
+        self._pending(tmp_repo, monkeypatch, "Never commit secrets to the repo")
+        cli.review()
+        assert "Captured" in capsys.readouterr().out
+
+    def test_quit_stops_without_touching_the_rest(self, tmp_repo, monkeypatch, capsys):
+        from contexer import store
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        for c in ("Never commit secrets here", "Never log personally identifying data"):
+            store.update_decision(tmp_repo, c, "s", "constraint")
+        assert len(store.get_pending_decisions(tmp_repo)) == 2
+
+        monkeypatch.setattr("builtins.input", lambda *_a: "Q")
+        cli.review()
+
+        assert "the rest stay pending" in capsys.readouterr().out
+        assert len(store.get_pending_decisions(tmp_repo)) == 2   # nothing approved
+
+    def test_pointer_resolved_capture_is_flagged(self, tmp_repo, monkeypatch, capsys):
+        """repo_source == 'pointer' is the one branch that can silently target the WRONG
+        repo, so review says so rather than leaving the developer to guess."""
+        from contexer import store
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        store.update_decision(tmp_repo, "Never commit secrets to the repo", "s",
+                              "constraint", repo_source="pointer")
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")
+        cli.review()
+        assert "shared repo pointer" in capsys.readouterr().out
+
+    def test_argument_resolved_capture_is_not_flagged(self, tmp_repo, monkeypatch, capsys):
+        from contexer import store
+        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        store.update_decision(tmp_repo, "Never commit secrets to the repo", "s",
+                              "constraint", repo_source="argument")
+        monkeypatch.setattr("builtins.input", lambda *_a: "S")
+        cli.review()
+        assert "shared repo pointer" not in capsys.readouterr().out

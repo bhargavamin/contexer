@@ -983,10 +983,11 @@ class TestApprovalTimeAnchorGuardPairing:
         assert result["advisories"][0]["decision_id"] == eid
         assert result["advisories"][0]["reason"] == "source_files match"
 
-    def test_bulk_approve_all_ai_captured_pairs_in_guard_staged_180(self, repo):
-        """Bulk approval via approve_decisions (the store side of `approve_decision
-        "all"`/comma-lists) is a genuine ratification gesture too — the developer
-        reviewed the shown pending list before clearing it — so it must count."""
+    def test_explicit_approve_of_ai_capture_pairs_in_guard_staged_180(self, repo):
+        """An explicit per-id approval is what earns guard trust for an ai-sourced capture.
+        This used to be pinned on the bulk path; bulk approval has since been removed
+        precisely because clearing a list wholesale is NOT the deliberate gesture the guard
+        trust model assumes."""
         _write(repo, "auth/jwt.py", "token = 0\n")
         _git(repo, "add", "auth/jwt.py")
         _commit(repo, "init")
@@ -994,8 +995,8 @@ class TestApprovalTimeAnchorGuardPairing:
         stored, eid = store.update_decision(str(repo), "Always use JWT for session auth, "
                                              "never plain cookies", "s1", "constraint")
         assert stored
-        results = store.approve_decisions(str(repo), [eid], "approve")
-        assert results == [(eid, True, results[0][2])]
+        ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok
 
         entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"

@@ -2004,8 +2004,8 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
 
 _PENDING_REVIEW_NUDGE = (
     "Contexer: decision(s) are pending your review. At a natural pause, offer to show them "
-    "(call review_pending) and approve via approve_decision (entry_id=all clears the shown "
-    "set); they stay inactive until approved."
+    "(call review_pending), then approve one id at a time via approve_decision; they stay "
+    "inactive until approved."
 )
 
 
@@ -2177,6 +2177,46 @@ def _staleness_note(repo_path: str, entry: dict) -> str:
             return ""
         extra = f", +{len(changed) - 1} more" if len(changed) > 1 else ""
         return f" [may be stale: {changed[0]} changed since capture{extra}]"
+    except Exception:
+        return ""
+
+
+_REVIEW_SUBJECT_CLIP = 44
+_PR_IN_SUBJECT = re.compile(r"#(\d+)")
+
+
+def review_anchor_note(repo_path: str, entry: dict) -> str:
+    """`<short sha> "<subject>" (#PR)` for an entry's anchor commit — what work was in flight
+    when this decision was captured, so the interactive review can judge it in one view.
+
+    No PR number is stored anywhere in the schema. It is read off the anchor commit's own
+    SUBJECT, which squash and merge commits already carry ("… (#211)", "Merge pull request
+    #211"), so it costs no git call beyond the one subject lookup and works retroactively on
+    decisions captured long before this existed. The subject is clipped but the PR is matched
+    against the FULL subject, so a trailing "(#211)" survives the clip.
+
+    Fail-soft like _staleness_note: no anchor, an unknown commit, a non-git repo, or a
+    timeout all render "". Never raises — this is decoration on a review screen, and no
+    git hiccup should be able to break reviewing."""
+    try:
+        anchor = entry.get("anchor_commit") or ""
+        if not anchor:
+            return ""
+        subject = _git(repo_path, "log", "-1", "--format=%s", anchor,
+                       timeout=_GIT_FAST_TIMEOUT)
+        if not subject:
+            return ""
+        subject = subject.strip().splitlines()[0].strip()
+        if not subject:
+            return ""
+        pr = _PR_IN_SUBJECT.search(subject)
+        shown = subject
+        if len(shown) > _REVIEW_SUBJECT_CLIP:
+            shown = shown[:_REVIEW_SUBJECT_CLIP].rstrip() + "…"
+        note = f'{anchor[:7]} "{shown}"'
+        if pr and f"#{pr.group(1)}" not in shown:
+            note += f" (#{pr.group(1)})"
+        return note
     except Exception:
         return ""
 
@@ -2488,10 +2528,9 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
                     now: str, repo_path: str, *,
                     has_caller_source_files: bool = False) -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory — no load, no save (the caller owns
-    those, batching many actions into one load+save via `approve_decisions`). NOT lock-free,
-    though: an approve/edit that anchors (`_anchor_sources`, via `_promote_proposal` or
-    directly below) shells out to `git rev-parse HEAD`, and every caller (`approve_decision`,
-    `approve_decisions`) invokes this only from inside its own `_store_lock(...)` block — so
+    those). NOT lock-free, though: an approve/edit that anchors (`_anchor_sources`, via
+    `_promote_proposal` or directly below) shells out to `git rev-parse HEAD`, and its sole
+    caller (`approve_decision`) invokes this only from inside its own `_store_lock(...)` block — so
     that git subprocess runs under the store lock, not lock-free. Returns (success, message,
     changed); `changed` lets the caller save only when something mutated. Resolves an exact id
     first, then an 8-char prefix (consistent with replace_id / get_shareable).
@@ -2622,28 +2661,11 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\"", True
 
 
-def approve_decisions(repo_path: str, entry_ids: list, action: str,
-                      content: str = "") -> list[tuple[str, bool, str]]:
-    """Apply `action` to several decisions in ONE store transaction — load once, save once —
-    so a bulk clear is atomic and O(1) writes, not one whole-file rewrite per id. Returns
-    [(entry_id, success, message), ...] so the caller reports accurate per-id results (a stale or
-    invalid id fails without faking success). 'edit' is single-only (it needs per-decision
-    content) and is rejected here."""
-    if action not in ("approve", "ignore", "skip", "dismiss"):
-        return [(i, False, f"Bulk action {action!r} not supported (edit is single-only).")
-                for i in entry_ids]
-    results: list[tuple[str, bool, str]] = []
-    with _store_lock(_slug(repo_path)):
-        data = _load(repo_path)
-        now = datetime.now(timezone.utc).isoformat()
-        changed_any = False
-        for eid in entry_ids:
-            ok, msg, changed = _apply_approval(data, eid, action, content, now, repo_path)
-            changed_any = changed_any or changed
-            results.append((eid, ok, msg))
-        if changed_any:
-            _save(repo_path, data)
-    return results
+# NOTE: there is deliberately no `approve_decisions` (plural) bulk entrypoint. It was removed
+# rather than left unrouted: approving stamps approved_by="human", which makes even an
+# ai-sourced decision guard-trusted at commit time, so a single bulk gesture could promote a
+# mis-captured decision into trusted standing context. Reviewing is one decision at a time,
+# by id — see server.approve_decision's refusal and `contexer review`.
 
 
 def get_pending_decisions(repo_path: str) -> list[dict]:
@@ -2703,9 +2725,10 @@ def format_pending_review(repo_path: str) -> str:
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
-    lines.append("\nReview each with the developer before approving. To clear several at once, "
-                 'pass comma-separated ids — or approve_decision(entry_id="all", action="approve") '
-                 "for the whole list.")
+    lines.append("\nReview each one with the developer before approving, and act on their "
+                 "answer ONE id at a time — there is no bulk approve, and approving a "
+                 "mis-captured decision makes it trusted standing context in every future "
+                 "session.")
     if clipped:
         # approve_decision(action='edit') requires the caller to already supply content — it
         # does not render the full current text — so the second pointer is get_context, which
@@ -4757,9 +4780,9 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             "approve_decision — or they can run `contexer review` in a terminal."
         )
         if total_pending >= _BACKLOG_ESCALATE:
-            notice += (" This backlog is growing — proactively offer to clear it this session; "
-                       'after the developer reviews, approve_decision(entry_id="all", '
-                       'action="approve") clears the lot.')
+            notice += (" This backlog is growing — proactively offer to work through it this "
+                       "session, one decision at a time (there is no bulk approve; a blanket "
+                       "clear would trust whatever misfired into the queue).")
         sys_parts.append(notice)
 
     # B1: size-gated standing topic map — a one-line overview once the store is big
@@ -7064,7 +7087,7 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
             paren = m.group(0).strip() if m else ""
             old_evidence = paren[1:-1] if paren.startswith("(") and paren.endswith(")") else paren
             # Rule-shaped, not meta-shaped: this sentence becomes the CURRENT revision the
-            # instant a developer approves it (or bulk-approves via entry_id="all"), so it
+            # instant a developer approves it, so it
             # must read like a convention a developer can live with, not a status memo — and
             # it must START with the rule text so replay still injects a real project rule.
             # The trailing parenthetical deliberately starts with "evidence withdrawn", not a
