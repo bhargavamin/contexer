@@ -615,3 +615,78 @@ def test_fast_git_never_trips_the_budget(repo):
         rows = dict(cli._review_metadata(repo, entry, budget))
     assert budget["skipped"] is False
     assert "Anchor" in rows
+
+
+def test_review_screen_makes_at_most_two_git_calls(repo, monkeypatch):
+    """Decision 9b71289b requires any expansion of the git-in-render exception to be
+    re-measured before shipping. Measured on this repo's real store: `git log -1` costs
+    p50 12.3ms / p95 14.7ms — the SAME as the sanctioned `git diff --name-only` (12.4ms) —
+    so a review screen's worst case is ~29ms, imperceptible against a keypress.
+
+    Pinned by CALL COUNT rather than wall clock deliberately: git subprocess timing is
+    exactly what this repo's fail-soft 2s timeouts exist for, so a latency assertion here
+    would flake under CI load. Count is deterministic and catches the real regressions —
+    a third git call per screen, or a broken memo."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+
+    calls = []
+    real = store._git
+    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
+
+    cli._review_metadata(repo, entry, cli._review_git_budget())
+    assert len(calls) <= 2, f"one review screen must cost at most 2 git calls, got {calls}"
+
+
+def _count_git(monkeypatch):
+    """Record the git SUBCOMMAND of every call ('log' / 'diff'), passing through to real git."""
+    calls = []
+    real = store._git
+    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
+    return calls
+
+
+def _fake_entry(sha, i, files):
+    return {"id": f"d{i}", "timestamp": "2026-08-16T10:00:00", "created_by": "ai",
+            "anchor_commit": sha, "source_files": files}
+
+
+def test_memoised_queue_collapses_the_anchor_lookup(repo, monkeypatch):
+    """The anchor subject depends only on the sha, so a queue sharing an anchor_commit must
+    cost exactly ONE `git log` however many decisions it holds — that is what makes the
+    uncapped loop safe.
+
+    Deliberately uses decisions with DIFFERENT source_files: an earlier version of this test
+    reused one identical entry, which passed trivially and would have kept passing even if the
+    memo were keyed on the whole entry (caught in review on #219). Staleness is NOT collapsed
+    across file sets, and must not be — it genuinely differs per file, so each distinct file
+    set is its own `git diff`."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    sha = _entry(repo)["anchor_commit"]
+
+    calls = _count_git(monkeypatch)
+    budget = cli._review_git_budget()
+    for i in range(25):
+        cli._review_metadata(repo, _fake_entry(sha, i, [f"f{i}.py"]), budget)
+
+    assert calls.count("log") == 1, f"one shared anchor must cost one log, got {calls.count('log')}"
+    assert calls.count("diff") == 25          # per-file-set, correctly not collapsed
+    assert budget["skipped"] is False         # 26 calls still well inside the time budget
+
+
+def test_memoised_queue_collapses_both_when_anchor_and_files_match(repo, monkeypatch):
+    """The common case — a queue captured in one session over the same files — collapses to
+    a single lookup of each kind."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    sha = _entry(repo)["anchor_commit"]
+
+    calls = _count_git(monkeypatch)
+    budget = cli._review_git_budget()
+    for i in range(25):
+        cli._review_metadata(repo, _fake_entry(sha, i, ["auth.py"]), budget)
+
+    assert calls.count("log") == 1 and calls.count("diff") == 1
+    assert budget["skipped"] is False
