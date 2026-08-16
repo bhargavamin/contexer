@@ -606,12 +606,12 @@ class TestOfferVariants:
         assert "never the assumption's own wording" in guide
 
     def test_correct_option_is_gated_on_the_assumption_answering_the_question(self):
-        """Most assumptions are scan observations that answer their gap. The goal gap's is the
-        repo's inferred purpose, which says nothing about what this user plans to do — offering
-        it as 'Correct' would store a restatement of the scan as the user's answer."""
+        """Most assumptions are scan observations that answer their gap. A gap no repo signal
+        can pre-answer now ships with no assumption at all, so the rule reduces to: no
+        assumption, no 'Correct' option."""
         guide = store.GAP_ASK_GUIDE
         assert "ONLY when that assumption actually answers the gap's question" in guide
-        assert "drop that option and ask the question" in guide
+        assert "no assumption" in guide
 
     def test_ask_shape_is_not_carried_by_the_session_start_injection(self, tmp_repo):
         """The guide is usable only once gaps exist, but this block is injected at every
@@ -895,7 +895,10 @@ class TestReactionMatrix:
                     assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
                     assert g["subtype"] in {"architecture", "constraint", "pattern", "convention"}, label
                     assert g["min_insight"] in {"low", "medium", "high"}, label
-                    assert g["assumption"] and g["hint"], label
+                    assert g["hint"], label
+                    # assumption is optional (the goal gap has none); an empty one would
+                    # render as a blank "Correct" option, so present means non-empty.
+                    assert g.get("assumption", "x"), label
 
     def test_every_advertised_option_has_a_handler(self, tmp_path, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")

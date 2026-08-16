@@ -4216,9 +4216,9 @@ GAP_ASK_GUIDE = (
     " Offer a \"Correct\" option (label \"Correct\", description = the gap's `assumption`) ONLY"
     " when that assumption actually answers the gap's question — most scan observations do"
     " ('No CI/CD config found in this repo' answers 'Is there a build or deploy pipeline?')."
-    " When it does not — the goal gap's assumption is the repo's inferred PURPOSE, which says"
-    " nothing about what this user plans to do here — drop that option and ask the question"
-    " openly; never present an unrelated statement as the confirming answer."
+    " A gap carrying no assumption key at all has nothing to confirm — the goal gap is one,"
+    " since nothing in the repo predicts what this user intends to do here — so with no"
+    " assumption there is no Correct option: ask that question openly and never invent one."
     " In between, add at most two options ONLY if the gap's `hint` names distinct candidate"
     " answers; a hint that restates the question, or that lists one answer's parts"
     " ('e.g. GDPR, PCI-DSS, SOC2, HIPAA' is a single answer), yields none and the question"
@@ -4396,8 +4396,10 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " this repo does, do NOT ask them the purpose gap question. Read the README and code,"
         " answer their question with your own summary, then ask 'Did I get that right —"
         " anything to correct?' and store the confirmed summary as the purpose.",
-        "For every gap question, lead with its assumption and ask the user to confirm or"
-        " correct it — never ask open-ended questions the scan can already half-answer."
+        "Where a gap carries an assumption, lead with it and ask the user to confirm or correct"
+        " it rather than asking open-ended what the scan can already half-answer — but a gap"
+        " may legitimately carry NO assumption (nothing in a repo predicts what the user plans"
+        " to do in it), and there you must ask openly and never invent one."
         " bootstrap_context's result carries a `how_to_ask` field with the exact question shape"
         " whenever it returns gaps; follow it then. It is deliberately NOT repeated here: this"
         " block is injected on every context-less session start, including the skip path, where"
@@ -6271,26 +6273,39 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     return "\n".join(lines)
 
 
-def _infer_purpose(name: str, readme_summary: str) -> str:
-    """Derive a concrete purpose assumption from project name and README first line."""
-    if readme_summary:
-        return readme_summary
-    if not name:
-        return "Purpose not yet documented"
-    n = name.lower()
-    if any(w in n for w in ["api", "server", "service", "backend"]):
-        return f"Backend API or service (\"{name}\")"
-    if any(w in n for w in ["cli", "tool", "cmd"]):
-        return f"CLI tool (\"{name}\")"
-    if any(w in n for w in ["bot", "agent"]):
-        return f"Bot or agent (\"{name}\")"
-    if any(w in n for w in ["worker", "job", "queue", "task"]):
-        return f"Background worker or job processor (\"{name}\")"
-    if any(w in n for w in ["web", "app", "ui", "front", "dashboard"]):
-        return f"Web app or frontend (\"{name}\")"
-    if any(w in n for w in ["lib", "sdk", "package", "plugin"]):
-        return f"Library or SDK (\"{name}\")"
-    return f"\"{name}\" — type not obvious from name alone"
+_PURPOSE_KINDS = (
+    ({"api", "server", "service", "backend"}, "Backend API or service"),
+    ({"cli", "tool", "cmd"}, "CLI tool"),
+    ({"bot", "agent"}, "Bot or agent"),
+    ({"worker", "job", "queue", "task"}, "Background worker or job processor"),
+    ({"web", "webapp", "app", "apps", "ui", "front", "frontend", "dashboard"},
+     "Web app or frontend"),
+    ({"lib", "library", "sdk", "package", "plugin"}, "Library or SDK"),
+)
+
+
+def _infer_purpose(name: str) -> str:
+    """Purpose assumption from the project name, or "" when the name says nothing.
+
+    Returns "" — never a placeholder — because `_gap` omits an EMPTY assumption but keeps a
+    truthy one, and GAP_ASK_GUIDE renders whatever survives as the "Correct" option for "What
+    does this repo do and who uses it?". The old fallbacks ("Purpose not yet documented",
+    '"x" — type not obvious from name alone') are non-answers, so a developer clicking Correct
+    stored a non-answer as the repo's ratified purpose. While README prose was still consulted
+    those fired only on a repo with no README/CLAUDE.md/docs at all; once it was deleted they
+    became the common case, which is how this shipped.
+
+    Matching is on NAME TOKENS, never substrings. `"api" in "rapid-sync"` is true (r-APId), so
+    a sync tool was labelled a backend API; "webhook-processor" hit "web" and became a
+    frontend. Substring matching cannot be made safe here, and with README prose gone there is
+    no second opinion to correct it."""
+    tokens = {t for t in re.split(r"[^a-z0-9]+", name.lower()) if t}
+    if not tokens:
+        return ""
+    for words, label in _PURPOSE_KINDS:
+        if tokens & words:
+            return f"{label} (\"{name}\")"
+    return ""
 
 
 def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None) -> dict:
@@ -6334,10 +6349,20 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         if _is_novel(fact, existing + proxy):
             inferred.append(fact)
 
-    def _gap(assumption: str, question: str, hint: str, subtype: str = "architecture",
-             min_insight: str = "high") -> dict:
-        return {"assumption": assumption, "question": question, "hint": hint,
-                "subtype": subtype, "min_insight": min_insight}
+    def _gap(question: str, hint: str, subtype: str = "architecture",
+             min_insight: str = "high", assumption: str = "") -> dict:
+        """`assumption` is optional and OMITTED when empty, never carried as "".
+
+        A gap whose answer no repo signal predicts has nothing to confirm, and shipping an
+        unrelated statement in that slot cost a paragraph of GAP_ASK_GUIDE teaching the model
+        to throw it away (the goal gap used to carry the repo's inferred PURPOSE, which answers
+        a different question). An empty string would be worse than absent: it renders as a
+        blank "Correct" option. Every call site passes keywords, so the reordering is safe."""
+        gap = {"question": question, "hint": hint,
+               "subtype": subtype, "min_insight": min_insight}
+        if assumption:
+            gap["assumption"] = assumption
+        return gap
 
     def _has_dep(*names: str) -> bool:
         return any(n in dep for n in names for dep in all_deps)
@@ -6679,10 +6704,10 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     name = sig["project_name"]
     user_rank = _INSIGHT_ORDER[insight]
 
-    # Goal — anyone can answer what *they* plan to do; irrelevant for repo authors
+    # Goal — anyone can answer what *they* plan to do; irrelevant for repo authors.
+    # No assumption: what the user intends here is the one thing no repo signal predicts.
     if user_rank < _INSIGHT_ORDER["high"]:
         gaps.append(_gap(
-            assumption=_infer_purpose(name, sig["readme_summary"]),
             question="What are you planning to do with this repo?",
             hint="e.g. evaluating it, learning the codebase, fixing a specific bug, integrating it into another project",
             subtype="architecture",
@@ -6691,7 +6716,7 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
 
     # Purpose — can never be inferred from code; first-timers can't answer it either
     gaps.append(_gap(
-        assumption=_infer_purpose(name, sig["readme_summary"]),
+        assumption=_infer_purpose(name),
         question="What does this repo do and who uses it?",
         hint=(
             f"e.g. what {name} is for and who uses it"
