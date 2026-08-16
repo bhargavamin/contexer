@@ -606,12 +606,41 @@ class TestOfferVariants:
         assert "never the assumption's own wording" in guide
 
     def test_correct_option_is_gated_on_the_assumption_answering_the_question(self):
-        """Most assumptions are scan observations that answer their gap. The goal gap's is the
-        repo's inferred purpose, which says nothing about what this user plans to do — offering
-        it as 'Correct' would store a restatement of the scan as the user's answer."""
+        """Most assumptions are scan observations that answer their gap. A gap no repo signal
+        can pre-answer now ships with no assumption at all, so the rule reduces to: no
+        assumption, no 'Correct' option."""
         guide = store.GAP_ASK_GUIDE
         assert "ONLY when that assumption actually answers the gap's question" in guide
-        assert "drop that option and ask the question" in guide
+        assert "no assumption" in guide
+
+    def test_guide_directs_the_model_to_read_the_enumerated_context_files(self):
+        """Docs shape the QUESTION, never the store. A rule file that already answers a gap
+        turns it from an open question into confirm-or-correct — and only the developer's
+        confirmed answer is stored, never the quoted line."""
+        guide = store.GAP_ASK_GUIDE
+        assert "`context_docs`" in guide, \
+            "must name the doc-only list, not existing_context_files — that one holds lockfiles" \
+            " and literal glob strings like '.eslintrc*' the model cannot read"
+        assert "confirm or correct" in guide
+        assert "never the quote" in guide
+
+    def test_guide_allows_exactly_one_added_question_the_contradiction(self):
+        """The no-added-questions rule and the doc-vs-measurement check collided: a
+        contradiction question is by definition not one of the returned gaps, so it IS an
+        addition. The guide must carve it out explicitly or the model picks a rule at random."""
+        guide = store.GAP_ASK_GUIDE
+        assert "ONE addition" in guide and "only this one" in guide
+        assert "`measured_conventions`" in guide, \
+            "the check is unexecutable unless the measurements ride the same payload"
+
+    def test_measured_conventions_ride_the_bootstrap_result(self, tmp_repo):
+        """bootstrap_apply mined these for gap suppression and threw them away; the guide's
+        contradiction check needs both sides in one payload."""
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        mined = [{"content": "Functions use type hints (61% of 556 functions)",
+                  "subtype": "convention", "tier": "medium"}]
+        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
+        assert result["measured_conventions"] == ["Functions use type hints (61% of 556 functions)"]
 
     def test_ask_shape_is_not_carried_by_the_session_start_injection(self, tmp_repo):
         """The guide is usable only once gaps exist, but this block is injected at every
@@ -895,7 +924,10 @@ class TestReactionMatrix:
                     assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
                     assert g["subtype"] in {"architecture", "constraint", "pattern", "convention"}, label
                     assert g["min_insight"] in {"low", "medium", "high"}, label
-                    assert g["assumption"] and g["hint"], label
+                    assert g["hint"], label
+                    # assumption is optional (the goal gap has none); an empty one would
+                    # render as a blank "Correct" option, so present means non-empty.
+                    assert g.get("assumption", "x"), label
 
     def test_every_advertised_option_has_a_handler(self, tmp_path, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")

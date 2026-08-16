@@ -4208,6 +4208,21 @@ def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
 # paths where no gap is ever asked. Single source: `/bootstrap` (bootstrap_command.md) and the
 # docs point at this field rather than restating it, so the rule cannot drift between copies.
 GAP_ASK_GUIDE = (
+    "First read the repo's own context docs — the result's `context_docs` names them (README,"
+    " CLAUDE.md, AGENTS.md, CONTRIBUTING.md, .claude/rules/*.md, docs/). Start with the"
+    " smallest; for a large file read its headings rather than the whole text. Where one"
+    " already answers a gap, do NOT ask that gap open-ended: quote the line and ask the"
+    " developer to confirm or correct it — recognition is cheaper for them than recall. Store"
+    " the confirmed answer, never the quote: a rule doc is EVIDENCE FOR A QUESTION, never a"
+    " decision, and an unconfirmed line from it must not reach the store."
+    " Those docs may otherwise only reshape or drop the gaps below — never mine them for extra"
+    " questions, or a thirty-line rules file becomes a thirty-question interview. ONE addition"
+    " is allowed, and only this one: if a doc CONTRADICTS a sentence in `measured_conventions`"
+    " (a doc demanding full type hints beside a measured '61% of 556 functions'), ask about"
+    " that single contradiction — both sides are evidence and only the developer can settle"
+    " which is the rule. Store that answer as a `convention`, and say in the same sentence that"
+    " it supersedes the measurement, so the developer can retire the stale one from"
+    " `contexer review`; do not silently leave both standing as equals. "
     "Ask these gaps ONE question at a time, never batched — each answer can remove later gaps"
     " (a docs-only purpose answer drops the tests/CI/deploy ones). With an interactive"
     " multiple-choice tool (Claude Code: AskUserQuestion), render each gap as one question:"
@@ -4216,9 +4231,9 @@ GAP_ASK_GUIDE = (
     " Offer a \"Correct\" option (label \"Correct\", description = the gap's `assumption`) ONLY"
     " when that assumption actually answers the gap's question — most scan observations do"
     " ('No CI/CD config found in this repo' answers 'Is there a build or deploy pipeline?')."
-    " When it does not — the goal gap's assumption is the repo's inferred PURPOSE, which says"
-    " nothing about what this user plans to do here — drop that option and ask the question"
-    " openly; never present an unrelated statement as the confirming answer."
+    " A gap carrying no assumption key at all has nothing to confirm — the goal gap is one,"
+    " since nothing in the repo predicts what this user intends to do here — so with no"
+    " assumption there is no Correct option: ask that question openly and never invent one."
     " In between, add at most two options ONLY if the gap's `hint` names distinct candidate"
     " answers; a hint that restates the question, or that lists one answer's parts"
     " ('e.g. GDPR, PCI-DSS, SOC2, HIPAA' is a single answer), yields none and the question"
@@ -4396,8 +4411,10 @@ def _build_bootstrap_context(repo_path: str) -> list[str]:
         " this repo does, do NOT ask them the purpose gap question. Read the README and code,"
         " answer their question with your own summary, then ask 'Did I get that right —"
         " anything to correct?' and store the confirmed summary as the purpose.",
-        "For every gap question, lead with its assumption and ask the user to confirm or"
-        " correct it — never ask open-ended questions the scan can already half-answer."
+        "Where a gap carries an assumption, lead with it and ask the user to confirm or correct"
+        " it rather than asking open-ended what the scan can already half-answer — but a gap"
+        " may legitimately carry NO assumption (nothing in a repo predicts what the user plans"
+        " to do in it), and there you must ask openly and never invent one."
         " bootstrap_context's result carries a `how_to_ask` field with the exact question shape"
         " whenever it returns gaps; follow it then. It is deliberately NOT repeated here: this"
         " block is injected on every context-less session start, including the skip path, where"
@@ -6271,26 +6288,79 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     return "\n".join(lines)
 
 
-def _infer_purpose(name: str, readme_summary: str) -> str:
-    """Derive a concrete purpose assumption from project name and README first line."""
-    if readme_summary:
-        return readme_summary
-    if not name:
-        return "Purpose not yet documented"
-    n = name.lower()
-    if any(w in n for w in ["api", "server", "service", "backend"]):
-        return f"Backend API or service (\"{name}\")"
-    if any(w in n for w in ["cli", "tool", "cmd"]):
-        return f"CLI tool (\"{name}\")"
-    if any(w in n for w in ["bot", "agent"]):
-        return f"Bot or agent (\"{name}\")"
-    if any(w in n for w in ["worker", "job", "queue", "task"]):
-        return f"Background worker or job processor (\"{name}\")"
-    if any(w in n for w in ["web", "app", "ui", "front", "dashboard"]):
-        return f"Web app or frontend (\"{name}\")"
-    if any(w in n for w in ["lib", "sdk", "package", "plugin"]):
-        return f"Library or SDK (\"{name}\")"
-    return f"\"{name}\" — type not obvious from name alone"
+_GENERATED_BANNER_LINES = 5   # a banner sits at the very top or it is not a banner
+_GENERATED_BANNER_CHARS = 80  # longer than this is a sentence, not a banner
+_GENERATED_MARKERS = ("auto-generated", "autogenerated", "@generated", "do not edit")
+
+
+def _is_generated_doc(path: Path) -> bool:
+    """True for a doc a tool generated, identified by a BANNER in its first few lines.
+
+    Deliberately narrow, because the two failure modes are not symmetric: enumerating a
+    generated doc costs the model one skipped read, while excluding a human-authored one
+    silently loses evidence it would have asked the developer to confirm. So the marker must
+    look like a machine banner — a SHORT line (<= 80 chars once comment leaders are stripped)
+    within the first 5 lines — not merely appear somewhere in the header.
+
+    That distinction is the whole point: a human rules file discussing generated code uses the
+    same words ("the files under `src/proto` are auto-generated; do not edit them manually"),
+    and matching anywhere in the first 400 chars dropped exactly the "never hand-edit the
+    protos" rule that most deserves a confirm-or-correct question.
+
+    Residual, accepted: a rules file whose opening lines contain a short standalone sentence
+    like "Protos are auto-generated." is still read as generated. Tightening further would
+    need to distinguish a banner from a terse rule by meaning rather than shape, and the cost
+    of being wrong in this direction is one unread file — against re-offering Contexer's own
+    stale 36KB mirror of CLAUDE.md back to the developer as evidence to confirm.
+
+    Fail-soft: an unreadable file is treated as NOT generated, i.e. toward keeping it."""
+    try:
+        head = path.read_text(encoding="utf-8", errors="ignore")[:1000]
+    except Exception:
+        return False
+    for raw in head.splitlines()[:_GENERATED_BANNER_LINES]:
+        line = raw.strip().lstrip("#<!-*/;").strip()
+        if not line or len(line) > _GENERATED_BANNER_CHARS:
+            continue
+        low = line.lower()
+        if any(m in low for m in _GENERATED_MARKERS):
+            return True
+    return False
+
+
+_PURPOSE_KINDS = (
+    ({"api", "server", "service", "backend"}, "Backend API or service"),
+    ({"cli", "tool", "cmd"}, "CLI tool"),
+    ({"bot", "agent"}, "Bot or agent"),
+    ({"worker", "job", "queue", "task"}, "Background worker or job processor"),
+    ({"web", "webapp", "app", "apps", "ui", "front", "frontend", "dashboard"},
+     "Web app or frontend"),
+    ({"lib", "library", "sdk", "package", "plugin"}, "Library or SDK"),
+)
+
+
+def _infer_purpose(name: str) -> str:
+    """Purpose assumption from the project name, or "" when the name says nothing.
+
+    Returns "" — never a placeholder — because `_gap` omits an EMPTY assumption but keeps a
+    truthy one, and GAP_ASK_GUIDE renders whatever survives as the "Correct" option for "What
+    does this repo do and who uses it?". The old fallbacks ("Purpose not yet documented",
+    '"x" — type not obvious from name alone') are non-answers, so a developer clicking Correct
+    stored a non-answer as the repo's ratified purpose. While README prose was still consulted
+    those fired only on a repo with no README/CLAUDE.md/docs at all; once it was deleted they
+    became the common case, which is how this shipped.
+
+    Matching is on NAME TOKENS, never substrings. `"api" in "rapid-sync"` is true (r-APId), so
+    a sync tool was labelled a backend API; "webhook-processor" hit "web" and became a
+    frontend. Substring matching cannot be made safe here, and with README prose gone there is
+    no second opinion to correct it."""
+    tokens = {t for t in re.split(r"[^a-z0-9]+", name.lower()) if t}
+    if not tokens:
+        return ""
+    for words, label in _PURPOSE_KINDS:
+        if tokens & words:
+            return f"{label} (\"{name}\")"
+    return ""
 
 
 def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None) -> dict:
@@ -6308,12 +6378,12 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     existing = [e for e in data.get("entries", []) if e["type"] == "decision"]
     inferred: list[str] = []
     found_files: list[str] = []
+    context_docs: list[str] = []   # the READABLE doc subset of found_files (see _keep_doc)
     all_deps: set[str] = set()
 
     # signals used only for question generation — not stored as inferred facts
     sig: dict = {
         "project_name": "",
-        "readme_summary": "",
         "has_tests": False,
         "has_ci": False,
         "has_container": False,
@@ -6334,10 +6404,20 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         if _is_novel(fact, existing + proxy):
             inferred.append(fact)
 
-    def _gap(assumption: str, question: str, hint: str, subtype: str = "architecture",
-             min_insight: str = "high") -> dict:
-        return {"assumption": assumption, "question": question, "hint": hint,
-                "subtype": subtype, "min_insight": min_insight}
+    def _gap(question: str, hint: str, subtype: str = "architecture",
+             min_insight: str = "high", assumption: str = "") -> dict:
+        """`assumption` is optional and OMITTED when empty, never carried as "".
+
+        A gap whose answer no repo signal predicts has nothing to confirm, and shipping an
+        unrelated statement in that slot cost a paragraph of GAP_ASK_GUIDE teaching the model
+        to throw it away (the goal gap used to carry the repo's inferred PURPOSE, which answers
+        a different question). An empty string would be worse than absent: it renders as a
+        blank "Correct" option. Every call site passes keywords, so the reordering is safe."""
+        gap = {"question": question, "hint": hint,
+               "subtype": subtype, "min_insight": min_insight}
+        if assumption:
+            gap["assumption"] = assumption
+        return gap
 
     def _has_dep(*names: str) -> bool:
         return any(n in dep for n in names for dep in all_deps)
@@ -6577,54 +6657,85 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
             layer_str = ", ".join(layers[:3]) + ("..." if len(layers) > 3 else "")
             _add(f"Architecture: layered structure detected (src/{layer_str})")
 
-    # --- README summary (for purpose inference) ---
-    readme = root / "README.md"
-    if readme.exists():
-        found_files.append("README.md")
-        try:
-            text = readme.read_text(encoding="utf-8", errors="ignore")
-            lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
-            if lines:
-                sig["readme_summary"] = lines[0][:120]
-            if any(w in text.lower()[:2000] for w in _SIMPLE_REPO_SIGNALS):
-                sig["is_simple_repo"] = True
+    # --- Context docs: enumerated for the model; SOME also feed the simple-repo keyword ---
+    # These used to also yield `readme_summary` — the first non-heading line, offered to the
+    # developer as the repo's inferred PURPOSE. That line is as often markup as a tagline: on
+    # contexer's own README it evaluated to '<p align="center">', and a length filter cannot
+    # save it (badge lines run 60-70 chars). The model reads these files itself (GAP_ASK_GUIDE
+    # names them), so a deterministic first-line grab could only be a worse second opinion.
+    #
+    # Second element is the keyword-scan budget in chars; 0 means ENUMERATED ONLY, never
+    # scanned. The distinction is carried in the data rather than in two near-identical loops,
+    # because it is a real invariant: _SIMPLE_REPO_SIGNALS is an UNANCHORED substring test, so
+    # a CONTRIBUTING.md reading "see the example below" would set is_simple_repo and silently
+    # suppress the tests/CI/deploy/exclusions gaps on a real production service. The four
+    # scanned entries are grandfathered, not endorsed — they carry the same risk (a CLAUDE.md
+    # opening "For example, run `make deploy`" trips it) and narrowing that test is a separate,
+    # behaviour-changing decision, deliberately not folded into this change.
+    _CONTEXT_DOC_FILES = (
+        ("README.md", 2000),
+        ("CLAUDE.md", 3000),
+        (".cursorrules", 3000),
+        (".windsurfrules", 3000),
+        ("AGENTS.md", 0),
+        ("CONTRIBUTING.md", 0),
+        ("GEMINI.md", 0),
+        (".github/copilot-instructions.md", 0),
+    )
+    _MAX_RULE_DOCS = 5  # work bound on a rules dir, same spirit as the docs/ cap
+
+    def _keep_doc(rel: str, budget: int, path: Path) -> None:
+        found_files.append(rel)
+        context_docs.append(rel)
+        if budget <= 0:
+            return
+        try:  # slice BEFORE lowering: a 200KB README should not be copied twice to read 2KB
+            head = path.read_text(encoding="utf-8", errors="ignore")[:budget].lower()
         except Exception:
-            pass
-    # CLAUDE.md / .cursorrules / docs/ — read for purpose hints before asking questions
-    _CONTEXT_FILES = ["CLAUDE.md", ".cursorrules", ".windsurfrules"]
-    for cf in _CONTEXT_FILES:
-        cf_path = root / cf
-        if cf_path.exists():
-            found_files.append(cf)
-            try:
-                cf_text = cf_path.read_text(encoding="utf-8", errors="ignore")[:3000]
-                # Extract first meaningful non-heading line as summary if README had none
-                if not sig["readme_summary"]:
-                    lines = [line.strip() for line in cf_text.splitlines()
-                             if line.strip() and not line.startswith("#") and len(line.strip()) > 20]
-                    if lines:
-                        sig["readme_summary"] = lines[0][:120]
-                if any(w in cf_text.lower() for w in _SIMPLE_REPO_SIGNALS):
-                    sig["is_simple_repo"] = True
-            except Exception:
-                pass
+            return
+        if any(w in head for w in _SIMPLE_REPO_SIGNALS):
+            sig["is_simple_repo"] = True
+
+    for rel, budget in _CONTEXT_DOC_FILES:
+        path = root / rel
+        if path.exists():
+            _keep_doc(rel, budget, path)
 
     docs_dir = root / "docs"
     if docs_dir.is_dir():
         found_files.append("docs/")
-        # Scan first doc file for purpose hints
+        context_docs.append("docs/")
+        # Sampled for the simple-repo keyword only. WHICH three still matters — this is the
+        # only signal those files feed — so the sort stays deterministic; what changed is that
+        # no summary is extracted, so no ordering heuristic can improve the sample. The model
+        # is pointed at the directory itself and lists what it needs.
         for doc in sorted(docs_dir.glob("*.md"))[:3]:
             try:
                 doc_text = doc.read_text(encoding="utf-8", errors="ignore")[:1500]
-                if not sig["readme_summary"]:
-                    lines = [line.strip() for line in doc_text.splitlines()
-                             if line.strip() and not line.startswith("#") and len(line.strip()) > 20]
-                    if lines:
-                        sig["readme_summary"] = lines[0][:120]
                 if any(w in doc_text.lower() for w in _SIMPLE_REPO_SIGNALS):
                     sig["is_simple_repo"] = True
             except Exception:
                 pass
+
+    # .claude/rules/*.md is normally developer-authored, but Contexer writes its OWN
+    # auto-generated mirror there. Offering that back as evidence to confirm would round-trip
+    # Contexer's own (often stale) output in as a human-ratified decision — the loop this
+    # whole design exists to avoid — so a generated file is skipped by its own header.
+    rules_dir = root / ".claude" / "rules"
+    if rules_dir.is_dir():
+        try:
+            rules = [r for r in sorted(rules_dir.glob("*.md")) if not _is_generated_doc(r)]
+            for rule in rules[:_MAX_RULE_DOCS]:
+                found_files.append(f".claude/rules/{rule.name}")
+                context_docs.append(f".claude/rules/{rule.name}")
+            if len(rules) > _MAX_RULE_DOCS:
+                # Never truncate silently: every other capped surface here says "showing N of
+                # M", and a model told these ARE the context files would read a cut list as
+                # complete.
+                context_docs.append(
+                    f".claude/rules/ (showing {_MAX_RULE_DOCS} of {len(rules)}; read the rest on request)")
+        except OSError:
+            pass
 
     # Repos with no build/package config and no inferred stack facts are docs-only
     has_code_config = any([
@@ -6679,10 +6790,10 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
     name = sig["project_name"]
     user_rank = _INSIGHT_ORDER[insight]
 
-    # Goal — anyone can answer what *they* plan to do; irrelevant for repo authors
+    # Goal — anyone can answer what *they* plan to do; irrelevant for repo authors.
+    # No assumption: what the user intends here is the one thing no repo signal predicts.
     if user_rank < _INSIGHT_ORDER["high"]:
         gaps.append(_gap(
-            assumption=_infer_purpose(name, sig["readme_summary"]),
             question="What are you planning to do with this repo?",
             hint="e.g. evaluating it, learning the codebase, fixing a specific bug, integrating it into another project",
             subtype="architecture",
@@ -6691,7 +6802,7 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
 
     # Purpose — can never be inferred from code; first-timers can't answer it either
     gaps.append(_gap(
-        assumption=_infer_purpose(name, sig["readme_summary"]),
+        assumption=_infer_purpose(name),
         question="What does this repo do and who uses it?",
         hint=(
             f"e.g. what {name} is for and who uses it"
@@ -6841,6 +6952,17 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
         "inferred": inferred,
         "gaps": gaps,
         "existing_context_files": found_files,
+        # The readable doc subset. `existing_context_files` is every file the scan TOUCHED —
+        # lockfiles, CI dirs, and literal glob strings like ".eslintrc*" that are not paths at
+        # all — so pointing the model at it to READ would cost failed reads and wasted tokens.
+        "context_docs": context_docs,
+        # The measured conventions, so GAP_ASK_GUIDE's doc-vs-measurement contradiction check
+        # has both sides in one payload. bootstrap_apply already computes these and passes them
+        # in for gap suppression, but returned only its stored/pending counts — leaving the
+        # instruction to compare against "a measured convention in this same result"
+        # unexecutable, since no measurement was in the result. Empty on a direct
+        # bootstrap_scan call (apply=False), which mines nothing.
+        "measured_conventions": [m.get("content", "") for m in mined],
         "insight": insight,
         "insight_source": insight_source,
         "decisive": decisive,

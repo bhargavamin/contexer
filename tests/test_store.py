@@ -586,12 +586,16 @@ class TestBootstrapScan:
     # ── gap structure ──────────────────────────────────────────────────────────
 
     def test_gaps_are_dicts_with_required_keys(self, tmp_repo):
+        """`assumption` is optional — a gap no repo signal can pre-answer omits it rather
+        than shipping an unrelated statement the guide then has to teach the model to
+        discard. When present it must be non-empty."""
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.bootstrap_scan(tmp_repo, insight="high")
         for gap in result["gaps"]:
-            assert "assumption" in gap
             assert "question" in gap
             assert "hint" in gap
+            if "assumption" in gap:
+                assert gap["assumption"]
 
     def test_always_asks_primary_purpose(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -627,12 +631,145 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo, insight="high")
         assert any("constraint" in q.lower() for q in _gap_questions(result))
 
-    def test_purpose_assumption_derived_from_readme(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "README.md").write_text("# MyApp\nA payment processing service for e-commerce.\n")
+    def test_purpose_assumption_ignores_readme_prose(self, tmp_repo):
+        """The README's first non-heading line is as often markup as a tagline — on this very
+        repo it is '<p align="center">', which shipped as the purpose the developer was asked
+        to confirm. Name-derived inference is deterministic and never junk; the model reads the
+        README itself (STEP 0 and the purpose-question rule both tell it to)."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text('[project]\nname = "my-api-service"\n', encoding="utf-8")
+        (root / "README.md").write_text('<p align="center"><img src="logo.png"></p>\n', encoding="utf-8")
         result = store.bootstrap_scan(tmp_repo, insight="high")
         purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
-        assert "payment" in purpose_gap["assumption"].lower()
+        assert "<p align" not in purpose_gap["assumption"]
+        assert "api" in purpose_gap["assumption"].lower() or "service" in purpose_gap["assumption"].lower()
+
+    def test_goal_gap_carries_no_assumption(self, tmp_repo):
+        """The goal gap asks what the USER plans to do here; the repo's inferred purpose says
+        nothing about that. It shipped anyway, and GAP_ASK_GUIDE spent a paragraph teaching the
+        model to drop it — delete the field, delete the workaround."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text('[project]\nname = "my-api-service"\n', encoding="utf-8")
+        result = store.bootstrap_scan(tmp_repo, insight="low")
+        goal_gap = next(g for g in result["gaps"] if "planning to do" in g["question"].lower())
+        assert "assumption" not in goal_gap
+
+    # ── context-doc enumeration (docs shape the QUESTION, never the store) ─────
+
+    def test_agent_and_rule_files_are_enumerated(self, tmp_repo):
+        """AGENTS.md, CONTRIBUTING.md and .claude/rules/*.md carry the intent the miner cannot
+        measure, and were invisible to bootstrap entirely. The model can only read what the
+        scan names, so enumeration is the whole mechanism."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "AGENTS.md").write_text("# Agents\nNever edit generated/.\n", encoding="utf-8")
+        (root / "CONTRIBUTING.md").write_text("# Contributing\nTrunk-based, squash merges.\n", encoding="utf-8")
+        (root / ".claude" / "rules").mkdir(parents=True)
+        (root / ".claude" / "rules" / "style.md").write_text("Always type-annotate.\n", encoding="utf-8")
+        found = store.bootstrap_scan(tmp_repo, insight="high")["existing_context_files"]
+        assert "AGENTS.md" in found
+        assert "CONTRIBUTING.md" in found
+        assert ".claude/rules/style.md" in found
+
+    def test_a_non_answer_purpose_yields_no_assumption(self, tmp_repo):
+        """_infer_purpose's fallbacks ("Purpose not yet documented", "type not obvious from
+        name alone") are non-answers, but they are TRUTHY, so _gap's omit-when-empty rule let
+        them through and GAP_ASK_GUIDE rendered them as the "Correct" option for 'What does
+        this repo do?'. Clicking Correct then stored a non-answer as the ratified purpose.
+        Before readme_summary was deleted these fired only on repos with no README at all;
+        afterwards they became the common case."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text('[project]\nname = "contexer"\n', encoding="utf-8")
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
+        assert "assumption" not in purpose_gap
+
+    def test_purpose_inference_matches_name_tokens_not_substrings(self, tmp_repo):
+        """Unanchored `in` matching misreads names: 'rapid-sync' contains 'api', 'webhook'
+        contains 'web', and 'task-manager-ui' hit the worker branch before the ui one. Each
+        was offered to the developer as 'Correct'."""
+        assert store._infer_purpose("rapid-sync") == ""
+        assert store._infer_purpose("webhook-processor") == ""
+        assert "api" in store._infer_purpose("orders-api").lower()
+        assert "cli" in store._infer_purpose("deploy-cli").lower()
+
+    def test_gaps_that_can_be_pre_answered_still_carry_an_assumption(self, tmp_repo):
+        """Paired with test_goal_gap_carries_no_assumption: relaxing both invariants to
+        `assumption` is optional would otherwise pass on a gaps list where EVERY assumption
+        vanished, silently deleting the Correct option from the whole interview."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text('[project]\nname = "api"\n', encoding="utf-8")
+        gaps = store.bootstrap_scan(tmp_repo, insight="high")["gaps"]
+        deploy_gap = next(g for g in gaps if "where does this run" in g["question"].lower())
+        assert deploy_gap["assumption"]
+
+    def test_contexer_own_generated_rules_file_is_not_offered_as_evidence(self, tmp_repo):
+        """.claude/rules/<x>.md is normally developer-authored, but Contexer writes its OWN
+        auto-generated mirror there (36KB on this repo, header 'Auto-generated. Do not edit
+        manually'). Enumerating it tells the model to quote Contexer's own stale output back
+        to the developer as evidence to confirm — a decision round-tripping in as if human."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        rules = root / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "contexer.md").write_text(
+            "# Contexer — Live Project Context\n# Auto-generated. Do not edit manually.\n",
+            encoding="utf-8")
+        (rules / "team.md").write_text("Always squash merge.\n", encoding="utf-8")
+        docs = store.bootstrap_scan(tmp_repo, insight="high")["context_docs"]
+        assert ".claude/rules/team.md" in docs
+        assert ".claude/rules/contexer.md" not in docs
+
+    def test_a_rule_doc_about_generated_files_is_still_evidence(self, tmp_repo):
+        """A human-authored rules file that DISCUSSES generated code says the same words a
+        generated banner does. Matching them anywhere in the header dropped the doc — and a
+        "never hand-edit the protos" rule is exactly the kind worth confirming. A banner is a
+        SHORT line in the first few lines; a rule is a sentence."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        rules = root / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "protos.md").write_text(
+            "# Protobuf rules\n\n"
+            "The files under `src/proto` are auto-generated by `make proto`; do not edit them"
+            " manually. Regenerate instead, and never hand-patch the descriptors.\n",
+            encoding="utf-8")
+        (rules / "gen.md").write_text(
+            "# Contexer — Live Project Context\n# Auto-generated. Do not edit manually.\n",
+            encoding="utf-8")
+        docs = store.bootstrap_scan(tmp_repo, insight="high")["context_docs"]
+        assert ".claude/rules/protos.md" in docs, "a rule ABOUT generated files is still a rule"
+        assert ".claude/rules/gen.md" not in docs, "a generated banner is still excluded"
+
+    def test_context_docs_excludes_build_files_and_glob_patterns(self, tmp_repo):
+        """`existing_context_files` is the scan's found-files list — lockfiles, CI dirs, and
+        literal glob strings like '.eslintrc*' that are not readable paths. The guide sends the
+        model to READ what it names, so it gets its own doc-only list."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text('[project]\nname = "api"\n', encoding="utf-8")
+        (root / "uv.lock").write_text("", encoding="utf-8")
+        (root / ".prettierrc").write_text("{}", encoding="utf-8")
+        (root / "README.md").write_text("# api\n", encoding="utf-8")
+        result = store.bootstrap_scan(tmp_repo, insight="high")
+        assert "README.md" in result["context_docs"]
+        for noise in ("uv.lock", "pyproject.toml", ".prettierrc*", ".github/workflows/"):
+            assert noise not in result["context_docs"]
+
+    def test_enumerated_rule_file_does_not_flag_a_simple_repo(self, tmp_repo):
+        """Regression guard, not a red test: enumeration must stay separate from the
+        _SIMPLE_REPO_SIGNALS keyword OR. Feeding these files into it would let a CONTRIBUTING.md
+        that says 'for example' suppress the infra gaps on a real service."""
+        root = Path(tmp_repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text('[project]\nname = "api"\n', encoding="utf-8")
+        (root / "CONTRIBUTING.md").write_text("# Contributing\nSee the example below.\n", encoding="utf-8")
+        questions = [g["question"].lower() for g in store.bootstrap_scan(tmp_repo, insight="high")["gaps"]]
+        assert any("where does this run" in q for q in questions)
 
     def test_purpose_assumption_inferred_from_name(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -861,14 +998,23 @@ class TestBootstrapScan:
         assert any("where does this run" in q for q in questions)
         assert any("automated testing" in q for q in questions)
 
-    def test_claude_md_provides_readme_summary_fallback(self, tmp_repo):
+    def test_claude_md_still_supplies_the_simple_repo_signal(self, tmp_repo):
+        """The summary half of the CLAUDE.md read is gone with readme_summary, but the read
+        itself still earns its place: the keyword scan that suppresses infra gaps on a
+        tutorial/portfolio repo runs off the same text.
+
+        This pins CURRENT behaviour, not an endorsement. _SIMPLE_REPO_SIGNALS is an unanchored
+        substring test, so a production repo whose CLAUDE.md opens "For example, run `make
+        deploy`" also sets is_simple_repo and silently loses its tests/CI/deploy/exclusions
+        gaps. Rule docs were kept out of that scan for exactly this reason; narrowing it for
+        the four grandfathered entries is a separate, behaviour-changing decision."""
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
         (Path(tmp_repo) / "CLAUDE.md").write_text(
-            "# Project\nThis service handles payment processing for e-commerce.\n"
+            "# Project\nThis is a tutorial repo built while learning Python.\n", encoding="utf-8"
         )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
-        assert "payment" in purpose_gap["assumption"].lower()
+        questions = [g["question"].lower() for g in store.bootstrap_scan(tmp_repo, insight="high")["gaps"]]
+        assert not any("where does this run" in q for q in questions)
 
     # ── mined-suppression (bootstrap redesign) ─────────────────────────────────
 
