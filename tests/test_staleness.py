@@ -615,3 +615,43 @@ def test_fast_git_never_trips_the_budget(repo):
         rows = dict(cli._review_metadata(repo, entry, budget))
     assert budget["skipped"] is False
     assert "Anchor" in rows
+
+
+def test_review_screen_makes_at_most_two_git_calls(repo, monkeypatch):
+    """Decision 9b71289b requires any expansion of the git-in-render exception to be
+    re-measured before shipping. Measured on this repo's real store: `git log -1` costs
+    p50 12.3ms / p95 14.7ms — the SAME as the sanctioned `git diff --name-only` (12.4ms) —
+    so a review screen's worst case is ~29ms, imperceptible against a keypress.
+
+    Pinned by CALL COUNT rather than wall clock deliberately: git subprocess timing is
+    exactly what this repo's fail-soft 2s timeouts exist for, so a latency assertion here
+    would flake under CI load. Count is deterministic and catches the real regressions —
+    a third git call per screen, or a broken memo."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+
+    calls = []
+    real = store._git
+    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
+
+    cli._review_metadata(repo, entry, cli._review_git_budget())
+    assert len(calls) <= 2, f"one review screen must cost at most 2 git calls, got {calls}"
+
+
+def test_memoised_queue_costs_one_lookup_per_distinct_anchor(repo, monkeypatch):
+    """A queue captured in one session shares an anchor_commit, so N decisions must not
+    cost N lookups — that is what makes the uncapped loop safe."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+
+    calls = []
+    real = store._git
+    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
+
+    budget = cli._review_git_budget()
+    for _ in range(25):                       # 25 decisions, one shared anchor
+        cli._review_metadata(repo, entry, budget)
+    assert len(calls) <= 2, f"25 same-anchor screens must reuse the memo, got {len(calls)} calls"
+    assert budget["skipped"] is False
