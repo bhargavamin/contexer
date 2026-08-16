@@ -238,90 +238,85 @@ def test_resolve_conflict_no_repo(monkeypatch):
     assert server.resolve_conflict("ab12cd34", "update", "") == "Skipped — repo path not detected."
 
 
-def test_approve_decision_bulk_ids_and_all(monkeypatch, tmp_path):
+# ── bulk approval is refused outright ─────────────────────────────────────────
+# A blanket approve rubber-stamps whatever happens to be in the queue, and the queue is
+# exactly where mis-captured decisions land. _apply_approval stamps approved_by="human"
+# on anything it approves, which makes even an ai-sourced entry guard-trusted at commit
+# time — so a bulk gesture could silently promote a misfire to trusted standing context.
+# Every action is refused, not just approve: 'ignore' in bulk discards decisions the
+# developer never actually read.
+
+@pytest.mark.parametrize("target", ["all", "ALL", "*", " all "])
+def test_approve_decision_all_is_refused(monkeypatch, tmp_path, target):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
     repo = "/bulk/repo"
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
-    for c in ("Never commit secrets", "Never log PII", "Never disable TLS verification"):
+    for c in ("Never commit secrets", "Never log PII"):
+        store.update_decision(repo, c, "s", "constraint")
+
+    out = server.approve_decision(target, "approve")
+    assert "one at a time" in out
+    assert len(store.get_pending_decisions(repo)) == 2  # nothing was touched
+
+
+def test_approve_decision_comma_list_is_refused(monkeypatch, tmp_path):
+    from contexer import store
+    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    repo = "/comma/repo"
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    for c in ("Never commit secrets", "Never log PII"):
         store.update_decision(repo, c, "s", "constraint")
     ids = [d["id"][:8] for d in store.get_pending_decisions(repo)]
-    # comma-separated bulk: approve the first two
+
     out = server.approve_decision(f"{ids[0]},{ids[1]}", "approve")
-    assert "Applied 'approve' to 2 of 2" in out
-    assert len(store.get_pending_decisions(repo)) == 1
-    # "all" clears the remainder in one gesture
-    server.approve_decision("all", "approve")
-    assert store.get_pending_decisions(repo) == []
+    assert "one at a time" in out
+    assert len(store.get_pending_decisions(repo)) == 2  # nothing was touched
 
 
-def test_approve_all_caps_to_displayed_never_approves_unseen(monkeypatch, tmp_path):
-    # Greptile #1: 'all' must only act on what review_pending SHOWED (the display cap), never
-    # trust decisions beyond the cap that the developer never saw.
+def test_bulk_refusal_covers_ignore_too(monkeypatch, tmp_path):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
-    repo = "/cap/repo"
+    repo = "/ignorebulk/repo"
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
-    data = store._load(repo)
-    for i in range(store._FILTERED_DISPLAY + 2):  # 27 pending, cap is 25
-        data["entries"].append(store._new_decision_entry(
-            f"Constraint {i} distinct text {i}", "s", "constraint", status="pending_approval"))
-    store._save(repo, data)
+    store.update_decision(repo, "Never commit secrets", "s", "constraint")
 
-    out = server.approve_decision("all", "approve")
-    assert f"to {store._FILTERED_DISPLAY} of {store._FILTERED_DISPLAY}" in out
-    assert "2 more pending" in out
-    assert len(store.get_pending_decisions(repo)) == 2  # the 2 unseen stay pending
+    out = server.approve_decision("all", "ignore")
+    assert "one at a time" in out
+    assert len(store.get_pending_decisions(repo)) == 1
 
 
-def test_approve_decision_bulk_reports_failures(monkeypatch, tmp_path):
-    # Greptile #2: a stale/invalid id in a bulk call must not read as success.
+def test_approve_decision_single_id_still_works(monkeypatch, tmp_path):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
-    repo = "/fail/repo"
+    repo = "/single/repo"
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
     _ok, eid = store.update_decision(repo, "Never commit secrets", "s", "constraint")
 
-    out = server.approve_decision(f"{eid[:8]},bogus99", "approve")
-    assert "Applied 'approve' to 1 of 2 decision(s) (1 failed" in out
-    assert "not found" in out.lower()
+    server.approve_decision(eid[:8], "approve")
+    assert store.get_pending_decisions(repo) == []
 
 
-def test_approve_decision_bulk_edit_rejected(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
-    assert "Bulk 'edit' isn't supported" in server.approve_decision("a,b", "edit", content="x")
+def test_store_no_longer_exposes_bulk_approval():
+    """The bulk engine is gone, not merely unrouted — nothing can call it back into life."""
+    from contexer import store
+    assert not hasattr(store, "approve_decisions")
 
 
-def test_approve_decision_all_nothing_pending(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(server.store, "get_pending_decisions", lambda r: [])
-    assert server.approve_decision("all", "approve") == "Nothing pending review."
-
-
-def test_approve_decision_all_with_source_files_raises_before_bulk_route(monkeypatch):
-    # M7a: store.approve_decisions has no source_files param and would silently drop
-    # the anchor, so server.approve_decision must reject an "all" target carrying
-    # source_files BEFORE ever routing to the bulk path.
+@pytest.mark.parametrize("target", ["all", "*", "id1,id2"])
+def test_multi_target_with_source_files_raises_not_refusal_string(monkeypatch, target):
+    """A multi-target carrying source_files is caller misuse of the API, so it keeps RAISING
+    rather than returning the developer-facing bulk-refusal text — and it must never reach
+    the store."""
     monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
 
     def _boom(*a, **k):
-        raise AssertionError("must not route to store.approve_decisions")
-    monkeypatch.setattr(server.store, "approve_decisions", _boom)
+        raise AssertionError("must not reach the store")
+    monkeypatch.setattr(server.store, "approve_decision", _boom)
     monkeypatch.setattr(server.store, "get_pending_decisions", _boom)
 
     with pytest.raises(ValueError, match="single decision id"):
-        server.approve_decision("all", "approve", source_files=["a.py"])
-
-
-def test_approve_decision_comma_list_with_source_files_raises_before_bulk_route(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
-
-    def _boom(*a, **k):
-        raise AssertionError("must not route to store.approve_decisions")
-    monkeypatch.setattr(server.store, "approve_decisions", _boom)
-
-    with pytest.raises(ValueError, match="single decision id"):
-        server.approve_decision("id1,id2", "approve", source_files=["a.py"])
+        server.approve_decision(target, "approve", source_files=["a.py"])
 
 
 def test_list_shareable_returns_list(monkeypatch):

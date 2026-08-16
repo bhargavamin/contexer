@@ -7,6 +7,21 @@ from contexer import store
 
 SESSION_ID = str(uuid.uuid4())
 
+# Bulk approval is refused rather than supported. Every approve stamps approved_by="human",
+# which makes even an ai-sourced decision guard-trusted at commit time — so one blanket
+# gesture could promote a mis-captured decision into trusted standing context that injects
+# into every future session. 'ignore' is refused for the mirror reason: it would discard
+# decisions the developer never actually read. The queue is where misfires land, so it is
+# precisely the place a shortcut must not exist.
+_BULK_REFUSAL = (
+    "Bulk actions aren't supported — act on decisions one at a time, by id.\n"
+    "A blanket approve would rubber-stamp whatever is in the queue, and the queue is exactly "
+    "where a mis-captured decision lands; approving one marks it developer-approved, which "
+    "also makes it trusted by the commit-time guard.\n"
+    "Call review_pending, show each decision to the developer, and pass their answer as a "
+    'single id: approve_decision(entry_id="<id>", action="approve|edit|ignore|skip").'
+)
+
 # Server-level instructions travel with the MCP server itself: the host surfaces them to the
 # model on initialize (Claude Code injects them under "MCP Server Instructions"), so this guidance
 # applies in EVERY repo and session with no per-project CLAUDE.md required. This is the universal
@@ -113,10 +128,12 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
     """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review — or
     retire an already-trusted (approved/suggested) decision with 'ignore'.
 
-    entry_id: a decision id (full or 8-char prefix); a comma-separated list to act on several
-              at once ("id1,id2,id3"); or "all" (or "*") to act on EVERY pending decision — so
-              the developer can clear the whole backlog in one gesture after reviewing ("all"
-              only reaches pending decisions, not active ones — ignore those by id).
+    entry_id: ONE decision id (full or 8-char prefix). Bulk targets are deliberately not
+              supported — no "all", no "*", no comma-separated list. Each decision must be
+              read and acted on individually: approving in bulk rubber-stamps whatever is in
+              the queue, and the queue is exactly where a mis-captured decision lands. Call
+              review_pending, surface each decision to the developer, and act on their answer
+              one id at a time.
     action: 'approve' - accept (a Suggested Update is promoted to a new revision, history kept)
             | 'edit' - correct and approve | 'skip' - keep pending for later
             | 'dismiss' - discard a Suggested Update, keep the current revision
@@ -131,42 +148,17 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
     resolved = store._resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    if source_files and (entry_id.strip().lower() in ("all", "*") or "," in entry_id):
+    target = entry_id.strip()
+    # Kept as a raise (not the refusal string below): passing source_files with a multi-target
+    # is caller misuse of the API, not a developer gesture to talk out of.
+    if source_files and (target.lower() in ("all", "*") or "," in target):
         raise ValueError("source_files requires a single decision id")
-    hidden = 0
-    if entry_id.strip().lower() in ("all", "*"):
-        pending = store.get_pending_decisions(resolved)
-        # Only act on decisions that review_pending actually SHOWED (its display cap). Approving
-        # beyond the cap would trust decisions the developer never saw — so "all" clears the shown
-        # set and reports the remainder rather than silently approving unseen content.
-        shown = pending[:store._FILTERED_DISPLAY]
-        ids = [d["id"] for d in shown]
-        hidden = len(pending) - len(shown)
-        if not ids:
-            return "Nothing pending review."
-    else:
-        ids = [i.strip() for i in entry_id.split(",") if i.strip()]
-    if not ids:
+    if target.lower() in ("all", "*") or "," in target:
+        return _BULK_REFUSAL
+    if not target:
         return "No decision id given."
-    if len(ids) == 1 and not hidden:
-        return store.approve_decision(resolved, ids[0], action, content,
-                                      source_files=source_files)[1]
-    # Bulk: 'edit' needs per-decision content, so it's single-only.
-    if action == "edit":
-        return "Bulk 'edit' isn't supported — edit decisions one at a time."
-    results = store.approve_decisions(resolved, ids, action, content)  # one atomic transaction
-    succeeded = sum(1 for _i, ok, _m in results if ok)
-    failed = len(results) - succeeded
-    header = f"Applied '{action}' to {succeeded} of {len(results)} decision(s)"
-    if failed:
-        header += f" ({failed} failed — see below)"
-    body = "\n".join(f"  {i[:8]}: {m}" for i, _ok, m in results)
-    tail = ""
-    if hidden:
-        tail = (f"\n\n{hidden} more pending decision(s) were NOT touched — 'all' only acts on the "
-                f"{store._FILTERED_DISPLAY} shown by review_pending. Run review_pending again to "
-                "review and clear the rest.")
-    return f"{header}:\n{body}{tail}"
+    return store.approve_decision(resolved, target, action, content,
+                                  source_files=source_files)[1]
 
 
 @mcp.tool()

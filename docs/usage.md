@@ -40,7 +40,7 @@ contexer review
 
 For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
 
-Approving through the MCP tool (`approve_decision`) also accepts `source_files`: a list of repo-relative files that decision describes. Passing it links the decision to those files right away, instead of waiting for the one-time [`guard anchors`](#commit-time-guard) pass — see [commit-time guard](#commit-time-guard). It only applies to a single decision id at a time (bulk approvals via `"all"` or a comma-list don't accept it).
+Approving through the MCP tool (`approve_decision`) also accepts `source_files`: a list of repo-relative files that decision describes. Passing it links the decision to those files right away, instead of waiting for the one-time [`guard anchors`](#commit-time-guard) pass — see [commit-time guard](#commit-time-guard). It only applies to a single decision id at a time — which is the only kind there is: bulk approval (`"all"`, `"*"`, comma-lists) is refused, so decisions are reviewed and approved one at a time.
 
 Prefer to see them all at once? `contexer ui` opens a local web console with the same review queue — plus every stored decision, its revision history, global rules, and cached team context, for every repo on the machine. Proposed changes are shown as before/after diffs, and you can edit, delete, and restore decisions there too. It is loopback-only and starts on demand; see **[the local console](ui.md)**.
 

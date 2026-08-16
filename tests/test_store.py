@@ -3796,15 +3796,6 @@ class TestPendingReviewFlag:
         assert store._pending_review_flag(tmp_repo).exists()         # A's flag untouched
         assert store.pending_review_nudge(tmp_repo)                  # A still nudges
 
-    def test_approve_decisions_batch_single_transaction(self, tmp_repo):
-        # Batched approve: per-id results (failures surfaced), one load+save, no per-id rewrite.
-        store.update_decision(tmp_repo, "Never log PII", "s", "constraint")
-        store.update_decision(tmp_repo, "Never disable TLS verification", "s", "constraint")
-        ids = [d["id"] for d in store.get_pending_decisions(tmp_repo)]
-        results = store.approve_decisions(tmp_repo, ids + ["bogus"], "approve")
-        assert [ok for _i, ok, _m in results] == [True, True, False]
-        assert store.get_pending_decisions(tmp_repo) == []  # both real ones cleared atomically
-
     def test_session_start_escalates_growing_backlog(self, tmp_repo):
         data = store._load(tmp_repo)
         for i in range(store._BACKLOG_ESCALATE + 2):
@@ -3814,7 +3805,9 @@ class TestPendingReviewFlag:
         store._save(tmp_repo, data)
         result = store.get_session_start_context(tmp_repo)
         assert "piling up" in result["systemMessage"]
-        assert 'entry_id="all"' in result["hookSpecificOutput"]["additionalContext"]
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "one decision at a time" in ctx
+        assert "all" not in ctx.split("backlog is growing")[1].split(".")[0]
 
     def test_approve_decision_resolves_8char_prefix(self, tmp_repo):
         # review_pending shows 8-char ids in its approve_decision(...) instructions; approving
@@ -4905,13 +4898,14 @@ class TestAnchorCandidates:
         assert entry["source_files"] == ["auth/jwt.py"]  # proposal's own stash wins
         assert "anchor_candidates" not in entry
 
-    def test_bulk_approve_also_blesses_candidates(self, tmp_repo):
+    def test_single_approve_blesses_candidates(self, tmp_repo):
+        # Was a bulk-path test; bulk approval is gone, so candidate blessing is pinned on the
+        # only remaining route.
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
-        results = store.approve_decisions(tmp_repo, [eid], "approve")
-        assert len(results) == 1
-        assert results[0][0] == eid and results[0][1] is True
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
         entry = self._entry(tmp_repo, eid)
         assert entry["source_files"] == ["auth/jwt.py"]
         assert "anchor_candidates" not in entry
