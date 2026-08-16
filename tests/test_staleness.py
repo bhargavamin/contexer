@@ -552,3 +552,66 @@ def test_print_wrapped_preserves_paragraph_breaks(capsys):
     out = capsys.readouterr().out
     assert "First paragraph." in out and "Second paragraph." in out
     assert "\n\n" in out          # the blank line between them survived
+
+
+# ── review git budget (Greptile #218) ─────────────────────────────────────────
+# The review loop is human-paced (<=2 git calls per screen, not one long stall), but it is
+# uncapped, and this repo's 2s git timeouts DO fire under load. Two guards: memoise per
+# anchor so a queue captured in one session costs one lookup, and stop spending once a wall
+# -clock budget is gone — saying so, rather than rendering a bare row that reads as "no data"
+# (the honest-on-exhaustion rule anchors.py already establishes).
+
+def test_review_metadata_memoises_repeated_anchor(repo, monkeypatch):
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+
+    calls = []
+    real = store._git
+    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
+
+    budget = cli._review_git_budget()
+    cli._review_metadata(repo, entry, budget)
+    first = len(calls)
+    assert first >= 1
+    cli._review_metadata(repo, entry, budget)      # same anchor + same files
+    assert len(calls) == first                      # served entirely from the memo
+
+
+def test_review_metadata_stops_spending_once_budget_is_gone(repo, monkeypatch):
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+
+    budget = cli._review_git_budget()
+    budget["left"] = 0.0                            # pretend git already ate the budget
+
+    called = []
+    monkeypatch.setattr(store, "_git", lambda *a, **k: called.append(a))
+    rows = cli._review_metadata(repo, entry, budget)
+
+    assert called == []                             # no further git work
+    assert budget["skipped"] is True
+    assert any("git is slow" in v for v in dict(rows).values())   # and it SAYS so
+
+
+def test_review_metadata_without_budget_still_works(repo):
+    """A bare call (no budget passed) keeps the simple uncapped behaviour."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    rows = dict(cli._review_metadata(repo, _entry(repo)))
+    assert "Anchor" in rows and "Files" in rows
+
+
+def test_fast_git_never_trips_the_budget(repo):
+    """A normal warm repo must render every row for a long queue — the failure mode of a
+    call-count cap (like _STALENESS_MAX_CHECKS) would be hiding accuracy rows when git is fine."""
+    from contexer import cli
+    store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
+    entry = _entry(repo)
+    budget = cli._review_git_budget()
+    for _ in range(30):
+        entry = dict(entry, anchor_commit=entry["anchor_commit"], id=f"x{_}")
+        rows = dict(cli._review_metadata(repo, entry, budget))
+    assert budget["skipped"] is False
+    assert "Anchor" in rows
