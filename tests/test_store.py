@@ -4097,7 +4097,7 @@ class TestShareProjectionSourceFiles:
 
     def test_anchor_truncation_is_recorded_and_previewed(self, tmp_repo, monkeypatch):
         """A decision governing more files than _MAX_SOURCE_FILES keeps the first N and the rest
-        are gone for good — so the count is stamped and rendered, turning a silent loss into a
+        are gone for good - so the count is stamped and rendered, turning a silent loss into a
         visible one the developer can narrow themselves."""
         from contexer import remote
         monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
@@ -4108,6 +4108,31 @@ class TestShareProjectionSourceFiles:
         assert len(entry["source_files"]) == store._MAX_SOURCE_FILES
         assert entry["source_files_total"] == len(many)
         assert f"of {len(many)}" in store.format_share_preview(tmp_repo, eid)
+
+    def test_projection_bounds_source_files_to_the_wire(self, tmp_repo, monkeypatch):
+        """The preview is what a developer approves an outward push from, and the outbox is what
+        actually drains, so neither may advertise a path _wire_args will silently drop. Pinned
+        end to end: the projection bounds it, and the same entry pushed for real sends exactly
+        what the preview showed."""
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        long_path = "a/" * 200 + "f.py"
+        assert len(long_path) > remote._WIRE_SOURCE_FILES_MAX_LEN
+        _stored, eid = store.update_decision(
+            tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+            source_files=["auth/jwt.py", long_path])
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert long_path in entry["source_files"]  # stored locally, verbatim
+
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py"]   # never advertised
+        wired = remote._wire_args(type="architecture", content="c",
+                                  source_files=projected["source_files"])
+        assert wired["source_files"] == projected["source_files"]  # preview == wire
+
+        out = store.format_share_preview(tmp_repo, eid)
+        assert long_path not in out
+        assert "sending 1 of 2" in out  # the drop is stated, not hidden
 
     def test_anchor_within_cap_records_no_total(self, tmp_repo):
         _stored, eid = store.update_decision(
@@ -4128,7 +4153,7 @@ class TestShareProjectionSourceFiles:
 
     def test_preview_labels_candidate_files_as_unconfirmed(self, tmp_repo, monkeypatch):
         """Sharing is outward and hard to undo, so the confirm-preview must label a guess as a
-        guess — the same thing `would anchor:` does at every other human-facing surface. Without
+        guess - the same thing `would anchor:` does at every other human-facing surface. Without
         the label, a candidate reads identically to a human-blessed anchor at the one screen
         where the developer signs off on sending it."""
         from contexer import remote
@@ -5142,7 +5167,7 @@ class TestAnchorCandidates:
     def test_share_projection_falls_back_to_candidates_for_source_files(self, tmp_repo):
         """An unanchored but shareable decision sends its candidates as source_files. Teams
         labels received files as claimed/unverified, which is exactly a candidate's trust
-        level — so the guess is safe on the wire while `source_files` stays unwritten locally
+        level - so the guess is safe on the wire while `source_files` stays unwritten locally
         (the commit guard's Tier-1 pairing must keep reading only human-blessed anchors)."""
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(

@@ -21,7 +21,7 @@ def pytest_collection_modifyitems(config, items):
     the measured path ~5x: `test_index_lookup_meets_latency_budget` measures ~0.9ms p50
     uninstrumented (the figure its docstring pins) but ~4.7ms against a 5.0ms budget under
     `--cov`, so whether it passes came down to machine load at that moment. Raising the
-    budget was the wrong fix — it would have to reach past the live-scan's ~7.7ms to be
+    budget was the wrong fix - it would have to reach past the live-scan's ~7.7ms to be
     safe, which is precisely the regression the assertion exists to catch. The marker
     already declares these "meaningful only on fixed hardware, never in CI" and CI already
     deselects them; this closes the one configuration that ran them anyway. Applied to the

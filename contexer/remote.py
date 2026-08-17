@@ -47,26 +47,41 @@ _DEFAULT_TIMEOUT = 10.0
 #
 # OPENED: contexer-teams accepts `source_files` on both `push_decision` and `push_decisions`
 # (server commit e1a2189, on main since 2026-08-09; validated by `INPUT_LIMITS.sourceFiles`, max
-# 10 paths x 300 chars). Verified end to end against a live server before flipping — same client,
+# 10 paths x 300 chars). Verified end to end against a live server before flipping - same client,
 # same decision, pushed with the gate off and on: off stored NULL, on stored both paths and
 # rendered them in the dashboard's Files section, with no -32602 on either the single or batch
 # tool. Kept as a constant rather than inlined so a stale endpoint that rejects the field is a
-# one-line rollback — still NOT a user-facing config flag, since a config toggle could be flipped
+# one-line rollback - still NOT a user-facing config flag, since a config toggle could be flipped
 # on against an old server and reintroduce the poisoning failure mode.
 _WIRE_SOURCE_FILES = True
 
 # Wire bounds for `source_files`, mirroring contexer-teams `INPUT_LIMITS.sourceFiles`. The server
-# commit justifies rejecting over-bounds input with "the client caps at the same numbers" — true
+# commit justifies rejecting over-bounds input with "the client caps at the same numbers" - true
 # for the COUNT (store._MAX_SOURCE_FILES, enforced at every anchor write) and false for the
 # LENGTH: nothing on the capture side bounds a path at 300 chars, and the egress scrub can even
 # LENGTHEN one ([REDACTED:kind] is longer than some values it replaces). The singular
 # `push_decision` rejects over-bounds at its zod boundary, i.e. -32602, i.e. exactly the permanent
 # outbox poisoning the gate above exists to prevent (the batch tool loosens x8/x4 and drops
 # per-row, so only the singular path is exposed). Asymmetric by a mile: dropping a path costs one
-# piece of metadata, sending it wedges the queue forever — so clamp here rather than trust the
+# piece of metadata, sending it wedges the queue forever - so clamp here rather than trust the
 # capture side to have been bounded.
 _WIRE_SOURCE_FILES_MAX_ITEMS = 10
 _WIRE_SOURCE_FILES_MAX_LEN = 300
+
+
+def bound_source_files(source_files: list[str]) -> list[str]:
+    """Apply the wire bounds above. ONE definition, deliberately called from BOTH layers, the
+    same two-layer shape redaction already has: `store._share_projection` bounds so the
+    confirm-preview and the durable outbox show exactly what will be sent (a path the wire is
+    going to drop must not appear in the preview the developer approves), and `_wire_args`
+    bounds again as the hard guarantee, because it is the only chokepoint EVERY push funnels
+    through - a legacy outbox row queued before this existed, or a direct `push_decision`
+    caller, never passed through a projection at all.
+
+    Callers apply this AFTER redaction, so what is measured is the length that actually goes
+    on the wire rather than the on-disk one."""
+    return [f for f in source_files
+            if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
 
 
 def _wire_args(*, type: str, content: str, repo: str | None = None,
@@ -88,7 +103,7 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
 
     `source_files` passes the `_WIRE_SOURCE_FILES` gate above (now open) and is re-scrubbed here
     for the same idempotent-egress-rule reason as content/evidence/title. The gate is read HERE,
-    at call time — not captured by a caller ahead of time — so entries queued to the outbox while
+    at call time - not captured by a caller ahead of time - so entries queued to the outbox while
     it was still closed egress their files on the next drain, with no re-queue or migration; a
     rollback likewise takes effect at drain time, not at enqueue time. It is also CLAMPED here to
     the server's own bounds (see `_WIRE_SOURCE_FILES_MAX_*`), for the same reason redaction lives
@@ -126,12 +141,11 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     if title is not None:
         args["title"] = title
     if _WIRE_SOURCE_FILES and source_files:
-        # Clamped AFTER the scrub above, so a redaction-lengthened path is measured at its real
+        # Bounded AFTER the scrub above, so a redaction-lengthened path is measured at its real
         # wire length. An all-over-bounds list omits the key entirely rather than sending [],
         # keeping the "omit every unset optional" rule (the server reads absent as unset, and an
         # empty array would CLEAR the column via `excluded.source_files` on re-push).
-        bounded = [f for f in source_files
-                   if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
+        bounded = bound_source_files(source_files)
         if bounded:
             args["source_files"] = bounded
     return args

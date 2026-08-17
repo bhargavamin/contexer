@@ -252,7 +252,7 @@ def _entry_push_kwargs(entry: dict) -> dict:
     """push_decision kwargs for one outbox entry. Shared by drain_outbox + adrain_outbox so
     the two drains serialize an entry identically (source coerced through _wire_source).
 
-    `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally — the
+    `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally - the
     wire gate `remote._wire_args`/`_WIRE_SOURCE_FILES` is read at CALL time, i.e. AT DRAIN, not
     at the time this entry was queued. So an entry queued before the gate opened drains with its
     files intact, no re-queue or schema migration needed; conversely a rollback before this entry

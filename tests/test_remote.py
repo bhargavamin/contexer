@@ -814,7 +814,7 @@ def test_wire_args_redact_param_overrides_config():
 # and an unknown/rejected field can poison the outbox with permanent validation failures (the
 # source="plan" incident: -32602 on every retry, 192 attempts). `remote._WIRE_SOURCE_FILES` is
 # that gate; it ships True now that the server accepts the field (e1a2189). These two tests pin
-# the DEFAULT, so a rollback of the constant has to be deliberate rather than silent — the rest
+# the DEFAULT, so a rollback of the constant has to be deliberate rather than silent - the rest
 # of the group monkeypatches the gate explicitly and holds either way.
 
 def test_wire_args_includes_source_files_by_default():
@@ -849,7 +849,7 @@ def test_wire_args_no_source_files_key_when_none():
 
 # ── wire bounds (mirror of contexer-teams INPUT_LIMITS.sourceFiles) ────────────
 # The capture side caps the COUNT (store._MAX_SOURCE_FILES) but nothing bounds path LENGTH, and
-# the singular push_decision rejects over-bounds at its zod boundary — a -32602, i.e. the same
+# the singular push_decision rejects over-bounds at its zod boundary - a -32602, i.e. the same
 # permanent outbox poisoning the gate above exists to prevent. Dropping a path costs one piece of
 # metadata; sending it wedges the queue, so the clamp is deliberately silent and lossy.
 

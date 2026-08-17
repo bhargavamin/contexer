@@ -2170,7 +2170,7 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     # THE single truncation point for anchors (apply_backfill_anchors delegates here, and
     # anchors.py's own `[:_MAX_SOURCE_FILES]` slices a list that was already capped by this
     # one, so it can never fire). A decision that genuinely governs 40 files keeps the first
-    # 10 and the rest are gone — recording how many there were is what stops that being a
+    # 10 and the rest are gone - recording how many there were is what stops that being a
     # SILENT loss: the review and share-preview surfaces render "anchored to the first 10 of
     # 40" so the developer can narrow the anchor themselves. Stamped only when it actually
     # differs, and popped otherwise, so a later re-anchor with fewer files can't leave a
@@ -3721,7 +3721,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     harmless), with empties dropped. `anchor_commit` is deliberately NOT projected here: it is a
     machine-local ref (meaningless on another machine or on the server) and never egresses,
     regardless of `source_files`. Whether `source_files` actually reaches the WIRE is decided
-    later, at `remote._wire_args` time, by `remote._WIRE_SOURCE_FILES` (now open) — this
+    later, at `remote._wire_args` time, by `remote._WIRE_SOURCE_FILES` (now open) - this
     projection always carries it so the preview and durable outbox stay wire-accurate."""
     if redact_on is None:
         redact_on = _redaction_enabled()
@@ -3738,11 +3738,11 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     # Fall back to the session's edited-files candidates when nothing is anchored yet. A
     # pending_approval decision IS shareable (_shareable_entries only excludes "ignored"), so
     # without this every decision shared before its local approval reaches Teams with no files
-    # at all — the anchor exists, it just hasn't been blessed yet. Deliberately one-directional:
+    # at all - the anchor exists, it just hasn't been blessed yet. Deliberately one-directional:
     # this reads `anchor_candidates`, it never writes `source_files`, because that field is the
     # commit guard's Tier-1 pairing input (_guard_pairs) and a guess must not become guard input
-    # without a human. Teams renders what it receives as claimed, unverified metadata — the same
-    # trust level a candidate actually has — so a guess is safe THERE and not safe here.
+    # without a human. Teams renders what it receives as claimed, unverified metadata - the same
+    # trust level a candidate actually has - so a guess is safe THERE and not safe here.
     # Already canonicalized and capped at write (record_edited_file / _MAX_SOURCE_FILES).
     # `source_files_unconfirmed` is what keeps the LOCAL surface honest: sharing is an outward,
     # hard-to-undo action, and every other human-facing surface labels a candidate as a guess
@@ -3777,6 +3777,17 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
                 scrubbed_files.append(sf)
                 redacted += nf
             source_files = scrubbed_files
+    # Bound to the wire's own limits, AFTER the scrub, exactly as _wire_args does (one shared
+    # definition, called from both layers). Without this the projection would advertise a path
+    # the wire then silently drops: the preview is the surface a developer approves an outward
+    # push from, and the outbox is what actually drains, so both must carry what will really be
+    # sent, not what is stored. `wire_total` is the pre-bound count, so a drop here surfaces
+    # through the same "sending N of M" line that capture-time truncation already uses rather
+    # than needing a second notice.
+    wire_total = len(source_files)
+    if source_files:
+        from contexer import remote
+        source_files = remote.bound_source_files(source_files)
     return {
         "id": entry.get("id", ""),
         "type": entry.get("subtype", "") or "convention",
@@ -3790,14 +3801,17 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # can show it and the developer doesn't push a not-yet-reviewed decision by accident.
         # Extra key like `redacted`: the wire builders read named fields, so it never egresses.
         "status": _entry_status(entry),
-        # Reaches the wire subject to remote._WIRE_SOURCE_FILES — see that constant's comment.
+        # Reaches the wire subject to remote._WIRE_SOURCE_FILES - see that constant's comment.
         # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
         # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
         "source_files": source_files,
         "source_files_unconfirmed": unconfirmed,
-        # How many files the anchor originally resolved to, when _anchor_sources truncated it.
-        # Extra key like `redacted`/`status`: read by the preview, never by a wire builder.
-        "source_files_total": (entry.get("source_files_total") or 0) if not unconfirmed else 0,
+        # How many files this decision really governs, when fewer are being sent: either
+        # _anchor_sources truncated at capture, or the wire bounds dropped an over-long path
+        # just above. Extra key like `redacted`/`status`: read by the preview, never by a
+        # wire builder.
+        "source_files_total": max(
+            wire_total, 0 if unconfirmed else (entry.get("source_files_total") or 0)),
     }
 
 
@@ -3985,7 +3999,7 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files, and
     the wire sends them while `remote._WIRE_SOURCE_FILES` is open (see that constant), so the
     per-decision `files:` line reads as plain fact. The note survives for the rollback case: if
-    the gate is ever closed again, the line regains its honest "(not yet sent — server support
+    the gate is ever closed again, the line regains its honest "(not yet sent - server support
     pending)" suffix rather than silently promising files that won't actually go out. A second,
     independent suffix marks files that came from `anchor_candidates` rather than a blessed
     anchor, so this surface labels a guess as a guess like every other human-facing one does."""
@@ -4005,10 +4019,10 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         if files:
             note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent — server support pending)"
             if p.get("source_files_unconfirmed"):
-                note += " (unconfirmed — this session's edits, not yet approved)"
+                note += " (unconfirmed - this session's edits, not yet approved)"
             total = p.get("source_files_total") or 0
             if total > len(files):
-                note += f" (first {len(files)} of {total} — the rest were dropped at capture)"
+                note += f" (sending {len(files)} of {total})"
             lines.append(f"      files: {', '.join(files)}{note}")
     redacted = sum(p.get("redacted", 0) for p in projs)
     if redacted:

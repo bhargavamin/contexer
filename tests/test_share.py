@@ -531,7 +531,7 @@ def test_drain_outbox_sends_title_on_retry(tmp_repo, monkeypatch):
 
 
 def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monkeypatch):
-    """issue #174 Task 5 — the wire gate is read at DRAIN time, never cached from queue time,
+    """issue #174 Task 5 - the wire gate is read at DRAIN time, never cached from queue time,
     in BOTH directions: an entry queued while gated off egresses its files once the gate opens,
     and one queued while open stops egressing them if the gate is rolled back. Both legs are set
     explicitly rather than leaning on the shipped default, so this keeps testing the drain-time
