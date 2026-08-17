@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.36.0](https://github.com/bhargavamin/contexer/compare/v0.35.0...v0.36.0) (2026-08-16)
+
+
+### Features
+
+* **bootstrap:** point the model at repo rule docs as question evidence ([c89c404](https://github.com/bhargavamin/contexer/commit/c89c404ce87f67f6749618d882a486ba343b30ad))
+* **bootstrap:** read repo rule docs as question evidence, and stop shipping junk purpose assumptions ([ff3d104](https://github.com/bhargavamin/contexer/commit/ff3d1047d3e8aae14612da7c41a888257579e920))
+* **review:** remove bulk approval; make one-at-a-time review accurate ([f5aa635](https://github.com/bhargavamin/contexer/commit/f5aa635b7db14c7503d1b5c4c95c24361b9d8fab))
+* **review:** remove bulk approval; make one-at-a-time review accurate ([d7c483a](https://github.com/bhargavamin/contexer/commit/d7c483a54695cd6089a1476e8e2176891bce5b40))
+
+
+### Bug Fixes
+
+* **bootstrap:** only treat a BANNER as a generated-doc marker ([b69c2f2](https://github.com/bhargavamin/contexer/commit/b69c2f2f84dec597de587e8ebf2150dbac3ba7d6))
+* **bootstrap:** stop offering non-answer purpose assumptions as "Correct" ([d43563a](https://github.com/bhargavamin/contexer/commit/d43563ace0e1888db45cb693dfeac1473138cd3f))
+* drop object quantifiers from the durability signal, keep recurrence only ([3e15cd7](https://github.com/bhargavamin/contexer/commit/3e15cd7314776c09325d5ec51642648fa43c832a))
+* treat "ensure you"/"make sure you" as weak triggers needing a durability signal ([12d4a5b](https://github.com/bhargavamin/contexer/commit/12d4a5b80280848d48973848abc33b792c9c21d3))
+* treat "ensure you"/"make sure you" as weak triggers needing a durability signal ([e5b1c0e](https://github.com/bhargavamin/contexer/commit/e5b1c0e4b743583f42fb7345eb021872e8ff0c42))
+
+
+### Performance Improvements
+
+* **review:** memoise and time-budget the review git lookups ([c0a9c0d](https://github.com/bhargavamin/contexer/commit/c0a9c0d1e1bb59a5677f993d837414f84761a5a9))
+
+
+### Documentation
+
+* **bootstrap:** document rule-doc evidence flow and the purpose fixes ([1ebf870](https://github.com/bhargavamin/contexer/commit/1ebf8702242cff6f2fda03b7a63e2eeb6795f839))
+
 ## [0.35.0](https://github.com/bhargavamin/contexer/compare/v0.34.2...v0.35.0) (2026-08-15)
 
 
