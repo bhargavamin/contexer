@@ -7,16 +7,36 @@ import pytest
 from contexer import remote, store
 
 
-def pytest_collection_modifyitems(items):
-    """Mark the benchmark-harness tests so CI can deselect them (`-m "not slow"`).
+def pytest_collection_modifyitems(config, items):
+    """Mark the benchmark-harness tests so CI can deselect them (`-m "not slow"`), and skip
+    `perf` tests whenever coverage is measuring, because a wall-clock number taken under a
+    tracer is not the number the assertion is about.
 
     ponytail: one marker, not a tier taxonomy — the harness files are the only
     slow ones (~45s vs ~30s for everything else combined). Split further only if
     a second slow area appears.
+
+    The perf skip is the root-cause fix for a real intermittent failure, not tidiness.
+    `addopts` turns coverage on for every bare `pytest` run, and coverage's tracer inflates
+    the measured path ~5x: `test_index_lookup_meets_latency_budget` measures ~0.9ms p50
+    uninstrumented (the figure its docstring pins) but ~4.7ms against a 5.0ms budget under
+    `--cov`, so whether it passes came down to machine load at that moment. Raising the
+    budget was the wrong fix — it would have to reach past the live-scan's ~7.7ms to be
+    safe, which is precisely the regression the assertion exists to catch. The marker
+    already declares these "meaningful only on fixed hardware, never in CI" and CI already
+    deselects them; this closes the one configuration that ran them anyway. Applied to the
+    marker rather than to the one test that flaked, so all 7 are covered. Get the real
+    numbers with `uv run pytest -m perf --no-cov`.
     """
+    covering = bool(getattr(config.option, "cov_source", None)) and not getattr(
+        config.option, "no_cov", False)
+    skip_perf = pytest.mark.skip(reason="perf timings are meaningless under coverage; "
+                                        "run `pytest -m perf --no-cov`")
     for item in items:
         if item.path.name.startswith("test_bench_"):
             item.add_marker(pytest.mark.slow)
+        if covering and item.get_closest_marker("perf"):
+            item.add_marker(skip_perf)
 
 
 @pytest.fixture
