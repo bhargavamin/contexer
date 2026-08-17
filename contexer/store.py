@@ -729,11 +729,22 @@ def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str |
     """Rendering primitive: (title, body) for a decision. `title` is the entry's title
     (or derived from content). `body` is the content to show on the indented second line,
     or None when it would merely repeat the title (a short decision whose derived title IS
-    its content) — callers skip the duplicate. Single content source: the current revision."""
+    its content) — callers skip the duplicate. Single content source: the current revision.
+
+    When the title was DERIVED from the content (no explicit title, so _derive_title took
+    the leading sentence), that same sentence is the start of `body` too — showing both
+    verbatim repeats it once as the title and again as the first thing in the body, in the
+    same bullet. Stripping the matched prefix keeps the body line additive (only the
+    reasoning the title didn't already say) instead of restating the title before it."""
     body = _current_content(entry) if content is None else content
     title = entry.get("title") or _derive_title(body)
     collapsed = " ".join(body.split())
-    return title, (body if collapsed and collapsed != title else None)
+    if not collapsed or collapsed == title:
+        return title, None
+    if collapsed.startswith(title):
+        remainder = collapsed[len(title):].strip()
+        return title, (remainder or None)
+    return title, body
 
 
 _BODY_CLIP = 400  # human review surfaces only — model-facing retrieval keeps full content
@@ -1277,13 +1288,44 @@ _DEICTIC_HERE = re.compile(r"\bhere\b(?!\W*$)", re.IGNORECASE)
 # this/it/here — land pending_approval rather than silently trusting it as a standing rule.
 _TEMPORAL_SCOPE = re.compile(r"\bfor\s+now\b", re.IGNORECASE)
 
+# "all three", "both (of them)", "all of them" — anaphoric COUNT references only the
+# preceding conversation turns can resolve. Classic shape: the assistant proposes a
+# numbered list of fixes ("want me to take them, along with the short poll for the
+# race?") and the user replies "yes fix all three, ... but don't show X when Y fails" —
+# a one-off approval of THAT plan, not a standing rule, even though the reply also
+# contains directive language ("don't"). Same treatment as this/it/here: still
+# captured, just not auto-trusted.
+# The negative lookahead is load-bearing: "all three"/"both" is only anaphoric when
+# nothing after it names its own referent. "always run all three linters before every
+# commit" and "never run migrations on both primary and replica at once" name their
+# referent right there in the sentence — that's a genuine standing rule, not a pointer
+# back at the conversation, so it must NOT be downgraded to pending. Only "all three,"
+# / "both," / "all three." (followed by punctuation, a conjunction, or end of string)
+# reads as anaphoric. "all of them/these/those" is exempt from the lookahead — the
+# pronoun itself IS the referent, so nothing can follow that makes it non-anaphoric.
+#
+# A bare "\s+\w" lookahead is too blunt: it blocks on ANY following word, including a
+# coordinating conjunction that isn't naming a referent at all — "yes fix all three but
+# dont show X" (no comma before "but") would fail the guard and get silently auto-
+# trusted, exactly the misfire class this pattern exists to catch (caught in review).
+# _ENUM_CONTINUATION whitelists the words that continue the sentence without supplying
+# a referent, so only a genuine noun phrase ("all three linters") blocks the match.
+_ENUM_CONTINUATION = r"(?:and|but|or|yet|so|however|though|although)"
+_DEICTIC_ENUMERATION = re.compile(
+    r"\ball\s+(?:three|four|five|six)\b(?!\s+(?!" + _ENUM_CONTINUATION + r"\b)\w)"
+    r"|\ball\s+of\s+(?:them|these|those)\b"
+    r"|\bboth\b(?:\s+of\s+(?:them|these|those))?(?!\s+(?!" + _ENUM_CONTINUATION + r"\b)\w)",
+    re.IGNORECASE,
+)
+
 
 def _is_deictic(content: str) -> bool:
     """True if `content` carries a conversation-local referent (see _DEICTIC_* above)."""
     return bool(_DEICTIC_IT.search(content)
                 or _DEICTIC_HERE.search(content)
                 or _DEICTIC_THIS_THESE_THOSE.search(content)
-                or _TEMPORAL_SCOPE.search(content))
+                or _TEMPORAL_SCOPE.search(content)
+                or _DEICTIC_ENUMERATION.search(content))
 
 
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:

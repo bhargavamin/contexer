@@ -3486,6 +3486,16 @@ class TestDeicticConstraintScope:
         "the pattern used here must always be followed",
         # "for now" is a temporal-scope signal, same treatment as this/it/here.
         "stop running the flaky test for now",
+        # Live misfire 2026-08-17: "all three" anaphorically resolves to items the
+        # assistant proposed moments earlier ("want me to take them, along with the
+        # short poll for the race?") — a one-off plan approval, not a standing rule,
+        # even though it also carries a "don't" clause.
+        "yes fix all three, show loading of something but dont show current message "
+        "when integration fails.",
+        # Same anaphoric-count shape as "all three", different wording.
+        "do both, but dont touch the config file",
+        "yes both of them, but dont deploy yet",
+        "all of them, but dont touch prod",
     ])
     def test_deictic_directive_stored_pending_not_trusted(self, tmp_repo, prompt):
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
@@ -3507,6 +3517,13 @@ class TestDeicticConstraintScope:
         # Greptile #125 P2: trailing here scopes the rule to the repo — durable.
         "always use uv here",
         "never push directly to main here.",
+        # "all three"/"both" only reads as anaphoric when nothing after it names its
+        # own referent — these name the referent right in the sentence, so they are
+        # genuine standing rules, not a pointer back at the conversation.
+        "always support both staging and production environments",
+        "never run migrations on both primary and replica at once",
+        "always run all three linters before every commit",
+        "never skip all three test suites",
     ])
     def test_clean_directive_remains_trusted(self, tmp_repo, prompt):
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
@@ -5957,7 +5974,9 @@ class TestTitleHelpers:
 
 class TestTitleAndBody:
     """_title_and_body(entry) -> (title, body). body is None whenever it would just repeat
-    the title on an indented second line — the dedup fix for finding #1."""
+    the title on an indented second line (finding #1); when the derived title is only the
+    LEADING sentence of a longer body, that repeated prefix is stripped instead so the two
+    lines are never the same sentence twice."""
 
     def test_short_untitled_dedups_body_to_none(self):
         # No authored title, content <=100 chars -> derived title IS the content ->
@@ -5968,16 +5987,19 @@ class TestTitleAndBody:
         assert title == c
         assert body is None
 
-    def test_long_untitled_keeps_full_body(self):
-        # No authored title, content >100 chars -> derived title is a truncated first
-        # sentence, distinct from the full body -> body is the full content.
+    def test_long_untitled_strips_repeated_lead_sentence_from_body(self):
+        # No authored title, content >100 chars -> derived title is the leading sentence.
+        # That sentence is also the START of the full body -> printing both verbatim would
+        # repeat it once as the title and again as the first thing in the body, in the same
+        # bullet. body keeps only what the title didn't already say.
         c = ("Native contexer-teams entry removed. Team sync is the Python path; "
              "kept a legacy janitor pop; login now refreshes status.")
         e = store._new_decision_entry(c, "s1", "architecture")
         title, body = store._title_and_body(e)
         assert title == store._derive_title(c)
         assert title != c
-        assert body == c
+        assert body == ("Team sync is the Python path; kept a legacy janitor pop; "
+                         "login now refreshes status.")
 
     def test_authored_title_distinct_from_content_keeps_body(self):
         # Authored title differs from content (even short content) -> body still renders,
