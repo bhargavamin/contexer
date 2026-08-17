@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.37.0](https://github.com/bhargavamin/contexer/compare/v0.36.1...v0.37.0) (2026-08-17)
+
+
+### Features
+
+* **share:** send source_files to contexer-teams ([cf7ec49](https://github.com/bhargavamin/contexer/commit/cf7ec49fff34781191ad6854ba44205218accc12))
+* **share:** send source_files to contexer-teams ([25829c8](https://github.com/bhargavamin/contexer/commit/25829c8fd592ff3dd2249d32f9c25ff1d95963a6))
+
+
+### Bug Fixes
+
+* **share:** bound source_files at the projection too, not just the wire ([7cad60b](https://github.com/bhargavamin/contexer/commit/7cad60bd0a64a8b0e1d540eea005ff84ef4a7c31))
+* **tests:** skip perf timings under coverage ([6199ef0](https://github.com/bhargavamin/contexer/commit/6199ef02b6c3c0189f111abbf294dc996e766841))
+
 ## [0.36.1](https://github.com/bhargavamin/contexer/compare/v0.36.0...v0.36.1) (2026-08-17)
 
 
