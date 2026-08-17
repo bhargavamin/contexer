@@ -420,7 +420,10 @@ def test_format_team_section_derives_title_when_cloud_sent_none(tmp_repo):
     derived = store._derive_title(long_content)
     lines = out.splitlines()
     assert lines[1] == f"- [scope=team] [architecture] {derived} (id=t1aaaaaa)"
-    assert lines[2] == f"    {long_content}"
+    # The derived title is the leading sentence of long_content; _title_and_body strips
+    # that repeated prefix so the body line doesn't restate the title verbatim.
+    remainder = " ".join(long_content.split())[len(derived):].strip()
+    assert lines[2] == f"    {remainder}"
 
 
 def test_format_team_section_derives_title_when_row_title_is_none(tmp_repo):
