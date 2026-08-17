@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.36.1](https://github.com/bhargavamin/contexer/compare/v0.36.0...v0.36.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **store:** auto-trusted constraints on plan-approval replies, dedupe title/body ([71efdf0](https://github.com/bhargavamin/contexer/commit/71efdf0736cb1f6f30cbaa564eb9e4d5d2ed89ac))
+* **store:** don't auto-trust plan-approval replies, dedupe repeated title/body sentence ([19e6d34](https://github.com/bhargavamin/contexer/commit/19e6d34bbca1757654bcfb76913f68bf542b7351))
+* **store:** scope title/body dedup to derived titles, not just untitled ones ([9f61b21](https://github.com/bhargavamin/contexer/commit/9f61b21f14a537e2c96f611eb84adf838b3e79a8))
+
 ## [0.36.0](https://github.com/bhargavamin/contexer/compare/v0.35.0...v0.36.0) (2026-08-16)
 
 
