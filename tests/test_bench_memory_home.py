@@ -3,7 +3,7 @@ from benchmarks.memory_home import write_home_settings, memory_dir, memory_files
 
 
 def test_write_home_settings_creates_file(tmp_path):
-    p = write_home_settings(tmp_path, memory_enabled=True)
+    p = write_home_settings(tmp_path)
     assert p == tmp_path / ".claude" / "settings.json"
     assert p.exists()
 

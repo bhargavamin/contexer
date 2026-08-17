@@ -16,10 +16,11 @@ import re
 from pathlib import Path
 
 
-def write_home_settings(home: Path, memory_enabled: bool) -> Path:
+def write_home_settings(home: Path) -> Path:
     """Write <home>/.claude/settings.json. Always {} : see module docstring,
-    there is no known key that disables the memory tool. memory_enabled is
-    kept for interface symmetry with the benchmark harness's two arms."""
+    there is no known key that disables the memory tool. It therefore takes no
+    per-arm flag: an earlier `memory_enabled` parameter was never read (both arms
+    write the same {}), so it advertised a lever this function does not have."""
     p = home / ".claude" / "settings.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({}, indent=2))

@@ -112,7 +112,7 @@ class ConsoleServer(ThreadingHTTPServer):
         self.csrf = secrets.token_urlsafe(32)
         self.port = self.server_address[1]
         self.version = daemon.current_version()
-        self.started_at = _now_iso()
+        self.started_at = daemon._now_iso()
         self.clock = clock
         self.idle_timeout_seconds = max(idle_timeout_minutes, 1) * 60
         self.last_request = clock()
@@ -498,10 +498,6 @@ def _same(supplied: str, secret: str) -> bool:
                                secret.encode("utf-8", "replace"))
 
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
 def _scrub(message: str) -> str:
     """Redact credentials and bound the length of anything on its way to ui.log.
 
@@ -514,12 +510,22 @@ def _scrub(message: str) -> str:
 
 def _log(message: str) -> None:
     """Append one line to ~/.contexer/ui.log. NEVER the token, the csrf secret, or decision
-    content — this file gets pasted into bug reports."""
+    content — this file gets pasted into bug reports.
+
+    Timestamp comes from daemon._now_iso (the same clock daemon's own lines use, so one log
+    file never mixes two formats); the `console:` prefix and the _scrub pass are what make
+    this distinct from daemon._log, which is why the two are not one function.
+
+    _scrub covers the REQUEST-handling paths, which is where attacker-controlled bytes reach
+    this file. It is not a property of ui.log as a whole: daemon._log writes its own lines
+    unscrubbed and daemon._spawn pipes the child's raw stdout/stderr in. Unifying all three
+    behind one scrubbing writer is a real improvement and a behaviour change to daemon
+    logging — deliberately not folded into a cleanup pass."""
     message = _scrub(message)
     try:
         daemon.LOG_PATH.parent.mkdir(mode=0o700, exist_ok=True)
         with open(daemon.LOG_PATH, "a", encoding="utf-8") as log:
-            log.write(f"{_now_iso()} console: {message}\n")
+            log.write(f"{daemon._now_iso()} console: {message}\n")
     except OSError:
         pass
 

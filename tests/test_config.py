@@ -157,3 +157,46 @@ def test_write_team_profile_preserves_redact_secrets_optout(config_path):
     config_path.write_text('mode = "team"\nendpoint = "http://x/mcp"\nredact_secrets = false\n')
     config.write_team_profile("http://new/mcp")
     assert load_profile().redact_secrets is False  # opt-out survives `contexer login`
+
+
+# ── redaction_enabled(): the ONE implementation of the fail-soft default ──────
+# store._redaction_enabled and remote._redaction_enabled are delegates, so this
+# branch is the only copy of "a broken config can never leak secrets" left. It has
+# to be pinned here, or a future edit flipping the fallback to False lands unnoticed.
+
+def test_redaction_enabled_true_with_no_config(config_path):
+    assert not config_path.exists()
+    assert config.redaction_enabled() is True
+
+
+def test_redaction_enabled_honors_the_optout(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('redact_secrets = false\n')
+    assert config.redaction_enabled() is False
+
+
+def test_redaction_enabled_fails_soft_to_on(config_path, monkeypatch):
+    """A malformed config raises ConfigError out of load_profile — redaction must still
+    report ON, since every caller is an egress path that would otherwise leak or raise."""
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('redact_secrets = "not-a-bool"\n')
+    with pytest.raises(ConfigError):
+        load_profile()                      # the underlying read really does raise
+    assert config.redaction_enabled() is True
+
+    def boom(*_a, **_k):
+        raise RuntimeError("config subsystem is broken")
+
+    monkeypatch.setattr(config, "load_profile", boom)
+    assert config.redaction_enabled() is True   # ANY exception, not just ConfigError
+
+
+def test_delegates_fail_soft_when_the_symbol_is_unresolvable(config_path, monkeypatch):
+    """The delegates import redaction_enabled INSIDE their try. Deleting the name is the
+    one way to prove that: an unguarded `from contexer.config import ...` would raise
+    ImportError straight out of get_shareable / _wire_args instead of degrading to ON."""
+    from contexer import remote, store
+
+    monkeypatch.delattr(config, "redaction_enabled")
+    assert store._redaction_enabled() is True
+    assert remote._redaction_enabled() is True

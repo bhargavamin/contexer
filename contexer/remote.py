@@ -26,11 +26,14 @@ T = TypeVar("T")
 
 
 def _redaction_enabled() -> bool:
-    """Whether outbound secret redaction is on (default True; opt out with redact_secrets=false).
-    Fail-soft: any config error keeps redaction ON so a broken config can't leak secrets."""
+    """Whether outbound secret redaction is on — config.redaction_enabled() is the one
+    implementation (default True); this stays as the remote-side patch point its tests target.
+    Import inside the try, and function-local even though `Profile` is imported at module top:
+    _wire_args is the last-mile wire guarantee, so ANY failure here — an unresolvable name
+    included — must degrade to redaction-ON, never raise and never fail at module load."""
     try:
-        from contexer.config import load_profile
-        return load_profile().redact_secrets
+        from contexer.config import redaction_enabled
+        return redaction_enabled()
     except Exception:
         return True
 

@@ -356,7 +356,9 @@ def _refresh_worker(repo_path: str) -> None:
 
 def _spawn_refresh(repo_path: str) -> None:
     """Start a detached background refresher — the hook process never waits on it."""
-    subprocess.Popen(  # noqa: S603 - fixed argv, our own interpreter/module
+    # argv is fixed and points at our own interpreter and module — no shell, and no part of
+    # it is caller- or user-supplied except repo_path, which arrives as its own argv element.
+    subprocess.Popen(
         [sys.executable, "-m", "contexer.team_context", repo_path],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
