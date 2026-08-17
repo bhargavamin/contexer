@@ -6010,6 +6010,17 @@ class TestTitleAndBody:
         assert title == "Queue backend: Postgres"
         assert body == c
 
+    def test_authored_title_that_is_a_literal_prefix_keeps_full_body(self):
+        # Greptile #221 P1: the prefix-strip is scoped to DERIVED titles (always a clean
+        # sentence boundary via _derive_title). An authored title can be an arbitrary
+        # fragment that happens to literally prefix the content — stripping it would cut
+        # off the body's own leading words instead of removing a genuine duplicate.
+        c = "Use Postgres for the queue, since ordering matters."
+        e = store._new_decision_entry(c, "s1", "architecture", title="Use Postgres")
+        title, body = store._title_and_body(e)
+        assert title == "Use Postgres"
+        assert body == c
+
     def test_content_param_overrides_current_revision(self):
         # Explicit `content` (e.g. a proposed_revision's content) is used instead of the
         # entry's current revision.

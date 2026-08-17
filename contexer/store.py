@@ -735,13 +735,26 @@ def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str |
     the leading sentence), that same sentence is the start of `body` too — showing both
     verbatim repeats it once as the title and again as the first thing in the body, in the
     same bullet. Stripping the matched prefix keeps the body line additive (only the
-    reasoning the title didn't already say) instead of restating the title before it."""
+    reasoning the title didn't already say) instead of restating the title before it.
+
+    Scoped to titles that MATCH what _derive_title would produce for this body — that
+    algorithm always cuts on a sentence boundary (a full sentence, or the whole content
+    when short), so the stripped prefix is a clean unit. This is NOT the same as "no
+    explicit title": _new_decision_entry back-fills entry["title"] with the derived
+    value even when nothing was authored, so a truthy entry.get("title") can't tell
+    derived apart from authored — comparing against _derive_title(body) can. An
+    AUTHORED title that differs from the derived one carries no clean-boundary
+    guarantee — a human can title a decision with an arbitrary short fragment that
+    happens to be a literal prefix of the content ("Use Postgres" as a title for "Use
+    Postgres for the queue, since ordering matters") — and stripping that fragment
+    would cut the body's own leading words, rendering an incomplete sentence instead of
+    protecting one (caught in review, PR #221)."""
     body = _current_content(entry) if content is None else content
     title = entry.get("title") or _derive_title(body)
     collapsed = " ".join(body.split())
     if not collapsed or collapsed == title:
         return title, None
-    if collapsed.startswith(title):
+    if title == _derive_title(body) and collapsed.startswith(title):
         remainder = collapsed[len(title):].strip()
         return title, (remainder or None)
     return title, body
