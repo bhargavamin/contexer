@@ -61,7 +61,7 @@ None found. Checked:
 - `--bare` is the only documented lever, and it is not a `settings.json` key:
   it is a CLI invocation flag that disables far more than memory (hooks,
   plugins, skills sync, keychain auth) so it does not fit
-  `write_home_settings(memory_enabled)`'s single-purpose contract, and would
+  `write_home_settings`'s single-purpose contract, and would
   contaminate the comparison by also turning off things the campaign wants
   left on (e.g. any hooks under test).
 
@@ -75,10 +75,11 @@ memory tool while leaving everything else on.
 ## Decision: sweep-between-sessions, not disable
 
 Since there is no settings-based disable mechanism, `write_home_settings`
-writes `{}` in both the `memory_enabled=True` and `memory_enabled=False`
-cases (the boolean is accepted for interface symmetry with the benchmark
-harness's "with memory" / "without memory" arms, but it does not change what
-gets written). It is therefore a no-op, and **`memory_campaign.py` no longer
+writes `{}` for both the "with memory" and "without memory" arms. It originally
+took a `memory_enabled` boolean for interface symmetry with those two arms, but
+the flag changed nothing about what got written and was never read, so it has
+since been removed rather than left advertising a lever this function does not
+have. It is therefore a no-op, and **`memory_campaign.py` no longer
 calls it at all**. The function is kept here because it documents this finding
 and is covered by tests, not because the runner needs it.
 

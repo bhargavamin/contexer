@@ -38,8 +38,9 @@ to catch a broken harness before it burns approved budget.
   which would contaminate the comparison by turning off things the campaign
   needs left on.
 - **Consequence: the `with` arm sweeps, it does not disable.**
-  `write_home_settings(memory_enabled=False)` cannot stop the memory tool from
-  writing, so the runner does not call it at all (calling it after
+  `write_home_settings` cannot stop the memory tool from
+  writing (which is why it no longer takes the `memory_enabled` flag it once
+  did), so the runner does not call it at all (calling it after
   `contexer install` used to overwrite the installed hooks). Instead, after
   every `with`-arm session the harness records how many memory files that
   session wrote (`memory_leak_files`) and deletes the memory directory, before
