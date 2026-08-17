@@ -4095,6 +4095,87 @@ class TestShareProjectionSourceFiles:
         out = store.format_share_preview(tmp_repo, eid)
         assert "files:" not in out
 
+    def test_anchor_truncation_is_recorded_and_previewed(self, tmp_repo, monkeypatch):
+        """A decision governing more files than _MAX_SOURCE_FILES keeps the first N and the rest
+        are gone for good - so the count is stamped and rendered, turning a silent loss into a
+        visible one the developer can narrow themselves."""
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        many = [f"src/f{i}.py" for i in range(store._MAX_SOURCE_FILES + 7)]
+        _stored, eid = store.update_decision(
+            tmp_repo, "Use JWT tokens for session auth", "s1", "architecture", source_files=many)
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert len(entry["source_files"]) == store._MAX_SOURCE_FILES
+        assert entry["source_files_total"] == len(many)
+        assert f"of {len(many)}" in store.format_share_preview(tmp_repo, eid)
+
+    def test_projection_bounds_source_files_to_the_wire(self, tmp_repo, monkeypatch):
+        """The preview is what a developer approves an outward push from, and the outbox is what
+        actually drains, so neither may advertise a path _wire_args will silently drop. Pinned
+        end to end: the projection bounds it, and the same entry pushed for real sends exactly
+        what the preview showed."""
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        long_path = "a/" * 200 + "f.py"
+        assert len(long_path) > remote._WIRE_SOURCE_FILES_MAX_LEN
+        _stored, eid = store.update_decision(
+            tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+            source_files=["auth/jwt.py", long_path])
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert long_path in entry["source_files"]  # stored locally, verbatim
+
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py"]   # never advertised
+        wired = remote._wire_args(type="architecture", content="c",
+                                  source_files=projected["source_files"])
+        assert wired["source_files"] == projected["source_files"]  # preview == wire
+
+        out = store.format_share_preview(tmp_repo, eid)
+        assert long_path not in out
+        assert "sending 1 of 2" in out  # the drop is stated, not hidden
+
+    def test_anchor_within_cap_records_no_total(self, tmp_repo):
+        _stored, eid = store.update_decision(
+            tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+            source_files=["auth/jwt.py", "auth/session.py"])
+        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        assert "source_files_total" not in entry
+        assert "first 2 of" not in store.format_share_preview(tmp_repo, eid)
+
+    def test_reanchor_with_fewer_files_clears_a_stale_total(self, tmp_repo):
+        """The stamp is popped, not just skipped: a decision re-anchored down to two files must
+        not keep claiming it governs seventeen."""
+        entry = {}
+        store._anchor_sources(tmp_repo, entry, [f"src/f{i}.py" for i in range(17)])
+        assert entry["source_files_total"] == 17
+        store._anchor_sources(tmp_repo, entry, ["auth/jwt.py", "auth/session.py"])
+        assert "source_files_total" not in entry
+
+    def test_preview_labels_candidate_files_as_unconfirmed(self, tmp_repo, monkeypatch):
+        """Sharing is outward and hard to undo, so the confirm-preview must label a guess as a
+        guess - the same thing `would anchor:` does at every other human-facing surface. Without
+        the label, a candidate reads identically to a human-blessed anchor at the one screen
+        where the developer signs off on sending it."""
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
+        assert not store._load(tmp_repo)["entries"][0].get("source_files")  # candidates only
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files: auth/jwt.py" in out
+        assert "unconfirmed" in out
+
+    def test_preview_does_not_label_a_blessed_anchor_unconfirmed(self, tmp_repo, monkeypatch):
+        from contexer import remote
+        monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
+        store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
+                              source_files=["auth/jwt.py"])
+        eid = store._load(tmp_repo)["entries"][0]["id"]
+        out = store.format_share_preview(tmp_repo, eid)
+        assert "files: auth/jwt.py" in out
+        assert "unconfirmed" not in out
+
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
 
@@ -5081,7 +5162,31 @@ class TestAnchorCandidates:
         entry = self._entry(tmp_repo, eid)
         assert entry.get("anchor_candidates")  # precondition: candidates actually present
         projected = store._share_projection(entry, redact_on=False)
-        assert "anchor_candidates" not in projected
+        assert "anchor_candidates" not in projected  # never its own wire field
+
+    def test_share_projection_falls_back_to_candidates_for_source_files(self, tmp_repo):
+        """An unanchored but shareable decision sends its candidates as source_files. Teams
+        labels received files as claimed/unverified, which is exactly a candidate's trust
+        level - so the guess is safe on the wire while `source_files` stays unwritten locally
+        (the commit guard's Tier-1 pairing must keep reading only human-blessed anchors)."""
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+        entry = self._entry(tmp_repo, eid)
+        assert not entry.get("source_files")  # precondition: nothing anchored yet
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py"]
+        assert not self._entry(tmp_repo, eid).get("source_files")  # local anchor still unwritten
+
+    def test_share_projection_prefers_real_anchor_over_candidates(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/session.py")
+        _stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            source_files=["auth/jwt.py"])
+        entry = self._entry(tmp_repo, eid)
+        entry["anchor_candidates"] = ["auth/session.py"]
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["auth/jwt.py"]  # blessed anchor wins
 
     def test_review_surfaces_would_anchor_line_for_new_pending_decision(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")

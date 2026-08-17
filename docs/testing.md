@@ -6,9 +6,10 @@ Two, both deselected in CI for different reasons:
 
 - **`slow`** — `tests/test_bench_*.py`, the stubbed benchmark harness. ~45s, exercises
   `benchmarks/`, which isn't in the coverage target. Runs in its own CI job.
-- **`perf`** — wall-clock latency assertions (`p99 < 5ms`, `mean < 1ms`, …) in
-  `test_benchmark.py` / `test_benchmark_extended.py`. These calibrate against fixed
-  hardware and **cannot** hold on shared runners; they never run in CI.
+- **`perf`** - wall-clock latency assertions (`p99 < 5ms`, `mean < 1ms`, ...) in
+  `test_benchmark.py`, `test_benchmark_extended.py` and `test_store.py`. These calibrate
+  against fixed hardware and **cannot** hold on shared runners; they never run in CI, and
+  `tests/conftest.py` also skips them whenever coverage is on (see below).
 
 ```bash
 # What CI's per-Python-version job runs — coverage gate on.
@@ -24,8 +25,22 @@ uv run pytest tests/ -m perf --no-cov -s
 Everything else in the accuracy benchmarks — retrieval hit/miss, novelty filtering,
 display caps — stays in the gate, because those assert behaviour, not nanoseconds.
 
-`uv run pytest tests/` locally still runs everything and is the right command before
-pushing, on a machine quiet enough for the `perf` numbers to mean something.
+`uv run pytest tests/` locally is the right command before pushing. It runs everything
+except the `perf` tests, which it skips: `addopts` turns coverage on for every bare run,
+and a wall-clock number taken under a tracer is not the number the assertion is about.
+Take the real measurements with the `-m perf --no-cov` command above, on a quiet machine.
+
+### Why `perf` tests skip under coverage
+
+Coverage's tracer inflates the measured path roughly 5x, which is enough to turn a genuine
+assertion into a coin flip. `test_index_lookup_meets_latency_budget` measures ~0.9ms p50
+uninstrumented, the figure its docstring pins, but ~4.7ms against its 5.0ms budget under
+`--cov` - so whether it passed came down to machine load at that moment.
+
+Raising the budget is the wrong fix. It would have to reach past the ~7.7ms live-scan
+fallback to be reliably safe, and that regression is precisely what the assertion exists to
+catch. `tests/conftest.py` skips the whole marker instead, so the number is only ever taken
+in the one configuration where it means something.
 
 ### Why `perf` is not just a bigger threshold
 
