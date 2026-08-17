@@ -1,4 +1,0 @@
-# Kept for reference; pyproject.toml is the authoritative dependency spec (managed by uv).
-# The upper bound must match pyproject's: mcp 2.0.0 removed `mcp.server.fastmcp`, so an
-# unbounded resolve installs a server that cannot start.
-mcp>=1.9.4,<2
