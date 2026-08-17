@@ -809,18 +809,20 @@ def test_wire_args_redact_param_overrides_config():
     assert _WIRE_AWS in off["content"]  # caller-resolved flag wins over a config read
 
 
-# ── source_files on the wire (issue #174 Task 5, gated) ────────────────────────
+# ── source_files on the wire (issue #174 Task 5, gate now open) ────────────────
 # THE pin that protects the outbox: contexer-teams' push_decision schema is server-controlled,
 # and an unknown/rejected field can poison the outbox with permanent validation failures (the
-# source="plan" incident: -32602 on every retry, 192 attempts). `source_files` must stay off the
-# wire until the server accepts it — `remote._WIRE_SOURCE_FILES` (shipped False) is the gate.
+# source="plan" incident: -32602 on every retry, 192 attempts). `remote._WIRE_SOURCE_FILES` is
+# that gate; it ships True now that the server accepts the field (e1a2189). These two tests pin
+# the DEFAULT, so a rollback of the constant has to be deliberate rather than silent — the rest
+# of the group monkeypatches the gate explicitly and holds either way.
 
-def test_wire_args_excludes_source_files_by_default():
+def test_wire_args_includes_source_files_by_default():
     args = remote._wire_args(type="architecture", content="use jwt", source_files=["auth/jwt.py"])
-    assert "source_files" not in args
+    assert args["source_files"] == ["auth/jwt.py"]
 
 
-def test_wire_args_includes_scrubbed_source_files_when_gated_on(monkeypatch):
+def test_wire_args_includes_scrubbed_source_files_when_gate_explicitly_on(monkeypatch):
     monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
     args = remote._wire_args(type="architecture", content="use jwt",
                              source_files=[f"auth/{_WIRE_AWS}.py"])
@@ -834,7 +836,7 @@ def test_wire_args_source_files_respects_redact_opt_out(monkeypatch):
     assert args["source_files"] == [f"auth/{_WIRE_AWS}.py"]  # opted out entirely
 
 
-def test_wire_args_empty_source_files_omitted_even_when_gated_on(monkeypatch):
+def test_wire_args_empty_source_files_omitted_even_when_gate_explicitly_on(monkeypatch):
     monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
     args = remote._wire_args(type="architecture", content="use jwt", source_files=[])
     assert "source_files" not in args
@@ -845,7 +847,49 @@ def test_wire_args_no_source_files_key_when_none():
     assert "source_files" not in args
 
 
-def test_push_decision_excludes_source_files_by_default(monkeypatch):
+# ── wire bounds (mirror of contexer-teams INPUT_LIMITS.sourceFiles) ────────────
+# The capture side caps the COUNT (store._MAX_SOURCE_FILES) but nothing bounds path LENGTH, and
+# the singular push_decision rejects over-bounds at its zod boundary — a -32602, i.e. the same
+# permanent outbox poisoning the gate above exists to prevent. Dropping a path costs one piece of
+# metadata; sending it wedges the queue, so the clamp is deliberately silent and lossy.
+
+def test_wire_args_drops_over_long_source_file():
+    long_path = "a/" * 200 + "f.py"          # > _WIRE_SOURCE_FILES_MAX_LEN
+    assert len(long_path) > remote._WIRE_SOURCE_FILES_MAX_LEN
+    args = remote._wire_args(type="architecture", content="use jwt",
+                             source_files=["auth/jwt.py", long_path])
+    assert args["source_files"] == ["auth/jwt.py"]  # in-bounds sibling still egresses
+
+
+def test_wire_args_truncates_over_count_source_files():
+    files = [f"src/f{i}.py" for i in range(remote._WIRE_SOURCE_FILES_MAX_ITEMS + 5)]
+    args = remote._wire_args(type="architecture", content="use jwt", source_files=files)
+    assert args["source_files"] == files[:remote._WIRE_SOURCE_FILES_MAX_ITEMS]
+
+
+def test_wire_args_omits_key_when_every_source_file_is_over_bounds():
+    """Omitted, never sent as []: the server reads an absent key as unset, while an empty array
+    would CLEAR the column through `excluded.source_files` on a re-push."""
+    long_path = "a/" * 200 + "f.py"
+    args = remote._wire_args(type="architecture", content="use jwt", source_files=[long_path])
+    assert "source_files" not in args
+
+
+def test_wire_args_measures_length_after_redaction(monkeypatch):
+    """Clamped AFTER the scrub, so what is measured is the length that actually goes on the wire,
+    not the on-disk one. Pinned in the direction this fixture moves (the placeholder is SHORTER
+    than the AWS key it replaces): a path over the cap raw but under it once redacted is KEPT,
+    which can only happen if the clamp runs after the scrub."""
+    from contexer import redact
+    raw = f"auth/{_WIRE_AWS}.py"
+    scrubbed = redact.scrub_text(raw)
+    assert len(scrubbed) < len(raw)  # precondition: this fixture shortens
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES_MAX_LEN", len(scrubbed))
+    args = remote._wire_args(type="architecture", content="use jwt", source_files=[raw])
+    assert args["source_files"] == [scrubbed]
+
+
+def test_push_decision_includes_source_files_by_default(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         remote, "_acall_tool",
@@ -854,10 +898,10 @@ def test_push_decision_excludes_source_files_by_default(monkeypatch):
     )
     RemoteStore("https://t/mcp", "tok").push_decision(
         type="architecture", content="use jwt", repo=None, source_files=["auth/jwt.py"])
-    assert "source_files" not in captured["args"]
+    assert captured["args"]["source_files"] == ["auth/jwt.py"]
 
 
-def test_push_decision_includes_source_files_when_gated_on(monkeypatch):
+def test_push_decision_includes_source_files_when_gate_explicitly_on(monkeypatch):
     monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
     captured = {}
     monkeypatch.setattr(

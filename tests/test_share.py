@@ -531,9 +531,11 @@ def test_drain_outbox_sends_title_on_retry(tmp_repo, monkeypatch):
 
 
 def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monkeypatch):
-    """issue #174 Task 5 — an entry queued while gated OFF (the shipped default) must still
-    respect a LATER flip of remote._WIRE_SOURCE_FILES at the moment it actually drains, not
-    whatever the gate was when it was enqueued. Uses the real RemoteStore (network seam
+    """issue #174 Task 5 — the wire gate is read at DRAIN time, never cached from queue time,
+    in BOTH directions: an entry queued while gated off egresses its files once the gate opens,
+    and one queued while open stops egressing them if the gate is rolled back. Both legs are set
+    explicitly rather than leaning on the shipped default, so this keeps testing the drain-time
+    read no matter which way the constant ships. Uses the real RemoteStore (network seam
     `remote._acall_tool` mocked, like test_remote.py) rather than _FakeRS, so the real
     _wire_args gate check is actually exercised — _FakeRS bypasses it entirely."""
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
@@ -551,7 +553,8 @@ def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monke
     monkeypatch.setattr(remote, "_acall_tool", fake_call)
     remote.reset_degradation_warnings()
 
-    # Gate OFF (default): source_files was on the queued entry but must NOT reach the wire.
+    # Gate CLOSED at drain: source_files was on the queued entry but must NOT reach the wire.
+    monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", False)
     assert share.drain_outbox(TEAM) == 1
     assert "source_files" not in captured["args"]["decisions"][0]
 

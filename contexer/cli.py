@@ -340,7 +340,11 @@ def _review_metadata(repo_path: str, entry: dict,
     files = entry.get("source_files") or []
     anchor_sha = entry.get("anchor_commit") or ""
     if files:
-        rows.append(("Files", ", ".join(files)))
+        # A truncated anchor says so (see store._anchor_sources): the dropped paths are gone,
+        # so the count is the only way the developer learns the anchor is partial.
+        total = entry.get("source_files_total") or 0
+        shown = f" (first {len(files)} of {total})" if total > len(files) else ""
+        rows.append(("Files", ", ".join(files) + shown))
         note = _budgeted(budget, ("stale", anchor_sha, tuple(files)),
                          lambda: store._staleness_note(repo_path, entry))
         if note:

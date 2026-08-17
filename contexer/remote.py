@@ -41,14 +41,32 @@ _DEFAULT_TIMEOUT = 10.0
 # GATE (issue #174 Task 5, developer-ruled): the contexer-teams `push_decision`/`push_decisions`
 # schema is server-controlled, and an unknown/rejected field can poison the outbox with permanent
 # validation failures — this happened for real with `source="plan"` (-32602 on every retry, 192
-# attempts, before the server accepted the value). `source_files` MUST NOT reach the wire until
-# the contexer-teams server has deployed support for it. Until then it stays LOCAL: the share
-# projection/preview/outbox carry it (so the developer can see what will be sent once enabled),
-# but `_wire_args` omits it from the actual push payload while this is False. Flipping this to
-# True is a deliberate, one-line follow-up client PR after the server-side schema change ships —
-# NOT a user-facing config flag, since a config toggle could be flipped on before the server is
-# ready and reintroduce the same poisoning failure mode.
-_WIRE_SOURCE_FILES = False
+# attempts, before the server accepted the value). `source_files` therefore stayed LOCAL until the
+# server accepted it: the share projection/preview/outbox carried it, but `_wire_args` omitted it
+# from the actual push payload.
+#
+# OPENED: contexer-teams accepts `source_files` on both `push_decision` and `push_decisions`
+# (server commit e1a2189, on main since 2026-08-09; validated by `INPUT_LIMITS.sourceFiles`, max
+# 10 paths x 300 chars). Verified end to end against a live server before flipping — same client,
+# same decision, pushed with the gate off and on: off stored NULL, on stored both paths and
+# rendered them in the dashboard's Files section, with no -32602 on either the single or batch
+# tool. Kept as a constant rather than inlined so a stale endpoint that rejects the field is a
+# one-line rollback — still NOT a user-facing config flag, since a config toggle could be flipped
+# on against an old server and reintroduce the poisoning failure mode.
+_WIRE_SOURCE_FILES = True
+
+# Wire bounds for `source_files`, mirroring contexer-teams `INPUT_LIMITS.sourceFiles`. The server
+# commit justifies rejecting over-bounds input with "the client caps at the same numbers" — true
+# for the COUNT (store._MAX_SOURCE_FILES, enforced at every anchor write) and false for the
+# LENGTH: nothing on the capture side bounds a path at 300 chars, and the egress scrub can even
+# LENGTHEN one ([REDACTED:kind] is longer than some values it replaces). The singular
+# `push_decision` rejects over-bounds at its zod boundary, i.e. -32602, i.e. exactly the permanent
+# outbox poisoning the gate above exists to prevent (the batch tool loosens x8/x4 and drops
+# per-row, so only the singular path is exposed). Asymmetric by a mile: dropping a path costs one
+# piece of metadata, sending it wedges the queue forever — so clamp here rather than trust the
+# capture side to have been bounded.
+_WIRE_SOURCE_FILES_MAX_ITEMS = 10
+_WIRE_SOURCE_FILES_MAX_LEN = 300
 
 
 def _wire_args(*, type: str, content: str, repo: str | None = None,
@@ -68,12 +86,14 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     it is scrubbed independently, same as content/evidence. Idempotent with the capture scrub
     (the [REDACTED] placeholder never re-matches).
 
-    `source_files` is GATED (see `_WIRE_SOURCE_FILES` above): it is re-scrubbed here for the same
-    idempotent-egress-rule reason as content/evidence/title, but only ever lands in the returned
-    dict when the module-level gate is True. The gate is read HERE, at call time — not captured
-    by a caller ahead of time — so an outbox entry queued while gated stays valid to drain later:
-    a drain re-invokes this function fresh, so it always reflects whatever the constant is set to
-    AT DRAIN TIME, never at the time the entry was queued.
+    `source_files` passes the `_WIRE_SOURCE_FILES` gate above (now open) and is re-scrubbed here
+    for the same idempotent-egress-rule reason as content/evidence/title. The gate is read HERE,
+    at call time — not captured by a caller ahead of time — so entries queued to the outbox while
+    it was still closed egress their files on the next drain, with no re-queue or migration; a
+    rollback likewise takes effect at drain time, not at enqueue time. It is also CLAMPED here to
+    the server's own bounds (see `_WIRE_SOURCE_FILES_MAX_*`), for the same reason redaction lives
+    at this chokepoint: every push funnels through here, so bounding once here is the guarantee,
+    where bounding at each capture site would be a promise several writers have to keep.
 
     `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
     config.toml per row); None means resolve it here for a lone call."""
@@ -106,7 +126,14 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     if title is not None:
         args["title"] = title
     if _WIRE_SOURCE_FILES and source_files:
-        args["source_files"] = source_files
+        # Clamped AFTER the scrub above, so a redaction-lengthened path is measured at its real
+        # wire length. An all-over-bounds list omits the key entirely rather than sending [],
+        # keeping the "omit every unset optional" rule (the server reads absent as unset, and an
+        # empty array would CLEAR the column via `excluded.source_files` on re-push).
+        bounded = [f for f in source_files
+                   if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
+        if bounded:
+            args["source_files"] = bounded
     return args
 
 

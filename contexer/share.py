@@ -252,12 +252,11 @@ def _entry_push_kwargs(entry: dict) -> dict:
     """push_decision kwargs for one outbox entry. Shared by drain_outbox + adrain_outbox so
     the two drains serialize an entry identically (source coerced through _wire_source).
 
-    `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally — it is
-    still gated at the actual wire by `remote._wire_args`/`_WIRE_SOURCE_FILES`, and that gate is
-    read at CALL time, i.e. AT DRAIN, not at the time this entry was queued. So an entry queued
-    while the gate was off and drained after a later flip sends it correctly, with no re-queue or
-    schema migration needed; conversely a flip that gets reverted before this entry drains means
-    it still won't egress the field, exactly as if it had never been gated on."""
+    `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally — the
+    wire gate `remote._wire_args`/`_WIRE_SOURCE_FILES` is read at CALL time, i.e. AT DRAIN, not
+    at the time this entry was queued. So an entry queued before the gate opened drains with its
+    files intact, no re-queue or schema migration needed; conversely a rollback before this entry
+    drains means it won't egress the field, exactly as if it had never been gated on."""
     return dict(
         type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
         rationale=entry.get("rationale"), confidence=entry.get("confidence"),

@@ -2162,10 +2162,23 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     # repository-relative staged path (guard pairing silently dead) and git diff
     # rejects/ignores it (staleness silently dead) — reject it at the door rather
     # than storing a dead anchor.
-    files = [p for p in canon if not guard_engine._escapes_repo(p)][:_MAX_SOURCE_FILES]
+    resolved = [p for p in canon if not guard_engine._escapes_repo(p)]
+    files = resolved[:_MAX_SOURCE_FILES]
     if not files:
         return
     entry["source_files"] = files
+    # THE single truncation point for anchors (apply_backfill_anchors delegates here, and
+    # anchors.py's own `[:_MAX_SOURCE_FILES]` slices a list that was already capped by this
+    # one, so it can never fire). A decision that genuinely governs 40 files keeps the first
+    # 10 and the rest are gone — recording how many there were is what stops that being a
+    # SILENT loss: the review and share-preview surfaces render "anchored to the first 10 of
+    # 40" so the developer can narrow the anchor themselves. Stamped only when it actually
+    # differs, and popped otherwise, so a later re-anchor with fewer files can't leave a
+    # stale count behind.
+    if len(resolved) > len(files):
+        entry["source_files_total"] = len(resolved)
+    else:
+        entry.pop("source_files_total", None)
     entry["anchor_commit"] = _git(repo_path, "rev-parse", "HEAD", timeout=_GIT_FAST_TIMEOUT) or ""
 
 
@@ -3707,9 +3720,9 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     secrets, but the projection must not special-case a field just because it usually looks
     harmless), with empties dropped. `anchor_commit` is deliberately NOT projected here: it is a
     machine-local ref (meaningless on another machine or on the server) and never egresses,
-    regardless of `source_files`. Whether `source_files` actually reaches the WIRE is a separate,
-    later gate — see `remote._WIRE_SOURCE_FILES` — this projection always carries it locally so
-    the preview and durable outbox can show the developer what will be sent once that gate opens."""
+    regardless of `source_files`. Whether `source_files` actually reaches the WIRE is decided
+    later, at `remote._wire_args` time, by `remote._WIRE_SOURCE_FILES` (now open) — this
+    projection always carries it so the preview and durable outbox stay wire-accurate."""
     if redact_on is None:
         redact_on = _redaction_enabled()
     rev = _current_revision(entry) or {}
@@ -3722,6 +3735,25 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     title = entry.get("title") or _derive_title(content)
     evidence = rev.get("evidence") or None
     source_files = [f for f in (entry.get("source_files") or []) if f]
+    # Fall back to the session's edited-files candidates when nothing is anchored yet. A
+    # pending_approval decision IS shareable (_shareable_entries only excludes "ignored"), so
+    # without this every decision shared before its local approval reaches Teams with no files
+    # at all — the anchor exists, it just hasn't been blessed yet. Deliberately one-directional:
+    # this reads `anchor_candidates`, it never writes `source_files`, because that field is the
+    # commit guard's Tier-1 pairing input (_guard_pairs) and a guess must not become guard input
+    # without a human. Teams renders what it receives as claimed, unverified metadata — the same
+    # trust level a candidate actually has — so a guess is safe THERE and not safe here.
+    # Already canonicalized and capped at write (record_edited_file / _MAX_SOURCE_FILES).
+    # `source_files_unconfirmed` is what keeps the LOCAL surface honest: sharing is an outward,
+    # hard-to-undo action, and every other human-facing surface labels a candidate as a guess
+    # (`would anchor:` in format_pending_review, `Would anchor` in cli._review_metadata). Rendering
+    # a guess in the confirm-preview as a plain `files:` line, identical to a blessed anchor, would
+    # be the one place the developer signs without seeing what they are signing. Extra key like
+    # `redacted`/`status`: the wire builders read named fields, so it never egresses.
+    unconfirmed = False
+    if not source_files:
+        source_files = [f for f in (entry.get("anchor_candidates") or []) if f]
+        unconfirmed = bool(source_files)
     # Redact at the projection so the confirm-preview and durable outbox show exactly what
     # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
     # `redacted` counts scrubbed secrets for the preview banner; extra key ignored by the
@@ -3758,10 +3790,14 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # can show it and the developer doesn't push a not-yet-reviewed decision by accident.
         # Extra key like `redacted`: the wire builders read named fields, so it never egresses.
         "status": _entry_status(entry),
-        # LOCAL-only until remote._WIRE_SOURCE_FILES flips True — see that constant's docstring.
+        # Reaches the wire subject to remote._WIRE_SOURCE_FILES — see that constant's comment.
         # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
         # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
         "source_files": source_files,
+        "source_files_unconfirmed": unconfirmed,
+        # How many files the anchor originally resolved to, when _anchor_sources truncated it.
+        # Extra key like `redacted`/`status`: read by the preview, never by a wire builder.
+        "source_files_total": (entry.get("source_files_total") or 0) if not unconfirmed else 0,
     }
 
 
@@ -3946,12 +3982,13 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
     id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml.
 
-    `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files
-    locally, but the wire only sends them once `remote._WIRE_SOURCE_FILES` is flipped True (see
-    that constant). While gated off, this preview stays WIRE-ACCURATE by appending a `files:`
-    line PER DECISION with an honest "(not yet sent — server support pending)" note, rather than
-    silently showing files that won't actually go out; once the gate opens the note drops and
-    the line reads as plain fact."""
+    `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files, and
+    the wire sends them while `remote._WIRE_SOURCE_FILES` is open (see that constant), so the
+    per-decision `files:` line reads as plain fact. The note survives for the rollback case: if
+    the gate is ever closed again, the line regains its honest "(not yet sent — server support
+    pending)" suffix rather than silently promising files that won't actually go out. A second,
+    independent suffix marks files that came from `anchor_candidates` rather than a blessed
+    anchor, so this surface labels a guess as a guess like every other human-facing one does."""
     from contexer import remote
     from contexer.config import default_endpoint, load_profile
     prof = profile or load_profile()  # resolved ONCE — governs both endpoint and redaction
@@ -3967,6 +4004,11 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         files = p.get("source_files") or []
         if files:
             note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent — server support pending)"
+            if p.get("source_files_unconfirmed"):
+                note += " (unconfirmed — this session's edits, not yet approved)"
+            total = p.get("source_files_total") or 0
+            if total > len(files):
+                note += f" (first {len(files)} of {total} — the rest were dropped at capture)"
             lines.append(f"      files: {', '.join(files)}{note}")
     redacted = sum(p.get("redacted", 0) for p in projs)
     if redacted:
