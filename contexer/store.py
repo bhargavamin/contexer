@@ -1003,9 +1003,6 @@ _L3_CONTENT_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
-# Confidence threshold for injecting 'suggested' decisions at session start.
-_SUGGESTED_INJECT_THRESHOLD = 0
-
 
 def _entry_status(entry: dict) -> str:
     """Returns the effective status of an entry, defaulting to 'approved' for old entries."""
@@ -1709,13 +1706,16 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
 
 
 def _redaction_enabled() -> bool:
-    """Whether outbound secret redaction is on. Default True (safety holds unconfigured); opt
-    out with redact_secrets=false in config.toml. Fail-soft: any config error keeps redaction ON.
+    """Whether outbound secret redaction is on — config.redaction_enabled() is the one
+    implementation (default True); this stays as the store-side patch point its tests target.
+    The import sits INSIDE the try on purpose: the promise is fail-soft against ANY failure,
+    an unresolvable name included, because every caller is an egress path (get_shareable,
+    _share_projection) that must degrade to redaction-ON rather than raise.
     Governs the EGRESS path only (share projection + wire) — capture is deliberately NOT scrubbed
     so the local store stays a faithful record; redaction happens when a decision LEAVES."""
     try:
-        from contexer.config import load_profile
-        return load_profile().redact_secrets
+        from contexer.config import redaction_enabled
+        return redaction_enabled()
     except Exception:
         return True
 
@@ -5079,7 +5079,7 @@ _QUERY_STOP_WORDS = frozenset({
     "implement", "implemented", "implementation", "use", "using", "used",
     "build", "built", "create", "created", "add", "added", "make", "made",
     "just", "here", "there", "when", "then", "than", "also", "get",
-    "into", "which", "who", "where", "what", "that", "its", "been",
+    "into", "which", "who", "where", "its",
 })
 
 # Additional words excluded when deciding if a project-context question is domain-specific.
@@ -6772,10 +6772,12 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
             except Exception:
                 pass
 
-    # .claude/rules/*.md is normally developer-authored, but Contexer writes its OWN
-    # auto-generated mirror there. Offering that back as evidence to confirm would round-trip
-    # Contexer's own (often stale) output in as a human-ratified decision — the loop this
-    # whole design exists to avoid — so a generated file is skipped by its own header.
+    # .claude/rules/*.md is normally developer-authored, but an earlier Contexer version wrote
+    # its OWN auto-generated mirror there (nothing in the current source regenerates one; an
+    # install of that vintage still leaves one behind). Offering that back as evidence to
+    # confirm would round-trip Contexer's own (often stale) output in as a human-ratified
+    # decision — the loop this whole design exists to avoid — so a generated file is skipped
+    # by its own header, whoever wrote it.
     rules_dir = root / ".claude" / "rules"
     if rules_dir.is_dir():
         try:
@@ -7304,10 +7306,13 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
 _GUARD_EXPORTS = frozenset({
     "guard_staged", "guard_candidates", "arm_guard", "disarm_guard", "dismiss_guard",
 })
-# Same mechanism, same reason, for the one PUBLIC entrypoint conflicts.py owns
-# (server.py's resolve_conflict tool calls it as store.record_conflict_memo).
-# The private conflict helpers are NOT re-exported — a private helper's caller
-# imports the module that owns it (cli.py's review branch does exactly that).
+# Same mechanism, same reason, for the one conflicts.py name that is actually
+# reached AS `store.<x>` (server.py's resolve_conflict tool calls
+# store.record_conflict_memo). The rule is that access shape, not public-vs-private:
+# every other conflicts.py name — the private helpers AND public ones like
+# memo_steer_line — is imported from the module that owns it by the callers that
+# need it (store.py's own _matches_query branch and cli.py's review branch both
+# do exactly that), so re-exporting them here would buy nothing.
 _CONFLICT_EXPORTS = frozenset({"record_conflict_memo"})
 
 
@@ -7322,7 +7327,10 @@ def __getattr__(name):
 
 
 def __dir__():
-    # Paired with the __getattr__ above (PEP 562): without this, dir(store) omits the
-    # five guard entrypoints entirely, since they're resolved lazily and never assigned
-    # into the module namespace.
-    return sorted([*globals(), *_GUARD_EXPORTS])
+    # Paired with the __getattr__ above (PEP 562): without this, dir(store) omits every
+    # lazily-resolved entrypoint — the five guard ones and record_conflict_memo — since
+    # they are never assigned into the module namespace. Mirror BOTH export sets, i.e.
+    # exactly what __getattr__ resolves: listing only one left record_conflict_memo
+    # answerable by getattr but absent from dir(), a split that no longer matches the
+    # facade the moment either set changes.
+    return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS])

@@ -708,10 +708,12 @@ class TestBootstrapScan:
         assert deploy_gap["assumption"]
 
     def test_contexer_own_generated_rules_file_is_not_offered_as_evidence(self, tmp_repo):
-        """.claude/rules/<x>.md is normally developer-authored, but Contexer writes its OWN
-        auto-generated mirror there (36KB on this repo, header 'Auto-generated. Do not edit
-        manually'). Enumerating it tells the model to quote Contexer's own stale output back
-        to the developer as evidence to confirm — a decision round-tripping in as if human."""
+        """.claude/rules/<x>.md is normally developer-authored, but an earlier Contexer version
+        wrote its OWN auto-generated mirror there (36KB on this repo until it was deleted;
+        header 'Auto-generated. Do not edit manually'), and an install of that vintage still
+        leaves one behind. Enumerating it tells the model to quote Contexer's own stale output
+        back to the developer as evidence to confirm — a decision round-tripping in as if
+        human — so the skip is keyed on the header, not on who wrote the file."""
         root = Path(tmp_repo)
         root.mkdir(parents=True, exist_ok=True)
         rules = root / ".claude" / "rules"
