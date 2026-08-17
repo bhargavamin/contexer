@@ -55,7 +55,7 @@ def test_poll_throttled_skips_network(team_env, monkeypatch):
                                         "decisions": [], "last_poll_at": time.time()})
     fake = _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
     assert team_context.poll(team_env, profile=TEAM) == []
-    assert fake.calls == []  # throttled — no round-trip
+    assert fake.calls == []  # throttled - no round-trip
 
 
 def test_poll_after_window_polls_again(team_env, monkeypatch):
@@ -161,7 +161,7 @@ def test_two_consumers_each_get_new_rows_once(team_env, monkeypatch):
 def test_new_consumer_starts_caught_up(team_env, monkeypatch):
     _no_spawn(monkeypatch)
     # SessionStart already rendered these rows; a brand-new consumer (no marker yet) must NOT
-    # re-inject the backlog — it catches up to the current log head instead.
+    # re-inject the backlog - it catches up to the current log head instead.
     _seed_log(team_env, seq=2, sync_log=[{"seq": 1, "ids": ["t1"]}, {"seq": 2, "ids": ["t2"]}],
               decisions=[{"id": "t1", "content": "a"}, {"id": "t2", "content": "b"}])
     assert team_context.poll_nonblocking(team_env, "codex", profile=TEAM) == []  # caught up
@@ -210,7 +210,7 @@ def test_sync_log_is_capped_dropping_oldest(team_env, monkeypatch):
 def test_consumer_behind_cap_gets_current_log_only(team_env, monkeypatch):
     _no_spawn(monkeypatch)
     # log covers seq 3..5 (1,2 dropped by the cap); a brand-new consumer (marker 0) still gets
-    # every batch REMAINING in the log — the dropped ones stay reachable via get_context.
+    # every batch REMAINING in the log - the dropped ones stay reachable via get_context.
     _seed_log(team_env, seq=5,
               sync_log=[{"seq": 3, "ids": ["t3"]}, {"seq": 4, "ids": ["t4"]},
                         {"seq": 5, "ids": ["t5"]}],
@@ -281,7 +281,7 @@ def test_corrupt_marker_degrades_to_empty(team_env, monkeypatch):
               decisions=[{"id": "t1", "content": "x"}])
     team_context.store.STORE_DIR.mkdir(exist_ok=True)
     team_context._seen_path(team_env, "claude").write_text("{not json")
-    # corrupt marker: no crash, no re-spam of the whole log — empty injection this once
+    # corrupt marker: no crash, no re-spam of the whole log - empty injection this once
     assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []
     # self-healed to caught-up (seq 1); a follow-up poll with no new batch is still empty
     assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []
@@ -355,7 +355,7 @@ def test_poll_throttle_widens_after_failures(team_env, monkeypatch):
         "last_sync": {"at": 1, "ok": False, "duration_ms": 1, "consecutive_failures": 2}})
     fake = _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
     assert team_context.poll(team_env, profile=TEAM) == []
-    assert fake.calls == []  # still backed off — no round-trip
+    assert fake.calls == []  # still backed off - no round-trip
 
 
 def test_poll_polls_again_once_backoff_window_elapses(team_env, monkeypatch):

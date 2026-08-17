@@ -133,7 +133,7 @@
 * **bench:** capture_stats derives store filename via store._slug ([b03cbfc](https://github.com/bhargavamin/contexer/commit/b03cbfc0e947ab2ad0701c64d497d8352e750259))
 * **bench:** capture-rate table sources measure rows ([a415075](https://github.com/bhargavamin/contexer/commit/a4150752ffe3f79331195be11053bfe27c79914a))
 * **bench:** explicit-tier rule was deictic, log regex matched "catalog" ([e0ab33d](https://github.com/bhargavamin/contexer/commit/e0ab33d829a7facb0e61843663cd8f430fa3f95b))
-* **bench:** lint clean — ruff never ran locally during this build ([acdb4cc](https://github.com/bhargavamin/contexer/commit/acdb4cc4aa4d0f925f1cbe988510c71eab1dcc09))
+* **bench:** lint clean - ruff never ran locally during this build ([acdb4cc](https://github.com/bhargavamin/contexer/commit/acdb4cc4aa4d0f925f1cbe988510c71eab1dcc09))
 * **bench:** memory campaign measured Contexer with its hooks deleted ([83341ad](https://github.com/bhargavamin/contexer/commit/83341ad3364c76a592703b0f47bcf09a0276c0ff))
 * **bench:** pooled headline cell, review bucket, validator memory contract ([566a4a6](https://github.com/bhargavamin/contexer/commit/566a4a67000fac5cb97dcca7d2ee765fe8266757))
 * **bench:** post-run contamination, per-row error capture, loud enf setup ([e528d16](https://github.com/bhargavamin/contexer/commit/e528d16e90725b781bbe3773d8ba8443250dcb91))
@@ -163,9 +163,9 @@
 ### Features
 
 * **anchors:** decision-file navigation and review-gated decay ([336d2af](https://github.com/bhargavamin/contexer/commit/336d2af2a3d85f7db3896353d92e2498f6b5803a))
-* **anchors:** review-gated anchor decay — rename re-anchor, retirement proposals ([df92fe6](https://github.com/bhargavamin/contexer/commit/df92fe630e3365b50105341e588a08cd74e174d5))
+* **anchors:** review-gated anchor decay - rename re-anchor, retirement proposals ([df92fe6](https://github.com/bhargavamin/contexer/commit/df92fe630e3365b50105341e588a08cd74e174d5))
 * **retrieval:** deterministic file-route injection at the prompt seam ([36dc13b](https://github.com/bhargavamin/contexer/commit/36dc13bcfd30c531dea7dddddcf934dca70e83c9))
-* **retrieval:** get_context(files=…) — decisions that govern the given files ([2144595](https://github.com/bhargavamin/contexer/commit/21445954b01829f66781f42fbf6faa79c4252af9))
+* **retrieval:** get_context(files=…) - decisions that govern the given files ([2144595](https://github.com/bhargavamin/contexer/commit/21445954b01829f66781f42fbf6faa79c4252af9))
 * **retrieval:** route prompt-named files through the anchor lookup ahead of BM25 ([1f99e6b](https://github.com/bhargavamin/contexer/commit/1f99e6b0a75d1d8a03952c64d15b2e71c8d14e09))
 * **share:** carry source_files in projection and preview, gated off the wire pending server support ([6961049](https://github.com/bhargavamin/contexer/commit/6961049ceef22bb08313a83b65735404c24ac7c1))
 * **ui:** show decision file references and filter by file ([ee43615](https://github.com/bhargavamin/contexer/commit/ee43615c105a7aa52ba7c82b0f2a0fff0bf3a9bb))
@@ -192,8 +192,8 @@
 * **capture:** carry anchor candidates from edited files; bless at approval ([c11ecf2](https://github.com/bhargavamin/contexer/commit/c11ecf21e0f7a75c6aed266ad6d915203045e749))
 * **capture:** carry anchor candidates on constraint capture ([f098213](https://github.com/bhargavamin/contexer/commit/f098213a95d48d2e02273cc9cb29d1354d4cd326))
 * **capture:** record per-session edited files from write hooks ([a1ca4fa](https://github.com/bhargavamin/contexer/commit/a1ca4fac272e1868f83c4ab4ca78dc1a6afe1a9b))
-* **guard:** anchor accrual — assisted backfill and capture-time candidates ([305b6e4](https://github.com/bhargavamin/contexer/commit/305b6e44c9007eaaa0140490a47811e33e9664d4))
-* **guard:** anchor coverage — trust widening, approval-time anchoring, guard_engine extraction ([14cd854](https://github.com/bhargavamin/contexer/commit/14cd8548011b13b72526fbb8fbfe64906f4f7dbc))
+* **guard:** anchor accrual - assisted backfill and capture-time candidates ([305b6e4](https://github.com/bhargavamin/contexer/commit/305b6e44c9007eaaa0140490a47811e33e9664d4))
+* **guard:** anchor coverage - trust widening, approval-time anchoring, guard_engine extraction ([14cd854](https://github.com/bhargavamin/contexer/commit/14cd8548011b13b72526fbb8fbfe64906f4f7dbc))
 * **guard:** anchor decisions at approval time ([21574a3](https://github.com/bhargavamin/contexer/commit/21574a3d1b1795566d742e28cd16c60187c1adcb))
 * **guard:** assisted anchor backfill via contexer guard anchors ([0f9aa65](https://github.com/bhargavamin/contexer/commit/0f9aa65de889c04e297f97dfcd5f121762085fb0))
 * **guard:** trust explicitly human-approved decisions regardless of capture source ([5ee2cfb](https://github.com/bhargavamin/contexer/commit/5ee2cfbcea9050d76cbbb297dd644100e9b79c6d))
@@ -224,12 +224,12 @@
 ### Documentation
 
 * **guard:** correct tier-1 pairing claims for unanchored decisions ([3ba507a](https://github.com/bhargavamin/contexer/commit/3ba507a2c521a7ac29be73ef536a17ec0a8d10cb))
-* **guard:** document anchor accrual — backfill, edited-files signal, candidate lifecycle ([7fbcb7a](https://github.com/bhargavamin/contexer/commit/7fbcb7a7f78eaa05133c2dd5d79c0595a1a5c8e5))
+* **guard:** document anchor accrual - backfill, edited-files signal, candidate lifecycle ([7fbcb7a](https://github.com/bhargavamin/contexer/commit/7fbcb7a7f78eaa05133c2dd5d79c0595a1a5c8e5))
 * **guard:** document trusted-source widening, approval anchoring, guard_engine layout ([c5681cf](https://github.com/bhargavamin/contexer/commit/c5681cfd45899043a6256d03692cec794b1fa909))
 * **guard:** rewrite user-facing guard docs for clarity ([afe665b](https://github.com/bhargavamin/contexer/commit/afe665b9bf00b4c3afa25db7c5f80b353f357070))
 * **guard:** scope approval-anchoring claims to paths that exist ([8bf1c79](https://github.com/bhargavamin/contexer/commit/8bf1c791a04436bf9639071ea3b64f594006cbcb))
-* **store:** scope the provenance ruling — synthesis derives, never fabricates ([b37c22b](https://github.com/bhargavamin/contexer/commit/b37c22b3de1a64bf1db063b318d03832a6ef9405))
-* **store:** scope the provenance ruling — synthesis derives, never fabricates ([#176](https://github.com/bhargavamin/contexer/issues/176)) ([3e925c5](https://github.com/bhargavamin/contexer/commit/3e925c58bc9854d3619304a0be54ca234961b780))
+* **store:** scope the provenance ruling - synthesis derives, never fabricates ([b37c22b](https://github.com/bhargavamin/contexer/commit/b37c22b3de1a64bf1db063b318d03832a6ef9405))
+* **store:** scope the provenance ruling - synthesis derives, never fabricates ([#176](https://github.com/bhargavamin/contexer/issues/176)) ([3e925c5](https://github.com/bhargavamin/contexer/commit/3e925c58bc9854d3619304a0be54ca234961b780))
 
 ## [0.30.0](https://github.com/bhargavamin/contexer/compare/v0.29.1...v0.30.0) (2026-08-07)
 
@@ -239,13 +239,13 @@
 * **guard:** add contexer guard CLI subcommand family ([fa6db74](https://github.com/bhargavamin/contexer/commit/fa6db746efca2ae361f356926e60002a0ae0610e))
 * **guard:** add git hook install/uninstall + pre-commit framework spec ([40de902](https://github.com/bhargavamin/contexer/commit/40de9029f0558ff83be55047a32150843cdb4934))
 * **guard:** add staged plumbing and path-matching helpers ([a670012](https://github.com/bhargavamin/contexer/commit/a670012acd1fbcab64d1a0ba0aae298400770a49))
-* **guard:** add Tier-1 advisory engine — pairing, throttle, dismissals ([c9d75a8](https://github.com/bhargavamin/contexer/commit/c9d75a84001c7683f960d6ffc9fceae7726f5c56))
-* **guard:** add Tier-2 armed rules — machine-checkable blocking checks ([918b585](https://github.com/bhargavamin/contexer/commit/918b58534e2b4acd16e5a4662cd5ba9b134b8254))
-* **guard:** commit-time decision guard — advisory pairing and armed blocking rules ([67469f7](https://github.com/bhargavamin/contexer/commit/67469f73ed8a2c879e06ff86dad33fba6151fc62))
+* **guard:** add Tier-1 advisory engine - pairing, throttle, dismissals ([c9d75a8](https://github.com/bhargavamin/contexer/commit/c9d75a84001c7683f960d6ffc9fceae7726f5c56))
+* **guard:** add Tier-2 armed rules - machine-checkable blocking checks ([918b585](https://github.com/bhargavamin/contexer/commit/918b58534e2b4acd16e5a4662cd5ba9b134b8254))
+* **guard:** commit-time decision guard - advisory pairing and armed blocking rules ([67469f7](https://github.com/bhargavamin/contexer/commit/67469f73ed8a2c879e06ff86dad33fba6151fc62))
 * **store:** bounce narrative-shaped AI captures with restate guidance ([02ee9ce](https://github.com/bhargavamin/contexer/commit/02ee9ceaf1d2da67734d1e7c5154628af4619755))
 * **store:** clip long decision bodies in human review surfaces ([8da4a3a](https://github.com/bhargavamin/contexer/commit/8da4a3aaf713833edd12e6d667a3b451c6c48e38))
 * **store:** re-verify scan conventions against fresh miner evidence ([bd5648d](https://github.com/bhargavamin/contexer/commit/bd5648dc29fd16d688dac9c60e66d29c93a638e7))
-* week-1 capture quality — lint narrative captures, clip review surfaces, stamp legacy entries, re-verify scan conventions ([29d461f](https://github.com/bhargavamin/contexer/commit/29d461fbc554fb360e311b303b64400f5bd78d75))
+* week-1 capture quality - lint narrative captures, clip review surfaces, stamp legacy entries, re-verify scan conventions ([29d461f](https://github.com/bhargavamin/contexer/commit/29d461fbc554fb360e311b303b64400f5bd78d75))
 
 
 ### Bug Fixes
@@ -349,7 +349,7 @@
 
 ### Bug Fixes
 
-* **deps:** cap mcp&lt;2 — 2.0.0 removed mcp.server.fastmcp ([f4e5b58](https://github.com/bhargavamin/contexer/commit/f4e5b585e19e2206c903d34ec2491c94a8046223))
+* **deps:** cap mcp&lt;2 - 2.0.0 removed mcp.server.fastmcp ([f4e5b58](https://github.com/bhargavamin/contexer/commit/f4e5b585e19e2206c903d34ec2491c94a8046223))
 * **hooks:** never abort a hook on an unwritable ~/.contexer ([0d95fb0](https://github.com/bhargavamin/contexer/commit/0d95fb078d029c729b634078d51ad813f21893ec))
 * **hooks:** never abort a hook on an unwritable ~/.contexer ([8d30104](https://github.com/bhargavamin/contexer/commit/8d3010405f75ce0ab36e27d50a1de421cbf1edbc))
 
@@ -363,7 +363,7 @@
 
 ### Bug Fixes
 
-* **team-context:** address Greptile review — cap bypass, stale cache, snapshot race ([20924af](https://github.com/bhargavamin/contexer/commit/20924afe57738b8f8f2d2c0788739f3614ce0b99))
+* **team-context:** address Greptile review - cap bypass, stale cache, snapshot race ([20924af](https://github.com/bhargavamin/contexer/commit/20924afe57738b8f8f2d2c0788739f3614ce0b99))
 * **team-context:** preserve ratification signal under architecture deferral ([25f413f](https://github.com/bhargavamin/contexer/commit/25f413fb8632218adbb11d7a81db4e1ee0ee76d3))
 * **team-context:** preserve ratification signal under architecture deferral ([0b3d816](https://github.com/bhargavamin/contexer/commit/0b3d816798920c06c9acd1bbf19cd0134a60a6c5))
 
@@ -420,7 +420,7 @@
 
 ### Bug Fixes
 
-* **redact:** address Greptile P1s — lowercase Bearer, quoted spans, store profile ([a1c740f](https://github.com/bhargavamin/contexer/commit/a1c740fc0c86327c87bf24a532ce15eceebc3f15))
+* **redact:** address Greptile P1s - lowercase Bearer, quoted spans, store profile ([a1c740f](https://github.com/bhargavamin/contexer/commit/a1c740fc0c86327c87bf24a532ce15eceebc3f15))
 * **share:** classify batch skips - drop invalid rows, keep capacity queued ([be8d65e](https://github.com/bhargavamin/contexer/commit/be8d65e4ae84cdfc24fdc63c3bde0edf9ab9b5c7))
 * **share:** honest degrade message - surface the server's reason, not 'unreachable' ([1a52037](https://github.com/bhargavamin/contexer/commit/1a520379084f1f895fe579c7f039491e1eb1f01a))
 
@@ -429,7 +429,7 @@
 
 ### Bug Fixes
 
-* **#108:** address Greptile P1s — enqueue on cancel; refresh off the loop ([27c0dab](https://github.com/bhargavamin/contexer/commit/27c0dab6b33f18a2dca876da8fc151a4341546ce))
+* **#108:** address Greptile P1s - enqueue on cancel; refresh off the loop ([27c0dab](https://github.com/bhargavamin/contexer/commit/27c0dab6b33f18a2dca876da8fc151a4341546ce))
 * **#108:** async-native RemoteStore push path so a wedged share is cancellable ([e2fe0f6](https://github.com/bhargavamin/contexer/commit/e2fe0f6f354aade028b2dcb6f159963e66c68d6c))
 * **#108:** async-native RemoteStore push path so a wedged share is cancellable ([a15d76e](https://github.com/bhargavamin/contexer/commit/a15d76ed33f02fdda38a3d73ce21bf2c70169e1e))
 * **login:** bound post-login sync + refresh the repo status shows ([5df4fcd](https://github.com/bhargavamin/contexer/commit/5df4fcd57e239400e53f8abbeb79cc9505eafe11))
@@ -492,7 +492,7 @@
 
 * add always-available GitHub stars badge ([be63335](https://github.com/bhargavamin/contexer/commit/be63335196213a356cd1eae087f12f39ba884e28))
 * add always-available GitHub stars badge ([eb36e92](https://github.com/bhargavamin/contexer/commit/eb36e92dbd8d96ed50ef7df538816358843a8ddf))
-* **bench:** address Greptile [#122](https://github.com/bhargavamin/contexer/issues/122) — reproducible session count, A/B attribution scope, source provenance ([d0c6c51](https://github.com/bhargavamin/contexer/commit/d0c6c515f66a00b1ac6becfbe1e1fe89c3038ea5))
+* **bench:** address Greptile [#122](https://github.com/bhargavamin/contexer/issues/122) - reproducible session count, A/B attribution scope, source provenance ([d0c6c51](https://github.com/bhargavamin/contexer/commit/d0c6c515f66a00b1ac6becfbe1e1fe89c3038ea5))
 * **bench:** measured v0.20.0 overhead + paraphrase stability (campaigns 7-8) ([1c3de73](https://github.com/bhargavamin/contexer/commit/1c3de739e75f299d11fc222422784624d9f9b314))
 * **bench:** measured v0.20.0 overhead + paraphrase stability (campaigns 7-8) ([80b79e8](https://github.com/bhargavamin/contexer/commit/80b79e89672e7b6e21a877d14d2a80a236d53a56))
 * name every agent's rules-file equivalent, not just CLAUDE.md ([67695d8](https://github.com/bhargavamin/contexer/commit/67695d81a9ba58e588eb4362a7b5743970c0d2d4))
@@ -507,18 +507,18 @@
 ### Features
 
 * **bench:** per-condition contexer source for version A/B campaigns ([d098db9](https://github.com/bhargavamin/contexer/commit/d098db95805ddef45e2336a886c334afc8b1ec4a))
-* **retrieval:** make injections observable — user-facing cost line, no-refetch cue ([a689a94](https://github.com/bhargavamin/contexer/commit/a689a94d01a2cd2e376540df2356aa011582e6a2))
-* **retrieval:** session integration — standing map, compact rehydration, working-set GC ([c50ce12](https://github.com/bhargavamin/contexer/commit/c50ce12bb0cd69a035a11a526605909ecb76a527))
+* **retrieval:** make injections observable - user-facing cost line, no-refetch cue ([a689a94](https://github.com/bhargavamin/contexer/commit/a689a94d01a2cd2e376540df2356aa011582e6a2))
+* **retrieval:** session integration - standing map, compact rehydration, working-set GC ([c50ce12](https://github.com/bhargavamin/contexer/commit/c50ce12bb0cd69a035a11a526605909ecb76a527))
 * **retrieval:** status line names what was recalled; token cost flagged on exception only ([29f1bda](https://github.com/bhargavamin/contexer/commit/29f1bdad67c14ea006368a6e3fc9c9207b31d628))
-* **retrieval:** topic router — BM25 index sidecar, injection ladder, working set ([879d66d](https://github.com/bhargavamin/contexer/commit/879d66db0e33101dcef1532f16ace95afaf6dddd))
-* **retrieval:** topic-aware retrieval V1 — BM25 router, injection ladder, session rehydration ([e2cb022](https://github.com/bhargavamin/contexer/commit/e2cb022a1786c0fe9a017571d9866eeaafc61389))
+* **retrieval:** topic router - BM25 index sidecar, injection ladder, working set ([879d66d](https://github.com/bhargavamin/contexer/commit/879d66db0e33101dcef1532f16ace95afaf6dddd))
+* **retrieval:** topic-aware retrieval V1 - BM25 router, injection ladder, session rehydration ([e2cb022](https://github.com/bhargavamin/contexer/commit/e2cb022a1786c0fe9a017571d9866eeaafc61389))
 
 
 ### Bug Fixes
 
-* **retrieval:** adapter parity — Codex/Gemini rehydration, structured status line, docs ([3496483](https://github.com/bhargavamin/contexer/commit/34964832d1caee8c643539fcb5f68be6fda4c3b6))
-* **retrieval:** address Greptile [#117](https://github.com/bhargavamin/contexer/issues/117) — pending decisions indexed, ws ids hashed, CLI validation ([283483b](https://github.com/bhargavamin/contexer/commit/283483b281f73ef68c26fa546d9fb6e463295da3))
-* **retrieval:** review findings — index must never lose to its own fallback ([86e21ff](https://github.com/bhargavamin/contexer/commit/86e21ff61e7af85e37a8c094a75d5f1912acd48c))
+* **retrieval:** adapter parity - Codex/Gemini rehydration, structured status line, docs ([3496483](https://github.com/bhargavamin/contexer/commit/34964832d1caee8c643539fcb5f68be6fda4c3b6))
+* **retrieval:** address Greptile [#117](https://github.com/bhargavamin/contexer/issues/117) - pending decisions indexed, ws ids hashed, CLI validation ([283483b](https://github.com/bhargavamin/contexer/commit/283483b281f73ef68c26fa546d9fb6e463295da3))
+* **retrieval:** review findings - index must never lose to its own fallback ([86e21ff](https://github.com/bhargavamin/contexer/commit/86e21ff61e7af85e37a8c094a75d5f1912acd48c))
 
 
 ### Documentation
@@ -556,7 +556,7 @@
 * **review:** deterministic .pending_review mid-session nudge (issue [#112](https://github.com/bhargavamin/contexer/issues/112)) ([60918c8](https://github.com/bhargavamin/contexer/commit/60918c8e5f88b57f83368ba85fca80cf96a3e249))
 * **review:** non-blocking pending-review UX + confirm-before-push ([6cdefc0](https://github.com/bhargavamin/contexer/commit/6cdefc02246abef57394582d8a4579ad133ae3ac))
 * **review:** non-blocking pending-review UX + confirm-before-push ([5cdc33a](https://github.com/bhargavamin/contexer/commit/5cdc33ad08bd96eb35e221f6d0325ccb74f4758e))
-* **review:** Phase 2 — bulk approve + backlog escalation (anti-pile-up) ([0c51afd](https://github.com/bhargavamin/contexer/commit/0c51afd6d121e33a3d7cee6a3374b4e848295522))
+* **review:** Phase 2 - bulk approve + backlog escalation (anti-pile-up) ([0c51afd](https://github.com/bhargavamin/contexer/commit/0c51afd6d121e33a3d7cee6a3374b4e848295522))
 * **share:** pick-and-multi-select instead of guessing a decision id ([aa31189](https://github.com/bhargavamin/contexer/commit/aa311899825f803449b71dd0efd7b3da226dd23c))
 
 
@@ -688,7 +688,7 @@
 * add share_decision + contexer share (C4) ([bad6554](https://github.com/bhargavamin/contexer/commit/bad6554e584bf6440627dc9b1ff87bd2d185045b))
 * add team-context pull + merge (C5) ([fb73cbe](https://github.com/bhargavamin/contexer/commit/fb73cbea76458132fb575d22a2e5771394b23dfd))
 * add team-context pull + merge (C5) ([1460c2e](https://github.com/bhargavamin/contexer/commit/1460c2ee32979e5eb31162bcb97e8a42f25b4ac5))
-* clean team onboarding — opt-in native MCP + self-configuring login ([e4afd6e](https://github.com/bhargavamin/contexer/commit/e4afd6e4c0d677063dbf88a27966b3ec138228af))
+* clean team onboarding - opt-in native MCP + self-configuring login ([e4afd6e](https://github.com/bhargavamin/contexer/commit/e4afd6e4c0d677063dbf88a27966b3ec138228af))
 * clean team onboarding (opt-in native MCP + self-configuring login) ([e16375a](https://github.com/bhargavamin/contexer/commit/e16375a5061b3bbaecb8e0226cf8400b83ed25c2))
 * make C7 delta-poll non-blocking (background refresh off the prompt path) ([a0107fb](https://github.com/bhargavamin/contexer/commit/a0107fb426b09625a11778222b4731dc85d05a45))
 * non-blocking C7 delta-poll + inclusive-cursor re-injection fix ([cf71923](https://github.com/bhargavamin/contexer/commit/cf71923875b971e05c550b69e9c58271c0889dc7))
@@ -791,4 +791,4 @@
 
 ### Documentation
 
-* **readme:** top-down rewrite — lead with problem and before/after ([#39](https://github.com/bhargavamin/contexer/issues/39)) ([6d84af9](https://github.com/bhargavamin/contexer/commit/6d84af9995d7fea5c8b8b16c1136aa987db467c6))
+* **readme:** top-down rewrite - lead with problem and before/after ([#39](https://github.com/bhargavamin/contexer/issues/39)) ([6d84af9](https://github.com/bhargavamin/contexer/commit/6d84af9995d7fea5c8b8b16c1136aa987db467c6))

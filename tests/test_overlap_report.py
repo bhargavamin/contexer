@@ -1,5 +1,5 @@
 """Tests for the store-hygiene overlap report: store.overlap_report clustering and
-its rendering inside the `contexer review` flow. Read-only surface — never merges
+its rendering inside the `contexer review` flow. Read-only surface - never merges
 or deletes; review's pending-item handling itself is untouched."""
 import builtins
 
@@ -61,7 +61,7 @@ class TestOverlapReport:
         assert all(d["status"] != "ignored" for d in clusters[0])
 
     def test_non_rule_subtypes_excluded(self, tmp_repo):
-        # Same overlapping texts, but as architecture decisions — out of scope.
+        # Same overlapping texts, but as architecture decisions - out of scope.
         for rule in TRIO:
             _add(tmp_repo, rule, subtype="architecture")
         assert store.overlap_report(tmp_repo) == []

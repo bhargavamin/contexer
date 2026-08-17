@@ -1,4 +1,4 @@
-"""Tests for contexer/redact.py — the stdlib-only secret redactor.
+"""Tests for contexer/redact.py - the stdlib-only secret redactor.
 
 Redaction is defense-in-depth: it runs at capture (store._normalize_content) so
 secrets never reach disk, and again at the wire (remote._wire_args) so they never
@@ -67,7 +67,7 @@ def test_bearer_token_redacted():
 
 
 def test_lowercase_bearer_token_redacted():
-    # Authorization schemes are case-insensitive — a lowercase `bearer` must still be caught.
+    # Authorization schemes are case-insensitive - a lowercase `bearer` must still be caught.
     out, n = redact.scrub("authorization: bearer abcDEF123456ghiJKL789mnoPQR")
     assert "abcDEF123456ghiJKL789mnoPQR" not in out
     assert "[REDACTED:bearer_token]" in out

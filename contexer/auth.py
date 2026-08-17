@@ -56,7 +56,7 @@ def _load_creds() -> dict | None:
 def _save_creds(creds: dict) -> None:
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     # Atomic write (unique temp + os.replace); mkstemp yields 0o600, so the creds file
-    # is never torn or world-readable even mid-write — critical when a refresher process
+    # is never torn or world-readable even mid-write - critical when a refresher process
     # and the foreground process persist rotated tokens concurrently.
     store._atomic_write(_creds_path(), json.dumps(creds, indent=2))
 
@@ -70,7 +70,7 @@ def _pkce() -> tuple[str, str]:
 
 
 def _issuer_from_endpoint(endpoint: str) -> str:
-    """The AS issuer (scheme://host[:port]) from an MCP endpoint URL — drops the path."""
+    """The AS issuer (scheme://host[:port]) from an MCP endpoint URL - drops the path."""
     parts = urllib.parse.urlsplit(endpoint)
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
@@ -113,7 +113,7 @@ def _register(registration_endpoint: str, redirect_uri: str) -> str:
     resp = _request(registration_endpoint, data={
         "client_name": "contexer-cli",
         "redirect_uris": [redirect_uri],
-        "token_endpoint_auth_method": "none",  # public client — PKCE, no secret
+        "token_endpoint_auth_method": "none",  # public client - PKCE, no secret
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
     })
@@ -142,9 +142,9 @@ def _refresh(token_endpoint: str, client_id: str, refresh_token: str) -> dict:
 def _refresh_rejected(exc: BaseException) -> bool:
     """True only when the AS actively REJECTED the refresh grant.
 
-    Proof of rejection is an answer from the token endpoint refusing the grant — an HTTP 4xx
-    (`invalid_grant` and friends, RFC 6749 §5.2). Everything else — DNS failure, timeout,
-    connection refused, a 5xx, a body that isn't JSON — means the endpoint was never reached
+    Proof of rejection is an answer from the token endpoint refusing the grant - an HTTP 4xx
+    (`invalid_grant` and friends, RFC 6749 §5.2). Everything else - DNS failure, timeout,
+    connection refused, a 5xx, a body that isn't JSON - means the endpoint was never reached
     or never decided, and leaves the refresh token's validity UNKNOWN. Persisting "unknown" as
     "rejected" is what turns a VPN outage into days of "log in again" on every surface, so the
     two are separated here exactly as `remote._classify` separates RemoteAuthError from
@@ -173,8 +173,8 @@ def _locked_refresh(profile: Profile) -> str | None:
 
     The refresh token is SINGLE-USE and rotates: two processes refreshing with the same
     token trips the server's compromise detection and revokes the whole token family. So
-    the read-check-refresh-write is serialized with an advisory lock, and — after acquiring
-    it — we re-read the creds: if another process already refreshed while we waited, we use
+    the read-check-refresh-write is serialized with an advisory lock, and - after acquiring
+    it - we re-read the creds: if another process already refreshed while we waited, we use
     that fresh access token instead of spending our (now-stale) refresh token again.
 
     Returns the usable access token, or ``profile.token`` (static/None) when refresh is
@@ -195,7 +195,7 @@ def _locked_refresh(profile: Profile) -> str | None:
             return creds.get("access_token")
         refresh_token = creds.get("refresh_token")
         if not refresh_token:
-            return profile.token  # expired, nothing to refresh with — skip the doomed network call
+            return profile.token  # expired, nothing to refresh with - skip the doomed network call
         try:
             tok = _refresh(creds["token_endpoint"], creds["client_id"], refresh_token)
         except Exception as exc:
@@ -203,13 +203,13 @@ def _locked_refresh(profile: Profile) -> str | None:
             # single-use, so a later reader (auth_state) cannot re-attempt one just to find out
             # why the session is dead. Without this marker an expired session and a rejected
             # renewal are indistinguishable, and the user is told "authentication failed" for
-            # days when the truth is "log in again". Only a REJECTION earns the marker — it is
+            # days when the truth is "log in again". Only a REJECTION earns the marker - it is
             # persistent, so an offline machine that recorded one would keep demanding a new
             # login long after the network came back.
             if _refresh_rejected(exc):
                 creds[_REFRESH_FAILED_AT] = time.time()
                 _save_creds(creds)
-            return profile.token  # refresh failed — degrade to the static token (or None)
+            return profile.token  # refresh failed - degrade to the static token (or None)
         creds["access_token"] = tok.get("access_token", creds.get("access_token"))
         if tok.get("refresh_token"):
             creds["refresh_token"] = tok["refresh_token"]  # persist the rotated (single-use) token
@@ -237,7 +237,7 @@ def refresh_now(profile: Profile) -> str | None:
 
     Shares `_locked_refresh`, so a concurrent process that already refreshed short-circuits
     us without a second network call. Returns the (possibly newly-refreshed) access token, or
-    the static/None fallback. Never raises — the caller decides whether the token changed."""
+    the static/None fallback. Never raises - the caller decides whether the token changed."""
     return _locked_refresh(profile)
 
 
@@ -258,12 +258,12 @@ def auth_state(profile: Profile) -> dict:
 
     A READ, in the strict sense: it never refreshes. Attempting a refresh to answer the
     question would SPEND a single-use token as the side effect of being asked, so renewing is
-    left to `refresh_now` — but the ANSWER must still describe what will happen, not just what
+    left to `refresh_now` - but the ANSWER must still describe what will happen, not just what
     the clock says. Access tokens are minted with `expires_in` 3600 and `resolve_token` renews
     them transparently, so a session past expiry that still holds a refresh token and carries
     no recorded rejection is `renewable`: nothing is wrong with it and the user has nothing to
     do. `expired` is kept for the session that genuinely cannot renew itself (no refresh
-    token), and `refresh_failed` for the one whose rotated refresh token the AS rejected —
+    token), and `refresh_failed` for the one whose rotated refresh token the AS rejected -
     which is the point of the marker `_locked_refresh` writes.
 
     Never raises and never returns a token, a refresh token, or any other secret: the result
@@ -272,9 +272,9 @@ def auth_state(profile: Profile) -> dict:
         creds = _load_creds()
         if not _creds_match(creds, profile):
             if profile.token:
-                return _state("static_only", "Using the static token from config.toml — no "
+                return _state("static_only", "Using the static token from config.toml - no "
                                              "Contexer Teams session is stored here.")
-            return _state("none", "Not signed in to Contexer Teams — log in to sync with "
+            return _state("none", "Not signed in to Contexer Teams - log in to sync with "
                                   "your team.")
         expires_at = creds.get("expires_at")
         detail = {"issuer": creds.get("issuer"), "expires_at": _iso(expires_at),
@@ -283,21 +283,21 @@ def auth_state(profile: Profile) -> dict:
             return _state("logged_in", "Signed in to Contexer Teams.", **detail)
         if creds.get(_REFRESH_FAILED_AT):
             return _state("refresh_failed", "Your Contexer Teams session expired and could "
-                                            "not be renewed — log in again.", **detail)
+                                            "not be renewed - log in again.", **detail)
         if creds.get("refresh_token"):
-            return _state("renewable", "Signed in to Contexer Teams — the access token is past "
+            return _state("renewable", "Signed in to Contexer Teams - the access token is past "
                                        "its expiry and renews itself on the next sync.",
                           **detail)
-        return _state("expired", "Your Contexer Teams session has expired — log in again.",
+        return _state("expired", "Your Contexer Teams session has expired - log in again.",
                       **detail)
     except Exception:
-        return _state("none", "Contexer Teams sign-in state is unreadable — log in again.")
+        return _state("none", "Contexer Teams sign-in state is unreadable - log in again.")
 
 
 # ── tracked login job (the console's "Log in" button) ────────────────────────────
 # `login` below is minutes-long, opens a browser and binds its own loopback port, so a caller
 # that must answer an HTTP request in seconds cannot run it in-process. These three functions
-# run it as ONE tracked subprocess instead — killable, capped, and reusing the CLI path verbatim.
+# run it as ONE tracked subprocess instead - killable, capped, and reusing the CLI path verbatim.
 
 # Generous, but a cap: an abandoned flow must not leave a python process and a loopback
 # listener alive for the rest of the machine's uptime.
@@ -306,7 +306,7 @@ _MESSAGE_LINES = 2
 _MESSAGE_LINE_LIMIT = 200
 # The drain keeps only the TAIL, which is all `_failure_message` reads (`lines[-2:]`). An
 # unbounded list held every byte a child printed for up to LOGIN_TIMEOUT, in a daemon that
-# stays up for days — a chatty or looping child was the whole budget for it.
+# stays up for days - a chatty or looping child was the whole budget for it.
 _MAX_OUTPUT_LINES = 200
 # How long the waiter gives the output drain after the child is gone. The browser the child
 # launched can inherit its stdout and hold the pipe open, and the job has to settle anyway.
@@ -315,7 +315,7 @@ _OUTPUT_DRAIN = 5.0
 # Query values a login prints (the authorize URL it echoes for a browser that won't open, an
 # error redirect it reflects). The failure message is RENDERED IN THE CONSOLE, so this is not
 # defensive: an unscrubbed tail can put an OAuth `code=` on screen, and into any screenshot of
-# it. A superset of what `ui.server._scrub` redacts — sharing that function would point auth
+# it. A superset of what `ui.server._scrub` redacts - sharing that function would point auth
 # at the ui layer, which imports auth.
 _QUERY_SECRET = re.compile(
     r"(?i)\b(code|code_verifier|code_challenge|state|client_id|token|access_token"
@@ -329,8 +329,8 @@ class LoginJobBusy(RuntimeError):
     """A login subprocess is already running: two concurrent browser flows would race to
     write the creds file, and only one of them could own the rotating refresh token.
 
-    Carries the id of the job in flight (`job_id`), so a caller told "busy" — a second console
-    tab, or a console while a terminal login runs — can follow THAT job's real outcome instead
+    Carries the id of the job in flight (`job_id`), so a caller told "busy" - a second console
+    tab, or a console while a terminal login runs - can follow THAT job's real outcome instead
     of inferring success from the session going live and never seeing its failure."""
 
     def __init__(self, message: str, job_id: str):
@@ -343,7 +343,7 @@ def start_login_job() -> str:
 
     Takes NO endpoint, deliberately: a caller-supplied one would aim the OAuth flow at an
     attacker's IdP and persist the token it handed back, so the endpoint is resolved here from
-    config. Single-flight — a second call while one is pending raises LoginJobBusy."""
+    config. Single-flight - a second call while one is pending raises LoginJobBusy."""
     global _login_job
     endpoint = _configured_endpoint()
     with _login_lock:
@@ -362,8 +362,8 @@ def login_job_status(job_id: str) -> dict | None:
     unknown id.
 
     `auth_url` is the consent page the child opened a browser to, None until it prints one.
-    It is what makes a login possible where no browser can open — an SSH session, a container,
-    WSL — because `webbrowser.open` silently no-ops there and the printed fallback used to go
+    It is what makes a login possible where no browser can open - an SSH session, a container,
+    WSL - because `webbrowser.open` silently no-ops there and the printed fallback used to go
     nowhere but into a captured pipe. Only meaningful while the job is `pending`: the loopback
     listener that completes the flow dies with the child.
 
@@ -377,7 +377,7 @@ def login_job_status(job_id: str) -> dict | None:
                 "auth_url": job["auth_url"]}
 
 
-def stop_login_job(reason: str = "Login was cancelled — the console stopped.") -> bool:
+def stop_login_job(reason: str = "Login was cancelled - the console stopped.") -> bool:
     """Kill a pending login subprocess. True when one was killed.
 
     Called wherever an orphaned browser flow could still write credentials nobody is waiting
@@ -399,7 +399,7 @@ def stop_login_job(reason: str = "Login was cancelled — the console stopped.")
 
 def _configured_endpoint() -> str:
     """The endpoint a console-started login should use: the configured profile's, else the
-    default. Fail-soft — a malformed config.toml must not be what stops you logging in."""
+    default. Fail-soft - a malformed config.toml must not be what stops you logging in."""
     try:
         return config.load_profile().endpoint or default_endpoint()
     except Exception:
@@ -407,12 +407,12 @@ def _configured_endpoint() -> str:
 
 
 def _spawn_login(endpoint: str):
-    """Spawn the CLI login with its output captured. The one seam tests replace — nothing in
+    """Spawn the CLI login with its output captured. The one seam tests replace - nothing in
     a test may open a browser.
 
     `-u` is load-bearing: the child's stdout is a pipe, so Python would block-buffer it and
     the authorize URL printed at the START of the flow would not reach us until the END of it
-    — minutes after the only moment it is useful."""
+    - minutes after the only moment it is useful."""
     return subprocess.Popen(
         [sys.executable, "-u", "-m", "contexer", "login", "--endpoint", endpoint],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -440,7 +440,7 @@ def _await_login(job: dict) -> None:
         if timed_out:
             job.update(state="failed",
                        message=f"Login timed out after {int(LOGIN_TIMEOUT // 60)} minutes "
-                               "— nothing was saved.")
+                               "- nothing was saved.")
         elif proc.returncode == 0:
             job.update(state="ok", message="Signed in to Contexer Teams.")
         else:
@@ -453,7 +453,7 @@ def _read_login_output(job: dict, lines: "collections.deque[str]") -> None:
 
     Streaming, rather than reading the output at exit: on a machine where no browser can open
     that URL is the ONLY way to finish the login, so it is needed WHILE the child sits waiting
-    for the callback — a post-mortem of a timed-out flow is exactly too late."""
+    for the callback - a post-mortem of a timed-out flow is exactly too late."""
     proc = job["proc"]
     try:
         for line in proc.stdout:
@@ -470,7 +470,7 @@ def _read_login_output(job: dict, lines: "collections.deque[str]") -> None:
 def _authorize_url(line: str) -> str | None:
     """The authorize URL in one line of the child's output, or None.
 
-    This is published verbatim — an authorize URL is the address of a consent page, not a
+    This is published verbatim - an authorize URL is the address of a consent page, not a
     credential, and redacting its parameters would leave a link that cannot complete a flow.
     So the match is narrow on purpose: the URL must carry the authorize REQUEST's own
     parameters, and one holding a `code=` is refused outright rather than shown, because an
@@ -492,7 +492,7 @@ def _failure_message(output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     tail = " ".join(line[:_MESSAGE_LINE_LIMIT] for line in lines[-_MESSAGE_LINES:])
     scrubbed = _QUERY_SECRET.sub(lambda match: f"{match.group(1)}=REDACTED", tail)
-    return f"Login failed — {scrubbed}" if scrubbed else "Login failed."
+    return f"Login failed - {scrubbed}" if scrubbed else "Login failed."
 
 
 # Static CSS for the loopback result tab (kept out of the f-string so `{}` stays literal).
@@ -538,7 +538,7 @@ _BRAND_MARK = (
 def _result_page(ok: bool, title: str, detail: str) -> bytes:
     """Self-contained HTML for the loopback result tab (inline CSS, no external assets).
 
-    `title` and `detail` are HTML-escaped here — `detail` can carry text reflected from the
+    `title` and `detail` are HTML-escaped here - `detail` can carry text reflected from the
     callback query string (`error_description`), so escaping is a security requirement, not
     cosmetics. The data-URI favicon suppresses the browser's follow-up /favicon.ico request,
     which would otherwise hit a already-closed (or still-listening) loopback server."""
@@ -564,22 +564,22 @@ def _callback_outcome(qs: dict, expected_state: str) -> tuple[str | None, str | 
 
     Pure (unit-testable): `qs` is the parse_qs dict of the /callback query; `page` is what
     the browser tab shows and always matches the terminal outcome. Three shapes:
-    - (code, None, page) — success;
-    - (None, error, page) — legitimate flow-terminating failure (denial, missing code);
-    - (None, None, page) — state mismatch: NOT our redirect. The AS echoes our `state` on
+    - (code, None, page) - success;
+    - (None, error, page) - legitimate flow-terminating failure (denial, missing code);
+    - (None, None, page) - state mismatch: NOT our redirect. The AS echoes our `state` on
       both success and error redirects (RFC 6749), so a request without it could come from
-      any local process poking the loopback port — the caller must keep listening rather
+      any local process poking the loopback port - the caller must keep listening rather
       than let a stray or malicious request abort (or spoof the reason for) the login."""
     if (qs.get("state") or [None])[0] != expected_state:
         return None, None, _result_page(
             False, "Login failed",
             "Security check failed (state mismatch). This tab is not from the current "
-            "login attempt — your terminal is still waiting; use the newest login link.")
+            "login attempt - your terminal is still waiting; use the newest login link.")
     error = (qs.get("error") or [None])[0]
     if error:
         desc = (qs.get("error_description") or [None])[0]
         reason = f"{error}: {desc}" if desc else error
-        return None, f"authorization failed — {reason}", _result_page(
+        return None, f"authorization failed - {reason}", _result_page(
             False, "Login failed", f"The authorization server reported: {reason}.")
     code = (qs.get("code") or [None])[0]
     if not code:
@@ -601,7 +601,7 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path != "/callback":
-                # Stray request (favicon, prefetch, port scan) — don't let it consume the
+                # Stray request (favicon, prefetch, port scan) - don't let it consume the
                 # one meaningful request; the outer loop keeps serving until /callback.
                 self.send_response(404)
                 self.end_headers()
@@ -613,7 +613,7 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
                 # mid-write must not leave the loop below serving forever.
                 result["code"], result["error"] = code, error
             else:
-                # State mismatch: not our redirect — answer it but keep listening.
+                # State mismatch: not our redirect - answer it but keep listening.
                 print("contexer: ignoring loopback callback with unexpected state",
                       file=sys.stderr)
             self.send_response(200)
@@ -642,7 +642,7 @@ def login(endpoint: str | None = None) -> None:
 
     `endpoint` defaults to default_endpoint() (prod, or localhost under CONTEXER_ENV=local).
     On success this writes mode='team' + endpoint to config.toml, so the user never hand-edits
-    it — team onboarding is just `contexer install` then `contexer login`."""
+    it - team onboarding is just `contexer install` then `contexer login`."""
     endpoint = _validate_endpoint(endpoint or default_endpoint())
     issuer = _issuer_from_endpoint(endpoint)
     meta = _discover(issuer)
@@ -663,7 +663,7 @@ def login(endpoint: str | None = None) -> None:
     code = _await_code(auth_url, port, state)
     tok = _exchange_code(meta["token_endpoint"], client_id, code, verifier, redirect_uri)
     if not tok.get("access_token"):
-        raise RuntimeError("token endpoint returned no access_token — login failed.")
+        raise RuntimeError("token endpoint returned no access_token - login failed.")
     _save_creds({
         "issuer": issuer,
         "client_id": client_id,
@@ -675,7 +675,7 @@ def login(endpoint: str | None = None) -> None:
     })
     # Creds first, config second, deliberately: the authorization code behind these tokens is
     # single-use, so a failure while writing config.toml must not throw away a session that
-    # already exists — config.toml is hand-fixable, a spent code is not. That ordering is only
+    # already exists - config.toml is hand-fixable, a spent code is not. That ordering is only
     # safe because write_team_profile can no longer fail on the CONTENT of the old file; it
     # used to abort here on an invalid `[ui]` value, after the creds were saved, leaving team
     # sync off with nothing on screen pointing at why.

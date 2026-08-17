@@ -35,7 +35,7 @@ def test_rerun_into_existing_out_dir_fails_loud(tmp_path):
 
 
 def test_zero_byte_existing_file_also_blocks(tmp_path):
-    """Greptile follow-up: the guard is an atomic O_EXCL claim, not a size check —
+    """Greptile follow-up: the guard is an atomic O_EXCL claim, not a size check -
     a check-then-write (e.g. `exists() and st_size > 0`) leaves a race window where
     two concurrent campaigns can both pass before either writes. A pre-existing
     EMPTY file must block too, since a size-based check would let it through and
@@ -43,7 +43,7 @@ def test_zero_byte_existing_file_also_blocks(tmp_path):
     import pytest
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    (out_dir / "runs.jsonl").touch()  # zero bytes — would pass an st_size>0 check
+    (out_dir / "runs.jsonl").touch()  # zero bytes - would pass an st_size>0 check
 
     with pytest.raises(FileExistsError):
         run_memory_campaign(out_dir, reps=1, claude_cmd=_stub(tmp_path),
@@ -184,7 +184,7 @@ def test_with_arm_setup_keeps_contexer_hooks(tmp_path, monkeypatch):
     """Critical 1: `contexer install` writes five hook events into
     <home>/.claude/settings.json; any settings write AFTER it destroys them and the
     with arm silently measures Contexer with its mechanism switched off. Asserts
-    the invariant where it counts — at every session the with arm actually runs."""
+    the invariant where it counts - at every session the with arm actually runs."""
     real_run = mc._run_and_record
     seen = []
 
@@ -228,7 +228,7 @@ def test_with_arm_sweeps_memory_and_records_the_count(tmp_path, monkeypatch):
 
 
 # Self-deleting stub: succeeds its first 2 calls, then unlinks itself (still emits
-# valid JSON on the call that deletes it — POSIX doesn't invalidate an open fd on
+# valid JSON on the call that deletes it - POSIX doesn't invalidate an open fd on
 # unlink) so every LATER invocation hits FileNotFoundError, a real crash a naive
 # per-run body would propagate straight out of the campaign loop.
 _CRASH_STUB = """#!/bin/bash
@@ -252,7 +252,7 @@ def test_campaign_survives_a_crashing_session(tmp_path):
     # without: 4 measured calls; memory: 5 teach (one session per scripted prompt:
     # 4 in teaching session 1 + 1 in session 2) + 4 measured = 13 total (the
     # campaign.json claude_version probe eats one of the stub's 3 healthy calls
-    # first, so the exact split is an implementation detail — the property under
+    # first, so the exact split is an implementation detail - the property under
     # test is: full completion, some rows crash, some don't, nothing aborts).
     assert len(rows) == 13
     errored = sum(1 for r in rows if r["error"])

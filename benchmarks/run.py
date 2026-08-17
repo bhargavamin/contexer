@@ -1,4 +1,4 @@
-"""A/B/C campaign runner: same tasks under three conditions — "without" (bare),
+"""A/B/C campaign runner: same tasks under three conditions - "without" (bare),
 "claudemd" (a static CLAUDE.md carrying the same knowledge, the honest
 competitor), and "with" (contexer install + bootstrap + seed). Live sessions go
 through the `claude` CLI; tests inject a stub binary via claude_cmd.
@@ -49,7 +49,7 @@ def _session_env(home: Path, otel_port: int) -> dict:
 def _load_tasks(task_ids):
     tasks = json.loads(TASKS_FILE.read_text())
     if task_ids is None:
-        # Paraphrase variants (prompt-sensitivity probes) never run by default —
+        # Paraphrase variants (prompt-sensitivity probes) never run by default -
         # they'd double-count their base task in campaign aggregates.
         picked = [t for t in tasks if not t.get("variant_of")]
     else:
@@ -62,7 +62,7 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
     whose HOME is the isolated one (store paths must resolve inside it). `source`
     is the contexer checkout `uv run` installs from (its cwd resolves the pyproject
     / venv that provides the `contexer` console script and the `contexer` package
-    imported below) — this is what lets an A/B campaign compare two contexer
+    imported below) - this is what lets an A/B campaign compare two contexer
     versions; it defaults to this harness's own repo root, so callers that don't
     pass it see no behavior change."""
     env = _session_env(home, otel_port=0)
@@ -79,12 +79,12 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
 
 def _condition_c_setup(work: Path, seed_decision: str,
                        filenames: tuple = ("CLAUDE.md",)) -> None:
-    """The honest competitor: NO contexer — static rules file(s) in the work repo
+    """The honest competitor: NO contexer - static rules file(s) in the work repo
     carrying the same knowledge condition "with" receives. Content mimics how these
     files are commonly written in the wild: CLAUDE.md as project overview + commands
     + key decisions (Anthropic's recommended shape), AGENTS.md as agent working
     conventions + testing + rules (the agents.md standard shape). With BOTH files,
-    knowledge splits realistically — rule-shaped seeds ("Never/Always ...") go to
+    knowledge splits realistically - rule-shaped seeds ("Never/Always ...") go to
     AGENTS.md, decision-shaped seeds to CLAUDE.md; a single file carries everything
     so single-file conditions stay comparable. For chains the file(s) are written
     once before step 1 and never updated between steps: a static file cannot
@@ -102,8 +102,8 @@ def _condition_c_setup(work: Path, seed_decision: str,
         "uv run pytest tests/ -q",
         "```", "",
         "## Architecture", "",
-        "- `app/` — service modules",
-        "- `tests/` — pytest suite, plain asserts", "",
+        "- `app/` - service modules",
+        "- `tests/` - pytest suite, plain asserts", "",
     ]
     decisions = ["## Key decisions", "", f"- {seed_decision}", ""] if seed_decision else []
     conventions = ["## Code style", ""] + [f"- {c}" for c in convs] + [""]
@@ -219,7 +219,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                 for chain_tasks in chains.values():
                     # A chain's steps must stay sequential within one condition
                     # (shared repo + HOME: accumulation), so the full chain runs
-                    # per condition — but conditions still cycle within the rep.
+                    # per condition - but conditions still cycle within the rep.
                     for condition in conditions:
                         work, home = _fresh(td, golden, f"{chain_tasks[0]['chain']}-{condition}-{rep}")
                         for task in chain_tasks:  # steps share repo + HOME: accumulation
@@ -239,7 +239,7 @@ def _fresh(td: Path, golden: Path, tag: str):
     home.mkdir()
     # resolve(): macOS TemporaryDirectory lives under /var/folders, a symlink to
     # /private/var. The SessionStart hook slugs the repo via `git rev-parse
-    # --show-toplevel`, which returns the CANONICAL path — seeding the store under
+    # --show-toplevel`, which returns the CANONICAL path - seeding the store under
     # the symlinked path would target a different slug and inject nothing.
     return work.resolve(), home.resolve()
 
@@ -269,7 +269,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
     try:
         # Chains set up their condition once (before step 1); singles on every run.
         # "claudemd_with" (condition D) layers contexer on top of a pre-existing
-        # CLAUDE.md — the adoption question for repos that already maintain one.
+        # CLAUDE.md - the adoption question for repos that already maintain one.
         if not task["chain"] or task["step"] <= 1:
             files = _FILE_CONDITIONS.get(condition)
             if files:
@@ -281,7 +281,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         rx.reset()
         row["ts"] = time.time()  # stamped when the session starts (post-setup)
         # Pre-session HEAD: sessions may commit their edits, which would vanish
-        # from a live `git diff HEAD` — score against where the repo started.
+        # from a live `git diff HEAD` - score against where the repo started.
         base_sha = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
                                   capture_output=True, text=True).stdout.strip() or "HEAD"
         res = _run_session(str(work), prompt, claude_cmd,
@@ -290,7 +290,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             row["error"] = res["_error"]
             return row
         # A claude-level failure (auth, API error) still returns well-formed JSON with
-        # zeroed usage — recording it as a clean row would silently poison the medians.
+        # zeroed usage - recording it as a clean row would silently poison the medians.
         if res.get("is_error") or res.get("terminal_reason", "completed") != "completed":
             row["error"] = (f"session error ({res.get('terminal_reason', 'unknown')}): "
                             f"{str(res.get('result', ''))[:200]}")
@@ -319,7 +319,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         else:
             row["success"] = True
         if task["chain"]:
-            # Snapshot the worktree so the next step scores ONLY its own work —
+            # Snapshot the worktree so the next step scores ONLY its own work -
             # otherwise an untracked file left by step 1 is re-counted by steps 2-3
             # (chain steps share the worktree by design). Also mirrors real flow:
             # work is committed between sessions.
@@ -346,7 +346,7 @@ if __name__ == "__main__":
     ap.add_argument("--conditions", default="without,claudemd,with")
     ap.add_argument("--contexer-sources", default="",
                     help="condition=path pairs, comma-separated (e.g. "
-                         "contexer_pre_v1=/path/a,contexer_v1=/path/b) — selects "
+                         "contexer_pre_v1=/path/a,contexer_v1=/path/b) - selects "
                          "which contexer checkout `uv run contexer install` uses "
                          "for that condition; a condition not listed here falls "
                          "back to this harness's own repo root.")

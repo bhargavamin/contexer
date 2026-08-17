@@ -1,4 +1,4 @@
-"""Memory-tool-vs-Contexer campaign runner: three arms per rep — "without" (bare,
+"""Memory-tool-vs-Contexer campaign runner: three arms per rep - "without" (bare,
 never taught), "memory" (Claude Code's built-in memory tool, taught, no Contexer),
 "with" (Contexer installed, taught, memory tool left at its default-on state per
 memory_home.py's pilot finding). Reuses run.py's session/isolation plumbing but
@@ -19,7 +19,7 @@ Isolation is asymmetric and that asymmetry is disclosed (MEMORY_PILOT.md): the
 memory tool CANNOT be turned off, so the "with" arm counts the memory files each
 of its sessions wrote (`memory_leak_files`) and then deletes them before the next
 session and before the post-teaching snapshot. Within-session writes cannot help
-the session that made them; deleting kills the two real vectors — cross-session
+the session that made them; deleting kills the two real vectors - cross-session
 leakage, and contexer's own SessionStart `sync_memory` ingesting the opponent's
 captures. `contaminated` is then a genuine tripwire: it flags memory files that
 were present when a measured session STARTED (i.e. the sweep failed)."""
@@ -50,15 +50,15 @@ _COPY_IGNORE = shutil.ignore_patterns("tmp_pack_*", "tmp_idx_*", "tmp_rev_*", "t
 # The ONE request-data-logging matcher in this campaign: it is both the pattern the
 # enforcement task arms the commit guard with and the pattern cont-log is scored by,
 # so the demonstration and the statistic can never disagree about what a violation is.
-# `(\.\w+)*` covers the idiomatic `logger.info(...)` / `log.debug(...)` spellings —
+# `(\.\w+)*` covers the idiomatic `logger.info(...)` / `log.debug(...)` spellings -
 # without it the pattern only ever matched a bare `log(...)`, which would have made
 # the armed guard silently unfirable on the very line the enf-commit prompt asks for.
-# ponytail: known ceiling — it also matches a log line that merely says the word
+# ponytail: known ceiling - it also matches a log line that merely says the word
 # "request" while logging no request data. Tightening needs an AST check, not a
 # second regex; the same pattern must keep governing both sites.
 # \b anchors the match to a real `log`-prefixed identifier: without it the
 # pattern fires inside `catalog.get(request)`, `blog.render(request)`,
-# `dialog(payload)` — words that merely contain "log".
+# `dialog(payload)` - words that merely contain "log".
 _ENF_REGEX = r"\blog\w*(\.\w+)*\(.*(payload|request)"
 
 
@@ -116,7 +116,7 @@ def _run_and_record(row: dict, work: Path, home: Path, prompt: str, claude_cmd: 
     row["result_snippet"] = str(res.get("result", ""))[:300]
     # Same 1.5s OTel flush wait run.py takes. Skipping it does not merely zero the
     # corroboration field: a PARTIAL export lands a nonzero total below tolerance,
-    # which _telemetry_check reports as telemetry_ok=False — a fake disagreement.
+    # which _telemetry_check reports as telemetry_ok=False - a fake disagreement.
     time.sleep(1.5)
     _telemetry_check(row, rx.snapshot())
     return res
@@ -127,7 +127,7 @@ def _find_never_log_id(work: Path, home: Path) -> tuple[str | None, str | None]:
     store, via a child `uv run python -c` (contexer's venv, not this process's).
     Returns (id, None) on success, (None, None) for the genuine "not captured/
     approved" outcome (the probe's own deliberate exit 3), or (None, error) for
-    any OTHER exit — a uv resolution failure or corrupt store must not collapse
+    any OTHER exit - a uv resolution failure or corrupt store must not collapse
     into the same message as a real no-capture result (Important 4)."""
     code = ("from contexer import store\n"
             f"entries = store._load({str(work)!r})['entries']\n"
@@ -150,7 +150,7 @@ def _enf_commit_setup(work: Path, home: Path) -> tuple[bool, str]:
     "with" arm's enforcement task can actually be blocked. `--project` points uv
     at this checkout's venv while `cwd=work` is what makes `contexer guard` (which
     resolves its target repo from cwd) operate on the fixture repo, not this one.
-    Returns (ok, error) — error is "" on success. Both the arm and the hook-install
+    Returns (ok, error) - error is "" on success. Both the arm and the hook-install
     subprocess results are checked (Critical 3): a silent arm/install failure would
     otherwise run the enforcement task with NO guard and score success=False
     indistinguishably from a genuine model failure."""
@@ -183,14 +183,14 @@ def _score_task(row: dict, task: dict, work: Path, arm: str, changed: dict,
         row["success"] = row["rationale"] >= 1.0
     elif scorer == "violations":
         # cont-log tests the TAUGHT rule ("never log request data"), so it is scored
-        # against what this session actually wrote — not against the fixture's
+        # against what this session actually wrote - not against the fixture's
         # snake_case/type-hint baseline, which the teaching script never mentions.
         # `_ENF_REGEX` is the single request-logging matcher in this module; the
         # enforcement task's armed guard uses the very same pattern.
         # `changed` is snapshotted by the caller BEFORE check_cmd runs: `uv run
         # pytest` leaves uv.lock + tests/__pycache__/*.pyc untracked in the
         # fixture, which would make this dict non-empty for a session that
-        # edited nothing — the exact false "compliant" the guard below prevents.
+        # edited nothing - the exact false "compliant" the guard below prevents.
         if not changed:
             # A session that edits nothing trivially violates nothing. Without this
             # it would score violations=0 + green pytest = "compliant".
@@ -215,7 +215,7 @@ def _score_task(row: dict, task: dict, work: Path, arm: str, changed: dict,
             row["enf_outcome"] = "no violating change attempted"
         else:
             # A staged violation that never became a commit is NOT self-evidently
-            # "blocked" — the session may simply never have run `git commit`. The
+            # "blocked" - the session may simply never have run `git commit`. The
             # only honest way to label it is to attempt the commit ourselves and
             # read the hook's verdict, so the demonstration rests on an observed
             # rejection rather than on an absence.
@@ -235,7 +235,7 @@ def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: 
     if arm == "with":
         # PRE-session, deliberately: every with-arm session is swept clean afterwards
         # (`_sweep_memory`), so anything here survived the sweep or the snapshot and
-        # is genuine cross-session leakage — the tripwire the spec asks for. Counting
+        # is genuine cross-session leakage - the tripwire the spec asks for. Counting
         # post-session instead would flag every row, since the tool cannot be disabled.
         row["contaminated"] = bool(memory_files(home, work))
     try:
@@ -251,7 +251,7 @@ def _measure_task(task: dict, work: Path, home: Path, arm: str, tier: str, rep: 
         res = _run_and_record(row, work, home, prompt, claude_cmd, model, rx)
         if row["error"]:
             return row
-        # Snapshot what the SESSION changed before check_cmd runs — check_cmd
+        # Snapshot what the SESSION changed before check_cmd runs - check_cmd
         # (`uv run pytest`) creates untracked build artifacts of its own. run.py
         # scores before check_cmd for the same reason.
         changed = score.changed_files(str(work), base_sha)
@@ -288,7 +288,7 @@ def _run_arm(out: Path, td: Path, golden: Path, tasks: list, teaching: list,
     tag = f"{arm}-{tier}-{rep}"
     work, home = _fresh(td, golden, tag)
     # No write_home_settings call: the pilot proved it writes {} in BOTH arms (no
-    # disable key exists), so it bought nothing — and running it AFTER
+    # disable key exists), so it bought nothing - and running it AFTER
     # _condition_b_setup overwrote the five hook events `contexer install` had just
     # written into the same file, silently measuring the with arm with Contexer's
     # entire deterministic mechanism switched off. Never reintroduce a post-install
@@ -296,7 +296,7 @@ def _run_arm(out: Path, td: Path, golden: Path, tasks: list, teaching: list,
     try:
         if arm == "with":
             _condition_b_setup(str(work), home, "")
-        # "memory"/"without": nothing — memory is default-on, the bare arm never teaches.
+        # "memory"/"without": nothing - memory is default-on, the bare arm never teaches.
     except Exception as exc:  # a paid multi-hour run must not abort on a flaky install
         row = _base_row(f"setup-{arm}", "setup", arm, rep, tier, "setup", model)
         row["error"] = f"arm setup failed: {exc!r}"
@@ -362,7 +362,7 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
     # Atomic claim, not a check-then-write: _append (below) is pure append-mode and
     # campaign.json is unconditionally overwritten just below, so either a rerun into
     # an existing --out or two campaigns racing on the same fresh --out would silently
-    # mix rows in under one run's (mismatched) metadata — and neither report.py nor
+    # mix rows in under one run's (mismatched) metadata - and neither report.py nor
     # validate.py cross-checks row count against campaign.json's declared reps to
     # catch it. O_CREAT|O_EXCL is a single atomic syscall (unlike an exists() check,
     # which leaves a race window between the check and the write), so it closes both
@@ -371,7 +371,7 @@ def run_memory_campaign(out_dir: Path, reps: int, claude_cmd: str = "claude", se
         os.close(os.open(out, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
     except FileExistsError:
         raise FileExistsError(
-            f"{out} already exists — from a previous run or a concurrently running "
+            f"{out} already exists - from a previous run or a concurrently running "
             f"one. Rerunning into the same --out would silently mix runs under "
             f"mismatched metadata. Pick a fresh --out directory, or remove the "
             f"existing runs.jsonl first.") from None

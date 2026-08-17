@@ -6,14 +6,14 @@ memory tool (``~/.claude/projects/<slug>/memory/*.md``) instead of calling
 blind. This module reads those memory files and turns each fact into a *subtyped*
 Contexer decision so it is retrievable by ``get_context(entry_type=...)``.
 
-Everything here is deterministic — no model in the loop. The memory files are already
+Everything here is deterministic - no model in the loop. The memory files are already
 structured (YAML frontmatter + markdown body), so a fact's summary (``description``)
 and category (``type`` + keyword rules) are lifted directly rather than summarized.
 A multi-section doc is split on ``##`` headings so it becomes several coherent
 entries, never one raw blob. Re-imports are silent no-ops via the store's >70%
 novelty filter; whole-dir re-runs are skipped by a content fingerprint (see
 ``claude.sync_memory``). Every path is fail-soft: a malformed file is skipped, never
-raised — a bad memory file must never break a session start.
+raised - a bad memory file must never break a session start.
 
 This module is neutral: it takes a directory path. The Claude-specific knowledge of
 *where* that directory lives is the adapter's (``adapters/claude.py``)."""
@@ -58,7 +58,7 @@ def _classify(text: str, fm_type: str) -> str:
 
 # ── Frontmatter / body parsing ──────────────────────────────────────────────────
 _DESC_RE = re.compile(r"^\s*description:\s*(.*)$")
-_TYPE_RE = re.compile(r"^\s*type:\s*(.*)$")          # `node_type:` has chars before `type:` — no false match
+_TYPE_RE = re.compile(r"^\s*type:\s*(.*)$")          # `node_type:` has chars before `type:` - no false match
 _ORIGIN_RE = re.compile(r"^\s*originSessionId:\s*(.*)$")
 _NAME_RE = re.compile(r"^\s*name:\s*(.*)$")
 
@@ -121,7 +121,7 @@ def _build_entries(fact: dict, source_id: str) -> list[tuple[str, str, str]]:
             heading = m.group(0).lstrip("# ").strip()
             # Disambiguate repeated headings so two `## Notes` sections get distinct
             # keys (else the second would overwrite the first on upsert). Unique
-            # headings keep the bare `source#heading` form — stable across reorders.
+            # headings keep the bare `source#heading` form - stable across reorders.
             seen[heading] = seen.get(heading, 0) + 1
             suffix = "" if seen[heading] == 1 else f"#{seen[heading]}"
             content = f"{_tag(name)}{heading}: {section}"

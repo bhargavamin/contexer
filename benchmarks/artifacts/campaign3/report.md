@@ -1,4 +1,4 @@
-# Contexer A/B Benchmark — model claude-sonnet-5, 66 runs (33 without / 33 with)
+# Contexer A/B Benchmark - model claude-sonnet-5, 66 runs (33 without / 33 with)
 
 | metric | without | with | Δ | Δ% |
 |---|---|---|---|---|
@@ -21,7 +21,7 @@
 
 ## Independent Validation
 
-**Status: PASS** — 0 failure(s), 0 warning(s)
+**Status: PASS** - 0 failure(s), 0 warning(s)
 
 ### Recomputed medians (errored rows excluded, 0 excluded)
 

@@ -1,13 +1,13 @@
 """Deterministic convention mining over a repo's source and config.
 
-Measures conventions with whole-repo evidence — every emitted sentence carries
+Measures conventions with whole-repo evidence - every emitted sentence carries
 its own proof (a percentage + sample count, or the config file it came from).
 No model in the loop: everything here is ast/regex/config parsing, never an
 LLM guess. This module is a leaf: it is imported by store.py and must NEVER
 import contexer.store, so it carries its own tiny `_git` helper (a twin of
 store._git at line ~1520) rather than share store.py's.
 
-Mining is an enhancement, not a gate: `mine_conventions` never raises — any
+Mining is an enhancement, not a gate: `mine_conventions` never raises - any
 unexpected failure returns whatever was gathered before the failure (or [])."""
 import ast
 import configparser
@@ -43,7 +43,7 @@ _PRECOMMIT_ID = re.compile(r"^\s*-\s*id:\s*(\S+)", re.M)
 
 
 def _git(repo_path: str, *args: str) -> str | None:
-    """Local twin of store._git — kept local so miner.py never imports
+    """Local twin of store._git - kept local so miner.py never imports
     contexer.store (mining must stay a leaf dependency)."""
     try:
         out = subprocess.run(
@@ -84,7 +84,7 @@ def _walk_files(root: Path, suffix: str):
         if dirs_seen > _MAX_DIRS:
             break
         # Dot-dirs (.claude worktrees, .idea, .mypy_cache, …) are tool state, not
-        # project source — mining them poisons the statistics with copies.
+        # project source - mining them poisons the statistics with copies.
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
             if name.endswith(suffix):
@@ -98,7 +98,7 @@ def _is_test_path(path: Path) -> bool:
     return "tests" in path.parts[:-1]
 
 
-# ── 1. config-file conventions (all tier="high" — a config file is 100% evidence) ──
+# ── 1. config-file conventions (all tier="high" - a config file is 100% evidence) ──
 
 def _emit_ruff(cfg: dict, source: str) -> list[dict]:
     items: list[dict] = []
@@ -112,11 +112,11 @@ def _emit_ruff(cfg: dict, source: str) -> list[dict]:
                       "subtype": "convention", "tier": "high"})
     # Selected rule set. Read from both spellings: ruff moved `select` under [lint] in
     # 0.2, and plenty of configs still carry the top-level key. Without this a repo whose
-    # CI blocks on `ruff check` mined nothing about linting at all — the gate existed and
+    # CI blocks on `ruff check` mined nothing about linting at all - the gate existed and
     # no session was ever told, which is the one failure this module is here to prevent.
     #
     # PRESENCE, not truthiness: when both spellings are set, `lint.select` wins in ruff
-    # even when it is EMPTY. Verified with ruff 0.15.4 — top-level select = ["E","F"] plus
+    # even when it is EMPTY. Verified with ruff 0.15.4 - top-level select = ["E","F"] plus
     # lint.select = [] reports "All checks passed!" on a file with two violations, while
     # the legacy key alone finds both. A `lint.get("select") or cfg.get("select")` would
     # therefore mine "rules selected: E, F" for a repo whose linter enforces nothing:
@@ -169,7 +169,7 @@ def _config_conventions(root: Path) -> list[dict]:
     if editorconfig.is_file():
         try:
             # `root = true` (a bare key before any section) breaks strict
-            # configparser, which requires a section header first — strip it,
+            # configparser, which requires a section header first - strip it,
             # we only care about the [*] section anyway.
             text = re.sub(r"(?im)^\s*root\s*=.*$", "", editorconfig.read_text(encoding="utf-8"))
             cp = configparser.ConfigParser()
@@ -235,7 +235,7 @@ def _config_conventions(root: Path) -> list[dict]:
     tsconfig = root / "tsconfig.json"
     if tsconfig.is_file():
         try:
-            # jsonc: strip comments before json.loads. Naive — a `//` inside a
+            # jsonc: strip comments before json.loads. Naive - a `//` inside a
             # string literal (e.g. a URL) would be mis-stripped; acceptable,
             # documented limitation for a deterministic best-effort scan.
             text = tsconfig.read_text(encoding="utf-8")
@@ -264,7 +264,7 @@ def _config_conventions(root: Path) -> list[dict]:
                         continue
                     val = m.group(1).strip()
                     if val in ("|", ">"):
-                        continue  # block-scalar marker — body lines aren't `run:`-prefixed
+                        continue  # block-scalar marker - body lines aren't `run:`-prefixed
                     if val not in cmds:
                         cmds.append(val)
             if cmds and files:

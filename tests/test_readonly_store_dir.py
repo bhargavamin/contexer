@@ -1,8 +1,8 @@
-"""Regression tests for #152 — an unwritable ~/.contexer must never abort a hook.
+"""Regression tests for #152 - an unwritable ~/.contexer must never abort a hook.
 
 Codex's managed sandbox can leave the workspace writable while ~/.contexer is not. The
 installed SessionStart hook then raised PermissionError on a best-effort bookkeeping write
-(the `.current_repo` anchor) and Contexer injected nothing at all — losing the whole stored
+(the `.current_repo` anchor) and Contexer injected nothing at all - losing the whole stored
 context over a pointer file it never needed in order to *read* that context.
 
 The rule under test: inability to write optional bookkeeping never prevents SessionStart
@@ -17,7 +17,7 @@ from contexer import store
 from contexer.adapters import cursor, gemini
 
 # A realistic host SessionStart/BeforeAgent payload. Hosts always send a session id, and
-# several guarded code paths only execute when one is present — a bare "{}" silently
+# several guarded code paths only execute when one is present - a bare "{}" silently
 # skips them, which is how the gemini marker writes stayed unguarded through review.
 RAW = json.dumps({"session_id": "sess-abc", "prompt": "why did we choose that?"})
 
@@ -25,7 +25,7 @@ RAW = json.dumps({"session_id": "sess-abc", "prompt": "why did we choose that?"}
 def _deny_store_writes(monkeypatch):
     """Make every *write* under STORE_DIR raise PermissionError; reads keep working.
 
-    Faithful to the sandbox failure mode and — unlike chmod — unaffected by the test
+    Faithful to the sandbox failure mode and - unlike chmod - unaffected by the test
     process running as root. Called explicitly (not as a fixture) so a test can seed the
     store first and then have the sandbox close around it, exactly as a session does.
     """
@@ -62,7 +62,7 @@ class TestAnchorRepo:
 
     def test_survives_a_non_utf8_repo_path(self, tmp_repo):
         # Why the except is `Exception` and not `OSError`: a path carrying non-UTF-8
-        # filesystem bytes (surfaced by Python as a surrogate escape — routine on Linux)
+        # filesystem bytes (surfaced by Python as a surrogate escape - routine on Linux)
         # makes write_text raise UnicodeEncodeError, which is a ValueError, NOT an
         # OSError. Narrowing the catch would reproduce #152 on a different trigger.
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
@@ -81,7 +81,7 @@ class TestAnchorRepo:
 class TestSessionStartUnderReadOnlyStoreDir:
     def test_renders_the_same_context_as_a_writable_store_dir(self, populated_repo, monkeypatch):
         # The headline regression, stated as parity: decisions are on disk and readable,
-        # only the bookkeeping write fails — so the session must get byte-identical
+        # only the bookkeeping write fails - so the session must get byte-identical
         # context. Before the fix this raised PermissionError and injected nothing.
         expected = store.get_session_start_context(populated_repo)
         _deny_store_writes(monkeypatch)
@@ -98,11 +98,11 @@ class TestSessionStartUnderReadOnlyStoreDir:
 
     def test_bare_session_start_does_not_raise(self, tmp_repo, monkeypatch):
         _deny_store_writes(monkeypatch)
-        store.get_session_start_context(tmp_repo)  # no stored context — must not raise
+        store.get_session_start_context(tmp_repo)  # no stored context - must not raise
 
     def test_gemini_session_start_still_injects(self, populated_repo, monkeypatch):
         # gemini.session_start wraps everything in a blanket except that degrades to an
-        # empty injection — so ANY unguarded write inside it silently costs the whole
+        # empty injection - so ANY unguarded write inside it silently costs the whole
         # context. The session id in RAW is load-bearing: without it _session_marker
         # returns None and the marker unlink never executes, so a `raw="{}"` version of
         # this test passes against code that is still broken for every real session.

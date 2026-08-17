@@ -19,7 +19,7 @@ _COMPARISONS = (("with", "without"), ("with", "claudemd"),
                 ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
                 ("claudemd_agentsmd", "claudemd"))
 _RATIONALE_NOTE = ("_Note: rationale 0.0 can mean the information was unavailable "
-                   "to that condition, not model failure — see per-condition design._")
+                   "to that condition, not model failure - see per-condition design._")
 
 _MEMORY_ARM_ORDER = ("without", "memory", "with")
 _MEMORY_TIERS = ("implicit", "explicit")
@@ -65,13 +65,13 @@ def _render_memory_campaign(rows: list) -> str:
     and a simple rat-mem summary line."""
     models = {r["model"] for r in rows if r.get("model")}
     if len(models) > 1:
-        raise ValueError(f"Mixed models in campaign: {sorted(models)} — refusing to aggregate.")
+        raise ValueError(f"Mixed models in campaign: {sorted(models)} - refusing to aggregate.")
     arms = _memory_arms_present(rows)
     measure = [r for r in rows if r.get("phase") == "measure"]
     teach = [r for r in rows if r.get("phase") == "teach"]
     errored = [r for r in rows if r.get("error")]
 
-    lines = [f"# Memory-vs-Contexer Benchmark — model {next(iter(models), 'unknown')}, "
+    lines = [f"# Memory-vs-Contexer Benchmark - model {next(iter(models), 'unknown')}, "
              f"{len(rows)} rows ({', '.join(arms)})", ""]
     if errored:
         lines += [f"_{len(errored)} errored run(s) excluded from success-rate cells "
@@ -99,7 +99,7 @@ def _render_memory_campaign(rows: list) -> str:
 
     # Capture rate: every measure row in a rep shares the same restored,
     # post-teaching snapshot (captured once after teaching, before the
-    # per-task restore loop) — the first measure row per (arm, rep) is a
+    # per-task restore loop) - the first measure row per (arm, rep) is a
     # deterministic pick of that snapshot.
     first_measure = {}
     for r in measure:
@@ -141,7 +141,7 @@ def _render_memory_campaign(rows: list) -> str:
                 else:
                     # enf_outcome distinguishes "the guard stopped a staged
                     # violation" (an observed non-zero commit exit) from "the model
-                    # never attempted one" and from "it committed anyway" — only the
+                    # never attempted one" and from "it committed anyway" - only the
                     # first demonstrates the mechanism, and only it scores success.
                     outcome = r.get("enf_outcome") or ("blocked" if r["success"]
                                                        else "not blocked")
@@ -189,7 +189,7 @@ def render(runs_path: Path) -> str:
         return _render_memory_campaign(rows)
     models = {r["model"] for r in rows if r.get("model")}
     if len(models) > 1:
-        raise ValueError(f"Mixed models in campaign: {sorted(models)} — refusing to aggregate.")
+        raise ValueError(f"Mixed models in campaign: {sorted(models)} - refusing to aggregate.")
     errored = [r for r in rows if r.get("error")]
     ok = [r for r in rows if not r.get("error")]
     conds = _conditions_present(ok)
@@ -199,7 +199,7 @@ def render(runs_path: Path) -> str:
     agree = sum(1 for r in checked if r["telemetry_ok"])
 
     counts = " / ".join(f"{len(by[c])} {c}" for c in conds)
-    lines = [f"# Contexer A/B Benchmark — model {next(iter(models), 'unknown')}, "
+    lines = [f"# Contexer A/B Benchmark - model {next(iter(models), 'unknown')}, "
              f"{len(ok)} runs ({counts})", ""]
     if errored:
         lines += [f"_{len(errored)} errored run(s) excluded (see runs.jsonl)._", ""]
@@ -220,7 +220,7 @@ def render(runs_path: Path) -> str:
 
     # Honest-ignorance footnote: a 0.0 rationale median in some condition can mean
     # the information never existed in that condition (per-condition design), not
-    # that the model failed. Presentation only — the scorer is untouched.
+    # that the model failed. Presentation only - the scorer is untouched.
     rat = [r for r in ok if r.get("kind") == "rationale"]
     if rat and any(_median([r for r in rat if r["condition"] == c], "rationale") == 0.0
                    for c in conds if any(r["condition"] == c for r in rat)):

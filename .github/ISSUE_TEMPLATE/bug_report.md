@@ -32,7 +32,7 @@ labels: bug
 
 ## Store contents (if relevant)
 
-<!-- Paste the affected ~/.contexer/<repo>.json — redact any sensitive content. -->
+<!-- Paste the affected ~/.contexer/<repo>.json - redact any sensitive content. -->
 
 ```json
 

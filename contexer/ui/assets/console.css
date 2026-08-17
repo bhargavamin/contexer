@@ -53,7 +53,7 @@
    `display` beats a UA rule regardless of specificity. `.banner` and `.toast` are positioned
    flex containers toggled exclusively through element.hidden, so without this override they were
    painted from first load and never went away: the console showed a permanent "Disconnected from
-   the Contexer daemon." banner — the literal placeholder text from index.html — over a dashboard
+   the Contexer daemon." banner - the literal placeholder text from index.html - over a dashboard
    that was polling successfully every 10 seconds. `!important` is load-bearing here, not
    defensive: it has to outrank the later, more specific component rules. */
 [hidden] {
@@ -126,7 +126,7 @@ h3 {
 }
 
 /* Utility classes exist because `style-src 'self'` (no 'unsafe-inline') blocks style
-   attributes — the console never writes one. */
+   attributes - the console never writes one. */
 .push {
   margin-left: auto;
 }
@@ -213,7 +213,7 @@ h3 {
   color: var(--signal);
 }
 /* The mark's cursor tile. A class rather than a fill="…" literal so it tracks --signal, and
-   never a style attribute — `style-src 'self'` blocks those. */
+   never a style attribute - `style-src 'self'` blocks those. */
 .brand-tile {
   fill: var(--signal);
 }
@@ -640,7 +640,7 @@ a.stat-card:hover {
   border-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
   background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
 }
-/* "suggested" is a maturity, not a category, so it deliberately spends no hue — every hue in
+/* "suggested" is a maturity, not a category, so it deliberately spends no hue - every hue in
    this file belongs to a subtype, and a status chip sits directly beside a subtype chip on the
    same row. A dashed border reads as provisional and cannot collide. */
 .badge-suggested {
@@ -677,7 +677,7 @@ a.stat-card:hover {
    Subtype is a colour as well as a word, so a 200-row list stays scannable without reading one.
    Three hues are the dashboard's (blue = convention, amber = constraint, lime = architecture);
    violet is `pattern`, which exists only in the local taxonomy. Tokens rather than literals
-   because the same colour has to drive both the chip and the row's left stripe below — two
+   because the same colour has to drive both the chip and the row's left stripe below - two
    copies of oklch(0.72 0.12 240) is how they drift apart. */
 
 :root {
@@ -830,7 +830,7 @@ a.stat-card:hover {
 }
 /* Fixed-ish sizing (not the 100%-basis every bare .input/.select in the toolbar defaults to)
    so the file filter doesn't fight the subtype/status selects for space, or balloon on a
-   long typed path — it wraps to its own row under flex-wrap instead. */
+   long typed path - it wraps to its own row under flex-wrap instead. */
 .file-filter {
   flex: 1 1 200px;
   min-width: 160px;
@@ -854,7 +854,7 @@ a.stat-card:hover {
    Decision titles, bodies, rationales, confidence factors and revision text are stored WITHOUT
    unicode sanitization, so any of them may contain an RTL or override run. Un-isolated, such a
    run reorders characters ACROSS this element's boundary and visually rewrites whatever sits
-   next to it — and here that is Approve, Delete and Restore. Isolate at the display layer; the
+   next to it - and here that is Approve, Delete and Restore. Isolate at the display layer; the
    hosted dashboard carries the same rule for the same reason. */
 .drow-title,
 .drow-text,
@@ -1497,7 +1497,7 @@ a.stat-card:hover {
 }
 
 /* ── Reduced motion ────────────────────────────────────────────────────────
-   Every transition in this file is decorative — hover tints, icon fades, the press scale. None
+   Every transition in this file is decorative - hover tints, icon fades, the press scale. None
    of them carries state the static rules do not, so under the query they all go, including the
    press scale itself: with the transition gone it is an instant 3% jump, which is the twitch
    the query exists to remove rather than a softer version of it. */

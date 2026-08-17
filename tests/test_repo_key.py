@@ -1,4 +1,4 @@
-"""Tests for canonical_repo_key — shared byte-for-byte with the TS sibling impl."""
+"""Tests for canonical_repo_key - shared byte-for-byte with the TS sibling impl."""
 import types
 
 import pytest

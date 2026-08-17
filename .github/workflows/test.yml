@@ -38,12 +38,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      # No --cov-fail-under here — the floor lives in pyproject addopts so the
+      # No --cov-fail-under here - the floor lives in pyproject addopts so the
       # convention miner can see it (see the comment there before moving it).
       - name: Run tests with coverage
         run: uv run pytest tests/ -m "not slow and not perf" -v --tb=short
 
-  # Split out so the 45s harness runs ONCE, not once per Python version — not to
+  # Split out so the 45s harness runs ONCE, not once per Python version - not to
   # defer it. Deliberately unconditional: an `if: github.event_name != 'pull_request'`
   # here silently skipped the harness entirely on any branch outside the `push`
   # allowlist above (e.g. `ci/**`), so it ran on neither event. Same push+PR overlap
@@ -70,7 +70,7 @@ jobs:
   # [tool.ruff.lint]; only the runner lives here.
   #
   # Version pinned exactly, and run via uvx rather than the dev group: ruff is a binary we
-  # never import, so pinning here keeps uv.lock untouched when it is bumped — and a fresh
+  # never import, so pinning here keeps uv.lock untouched when it is bumped - and a fresh
   # ruff release can never turn a green PR red on its own. Keep in step with CONTRIBUTING.
   lint:
     # Name carries no version: it is the GitHub check name, so baking 0.15.4 into it would

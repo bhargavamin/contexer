@@ -1,4 +1,4 @@
-# Contexer A/B Benchmark — model claude-sonnet-5, 18 runs (4 without / 4 agentsmd / 4 claudemd / 3 claudemd_agentsmd / 3 with)
+# Contexer A/B Benchmark - model claude-sonnet-5, 18 runs (4 without / 4 agentsmd / 4 claudemd / 3 claudemd_agentsmd / 3 with)
 
 | metric | without | agentsmd | claudemd | claudemd_agentsmd | with | Δ (with−without) | Δ% (with−without) | Δ (with−claudemd) | Δ% (with−claudemd) | Δ (agentsmd−claudemd) | Δ% (agentsmd−claudemd) | Δ (claudemd_agentsmd−claudemd) | Δ% (claudemd_agentsmd−claudemd) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -11,11 +11,11 @@
 | rationale | 0 | 1 | 1 | 1 | 1 | 1 | n/a | 0 | +0.0% | 0 | +0.0% | 0 | +0.0% |
 | success | 1 | 1 | 1 | 1 | 1 | 0 | +0.0% | 0 | +0.0% | 0 | +0.0% | 0 | +0.0% |
 
-_Note: rationale 0.0 can mean the information was unavailable to that condition, not model failure — see per-condition design._
+_Note: rationale 0.0 can mean the information was unavailable to that condition, not model failure - see per-condition design._
 
 ## Independent Validation
 
-**Status: PASS** — 0 failure(s), 29 warning(s)
+**Status: PASS** - 0 failure(s), 29 warning(s)
 
 ### Warnings
 
@@ -39,15 +39,15 @@ _Note: rationale 0.0 can mean the information was unavailable to that condition,
 - cell (rat-storage-p1, claudemd_agentsmd) has 0 of 3 rows (short)
 - cell (rat-storage-p1, with) has 0 of 3 rows (short)
 - cell (rat-storage-p1, without) has 1 of 3 rows (short)
-- paired tokens_total (with_vs_claudemd) direction (with-worse) is driven by a single task 'rat-errors' — removing it flips/erases the sign
-- paired turns (with_vs_claudemd) direction (with-better) is driven by a single task 'cont-logging' — removing it flips/erases the sign
-- paired tool_calls (with_vs_claudemd) direction (with-better) is driven by a single task 'cont-logging' — removing it flips/erases the sign
-- paired turns (claudemd_vs_without) direction (claudemd-better) is driven by a single task 'rat-storage' — removing it flips/erases the sign
-- paired tokens_total (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' — removing it flips/erases the sign
-- paired cost_usd (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-better) is driven by a single task 'rat-errors' — removing it flips/erases the sign
-- paired turns (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' — removing it flips/erases the sign
-- paired tool_calls (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' — removing it flips/erases the sign
-- paired duration_ms (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' — removing it flips/erases the sign
+- paired tokens_total (with_vs_claudemd) direction (with-worse) is driven by a single task 'rat-errors' - removing it flips/erases the sign
+- paired turns (with_vs_claudemd) direction (with-better) is driven by a single task 'cont-logging' - removing it flips/erases the sign
+- paired tool_calls (with_vs_claudemd) direction (with-better) is driven by a single task 'cont-logging' - removing it flips/erases the sign
+- paired turns (claudemd_vs_without) direction (claudemd-better) is driven by a single task 'rat-storage' - removing it flips/erases the sign
+- paired tokens_total (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' - removing it flips/erases the sign
+- paired cost_usd (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-better) is driven by a single task 'rat-errors' - removing it flips/erases the sign
+- paired turns (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' - removing it flips/erases the sign
+- paired tool_calls (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' - removing it flips/erases the sign
+- paired duration_ms (claudemd_agentsmd_vs_claudemd) direction (claudemd_agentsmd-worse) is driven by a single task 'cont-logging' - removing it flips/erases the sign
 
 ### Recomputed medians (errored rows excluded, 0 excluded)
 

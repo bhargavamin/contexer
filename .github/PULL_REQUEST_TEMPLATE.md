@@ -4,7 +4,7 @@
 
 ## Why?
 
-<!-- The motivation — what problem does it solve, or what behaviour does it improve? -->
+<!-- The motivation - what problem does it solve, or what behaviour does it improve? -->
 
 ## How was it tested?
 

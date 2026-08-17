@@ -2,7 +2,7 @@
 
 The console has no build step and no test runner of its own, so the only thing standing between
 `contexer/ui/assets/console.js` and a browser is this file. These are deliberately *structural*
-checks — they read the source and assert the shapes that four verified defects all came from:
+checks - they read the source and assert the shapes that four verified defects all came from:
 
 * a handler that throws away the developer's typed draft BEFORE the request it depends on,
 * a refusal to send that is indistinguishable from a successful write,
@@ -56,7 +56,7 @@ def _block_at(text: str, open_brace: int) -> str:
 
 
 def _code(text: str) -> str:
-    """`text` with comments removed, for guards that assert an identifier is ABSENT — a comment
+    """`text` with comments removed, for guards that assert an identifier is ABSENT - a comment
     explaining why it is absent must not read as the thing itself."""
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     return re.sub(r"^\s*//.*$", "", text, flags=re.MULTILINE)
@@ -104,7 +104,7 @@ DISCARDS = (
 def test_no_click_handler_discards_state_before_the_write_it_depends_on(script):
     """`state.edit = null` before `await act(...)` is how a rewritten decision was lost to a 409.
 
-    A handler may only discard the developer's work AFTER the daemon has taken it — which means
+    A handler may only discard the developer's work AFTER the daemon has taken it - which means
     inside `act`'s `onOk` callback, or behind `act`'s boolean. Anything that runs before the call
     runs for a request that may be rejected (409/400/429/500) or refused outright, and the console
     has no undo.
@@ -196,8 +196,8 @@ def test_the_share_button_never_clears_a_selection_it_did_not_send(script):
 
 def test_the_login_conflict_branch_consumes_the_job_id_the_daemon_sends(script):
     """`api._login` puts the in-flight job's id in its 409 precisely so a second tab can learn the
-    login FAILED. Dropping it left that tab watching /api/config — a channel that only ever reports
-    success — until the 6-minute client backstop expired."""
+    login FAILED. Dropping it left that tab watching /api/config - a channel that only ever reports
+    success - until the 6-minute client backstop expired."""
     start = _function_body(script, "startLogin")
     m = re.search(r"err\.status === 409\)\s*\{", start)
     assert m, "startLogin no longer handles the single-flight 409"
@@ -273,7 +273,7 @@ def test_the_team_view_reads_its_selection_through_the_scoped_lookup(script):
 
 def test_the_global_view_tells_an_unreadable_file_from_an_empty_one(script):
     """A corrupt ~/.contexer/_global.json read as `{"entries": []}`, so the view said "No global
-    rules" over a file that still held them — and the Add button beside that sentence rewrote the
+    rules" over a file that still held them - and the Add button beside that sentence rewrote the
     file with one entry, destroying every global rule on the machine. The store refuses that write
     now; the view must stop making the claim that invited it.
     """
@@ -319,7 +319,7 @@ def test_an_unreadable_file_never_shows_a_zero_count_in_the_nav(script):
 # --- the CSP the console is served under -----------------------------------------------
 
 def test_the_assets_stay_inside_the_content_security_policy():
-    """`default-src 'none'; style-src 'self'; script-src 'self'` — an inline handler, an inline
+    """`default-src 'none'; style-src 'self'; script-src 'self'` - an inline handler, an inline
     style attribute or an off-host URL is not a lint nit here, it is a blank page."""
     for path in (SCRIPT, MARKUP, STYLES):
         text = path.read_text()
@@ -393,7 +393,7 @@ def test_the_favicon_is_served_and_is_the_same_mark():
 
 
 def test_every_subtype_has_a_colour_on_both_the_chip_and_the_row(script):
-    """Subtype is a colour as well as a word — that is what makes a 200-row list scannable, and
+    """Subtype is a colour as well as a word - that is what makes a 200-row list scannable, and
     it is the dashboard's own language. A subtype with no rule falls back to neutral silently,
     so the taxonomy and the stylesheet are checked against each other rather than by eye."""
     m = re.search(r"const SUBTYPES = \[(.*?)\]", script, re.DOTALL)
@@ -445,7 +445,7 @@ def test_a_status_chip_never_borrows_a_subtype_hue():
 def test_stored_text_is_bidi_isolated_wherever_it_is_rendered():
     """Decision bodies are stored without unicode sanitization. An un-isolated RTL/override run
     reorders characters across the element boundary and can visually rewrite the control next to
-    it — here, Approve and Delete. Same rule, same reason, as the hosted dashboard."""
+    it - here, Approve and Delete. Same rule, same reason, as the hosted dashboard."""
     css = STYLES.read_text()
     m = re.search(r"((?:\.[a-z-]+(?: li)?,\s*)+[.a-z -]+)\{\s*unicode-bidi:\s*isolate", css)
     assert m, "console.css no longer isolates stored text"
@@ -482,8 +482,8 @@ def test_every_view_names_itself_in_the_tab(script):
 
 # The review card used to pick between two shapes by the SIZE of the LCS table: under budget it
 # rendered ONE interleaved block of struck-out and inserted words, over budget it rendered the two
-# texts as columns. On a rewrite — which shares almost nothing, so the LCS matches only "the",
-# "is", "access" — the interleaved block was unreadable, and which of the two a proposal got came
+# texts as columns. On a rewrite - which shares almost nothing, so the LCS matches only "the",
+# "is", "access" - the interleaved block was unreadable, and which of the two a proposal got came
 # down to a 0.8% difference in table cells. Now there is one shape, columns, and the word marks
 # are an aid drawn on top of it only when they help.
 
@@ -542,7 +542,7 @@ _JS_FUNCTIONS = ("append", "h", "tokenize", "diffTokens", "sameShare", "diffColu
 
 
 def _js_declaration(text: str, name: str) -> str:
-    """`function name(...) { ... }`, declaration included — the body alone is not runnable."""
+    """`function name(...) { ... }`, declaration included - the body alone is not runnable."""
     m = re.search(r"function\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", text)
     assert m, "no function %s in console.js" % name
     return text[m.start():m.end() - 1] + _block_at(text, m.end() - 1)
@@ -577,7 +577,7 @@ def _run_js(script_text: str, snippet: str):
 
 @needs_node
 def test_both_columns_carry_the_whole_stored_text(script):
-    """A developer clicking Approve must have been shown every word of what they are approving —
+    """A developer clicking Approve must have been shown every word of what they are approving -
     marked or unmarked, small edit or total rewrite, and whether or not the pair fits the LCS
     budget."""
     out = _run_js(script, """

@@ -52,7 +52,7 @@ def build_webapi(dest: Path, seed: int = 0) -> Path:
     # Repo-local identity so a commit made INSIDE the fixture (by a benchmarked
     # session, or by the enforcement task verifying the guard) succeeds without a
     # ~/.gitconfig. The throwaway HOME has none, and git's hostname fallback fails
-    # on any host without an FQDN — which would look like a guard block.
+    # on any host without an FQDN - which would look like a guard block.
     _sh("git", "config", "user.email", "fixture@bench.local", cwd=dest)
     _sh("git", "config", "user.name", "Bench", cwd=dest)
     _sh("git", "config", "commit.gpgsign", "false", cwd=dest)

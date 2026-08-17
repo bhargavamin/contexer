@@ -47,7 +47,7 @@ def store_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def wt_repo(tmp_path):
-    """(main_path, worktree_path) — a real repo with one linked worktree.
+    """(main_path, worktree_path) - a real repo with one linked worktree.
 
     Paths are realpath'd: on macOS tmp dirs live under a /var → /private/var symlink
     and git reports resolved paths, so the fixture must hand out what git will say."""
@@ -100,7 +100,7 @@ class TestCanonicalStoreKey:
         )
         calls = []
         monkeypatch.setattr(store.subprocess, "run", lambda *a, **k: calls.append(a))
-        # gitdir is .../backup/.git (no /worktrees/) — must NOT mis-key to <tmp>/backup.
+        # gitdir is .../backup/.git (no /worktrees/) - must NOT mis-key to <tmp>/backup.
         assert store._canonical_store_key(str(repo)) == str(repo)
         assert calls == []
 
@@ -142,7 +142,7 @@ class TestCanonicalStoreKey:
 
     def test_worktree_path_reuse_by_different_repo_not_stale_cached(self, tmp_path):
         # A worktree path removed and later reused by a DIFFERENT repo's worktree in
-        # the same long-lived process must re-resolve — a stale cache hit here would
+        # the same long-lived process must re-resolve - a stale cache hit here would
         # route the replacement repo into the former repo's store.
         root = Path(os.path.realpath(tmp_path))
         repo_a = _make_repo(root / "repo_a")

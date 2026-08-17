@@ -16,7 +16,7 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parent.parent / "contexer"
 
 # Binary APIs take no encoding, and tomllib/json binary reads are the correct way to
-# parse those formats — only text-mode calls are in scope. read_bytes/write_bytes are
+# parse those formats - only text-mode calls are in scope. read_bytes/write_bytes are
 # therefore fine, and are in fact the right answer when byte-exactness matters (see
 # cli._guard_read_hook, where text mode's newline translation was the second bug).
 _TEXT_IO = {"read_text", "write_text"}
@@ -75,7 +75,7 @@ def test_package_text_io_always_pins_encoding():
         rel = path.relative_to(PACKAGE.parent).as_posix()
         offenders += _unpinned_text_io(path.read_text(encoding="utf-8"), rel)
     assert not offenders, (
-        "Text IO must pass encoding=\"utf-8\" — the locale default is ASCII under "
+        "Text IO must pass encoding=\"utf-8\" - the locale default is ASCII under "
         "LC_ALL=C and cp1252 on Windows, so these calls fail on a file that is "
         "perfectly valid UTF-8:\n  " + "\n  ".join(offenders))
 

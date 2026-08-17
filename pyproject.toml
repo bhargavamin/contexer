@@ -24,7 +24,7 @@ dependencies = [
     # (FastMCP moved to its own `fastmcp` distribution and mcp 2.x pulls `mcp-types`),
     # so server.py's import dies at startup. Unbounded, a fresh `uv tool install` /
     # `pip install contexer` resolves 2.x and ships a server that cannot start, while
-    # this repo's uv.lock (mcp 1.27.2) keeps every dev command green — the break is
+    # this repo's uv.lock (mcp 1.27.2) keeps every dev command green - the break is
     # invisible from source. Lift only together with the FastMCP 2.x migration.
     "mcp>=1.9.4,<2",
 ]
@@ -59,7 +59,7 @@ dev = [
 [tool.ruff]
 # The lint gate CI enforces (.github/workflows/test.yml). Ruff is not a dev-group
 # dependency on purpose: it is a standalone binary, never imported, so CI and
-# CONTRIBUTING both invoke it as `uvx ruff@<exact version> check` — pinned like every
+# CONTRIBUTING both invoke it as `uvx ruff@<exact version> check` - pinned like every
 # other tool here, and no uv.lock churn when it is bumped.
 target-version = "py312"          # matches requires-python; never inferred from the local interpreter
 # Deliberately NO line-length: E501 is not selected (comment-heavy modules run past
@@ -77,15 +77,15 @@ testpaths = ["tests"]
 # only key contexer/miner.py mines the coverage floor from, so relocating the
 # flag silently deletes this repo's own "coverage ≥85%" convention (enforced
 # by test_own_repo_coverage_floor_stays_minable). Known cost: subset runs
-# exit 1 on coverage — pass --no-cov (see CONTRIBUTING.md).
+# exit 1 on coverage - pass --no-cov (see CONTRIBUTING.md).
 addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
 markers = [
     "slow: benchmark-harness tests (tests/test_bench_*.py), deselected in the PR gate",
-    "perf: wall-clock latency assertions — meaningful only on fixed hardware, never in CI",
+    "perf: wall-clock latency assertions - meaningful only on fixed hardware, never in CI",
 ]
 
 [tool.coverage.run]
 omit = [
-    "contexer/server.py",   # MCP entry point — thin wrappers, tested via store
+    "contexer/server.py",   # MCP entry point - thin wrappers, tested via store
     "contexer/__main__.py", # CLI entry point
 ]

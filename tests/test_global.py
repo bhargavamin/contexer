@@ -1,4 +1,4 @@
-"""Tests for global context store — all permutations of global/repo store interaction."""
+"""Tests for global context store - all permutations of global/repo store interaction."""
 import json
 
 import pytest
@@ -31,7 +31,7 @@ def _add_repo(content: str, subtype: str = "constraint") -> str | None:
 
 
 def _truncate_global() -> str:
-    """Truncate `_global.json` so it will not parse — an interrupted write, a disk-full
+    """Truncate `_global.json` so it will not parse - an interrupted write, a disk-full
     truncation, a hand-edit typo. Returns the exact bytes now on disk."""
     path = store._global_path()
     broken = path.read_text(encoding="utf-8")[:-3]
@@ -157,7 +157,7 @@ class TestGetGlobalDecisions:
 class TestUnreadableGlobalStore:
     """`_global.json` holds every cross-repo rule on the machine. A read that degrades a
     corrupt file to "no rules", next to a write that saves that degraded state back, destroys
-    the lot — the same hazard `delete_decision` already refuses for the tombstone sidecar."""
+    the lot - the same hazard `delete_decision` already refuses for the tombstone sidecar."""
 
     def test_adding_a_rule_never_overwrites_a_file_it_could_not_parse(self):
         _add_global("Never commit untested code to the main branch", "constraint")
@@ -390,7 +390,7 @@ class TestSessionStartPermutations:
         assert "untested code" in ctx
 
 
-# ── get_context_for_prompt — global fallback ──────────────────────────────────
+# ── get_context_for_prompt - global fallback ──────────────────────────────────
 
 class TestContextForPromptGlobalFallback:
     def test_silent_for_non_rationale_prompt(self):
@@ -410,7 +410,7 @@ class TestContextForPromptGlobalFallback:
         assert "postgres" in result.lower()
 
     def test_falls_back_to_global_when_repo_empty(self):
-        # "management" (10 chars) is the longest keyword — always in top-3, guaranteed to match
+        # "management" (10 chars) is the longest keyword - always in top-3, guaranteed to match
         _add_global("Always prefer pipenv for package management across all projects", "convention")
         result = store.get_context_for_prompt(REPO, "why did we choose this package management approach?")
         assert result != ""
@@ -440,7 +440,7 @@ class TestContextForPromptGlobalFallback:
 
 class TestGlobalRecurrence:
     """A restated global rule must record a recurrence (bump count + track session),
-    mirroring the repo path — not vanish silently (review finding H4)."""
+    mirroring the repo path - not vanish silently (review finding H4)."""
 
     def test_new_global_entry_has_recurrence_fields(self):
         store.update_global_decision("always sign commits with a gpg key", "s1", "convention")

@@ -50,7 +50,7 @@ class TestAuditSessions:
         assert len(row["stores"]) == 3
 
     def test_global_store_never_participates(self, store_dir):
-        # Global decisions are cross-repo BY DESIGN — they are supposed to apply everywhere.
+        # Global decisions are cross-repo BY DESIGN - they are supposed to apply everywhere.
         _write_store(store_dir, "/repo/a", [_decision("a1", "sess-1")])
         (store_dir / f"{store.GLOBAL_SLUG}.json").write_text(
             json.dumps({"entries": [_decision("g1", "sess-1")]}))
@@ -67,7 +67,7 @@ class TestAuditSessions:
     def test_tombstone_sidecar_is_not_a_second_store(self, store_dir):
         # `<slug>.deleted.json` carries the SAME shape as a real store, so a hand-rolled
         # "skip dotfiles and _global" filter reads a repo's deleted decisions as a second
-        # store FOR THE SAME REPO — reporting one repo twice and telling the developer to
+        # store FOR THE SAME REPO - reporting one repo twice and telling the developer to
         # re-capture a decision they deliberately deleted.
         _write_store(store_dir, "/repo/a", [_decision("a1", "sess-1")])
         (store_dir / f"{store._slug('/repo/a')}.deleted.json").write_text(
@@ -81,7 +81,7 @@ class TestAuditSessions:
         assert scope_audit.audit_sessions() == []
 
     def test_malformed_entry_costs_its_title_not_the_audit(self, store_dir):
-        # Entries here are RAW json — never run through _load's migration — so revision-model
+        # Entries here are RAW json - never run through _load's migration - so revision-model
         # helpers can meet shapes a live store never hands them. That must not raise out of a
         # read-only report.
         _write_store(store_dir, "/repo/a",
@@ -94,7 +94,7 @@ class TestAuditSessions:
 
     def test_memory_imports_never_participate(self, store_dir):
         # memory_sync stores an unattributed fact under the LITERAL id "memory-sync", so every
-        # repo that ever imported one shares it — a guaranteed false pair. And even a real
+        # repo that ever imported one shares it - a guaranteed false pair. And even a real
         # originSessionId records where the FACT came from, not which repo a writer targeted.
         for repo, eid in (("/repo/a", "a1"), ("/repo/b", "b1")):
             _write_store(store_dir, repo, [_decision(eid, "memory-sync", created_by="memory",
@@ -102,7 +102,7 @@ class TestAuditSessions:
         assert scope_audit.audit_sessions() == []
 
     def test_memory_import_detected_without_the_provenance_field(self, store_dir):
-        # Read raw, without _load's migration — an older entry may carry only one marker.
+        # Read raw, without _load's migration - an older entry may carry only one marker.
         _write_store(store_dir, "/repo/a", [_decision("a1", "real-sid", memory_key="n.md#x")])
         _write_store(store_dir, "/repo/b", [_decision("b1", "real-sid", memory_key="n.md#x")])
         assert scope_audit.audit_sessions() == []
@@ -160,7 +160,7 @@ class TestAuditSessions:
 
     def test_numeric_session_id_does_not_reach_the_report(self, store_dir):
         # An int IS hashable, so it survives the grouping and only breaks later, in the
-        # report's slicing — coerced away at the same point as the unhashable case.
+        # report's slicing - coerced away at the same point as the unhashable case.
         _write_store(store_dir, "/repo/a", [_decision("a1", 12345)])
         _write_store(store_dir, "/repo/b", [_decision("b1", 12345)])
         assert scope_audit.audit_sessions() == []
@@ -182,7 +182,7 @@ class TestAuditSessions:
             {"repo_path": "/repo/wt", "entries": [_decision("w1", "sess-1")]}))
 
     def test_two_store_files_for_one_repo_are_one_store(self, store_dir, monkeypatch):
-        # Both files describe ONE repo, so a session writing to both is correctly scoped —
+        # Both files describe ONE repo, so a session writing to both is correctly scoped -
         # reporting it would send the developer to retire records that are fine.
         self._stray_worktree_pair(store_dir, monkeypatch)
         assert scope_audit.audit_sessions() == []
@@ -198,7 +198,7 @@ class TestAuditSessions:
         assert [e["id"] for e in merged["entries"]] == ["m1", "w1"]
 
     def test_a_repo_that_no_longer_exists_is_labelled(self, store_dir):
-        # A stray from a REMOVED worktree cannot be merged with its main worktree — the .git
+        # A stray from a REMOVED worktree cannot be merged with its main worktree - the .git
         # file is gone and `git worktree list` no longer enumerates it, so nothing on disk
         # records the link. The row is labelled rather than guessed at.
         _write_store(store_dir, "/repo/gone-worktree", [_decision("g1", "sess-1")])
@@ -261,7 +261,7 @@ class TestFormatAudit:
         assert "Nothing was changed" in out          # read-only promise stated to the reader
 
     def test_report_does_not_assert_a_defect_as_fact(self, store_dir):
-        # The id is a WRITE-SESSION id — for MCP captures a per-PROCESS uuid4 — so a
+        # The id is a WRITE-SESSION id - for MCP captures a per-PROCESS uuid4 - so a
         # deliberate cross-repo capture produces this exact shape with nothing wrong.
         _write_store(store_dir, "/repo/a", [_decision("a1", "sess-1")])
         _write_store(store_dir, "/repo/b", [_decision("b1", "sess-1")])

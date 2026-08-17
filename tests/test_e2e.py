@@ -1,4 +1,4 @@
-"""End-to-end tests — exercises the full hook sequence from install through context recall.
+"""End-to-end tests - exercises the full hook sequence from install through context recall.
 
 Covers: install/uninstall, reinstall idempotency, session start states, bootstrap offer,
 constraint capture, decision storage, context retrieval, rationale injection, task capture,
@@ -76,7 +76,7 @@ def _in_groups(groups: list, marker: str) -> bool:
     return any(marker in str(h) for grp in groups for h in grp.get("hooks", []))
 
 
-# ── 1. Install — hook and permission registration ─────────────────────────────
+# ── 1. Install - hook and permission registration ─────────────────────────────
 
 class TestInstall:
     def test_mcp_server_registered(self, tmp_home):
@@ -140,7 +140,7 @@ class TestInstall:
         assert _in_groups(ups, "claude.rationale")
 
     def test_bootstrap_command_installed_globally(self, tmp_home):
-        """A project-level command file only works inside that repo — end users
+        """A project-level command file only works inside that repo - end users
         installing from PyPI must get /bootstrap in ~/.claude/commands/."""
         cli.install()
         cmd = (tmp_home / ".claude" / "commands" / "bootstrap.md").read_text()
@@ -358,19 +358,19 @@ class TestPostCompactContext:
 
 class TestBootstrapInstructions:
     def test_always_shown_for_task_prompts(self, tmp_repo):
-        """Bootstrap offer must be shown always — even when user sent a task or question."""
+        """Bootstrap offer must be shown always - even when user sent a task or question."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
         assert "CRITICAL" in full_text, "Bootstrap must use a critical instruction so it isn't skipped for task prompts"
 
     def test_no_just_continues_skip_rule(self, tmp_repo):
-        """'just continues → skip' was the original bug — must be gone."""
+        """'just continues → skip' was the original bug - must be gone."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
         assert "just continues" not in full_text
 
     def test_stops_and_waits_for_response(self, tmp_repo):
-        """Bootstrap must pause after the offer — not proceed with the original task."""
+        """Bootstrap must pause after the offer - not proceed with the original task."""
         lines = store._build_bootstrap_context(tmp_repo)
         full_text = "\n".join(lines)
         assert "CRITICAL" in full_text or "stop completely" in full_text.lower()
@@ -385,15 +385,15 @@ class TestBootstrapInstructions:
     def test_ambiguous_offer_options_are_parallel_modes(self, tmp_repo):
         """Options must be modes, not yes/no mixed with modes. tmp_repo has no .git → ambiguous variant."""
         full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        for option in ["1. quick —", "2. full —", "3. scan —", "4. skip —"]:
+        for option in ["1. quick -", "2. full -", "3. scan -", "4. skip -"]:
             assert option in full_text
-        assert not re.search(r"\d\. some —", full_text), \
+        assert not re.search(r"\d\. some -", full_text), \
             "'some' has no row: five options exceed the picker cap"
         assert "'some' if you work with it" in full_text, \
             "'some' must stay a documented typed reply"
 
     def test_scan_option_never_quizzes_whichever_insight_it_routes_to(self, tmp_repo):
-        """Ambiguous routes scan to 'medium' (it doubles as the 'some' row — see
+        """Ambiguous routes scan to 'medium' (it doubles as the 'some' row - see
         test_ambiguous_scan_keeps_the_purpose_gap); either way scan must never quiz.
 
         Asserts the scan HANDLER line, not a bare "insight='medium'": that substring is also
@@ -412,7 +412,7 @@ class TestBootstrapInstructions:
 
 class TestBootstrapAutomaticStorage:
     """bootstrap_context now self-stores detected facts and measured conventions
-    (apply=True default) — the handler instructions must reflect that: no more
+    (apply=True default) - the handler instructions must reflect that: no more
     per-fact choreography telling the model to store what the tool already stored."""
 
     def test_handlers_do_not_instruct_per_fact_storage(self, tmp_repo):
@@ -441,8 +441,8 @@ class TestOfferVariants:
         _set_me(git_repo)
         text = "\n".join(store._build_bootstrap_context(git_repo))
         assert "How well do you know this repo?" not in text
-        assert "1. quick —" in text and "2. full —" in text
-        assert "4. scan — I'm actually new to this repo" in text, "override must stay visible"
+        assert "1. quick -" in text and "2. full -" in text
+        assert "4. scan - I'm actually new to this repo" in text, "override must stay visible"
 
     def test_low_decisive_states_evidence_not_conclusion(self, git_repo, tmp_path):
         _git_commit(git_repo, OTHER, 3)
@@ -452,8 +452,8 @@ class TestOfferVariants:
         text = "\n".join(store._build_bootstrap_context(str(clone)))
         assert "No commits from your git email" in text, "must state the evidence"
         assert "you're new to this repo" not in text, "must not assert a conclusion that may be wrong"
-        assert "1. scan —" in text, "scan must lead when the evidence says no commits"
-        assert "2. quick —" in text and "3. full —" in text, \
+        assert "1. scan -" in text, "scan must lead when the evidence says no commits"
+        assert "2. quick -" in text and "3. full -" in text, \
             "the override rows themselves must stay visible, not just the reply-key line"
 
     def test_ambiguous_asks_familiarity(self, tmp_repo):
@@ -465,7 +465,7 @@ class TestOfferVariants:
         _git_commit(git_repo, ME, 2)
         _set_me(git_repo)
         text = "\n".join(store._build_bootstrap_context(git_repo))
-        assert "How well do you know this repo?" in text, "1-4 commits is non-decisive — must still ask"
+        assert "How well do you know this repo?" in text, "1-4 commits is non-decisive - must still ask"
         assert "reply 'some'" in text, "the medium hint must still name the typed 'some' reply"
 
     def test_all_variants_are_numbered_and_capped_at_four(self, git_repo, tmp_path, tmp_repo):
@@ -478,7 +478,7 @@ class TestOfferVariants:
         subprocess.run(["git", "config", "user.email", OTHER], cwd=clone, check=True)
         for label, repo in [("high", git_repo), ("ambiguous", tmp_repo), ("low", str(clone))]:
             text = "\n".join(store._build_bootstrap_context(repo))
-            rows = re.findall(r"^\s+(\d)\. (\w+) —", text, re.MULTILINE)
+            rows = re.findall(r"^\s+(\d)\. (\w+) -", text, re.MULTILINE)
             assert [n for n, _ in rows] == ["1", "2", "3", "4"], f"{label}: {rows}"
             assert {kw for _, kw in rows} == {"quick", "full", "scan", "skip"}, \
                 f"{label}: every variant offers the same four modes, only the order differs"
@@ -492,7 +492,7 @@ class TestOfferVariants:
 
     def test_numeric_and_keyword_replies_both_documented(self, tmp_repo):
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "Their reply is one of — 1-4, or quick / full / scan / skip" in text, \
+        assert "Their reply is one of - 1-4, or quick / full / scan / skip" in text, \
             "the offer's own reply line must advertise the numbers"
         assert "A numeric reply means the option at that position" in text
         assert "treat that as skip" in text, "a cancelled picker must not re-ask"
@@ -500,7 +500,7 @@ class TestOfferVariants:
     def test_picker_answer_is_handled_in_the_same_turn(self, tmp_repo):
         """An AskUserQuestion answer returns as a tool result inside the turn. The old
         text-mode 'stop completely / wait for them to reply' wording, kept verbatim next to
-        the picker path, told the model to end its turn instead — dropping the answer."""
+        the picker path, told the model to end its turn instead - dropping the answer."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
         assert "do not end the turn on the question" in text
         assert "act on it immediately" in text
@@ -513,7 +513,7 @@ class TestOfferVariants:
         """Option 1 is not the same mode in every variant: in the low variant the proposal on
         the table is scan, so a blanket "'yes' means quick" would start the author interview
         that variant exists to prevent. Only the DECISIVE variants resolve an affirmative at
-        all — see test_bare_yes_never_infers_authorship_when_insight_is_ambiguous."""
+        all - see test_bare_yes_never_infers_authorship_when_insight_is_ambiguous."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
         clone = tmp_path / "clone"
@@ -521,23 +521,23 @@ class TestOfferVariants:
         subprocess.run(["git", "config", "user.email", OTHER], cwd=clone, check=True)
         for expected, repo in [("quick", git_repo), ("scan", str(clone))]:
             text = "\n".join(store._build_bootstrap_context(repo))
-            assert f"means option 1 — here that is {expected}," in text, \
+            assert f"means option 1 - here that is {expected}," in text, \
                 f"{repo}: bare 'yes' must resolve to this variant's first row"
 
     def test_bare_yes_never_infers_authorship_when_insight_is_ambiguous(self, tmp_repo):
         """The ambiguous question is "How well do you know this repo?" and its option 1 says
         "I wrote or maintain it". A bare "yes" makes no such claim, and resolving it there
-        routes a newcomer to insight='high' — dropping the goal gap they can answer and
+        routes a newcomer to insight='high' - dropping the goal gap they can answer and
         asking only the purpose question they cannot."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "means option 1 — here that is" not in text, \
+        assert "means option 1 - here that is" not in text, \
             "no affirmative may resolve to a row in the variant that cannot tell"
         assert "Never infer authorship from an affirmative" in text
         assert "ask which of the four they mean" in text
 
     def test_ambiguous_scan_keeps_the_purpose_gap(self, tmp_repo, git_repo, tmp_path):
         """'some' has no row, so scan is also what a works-with-it-but-didn't-build-it developer
-        picks. insight='low' returns only the goal gap — the purpose question (min_insight
+        picks. insight='low' returns only the goal gap - the purpose question (min_insight
         'medium') would be silently dropped for a user who can answer it."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
         assert "If scan (didn't build it, or first time here)" in text
@@ -564,7 +564,7 @@ class TestOfferVariants:
 
     def test_handler_mapping_covers_every_advertised_mode(self, git_repo, tmp_path, tmp_repo):
         """Every variant maps quick/full → high and some → medium; scan's level is
-        variant-dependent, so assert the scan HANDLER itself in all three — a bare
+        variant-dependent, so assert the scan HANDLER itself in all three - a bare
         "insight='...'" substring check passes on the unrelated 'some' handler."""
         clone = tmp_path / "clone"
         _git_commit(git_repo, OTHER, 3)
@@ -588,9 +588,9 @@ class TestOfferVariants:
         for text in (ambiguous, low, high):
             assert "insight='high'" in text and "insight='medium'" in text
             assert "If no or skip" in text
-        # scan's routing, pinned per variant — this is what a bare substring check missed
+        # scan's routing, pinned per variant - this is what a bare substring check missed
         assert "insight='medium'" in scan_handler(tmp_repo), \
-            "scan doubles as the 'some' row here — routing it to 'low' drops the purpose gap"
+            "scan doubles as the 'some' row here - routing it to 'low' drops the purpose gap"
         assert "insight='low'" in scan_handler(str(clone)), \
             "the low-decisive variant keeps the minimal-questions path"
         assert "insight='low'" in scan_handler(str(high_repo)), \
@@ -615,11 +615,11 @@ class TestOfferVariants:
 
     def test_guide_directs_the_model_to_read_the_enumerated_context_files(self):
         """Docs shape the QUESTION, never the store. A rule file that already answers a gap
-        turns it from an open question into confirm-or-correct — and only the developer's
+        turns it from an open question into confirm-or-correct - and only the developer's
         confirmed answer is stored, never the quoted line."""
         guide = store.GAP_ASK_GUIDE
         assert "`context_docs`" in guide, \
-            "must name the doc-only list, not existing_context_files — that one holds lockfiles" \
+            "must name the doc-only list, not existing_context_files - that one holds lockfiles" \
             " and literal glob strings like '.eslintrc*' the model cannot read"
         assert "confirm or correct" in guide
         assert "never the quote" in guide
@@ -644,7 +644,7 @@ class TestOfferVariants:
 
     def test_ask_shape_is_not_carried_by_the_session_start_injection(self, tmp_repo):
         """The guide is usable only once gaps exist, but this block is injected at every
-        context-less session start, at the first prompt, and post-compact — including the skip
+        context-less session start, at the first prompt, and post-compact - including the skip
         and STEP 0 paths. It points at bootstrap_context's how_to_ask instead of restating."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
         assert "ONE question at a time, never batched" not in text, \
@@ -652,7 +652,7 @@ class TestOfferVariants:
         assert "`how_to_ask`" in text, "the block must point at where the shape lives"
 
     def test_newcomer_question_check_comes_before_menu(self, tmp_repo):
-        """A repo question must be ANSWERED, not met with the menu — so STEP 0 (answer-first)
+        """A repo question must be ANSWERED, not met with the menu - so STEP 0 (answer-first)
         must precede the 'response must be ONLY the offer' directive, or it loses to it."""
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
         assert "STEP 0" in text
@@ -668,7 +668,7 @@ class TestOfferVariants:
         assert "STEP 0" in text
 
     def test_newcomer_check_present_when_high_decisive_with_maintainer_framing(self, git_repo):
-        """A repo author asking what the repo does still gets answered — but as a fellow
+        """A repo author asking what the repo does still gets answered - but as a fellow
         maintainer, never quizzed as a newcomer. STEP 0 applies at every insight level."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
@@ -698,7 +698,7 @@ class TestOfferVariants:
 class TestNewcomerQuestionDetection:
     @pytest.mark.parametrize("prompt", [
         "what is this repo doing?",
-        "what is repo doing?",          # article-less — the reported miss
+        "what is repo doing?",          # article-less - the reported miss
         "what does project do",         # article-less
         "What does this project do?",
         "explain this codebase",
@@ -707,7 +707,7 @@ class TestNewcomerQuestionDetection:
         "walk me through this codebase please",
         "give me an overview of this project",
         "whats this repo about",
-        # summarize variants — the original misfiring report
+        # summarize variants - the original misfiring report
         "summarize this repo",
         "summarize the codebase",
         "summarize this project",
@@ -739,14 +739,14 @@ class TestNewcomerQuestionDetection:
         assert "How well do you know this repo?" not in ctx
 
     def test_articleless_prompt_overrides_menu(self, tmp_repo):
-        """'what is repo doing?' (no this/the) was the reported miss — must answer, not menu."""
+        """'what is repo doing?' (no this/the) was the reported miss - must answer, not menu."""
         result = store.get_bootstrap_context_prompt(tmp_repo, "what is repo doing?")
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "OVERRIDE" in ctx and "Answer it" in ctx
         assert "How well do you know this repo?" not in ctx
 
     def test_summarize_prompt_overrides_menu(self, tmp_repo):
-        """'summarize this repo' was an earlier misfiring report — must answer, not menu."""
+        """'summarize this repo' was an earlier misfiring report - must answer, not menu."""
         result = store.get_bootstrap_context_prompt(tmp_repo, "summarize this repo")
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "OVERRIDE" in ctx and "Answer it" in ctx
@@ -757,7 +757,7 @@ class TestNewcomerQuestionDetection:
         assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
 
     def test_newcomer_prompt_in_own_repo_answers_as_maintainer(self, git_repo):
-        """A repo author asking what the repo does is answered (not menued) — as a
+        """A repo author asking what the repo does is answered (not menued) - as a
         maintainer, not quizzed. The commit signal tunes phrasing, never blocks the answer."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
@@ -787,13 +787,13 @@ class TestNewcomerQuestionDetection:
 
 class TestOfferFiresOncePerSession:
     """The offer tells the model a dismissed picker means skip and must never be re-asked.
-    Skipping stores nothing, so `if decisions` never suppresses the block — without a flag
+    Skipping stores nothing, so `if decisions` never suppresses the block - without a flag
     every later prompt (and every /compact) rebuilt it, re-opening the modal."""
 
     def test_prompt_fallback_silent_after_session_start_offered(self, tmp_repo):
         assert store.session_start_payload(tmp_repo, "startup")["context"], "offer expected"
         assert store.bootstrap_prompt_payload(tmp_repo, "fix the bug")["context"] == "", \
-            "SessionStart already offered this session — the fallback must not re-open it"
+            "SessionStart already offered this session - the fallback must not re-open it"
 
     def test_prompt_fallback_offers_once_when_session_start_never_ran(self, tmp_repo):
         first = store.bootstrap_prompt_payload(tmp_repo, "fix the bug")["context"]
@@ -813,7 +813,7 @@ class TestOfferFiresOncePerSession:
     def test_new_session_re_arms_the_offer(self, tmp_repo):
         store.session_start_payload(tmp_repo, "startup")
         assert store.session_start_payload(tmp_repo, "startup")["context"], \
-            "a genuinely new session must offer again — the repo still has no context"
+            "a genuinely new session must offer again - the repo still has no context"
 
     def test_newcomer_question_answers_even_after_the_offer_was_made(self, tmp_repo):
         """STEP 0 shows no menu; gating it on the offer flag would swallow the answer."""
@@ -843,7 +843,7 @@ class TestResumeSessionStart:
         assert store.source_from_hook_stdin(raw) == expected
 
     def test_resume_with_context_skips_reinjection(self, tmp_repo):
-        """The resumed conversation already contains the original injection —
+        """The resumed conversation already contains the original injection -
         re-injecting duplicates ~1k tokens."""
         store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
         result = store.get_session_start_context(tmp_repo, source="resume")
@@ -856,14 +856,14 @@ class TestResumeSessionStart:
         assert "RESUMED session" in ctx
         assert "update_context" in ctx and "bootstrap_context" in ctx
         assert "never invent" in ctx
-        assert "How well do you know this repo?" not in ctx, "no menu on resume — mine instead"
+        assert "How well do you know this repo?" not in ctx, "no menu on resume - mine instead"
 
     def test_resume_mining_suppresses_menu_fallback(self, tmp_repo):
         """The UserPromptSubmit once-hook must not inject a contradictory menu after
         the SessionStart resume branch injected mining instructions."""
         store.get_session_start_context(tmp_repo, source="resume")
         assert store.get_bootstrap_context_prompt(tmp_repo, "continue please") == {}
-        # flag is consumed — the next call behaves normally again
+        # flag is consumed - the next call behaves normally again
         result = store.get_bootstrap_context_prompt(tmp_repo, "continue please")
         assert result != {}
 
@@ -872,7 +872,7 @@ class TestResumeSessionStart:
         store.get_session_start_context(tmp_repo, source="startup")  # must clear it
         assert not (store.STORE_DIR / ".resume_mining").exists()
         # That startup also made this session's offer, so the fallback is correctly silent
-        # now. Re-arm as if SessionStart had never run — the case the fallback exists for —
+        # now. Re-arm as if SessionStart had never run - the case the fallback exists for -
         # and assert the *resume* flag isn't what gags it.
         store._offer_flag(tmp_repo).unlink(missing_ok=True)
         result = store.get_bootstrap_context_prompt(tmp_repo, "fix the bug")
@@ -933,9 +933,9 @@ class TestReactionMatrix:
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
         for repo in self._repo_states(tmp_path):
             text = "\n".join(store._build_bootstrap_context(repo))
-            rows = re.findall(r"^\s+(\d)\. (\w+) —", text, re.MULTILINE)
+            rows = re.findall(r"^\s+(\d)\. (\w+) -", text, re.MULTILINE)
             assert [n for n, _ in rows] == ["1", "2", "3", "4"], \
-                f"{Path(repo).name}: options must be numbered 1-4 with no gaps — got {rows}"
+                f"{Path(repo).name}: options must be numbered 1-4 with no gaps - got {rows}"
             for option in ["quick", "full", "some", "scan"]:
                 if option in {kw for _, kw in rows} or f"'{option}'" in text:
                     assert f"If {option}" in text, \
@@ -977,7 +977,7 @@ class TestInsightDetection:
         assert store._detect_insight(git_repo) == ("medium", False)
 
     def test_zero_commits_in_local_repo_is_ambiguous(self, git_repo):
-        """Could be an email mismatch in the user's own repo — must ask, not conclude."""
+        """Could be an email mismatch in the user's own repo - must ask, not conclude."""
         _git_commit(git_repo, OTHER, 3)
         _set_me(git_repo)
         assert store._detect_insight(git_repo) == ("low", False)
@@ -1031,7 +1031,7 @@ class TestConstraintCapture:
         assert entry["type"] == "decision"
 
     def test_long_pasted_prompt_is_not_captured(self, tmp_repo):
-        # A long pasted blob containing a directive word is not a clean directive —
+        # A long pasted blob containing a directive word is not a clean directive -
         # it must not be auto-stored as a constraint.
         long_prompt = "always " + "x" * 700
         eid, content, status = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
@@ -1039,7 +1039,7 @@ class TestConstraintCapture:
         assert store._load(tmp_repo)["entries"] == []
 
 
-# ── 6. Decision storage — novelty filter ─────────────────────────────────────
+# ── 6. Decision storage - novelty filter ─────────────────────────────────────
 
 class TestDecisionStorage:
     def test_exact_duplicate_rejected(self, tmp_repo):
@@ -1114,7 +1114,7 @@ class TestPatternPromotion:
         assert entry.get("occurrence_count") == 1
 
     def test_legacy_entry_without_field_treated_as_count_one(self, tmp_repo):
-        """Entries written before this change lack occurrence_count — must behave as count=1."""
+        """Entries written before this change lack occurrence_count - must behave as count=1."""
         store.update_decision(tmp_repo, "Use Redis for caching decisions", SESSION, "architecture")
         data = store._load(tmp_repo)
         data["entries"][0].pop("occurrence_count", None)
@@ -1165,7 +1165,7 @@ class TestPatternPromotion:
 
     def test_cross_session_rediscovery_does_not_promote(self, tmp_repo):
         """Independent rediscovery across sessions is tracked (count + session_ids) but
-        does not change the subtype — recurrence cannot distinguish a reused approach
+        does not change the subtype - recurrence cannot distinguish a reused approach
         from the same fact restated, so it never auto-promotes."""
         store.update_decision(tmp_repo, "Use Postgres for the persistence layer", "s1", "architecture")
         store.update_decision(tmp_repo, "Postgres used for the persistence layer", "s2", "architecture")
@@ -1186,7 +1186,7 @@ class TestPatternPromotion:
         assert set(entry["session_ids"]) == {"s1", "s2"}
 
     def test_recurrence_never_changes_subtype(self, tmp_repo):
-        """No subtype is ever flipped by recurrence — a near-duplicate only bumps the
+        """No subtype is ever flipped by recurrence - a near-duplicate only bumps the
         count on whichever entry it matches first, regardless of that entry's subtype."""
         store.update_decision(tmp_repo, "Always validate requests at the API boundary", SESSION, "constraint")
         store.update_decision(tmp_repo, "Always validate requests at the API boundary please", SESSION, "constraint")
@@ -1196,7 +1196,7 @@ class TestPatternPromotion:
         assert entry.get("occurrence_count") == 2
 
     def test_deferred_breakdown_excludes_preloaded_patterns(self, tmp_repo):
-        """The 'load on demand' breakdown must count only architecture — patterns are
+        """The 'load on demand' breakdown must count only architecture - patterns are
         pre-loaded inline, so claiming they are deferred would force a wasted get_context."""
         store.update_decision(tmp_repo, "Validate at the route boundary across all endpoints", SESSION, "pattern")
         store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
@@ -1232,7 +1232,7 @@ class TestPatternPromotion:
 
     def test_truncation_keeps_high_recurrence_over_recent(self, tmp_repo):
         """When more decisions exist than the display cap, the recurring one survives
-        even if older — it is not pushed out by newer one-off decisions."""
+        even if older - it is not pushed out by newer one-off decisions."""
         # One recurring decision (count 2), stored first so it is the OLDEST.
         store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
         store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
@@ -1285,7 +1285,7 @@ class TestPatternPromotion:
 
     def test_pinned_new_entry_survives_eviction_at_capacity(self, tmp_repo, monkeypatch):
         """A freshly written count-1 decision must persist even when the store is full of
-        higher-count entries — otherwise update_decision reports success for a lost write."""
+        higher-count entries - otherwise update_decision reports success for a lost write."""
         monkeypatch.setattr(store, "MAX_ENTRIES", 3)
         # Fill the cap with recurring (count-2) decisions.
         recurring = [
@@ -1410,7 +1410,7 @@ class TestBootstrapScan:
         assert result["insight_source"] == "user" and result["decisive"] is True
 
     def test_low_insight_gets_single_goal_question(self, tmp_repo):
-        """First-timers can't answer insider questions — only their own goal is askable."""
+        """First-timers can't answer insider questions - only their own goal is askable."""
         result = store.bootstrap_scan(tmp_repo, insight="low")
         assert len(result["gaps"]) == 1
         assert "planning to do" in result["gaps"][0]["question"]
@@ -1445,7 +1445,7 @@ class TestBootstrapScan:
         assert any("some-lib" in f for f in result["inferred"])
 
     def test_full_on_bare_repo_still_interviews(self, tmp_repo):
-        """'full' is explicit opt-in to an interview — a simple repo must not collapse it
+        """'full' is explicit opt-in to an interview - a simple repo must not collapse it
         to a single question; the author's head holds decisions no scan can reach.
         Floor is 3 (not 4): the generic "conventions" filler is redundant once mining
         measures conventions directly, so the un-mined bootstrap_scan() path here still
@@ -1464,14 +1464,14 @@ class TestBootstrapScan:
         result = store.bootstrap_scan(tmp_repo, insight="high")
         assert len(result["gaps"]) >= 4
         assert not any("aren't visible in it" in g["question"] for g in result["gaps"]), \
-            "signal-rich repos have real questions — generic interview padding not needed"
+            "signal-rich repos have real questions - generic interview padding not needed"
 
     def test_interview_floor_not_applied_below_high(self, tmp_repo):
         assert len(store.bootstrap_scan(tmp_repo, insight="low")["gaps"]) == 1
         assert len(store.bootstrap_scan(tmp_repo, insight="medium")["gaps"]) == 2
 
 
-# ── 10b. bootstrap_apply flow (bootstrap redesign — core wiring) ─────────────
+# ── 10b. bootstrap_apply flow (bootstrap redesign - core wiring) ─────────────
 
 class TestBootstrapApplyFlow:
     def test_session_start_after_apply_shows_rules_not_menu(self, tmp_repo):
@@ -1546,7 +1546,7 @@ class TestUninstall:
 
     def test_no_settings_file_is_graceful(self, tmp_home):
         """Uninstall without a prior install should not raise."""
-        cli.uninstall()  # no install first — should complete without error
+        cli.uninstall()  # no install first - should complete without error
 
     def test_bootstrap_command_removed(self, tmp_home):
         cli.install()
@@ -1603,7 +1603,7 @@ def _legacy_repo_settings(clone: str, repo: str) -> dict:
             "PreCompact": [{"hooks": [{
                 "type": "command",
                 "command": ("echo '{\"systemMessage\": \"Contexer: context compaction "
-                            "starting — call update_context for any decisions not yet stored\"}'"),
+                            "starting - call update_context for any decisions not yet stored\"}'"),
                 "statusMessage": "Saving decisions before compact..."}]}],
             "PostCompact": [{"hooks": [{
                 "type": "command",
@@ -1687,7 +1687,7 @@ class TestUpgradeFromLegacyInstall:
         monkeypatch.chdir(repo)   # user runs `contexer install` from their project
         cli.install()
         assert len(self._contexer_session_start_groups(tmp_home, repo)) == 1, \
-            "exactly one contexer SessionStart hook may remain — one startup message"
+            "exactly one contexer SessionStart hook may remain - one startup message"
 
     def test_upgrade_removes_every_capture_context_reference(self, legacy_user, tmp_home, monkeypatch):
         repo = legacy_user
@@ -1705,7 +1705,7 @@ class TestUpgradeFromLegacyInstall:
         log = "\n".join(claude_adapter.install(tmp_home))
         assert "Removed legacy Contexer hooks" in log
         hooks = json.loads((repo / ".claude" / "settings.json").read_text()).get("hooks", {})
-        assert hooks == {}, "every legacy repo-level hook group was contexer's — all must go"
+        assert hooks == {}, "every legacy repo-level hook group was contexer's - all must go"
 
     def test_uninstall_also_cleans_repo_settings(self, legacy_user, tmp_home, monkeypatch):
         repo = legacy_user
@@ -1742,7 +1742,7 @@ class TestUpgradeFromLegacyInstall:
         """Package-upgrade-only path (user upgrades the package but never re-runs
         `contexer install` from the repo): the modern home hook alone, executed for
         real through bash, must emit exactly one systemMessage AND strip the legacy
-        repo-level hooks via the sync_memory self-heal — so the session after next
+        repo-level hooks via the sync_memory self-heal - so the session after next
         is down to one startup message with no reinstall."""
         repo = legacy_user
         monkeypatch.chdir(tmp_home)      # install runs elsewhere: repo file NOT cleaned here
@@ -1764,13 +1764,13 @@ class TestUpgradeFromLegacyInstall:
         out = self._run_installed_session_start_hook(tmp_home, repo)  # session 2: clean
         assert out["systemMessage"].count("Contexer:") == 1
         assert (repo / ".claude" / "settings.json").read_text() == before, \
-            "healing must be idempotent — no churn on an already-clean file"
+            "healing must be idempotent - no churn on an already-clean file"
 
     def test_home_git_repo_never_cleans_global_settings(self, tmp_home, monkeypatch):
         """Dotfiles-in-home: HOME itself is a git repo, and the user runs
         `contexer install` from ~. The cwd's git root then IS the home dir, and
         ~/.claude/settings.json is the GLOBAL config whose freshly-written modern
-        hooks contain the legacy markers — the cleanup must refuse to touch it
+        hooks contain the legacy markers - the cleanup must refuse to touch it
         (Greptile P1, PR #96: without the _is_sane_repo guard, install stripped
         the very hooks it had just written)."""
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
@@ -1781,7 +1781,7 @@ class TestUpgradeFromLegacyInstall:
         hooks = json.loads((tmp_home / ".claude" / "settings.json").read_text())["hooks"]
         assert "SessionStart" in hooks, "global SessionStart hook must survive install from ~"
         assert "PreCompact" in hooks
-        cli.uninstall()   # same guard on the uninstall path — must not raise
+        cli.uninstall()   # same guard on the uninstall path - must not raise
 
     def test_install_log_surfaces_stale_plugin_warning(self, tmp_home):
         from contexer.adapters import claude as claude_adapter

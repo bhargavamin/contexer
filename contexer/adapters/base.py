@@ -9,7 +9,7 @@ An adapter is a *module* (duck-typed, no class needed) that exposes:
   status_lines(home: Path) -> list[str]  # diagnostic lines for `contexer status`
 
 Plus hook entrypoints called from the hook command strings, each returning the
-JSON string to print on stdout (never raises — hooks must not crash the host).
+JSON string to print on stdout (never raises - hooks must not crash the host).
 
 This module also holds the shared config-file helpers (_load/_save, hook-group
 markers, the /bootstrap command text) used by both cli.py and the adapters.
@@ -29,7 +29,7 @@ def _bootstrap_command_text() -> str:
 
 def _load(path: Path) -> dict:
     # Strict load for mutating paths (install/uninstall): unparseable JSON raises
-    # JSONDecodeError, and valid-but-non-object JSON ([], null, 42) raises ValueError —
+    # JSONDecodeError, and valid-but-non-object JSON ([], null, 42) raises ValueError -
     # both surface as a clean abort (see cli._run_guarded) instead of an AttributeError
     # mid-install that could leave the config half-written.
     if not path.exists():
@@ -52,7 +52,7 @@ def _load_safe(path: Path) -> dict:
 
 
 def _is_corrupt(path: Path) -> bool:
-    """True when the file exists but is not a JSON object — status() uses this to
+    """True when the file exists but is not a JSON object - status() uses this to
     give honest advice (a corrupt config must be fixed, not re-installed over)."""
     if not path.exists():
         return False
@@ -72,7 +72,7 @@ def _save(path: Path, data: dict) -> None:
 
 def _hooks_of(grp) -> list:
     """Hook list of one group, tolerating hand-edited shapes (non-dict group,
-    non-list hooks value) — used by status() on configs it must not crash on."""
+    non-list hooks value) - used by status() on configs it must not crash on."""
     hooks = grp.get("hooks", []) if isinstance(grp, dict) else []
     return hooks if isinstance(hooks, list) else []
 
@@ -80,21 +80,21 @@ def _hooks_of(grp) -> list:
 def _in_groups(groups: list, marker: str) -> bool:
     """True when any hook in `groups` carries `marker`.
 
-    Matches against `str(hook_dict)` — the dict's *repr* — so it sees every field
+    Matches against `str(hook_dict)` - the dict's *repr* - so it sees every field
     (command, statusMessage, matcher, type) in one shot. The catch: a repr can escape
     quotes. Precisely, repr delimits with `'` unless the string contains `'` and no `"`,
     and escapes only the delimiter. So a `"`-bearing marker is always safe, while a
-    `'`-bearing marker breaks exactly when the command ALSO contains `"` — which every
+    `'`-bearing marker breaks exactly when the command ALSO contains `"` - which every
     real hook command does, being `py -c "..."`. That is the trap: `'codex'` matches
     fine in a toy string and never matches in production, so a migration gate keyed on
-    it silently re-fires on every install forever. Don't reason it through per marker —
+    it silently re-fires on every install forever. Don't reason it through per marker -
     use `_in_commands` for any marker containing a quote."""
     return any(marker in str(h) for grp in groups for h in _hooks_of(grp))
 
 
 def _in_commands(groups: list, marker: str) -> bool:
     """True when any hook's `command` string carries `marker`, matched against the raw
-    value rather than a repr. Quote-safe, unlike `_in_groups` — use it whenever the
+    value rather than a repr. Quote-safe, unlike `_in_groups` - use it whenever the
     marker contains `'` or `"` (e.g. a quoted argument that identifies one call site).
 
     `str(… or "")` rather than a plain `.get("command", "")`: the default only applies
@@ -114,7 +114,7 @@ def _filter_groups(groups: list, markers: list) -> list:
 
 def _strip_stale(groups: list, ident_markers: list, current_cmd: str) -> list:
     """Drop any group that is a Contexer hook of this identity (a command containing
-    one of ident_markers) but whose command differs from current_cmd — i.e. a stale
+    one of ident_markers) but whose command differs from current_cmd - i.e. a stale
     version from an older install: different phrasing, a from-source `uv run
     --directory <clone>` path, or a pre-sentinel command. Keeps the current group and
     every non-Contexer group, so reinstall converges instead of stacking duplicates."""

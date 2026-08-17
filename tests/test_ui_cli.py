@@ -1,4 +1,4 @@
-"""Tests for `contexer ui` — the console subcommand — and the repo-store count in `status`."""
+"""Tests for `contexer ui` - the console subcommand - and the repo-store count in `status`."""
 import json
 import os
 import signal
@@ -16,7 +16,7 @@ from contexer.ui import daemon
 
 @pytest.fixture(autouse=True)
 def ui_home(tmp_path, monkeypatch):
-    """A throwaway HOME with the statefile and log inside it — never the real ~/.contexer.
+    """A throwaway HOME with the statefile and log inside it - never the real ~/.contexer.
 
     Also pins the daemon's configured-port lookup and the PyPI check: `contexer ui` and
     `contexer status` must not read the developer's real config or touch the network."""
@@ -30,7 +30,7 @@ def ui_home(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def occupied_ports(monkeypatch):
-    """Ports `daemon.port_occupied` should report as taken — none, unless a test binds one.
+    """Ports `daemon.port_occupied` should report as taken - none, unless a test binds one.
 
     The real probe opens a TCP connection to the FIXED default port, so without this the
     default-port tests passed or failed depending on whether the developer happened to be
@@ -67,7 +67,7 @@ def opened(monkeypatch):
 
 @pytest.fixture
 def kills(monkeypatch):
-    """Record signals instead of sending them — a recorded pid may exist on this machine."""
+    """Record signals instead of sending them - a recorded pid may exist on this machine."""
     sent = []
     monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((pid, sig)))
     return sent
@@ -174,7 +174,7 @@ class TestUiPort:
 
     def test_a_dead_daemon_on_another_port_does_not_block_the_flag(self, monkeypatch,
                                                                    spawns, capsys):
-        """Only a LIVE incumbent is a reason to refuse — a stale statefile holds no port."""
+        """Only a LIVE incumbent is a reason to refuse - a stale statefile holds no port."""
         monkeypatch.setattr(daemon, "probe", lambda p, t: False)
         daemon.write_state(a_state())
         cli.ui_cmd(["--port", "45678"])
@@ -220,7 +220,7 @@ class TestUiPortInUse:
 
     def test_our_own_console_on_that_port_is_not_foreign(self, monkeypatch, listener,
                                                         spawns, capsys):
-        """The occupied-port check must not fire on a warm start — that is our own listener."""
+        """The occupied-port check must not fire on a warm start - that is our own listener."""
         port = listener.getsockname()[1]
         monkeypatch.setattr(daemon, "probe", lambda p, t: True)
         daemon.write_state(a_state(port=port))
@@ -231,7 +231,7 @@ class TestUiPortInUse:
     def test_waits_out_our_own_dying_daemon_before_blaming_another_process(self, monkeypatch,
                                                                           spawns, capsys):
         """`contexer ui --stop && contexer ui` is the documented way to apply a config change,
-        and `--stop` drops the statefile before the SIGTERMed daemon has released the socket —
+        and `--stop` drops the statefile before the SIGTERMed daemon has released the socket -
         so waiting the port out is all that tells our own corpse from a foreign listener."""
         probes = []
         monkeypatch.setattr(daemon, "port_occupied",
@@ -353,7 +353,7 @@ class TestUiForeground:
 
     @pytest.mark.parametrize("code", [1, 2])
     def test_propagates_the_servers_exit_code(self, monkeypatch, spawns, code):
-        """server.main RETURNS the exit code, so a failed bind must not exit 0 — a supervisor
+        """server.main RETURNS the exit code, so a failed bind must not exit 0 - a supervisor
         (or a shell script) reads that as a console that is up and serving."""
         from contexer import ui
 

@@ -1,4 +1,4 @@
-# Memory-vs-Contexer Benchmark — model claude-sonnet-5, 66 rows (without, memory, with)
+# Memory-vs-Contexer Benchmark - model claude-sonnet-5, 66 rows (without, memory, with)
 
 
 ## sup-current
@@ -56,12 +56,12 @@ _Pooled cell = both phrasing tiers combined, with its own Wilson interval; it is
 - with: median 34516 tokens, success 2/3
 ## Independent Validation
 
-**Status: PASS** — 0 failure(s), 8 warning(s)
+**Status: PASS** - 0 failure(s), 8 warning(s)
 
 ### Warnings
 
 - duration outlier: rat-mem/with/rep2 31335ms > 5x cell median 4590ms
-- paired tokens_total (with_vs_memory) direction (with-better) is driven by a single task 'enf-commit' — removing it flips/erases the sign
+- paired tokens_total (with_vs_memory) direction (with-better) is driven by a single task 'enf-commit' - removing it flips/erases the sign
 - tier imbalance for sup-current/without: implicit=2 explicit=1
 - tier imbalance for cont-log/without: implicit=2 explicit=1
 - tier imbalance for sup-current/memory: implicit=2 explicit=1

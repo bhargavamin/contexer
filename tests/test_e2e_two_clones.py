@@ -135,7 +135,7 @@ def test_shared_title_round_trips_to_other_clones_team_context(team_stack):
 
 def test_shared_decision_without_title_still_renders_via_derived_fallback(team_stack):
     """Older-server / untitled path: a row with NO title (e.g. added before Decision Titles
-    v2 existed) must still pull and render cleanly — title is never mandatory in the fake,
+    v2 existed) must still pull and render cleanly - title is never mandatory in the fake,
     and the team-context renderer derives a heading from content, same as a local decision."""
     server = team_stack
     server.add_team_decision("always squash-merge feature branches")  # title=None, the default

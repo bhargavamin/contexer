@@ -70,7 +70,7 @@ def test_ui_not_a_table_raises(cfg):
 
 @pytest.mark.parametrize("body", [
     'port = "8080"',            # string, not integer
-    "port = true",              # bool is an int subclass — must not become port 1
+    "port = true",              # bool is an int subclass - must not become port 1
     "port = 0",
     "port = 65536",
     "port = 1.5",
@@ -175,7 +175,7 @@ def test_write_team_profile_preserves_the_ui_table(cfg):
 ])
 def test_write_team_profile_survives_an_unloadable_ui_table(cfg, body):
     """`contexer login` runs this AFTER the browser flow and the creds file. Aborting on a
-    hand-edited [ui] leaves mode/endpoint unwritten — team sync stays off, permanently, and
+    hand-edited [ui] leaves mode/endpoint unwritten - team sync stays off, permanently, and
     every retry re-runs the whole flow and fails identically."""
     cfg.parent.mkdir(parents=True)
     cfg.write_text(f'token = "keep-me"\nskip_confirm = true\n\n[ui]\n{body}\n')

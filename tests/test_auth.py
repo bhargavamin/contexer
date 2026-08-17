@@ -104,7 +104,7 @@ def test_callback_outcome_state_mismatch_keeps_listening():
 
 def test_callback_outcome_error_without_state_is_ignored():
     # An OAuth error redirect echoes our state (RFC 6749); one without it could come from
-    # any local process poking the loopback port — it must not terminate the flow.
+    # any local process poking the loopback port - it must not terminate the flow.
     code, err, page = auth._callback_outcome(
         {"error": ["access_denied"], "error_description": ["spoofed"]}, "s1")
     assert code is None and err is None
@@ -273,7 +273,7 @@ def test_refresh_single_flight_only_one_network_refresh(creds_env, monkeypatch):
     """Two concurrent refreshers must NOT both spend the single-use refresh token.
 
     The advisory lock serializes them; the second re-reads the freshly-rotated creds under
-    the lock and short-circuits — so ``_refresh`` (the network POST) fires exactly once."""
+    the lock and short-circuits - so ``_refresh`` (the network POST) fires exactly once."""
     import threading
 
     auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
@@ -308,7 +308,7 @@ def test_refresh_single_flight_only_one_network_refresh(creds_env, monkeypatch):
 
 def test_refresh_skipped_when_serialization_unavailable(creds_env, monkeypatch):
     """On a non-POSIX runtime (no fcntl → store._store_lock can't actually serialize), refreshing
-    the single-use token unserialized risks family revocation. So we must NOT refresh — degrade to
+    the single-use token unserialized risks family revocation. So we must NOT refresh - degrade to
     the static/None token instead (the caller surfaces the re-login warning)."""
     auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
                       "token_endpoint": "http://localhost:8080/token", "access_token": "old",
@@ -333,7 +333,7 @@ def test_refresh_now_forces_refresh(creds_env, monkeypatch):
 
 def test_refresh_now_double_check_skips_network_when_already_fresh(creds_env, monkeypatch):
     """If creds are already valid (a concurrent process just refreshed), refresh_now returns
-    the current token WITHOUT a network call — this is what prevents the double-spend."""
+    the current token WITHOUT a network call - this is what prevents the double-spend."""
     auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
                       "token_endpoint": "http://localhost:8080/token", "access_token": "fresh",
                       "refresh_token": "r", "expires_at": time.time() + 3600})
@@ -402,7 +402,7 @@ def _http_error(code: int, body: bytes = b'{"error": "invalid_grant"}'):
 
 def test_auth_state_does_not_read_a_missing_outcome_as_a_rejection(creds_env):
     """A creds file written before the marker existed carries no outcome, and a missing
-    outcome means UNKNOWN — never "the refresh was rejected"."""
+    outcome means UNKNOWN - never "the refresh was rejected"."""
     auth._save_creds(_stored(expires_at=time.time() - 10))
     assert auth._REFRESH_FAILED_AT not in auth._load_creds()
     state = auth.auth_state(TEAM)
@@ -411,7 +411,7 @@ def test_auth_state_does_not_read_a_missing_outcome_as_a_rejection(creds_env):
 
 def test_auth_state_reports_refresh_failed_after_a_rejected_grant(creds_env, monkeypatch):
     """The live bug: creds match, they are expired, and the rotated refresh token is dead.
-    An HTTP 4xx from the token endpoint is the AS answering "that grant is invalid" — the one
+    An HTTP 4xx from the token endpoint is the AS answering "that grant is invalid" - the one
     thing that proves only a new login can fix this."""
     auth._save_creds(_stored(expires_at=time.time() - 10))
     monkeypatch.setattr(auth, "_refresh", _raises(_http_error(400)))
@@ -431,7 +431,7 @@ def test_an_unreachable_token_endpoint_is_not_recorded_as_a_rejection(creds_env,
                                                                      exc, why):
     """A transport failure says NOTHING about the refresh token, and the marker is persistent:
     recording one here makes a five-minute outage tell the user for days that their session was
-    rejected — `contexer status`, `contexer pull` and the console's red badge all at once."""
+    rejected - `contexer status`, `contexer pull` and the console's red badge all at once."""
     auth._save_creds(_stored(expires_at=time.time() - 10))
     monkeypatch.setattr(auth, "_refresh", _raises(exc))
     assert auth.resolve_token(TEAM) is None
@@ -443,7 +443,7 @@ def test_an_unreachable_token_endpoint_is_not_recorded_as_a_rejection(creds_env,
 
 def test_auth_state_reports_a_renewable_session_rather_than_expired(creds_env, monkeypatch):
     """Access tokens are minted with expires_in 3600 and `resolve_token` spends the refresh
-    token transparently on the next call, so "expired — log in again" fired every hour on a
+    token transparently on the next call, so "expired - log in again" fired every hour on a
     session with nothing wrong with it."""
     auth._save_creds(_stored(expires_at=time.time() - 10))
     monkeypatch.setattr(auth, "_refresh", lambda *a: pytest.fail("auth_state must not refresh"))
@@ -453,7 +453,7 @@ def test_auth_state_reports_a_renewable_session_rather_than_expired(creds_env, m
 
 
 def test_auth_state_reports_expired_without_a_refresh_token(creds_env):
-    """Nothing left to renew with — this session really does need the user to act."""
+    """Nothing left to renew with - this session really does need the user to act."""
     auth._save_creds(_stored(expires_at=time.time() - 10, refresh_token=None))
     state = auth.auth_state(TEAM)
     assert state["state"] == "expired"
@@ -528,7 +528,7 @@ class FakeProc:
     binds a loopback port and blocks with no timeout.
 
     `stdout` streams `output` line by line and then blocks until the process finishes or is
-    killed — like the real child, which prints the authorize URL within a second and then
+    killed - like the real child, which prints the authorize URL within a second and then
     lives on for minutes waiting for the callback."""
 
     def __init__(self, *, returncode=0, output="", block=False, timeout=False):
@@ -615,7 +615,7 @@ def test_a_failed_login_job_reports_the_scrubbed_tail_of_its_output(creds_env, l
         "Opening your browser to sign in. If it doesn't open, visit:\n"
         "  http://localhost:8080/authorize?response_type=code&client_id=CID9&"
         "code_challenge=CHALLENGE&code_challenge_method=S256&state=STATEVALUE&scope=\n"
-        "contexer login: authorization failed — access_denied: bad code=AUTHCODE9\n")))
+        "contexer login: authorization failed - access_denied: bad code=AUTHCODE9\n")))
     status = _settled(auth.start_login_job())
     assert status["state"] == "failed"
     assert "access_denied" in status["message"]
@@ -642,7 +642,7 @@ def test_a_login_job_that_prints_nothing_still_reports_a_failure(creds_env, logi
 
 def test_a_pending_login_publishes_the_authorize_url(creds_env, login_job):
     """On a headless box `webbrowser.open` no-ops and this URL is the only way to finish the
-    login, so it has to reach the caller WHILE the child is still waiting for the callback —
+    login, so it has to reach the caller WHILE the child is still waiting for the callback -
     not in the post-mortem of a flow that already timed out."""
     proc = login_job(FakeProc(block=True, output=URL_OUTPUT))
     job = auth.start_login_job()
@@ -663,7 +663,7 @@ def test_the_authorize_url_outlives_a_timeout(creds_env, login_job):
 
 def test_the_published_authorize_url_keeps_the_parameters_that_make_it_work(creds_env,
                                                                             login_job):
-    """`_failure_message` redacts client_id/state/code_challenge — correctly, it is a rendered
+    """`_failure_message` redacts client_id/state/code_challenge - correctly, it is a rendered
     error string. A URL with those redacted is not a link, so the affordance travels in its
     own field instead of being reconstructed from a scrubbed message."""
     proc = login_job(FakeProc(block=True, output=URL_OUTPUT))
@@ -722,12 +722,12 @@ def test_stopping_a_login_job_wins_over_the_waiter(creds_env, login_job):
 
 
 def test_stopping_a_login_job_records_the_callers_reason(creds_env, login_job):
-    """A logout kills an in-flight login too — for a completely different reason, and the tab
+    """A logout kills an in-flight login too - for a completely different reason, and the tab
     attached to that job is told the message verbatim."""
     login_job(FakeProc(block=True))
     job = auth.start_login_job()
-    assert auth.stop_login_job("Signed out — the login in progress was cancelled.") is True
-    assert _settled(job)["message"] == "Signed out — the login in progress was cancelled."
+    assert auth.stop_login_job("Signed out - the login in progress was cancelled.") is True
+    assert _settled(job)["message"] == "Signed out - the login in progress was cancelled."
 
 
 def test_login_job_status_is_none_for_an_unknown_id(creds_env, login_job):
@@ -762,7 +762,7 @@ def test_a_login_job_uses_the_default_endpoint_when_config_is_unusable(creds_env
 
 
 def test_the_login_job_spawns_the_cli_through_the_module_form(creds_env, monkeypatch):
-    """`python -m contexer login` is the contract with cli.py — verified by hand against
+    """`python -m contexer login` is the contract with cli.py - verified by hand against
     contexer/__main__.py, pinned here so a rename cannot silently break the button."""
     monkeypatch.setattr(auth, "_login_job", None)
     captured = {}
@@ -781,7 +781,7 @@ def test_the_login_job_spawns_the_cli_through_the_module_form(creds_env, monkeyp
     _settled(auth.start_login_job())
     argv = captured["argv"]
     # `-u`: stdout is a pipe, so without it the authorize URL sits in the child's block buffer
-    # until the flow ends — which is minutes after the only moment it is useful.
+    # until the flow ends - which is minutes after the only moment it is useful.
     assert argv[:5] == [auth.sys.executable, "-u", "-m", "contexer", "login"]
     assert argv[5] == "--endpoint" and argv[6]
     assert captured["kwargs"]["stdin"] is subprocess.DEVNULL  # never prompts on our stdin
@@ -812,7 +812,7 @@ def test_login_saves_creds_and_writes_config(creds_env, monkeypatch):
     assert creds["issuer"] == "http://localhost:8080"
     assert creds["token_endpoint"] == "http://localhost:8080/token"
     assert creds["expires_at"] > time.time()
-    # self-configured: no manual config.toml — login wrote team mode + endpoint
+    # self-configured: no manual config.toml - login wrote team mode + endpoint
     prof = config.load_profile()
     assert prof.mode == "team"
     assert prof.endpoint == "http://localhost:8080/mcp"
@@ -820,7 +820,7 @@ def test_login_saves_creds_and_writes_config(creds_env, monkeypatch):
 
 def test_login_self_configures_over_an_unloadable_ui_table(creds_env, monkeypatch):
     """The browser flow is done and the tokens are already on disk by the time config.toml is
-    written, so a hand-edited `[ui]` value that aborts that write leaves mode/endpoint unset —
+    written, so a hand-edited `[ui]` value that aborts that write leaves mode/endpoint unset -
     team sync off forever, and every retry re-runs the whole flow to fail the same way."""
     _stub_oauth(monkeypatch)
     config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -905,7 +905,7 @@ def test_cli_login_endpoint_flag(monkeypatch):
 
 
 def test_cli_login_triggers_post_login_sync(monkeypatch):
-    # After a successful login, status must not be stale — login kicks a team pull.
+    # After a successful login, status must not be stale - login kicks a team pull.
     from contexer import cli
     called = {}
     monkeypatch.setattr(auth, "login", lambda endpoint=None: None)
@@ -957,7 +957,7 @@ def test_post_login_sync_swallows_errors(monkeypatch):
         raise RuntimeError("network exploded")
 
     monkeypatch.setattr(team_context, "refresh", boom)  # refresh normally never raises
-    cli._post_login_sync()  # the outer guard must still swallow it — login already succeeded
+    cli._post_login_sync()  # the outer guard must still swallow it - login already succeeded
 
 
 def test_cli_login_endpoint_flag_missing_url(monkeypatch, capsys):
@@ -1008,7 +1008,7 @@ def test_the_login_output_drain_is_bounded(creds_env, login_job, monkeypatch):
 
 def test_the_output_cap_keeps_the_lines_the_failure_message_reads(creds_env, login_job):
     """`_failure_message` reads `lines[-2:]`, so the cap has to keep the LAST lines, not the
-    first — a plain head-truncation would report startup chatter as the reason a login failed."""
+    first - a plain head-truncation would report startup chatter as the reason a login failed."""
     proc = FakeProc(returncode=1,
                     output="".join(f"noise {i}\n" for i in range(auth._MAX_OUTPUT_LINES * 3))
                            + "second to last\nthe real error\n")

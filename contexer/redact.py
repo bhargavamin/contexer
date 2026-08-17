@@ -2,7 +2,7 @@
 
 Defense-in-depth: `scrub` runs at capture (store._normalize_content) so secrets never
 reach disk, and again at the wire (remote._wire_args) so they never egress to the remote
-Teams MCP. A leaf module — imported by store.py and remote.py, importing neither.
+Teams MCP. A leaf module - imported by store.py and remote.py, importing neither.
 
 Design (balanced detection, developer-confirmed):
   - high-confidence provider token shapes (AWS/GitHub/Slack/Stripe/Google/AI/SendGrid/npm/
@@ -11,7 +11,7 @@ Design (balanced detection, developer-confirmed):
   - NO entropy heuristic (would false-positive on SHAs/UUIDs/base64).
 
 Each match becomes `[REDACTED:<kind>]`. Idempotent: the placeholder never re-matches, so a
-double scrub (capture then wire) is a no-op. Never raises — any failure returns best-effort.
+double scrub (capture then wire) is a no-op. Never raises - any failure returns best-effort.
 """
 import re
 
@@ -42,7 +42,7 @@ _FULL: list[tuple[re.Pattern, str]] = [
 # Bearer is IGNORECASE: HTTP auth schemes are case-insensitive, so `bearer <tok>` must match too.
 _BEARER = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE)
 _CONN = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*)://([^:@/\s]+):([^@/\s]+)@")
-# Generic keyword=value. The value is either a QUOTED span (may contain spaces — so a quoted
+# Generic keyword=value. The value is either a QUOTED span (may contain spaces - so a quoted
 # passphrase is redacted whole, not just its first word) or a bare non-whitespace token.
 _GENERIC = re.compile(
     r"(?i)\b(password|passwd|pwd|secret_key|secret|api[_-]?key|access[_-]?key|"
@@ -54,8 +54,8 @@ _GENERIC = re.compile(
 # The commit-time guard's Tier-2 "secret" armed rule (contexer/store.py) needs to
 # ask "does this line look like a real credential?" with ZERO tolerance for false
 # positives (a blocking check, unlike scrub's redact-on-suspicion posture). So it
-# gets ONLY the already-compiled high-confidence pattern objects — provider token
-# shapes, PEM private-key blocks, JWTs, and connection-string passwords — never the
+# gets ONLY the already-compiled high-confidence pattern objects - provider token
+# shapes, PEM private-key blocks, JWTs, and connection-string passwords - never the
 # keyword-gated generic catch-all, whose `_looks_secretlike` gate is precision-
 # risky on ordinary code (`token = short_lived`). Pure re-export of existing
 # pattern objects: no new regex, no behavior change to `scrub`, module stays leaf.
@@ -63,7 +63,7 @@ HIGH_CONFIDENCE_PATTERNS: list[re.Pattern] = [rx for rx, _kind in _FULL] + [_CON
 
 _MIN_VALUE_LEN = 6
 # A plain lowercase word or hyphenated/apostrophed phrase ("required", "short-lived",
-# "bearer") — prose, not a credential. Used to gate the generic keyword catch-all.
+# "bearer") - prose, not a credential. Used to gate the generic keyword catch-all.
 _PROSE_VALUE = re.compile(r"[a-z]+(?:[-'][a-z]+)*")
 
 
@@ -72,7 +72,7 @@ def _looks_secretlike(value: str) -> bool:
     credential, not ordinary prose that merely follows `token:`/`auth =`. A credential is
     >=6 chars and NOT a plain lowercase word/phrase (that is how "required", "short-lived",
     "optional" slipped through and mauled real decisions). Known tradeoff: an all-lowercase
-    passphrase reads as prose and is missed here — provider patterns still catch real API keys,
+    passphrase reads as prose and is missed here - provider patterns still catch real API keys,
     and erring toward not corrupting stored decisions is the deliberate choice."""
     if len(value) < _MIN_VALUE_LEN:
         return False
@@ -80,7 +80,7 @@ def _looks_secretlike(value: str) -> bool:
 
 
 def _is_placeholder(value: str) -> bool:
-    """A value that is obviously a stand-in, not a real secret — never redacted."""
+    """A value that is obviously a stand-in, not a real secret - never redacted."""
     if value.startswith("[REDACTED"):        # already scrubbed → idempotent no-op
         return True
     if value.startswith("<") and value.endswith(">"):

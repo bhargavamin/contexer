@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contexer uninstaller — removes MCP server + hooks from your AI assistant(s).
+# Contexer uninstaller - removes MCP server + hooks from your AI assistant(s).
 # Context store (~/.contexer/) is preserved unless you pass --purge.
 #
 # Usage:
@@ -7,7 +7,7 @@
 #   bash scripts/uninstall.sh --target cursor  # Cursor only
 #   bash scripts/uninstall.sh --purge          # also delete ~/.contexer/
 #
-# Delegates to `contexer uninstall` (contexer/adapters/*) — single source of truth.
+# Delegates to `contexer uninstall` (contexer/adapters/*) - single source of truth.
 set -euo pipefail
 
 echo "Uninstalling Contexer..."

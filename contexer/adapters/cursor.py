@@ -38,10 +38,10 @@ _NUDGE = (
     "changed, drop what was abandoned) once it stuck.\n"
     "- To save a rule, constraint, convention, or decision: CALL contexer update_context "
     "(or update_global_context for cross-repo rules). Do NOT create a .cursor/rules/*.mdc "
-    "file for these — Contexer is the store. The server deduplicates, so err on the side "
+    "file for these - Contexer is the store. The server deduplicates, so err on the side "
     "of calling it.\n"
     "- ALWAYS pass repo_path set to the absolute path of this workspace when calling any "
-    "contexer tool — do not rely on auto-detection."
+    "contexer tool - do not rely on auto-detection."
 )
 
 # Body of the managed always-apply Cursor rule. Cursor injects rules on every prompt
@@ -69,16 +69,16 @@ _RULE_BODY = (
     "until implementation validates it; capture it, then reconcile (approve what held, update what "
     "changed, drop what was abandoned) once it stuck.\n\n"
     "If Contexer reports decisions pending your review (its SessionStart context mentions a "
-    "pending count), offer at a natural pause to show them — call `review_pending` — and "
-    "approve via `approve_decision`, ONE id at a time, once the user confirms each — there is "
+    "pending count), offer at a natural pause to show them - call `review_pending` - and "
+    "approve via `approve_decision`, ONE id at a time, once the user confirms each - there is "
     "no bulk approve. "
     "They stay inactive until approved.\n\n"
     "When the user asks to create/save/remember a rule, constraint, convention, or "
     "decision: call contexer `update_context` (or `update_global_context` for cross-repo "
-    "rules). Do not create a separate `.cursor/rules/*.mdc` file for it — Contexer is the "
+    "rules). Do not create a separate `.cursor/rules/*.mdc` file for it - Contexer is the "
     "store.\n\n"
     "Always pass `repo_path` set to the absolute path of this workspace when calling any "
-    "contexer tool — do not rely on auto-detection.\n"
+    "contexer tool - do not rely on auto-detection.\n"
 )
 
 
@@ -102,7 +102,7 @@ def _repo_from(raw: str, repo_path: str) -> str:
 
 
 def _repo_from_verbose(raw: str, repo_path: str) -> tuple[str, str]:
-    """`_repo_from` plus WHICH of its signals produced the repo — the provenance the
+    """`_repo_from` plus WHICH of its signals produced the repo - the provenance the
     wrong-store audit reads (`scope_audit.py`). Cursor has one signal the other hosts do not
     (`workspace_roots`), so it gets its own label rather than being flattened into
     `argument`, which the audit reads as a deliberate cross-repo write."""
@@ -122,10 +122,10 @@ def _repo_from_verbose(raw: str, repo_path: str) -> tuple[str, str]:
 def _ensure_rule_file(repo_dir: str) -> None:
     """Write a Contexer-managed always-apply rule into <workspace>/.cursor/rules/.
 
-    Cursor injects rules on every prompt natively — the only reliable per-prompt steering,
+    Cursor injects rules on every prompt natively - the only reliable per-prompt steering,
     since beforeSubmitPrompt cannot inject context. Marker-guarded and idempotent: a user's
     own rule files are never touched, and we only (re)write our own managed file. Best-effort;
-    never raises — sessionStart must not crash Cursor."""
+    never raises - sessionStart must not crash Cursor."""
     try:
         if not repo_dir:
             return
@@ -168,7 +168,7 @@ def _anchor_current_repo(repo: str) -> None:
     repo_path) resolve correctly.
 
     Cursor launches the MCP server outside the project, so the server's cwd-derived
-    _SESSION_REPO is empty — and only sessionStart wrote the pointer, which then went stale
+    _SESSION_REPO is empty - and only sessionStart wrote the pointer, which then went stale
     or got clobbered. Refreshing it on every prompt from workspace_roots (a base field on
     all Cursor hooks) mirrors Claude's per-prompt anchor and is what keeps get_context({})
     working. Guarded by _is_sane_repo + best-effort (hooks must never crash the host)."""
@@ -201,7 +201,7 @@ def capture_task(repo_path: str, raw: str) -> str:
 
     Mirrors claude.capture_task: install() strips the capture-task hook on
     reinstall, but a package-only upgrade leaves the installed beforeSubmitPrompt
-    hook calling this function — without the stub that is an AttributeError
+    hook calling this function - without the stub that is an AttributeError
     traceback on every prompt. Being invoked is proof of the stale hook, so remove
     it from ~/.cursor/hooks.json and pass the prompt through. Args are unused but
     keep the installed hook's call signature. Fail-soft."""
@@ -267,7 +267,7 @@ def install(home: Path) -> list[str]:
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.cursor/hooks.json")
     log.append("  ℹ Cursor hooks require Cursor 1.7+.")
-    log.append("  ℹ Cursor will ask once to approve Contexer's MCP tools — approve to allow.")
+    log.append("  ℹ Cursor will ask once to approve Contexer's MCP tools - approve to allow.")
     return log
 
 
