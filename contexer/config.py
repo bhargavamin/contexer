@@ -87,6 +87,20 @@ def load_profile(path: Path | None = None) -> Profile:
                    skip_confirm=skip_confirm, redact_secrets=redact_secrets)
 
 
+def redaction_enabled() -> bool:
+    """Whether outbound secret redaction is on. Default True (safety holds unconfigured); opt
+    out with redact_secrets=false in config.toml. Fail-soft: ANY config error keeps redaction
+    ON, so a broken config can never leak secrets.
+
+    The single source of this default. store._redaction_enabled and remote._redaction_enabled
+    are one-line delegates that exist only as the per-module patch points their tests already
+    target — two independent copies of a security default is exactly the thing that drifts."""
+    try:
+        return load_profile().redact_secrets
+    except Exception:
+        return True
+
+
 def write_team_profile(endpoint: str, path: Path | None = None) -> None:
     """Persist a team profile to config.toml (mode='team' + endpoint), preserving any
     existing token. Creates the file/dir if absent — so `contexer login` self-configures and
