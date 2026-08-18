@@ -1,4 +1,4 @@
-/* Contexer local console — hand-written, no build step, no framework.
+/* Contexer local console - hand-written, no build step, no framework.
  *
  * CSP: default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:;
  *      connect-src 'self'
@@ -24,7 +24,7 @@
   const STATUSES = ["approved", "suggested", "pending_approval", "ignored"];
   // Tab titles. `scoped` views belong to one repo, so their tab names it: several console tabs
   // open on different repos is the normal case, and seven tabs all reading "Contexer Console"
-  // cannot be told apart. Most specific segment first — a tab strip truncates from the right.
+  // cannot be told apart. Most specific segment first - a tab strip truncates from the right.
   const VIEW_TITLE = {
     dashboard: { label: "Dashboard", scoped: true },
     decisions: { label: "Decisions", scoped: true },
@@ -82,7 +82,7 @@
     edit: null, // { id, content, title, subtype, stored }
     confirm: "", // id awaiting a delete/restore confirmation
     // The Teams login this tab is waiting on. `attached` is the fallback for a login this tab
-    // cannot follow by job — an older daemon's 409 names none, so all that is left to watch is
+    // cannot follow by job - an older daemon's 409 names none, so all that is left to watch is
     // the session state itself. A 409 that DOES name one is polled like our own.
     login: {
       polling: false,
@@ -95,7 +95,7 @@
       deadline: 0,
     },
     // A pull that failed for want of a Teams session: { slug, message, state }. Held in state so
-    // it survives the refetch and stays on screen until it is acted on — a toast would not.
+    // it survives the refetch and stays on screen until it is acted on - a toast would not.
     authPanel: null,
     // Share selection, SCOPED to the repo it was made in. A module-scoped bare Set outlived the
     // repo switch that invalidated it: the header kept claiming "3 selected" while every checkbox
@@ -213,7 +213,7 @@
   }
 
   /** Row-level file summary (Task 4 of #174): the first two anchored files, then a "+N more"
-   * count — mirrors the "+N more" convention the store's own staleness note uses, so a
+   * count - mirrors the "+N more" convention the store's own staleness note uses, so a
    * decision anchored to many files still renders as one short line instead of pushing the
    * row's height around. The detail pane's "Anchored files" block lists every file in full;
    * this stays a compact pointer at it. */
@@ -263,7 +263,7 @@
   /** What actually went wrong, in the banner itself.
    *
    *  A transport-level rejection never reaches the daemon, so ~/.contexer/ui.log has no record
-   *  of it and "Disconnected" on its own is unfalsifiable — indistinguishable from a daemon that
+   *  of it and "Disconnected" on its own is unfalsifiable - indistinguishable from a daemon that
    *  is up and answering, which is exactly the confusion this replaces. The browser's own
    *  DOMException name and message are the only evidence that exists, so they belong on screen
    *  and in the devtools console rather than requiring the user to go find them. */
@@ -290,13 +290,13 @@
 
   /** Raised by mutate() when it REFUSES to send because another mutation is still in flight.
    *
-   *  Refusal used to be a `null` return, which act() could not tell from a 204's empty body — so
+   *  Refusal used to be a `null` return, which act() could not tell from a 204's empty body - so
    *  a double-click reported "Approved." for a request that never left the browser, and "Share
    *  selected" destroyed the selection before discovering nothing had been sent. A distinct throw
    *  makes "never sent" impossible to mistake for "succeeded". */
   function BusyError() {
     this.name = "BusyError";
-    this.message = "Another change is still saving — try that again in a moment.";
+    this.message = "Another change is still saving - try that again in a moment.";
   }
   BusyError.prototype = Object.create(Error.prototype);
 
@@ -322,7 +322,7 @@
     } catch (err) {
       // A transport-level rejection is not proof the daemon is gone. The browser keeps pooled
       // and pre-opened sockets, and one the server has since closed fails the instant it is
-      // reused — no request reaches the daemon, so there is no status and no log line. Retrying
+      // reused - no request reaches the daemon, so there is no status and no log line. Retrying
       // once gets a fresh connection and succeeds; only a second failure means the daemon is
       // genuinely unreachable. A GET is safe to repeat. A mutation is NOT: it may have been
       // delivered and applied before the socket broke, so it reports instead of risking a
@@ -336,7 +336,7 @@
       } catch (err2) {
         // A hidden tab is not a broken daemon: browsers freeze background tabs and cancel their
         // in-flight requests, which is indistinguishable here from a real outage. Staying quiet
-        // means the banner cannot be a lie the user has to disprove — the visibilitychange
+        // means the banner cannot be a lie the user has to disprove - the visibilitychange
         // handler re-renders the moment the tab is looked at again.
         if (document.visibilityState !== "visible") throw new NetworkError();
         setDisconnected(true, describeTransportFailure(path, err2));
@@ -398,8 +398,8 @@
   /** Runs a mutation, reports failures, and refetches the affected view. No optimistic UI.
    *
    *  Returns TRUE only when the write reached the daemon and the daemon accepted it. Every caller
-   *  that throws something away on a write's behalf — a selection, an open confirmation, a typed
-   *  draft, the current route — must do it in `onOk` or behind this boolean, never before the
+   *  that throws something away on a write's behalf - a selection, an open confirmation, a typed
+   *  draft, the current route - must do it in `onOk` or behind this boolean, never before the
    *  await. `onOk` runs after the write succeeds and before the refetch, so the discard is
    *  reflected by the very render that reports it.
    *
@@ -422,7 +422,7 @@
       return true;
     } catch (err) {
       if (err instanceof BusyError) {
-        // Nothing was sent. No success message, no refetch, and — because onOk never ran — no
+        // Nothing was sent. No success message, no refetch, and - because onOk never ran - no
         // state discarded for a request that does not exist.
         toast(err.message, true);
         return false;
@@ -436,7 +436,7 @@
         // The draft is deliberately LEFT OPEN. Clearing state.edit here painted the read-only
         // pane over text the developer had just typed and could not get back; the reload gives
         // the form a fresh `if_version` to save against instead.
-        toast("Changed underneath you (now v" + conflictVersion + ") — reloaded, your edits are kept.", true);
+        toast("Changed underneath you (now v" + conflictVersion + ") - reloaded, your edits are kept.", true);
         await render();
         return false;
       }
@@ -449,7 +449,7 @@
   // ── Teams session ─────────────────────────────────────────────────────────────────────
   /* `contexer login` opens a browser and blocks with no timeout, so the daemon runs it as a
    * tracked subprocess and hands back a job id. Everything here is that job's client: start it,
-   * poll it about once a second, and — when a pull is what needed the session — run that pull
+   * poll it about once a second, and - when a pull is what needed the session - run that pull
    * again afterwards so the developer gets the pull's real result, not "try again".
    *
    * No token is ever read or written here. /api/config carries none, and the only credential
@@ -457,7 +457,7 @@
   // `expired` and `refresh_failed` are both dead sessions, but only one of them might still
   // refresh itself, so they do not share a label.
   //
-  // `renewable` is a HEALTHY session whose access token is merely past its expiry — the next
+  // `renewable` is a HEALTHY session whose access token is merely past its expiry - the next
   // sync renews it with no interaction, which is what tokens minted with expires_in 3600 do
   // every hour. It MUST have an entry here: an unknown state falls through to
   // `session.logged_in === true ? "logged_in" : "none"`, and api._config derives logged_in as
@@ -638,7 +638,7 @@
     const after = state.login.after; // captured: stopLogin clears it
     stopLogin("");
     if (after && after.kind === "pull") {
-      toast("Signed in — running the pull again.");
+      toast("Signed in - running the pull again.");
       await pullNow(after.slug);
       return;
     }
@@ -648,7 +648,7 @@
 
   /** A pull is the one action that can fail for want of a Teams session, so it does not go
    *  through act(): an `auth: true` failure becomes a panel with a Log in button that re-runs
-   *  this same pull, and a failure WITHOUT it keeps the plain message — nobody should be told to
+   *  this same pull, and a failure WITHOUT it keeps the plain message - nobody should be told to
    *  re-login because their network is down. */
   async function pullNow(slug) {
     if (state.busy) return null;
@@ -693,7 +693,7 @@
   }
 
   /** The actionable half of a failed pull: the daemon's own sentence plus the one button that
-   *  fixes it. Built per render, never a statically hidden element — nothing to strand. */
+   *  fixes it. Built per render, never a statically hidden element - nothing to strand. */
   function authRecoveryPanel(slug) {
     const panel = state.authPanel;
     if (!panel || panel.slug !== slug) return null;
@@ -844,7 +844,7 @@
       decisions: row && row.ok !== false ? num(row.decisions) : null,
       pending: row && row.ok !== false ? num(row.pending) : null,
       // "!" rather than a count: an unreadable sidecar has no trustworthy number, and 0 would
-      // read as "nothing deleted" — the one thing it does not mean.
+      // read as "nothing deleted" - the one thing it does not mean.
       deleted:
         row && row.ok !== false
           ? state.tombstonesOk === false
@@ -874,7 +874,7 @@
       : "Contexer Console";
 
     document.getElementById("version-line").textContent =
-      "contexer " + (state.version ? "v" + state.version : "—");
+      "contexer " + (state.version ? "v" + state.version : "-");
     document.getElementById("port-line").textContent = state.port ? "127.0.0.1:" + state.port : "";
   }
 
@@ -899,8 +899,8 @@
     });
   }
 
-  /** The row's left stripe, carrying the same colour as its chip. Returns null — which `h` drops
-   *  — for anything outside the taxonomy, so an unknown subtype gets no stripe rather than an
+  /** The row's left stripe, carrying the same colour as its chip. Returns null - which `h` drops
+   *  - for anything outside the taxonomy, so an unknown subtype gets no stripe rather than an
    *  attribute no rule matches. */
   function subtypeAttr(subtype) {
     const s = String(subtype || "");
@@ -963,7 +963,7 @@
     return [
       "Nothing here yet. Start a coding session in this repo and run the ",
       h("code", { text: "/bootstrap" }),
-      " flow (or let Contexer capture decisions as you work — ",
+      " flow (or let Contexer capture decisions as you work - ",
       h("code", { text: "contexer install" }),
       " wires the hooks).",
     ];
@@ -972,7 +972,7 @@
   function unreadableNotice(error) {
     return notice("bad", [
       h("strong", { text: "Store unreadable." }),
-      " Contexer could not parse this repo's store file, so its contents are unknown — this is not the same as an empty store.",
+      " Contexer could not parse this repo's store file, so its contents are unknown - this is not the same as an empty store.",
       error ? h("div", { class: "mono", text: String(error) }) : null,
     ]);
   }
@@ -981,13 +981,13 @@
    *
    *  A corrupt ~/.contexer/_global.json used to read as an empty one: the view said "No global
    *  rules" over a file that still held them, and the Add button beside that sentence rewrote the
-   *  file with the single new rule — destroying every global constraint on the machine. The write
+   *  file with the single new rule - destroying every global constraint on the machine. The write
    *  is refused now, but "no rules" over an unreadable file is still a lie about rules that apply
    *  to every repo the developer works in, so it gets a notice rather than an empty state. */
   function globalUnreadableNotice(error) {
     return notice("bad", [
       h("strong", { text: "Global rules unreadable." }),
-      " Contexer could not parse ~/.contexer/_global.json, so which rules apply to every repo on this machine is unknown — this is not the same as having none. Adding is refused until the file is repaired or moved aside, so nothing can be overwritten.",
+      " Contexer could not parse ~/.contexer/_global.json, so which rules apply to every repo on this machine is unknown - this is not the same as having none. Adding is refused until the file is repaired or moved aside, so nothing can be overwritten.",
       error ? h("div", { class: "mono", text: String(error) }) : null,
     ]);
   }
@@ -995,7 +995,7 @@
   function tombstonesUnreadableNotice(error) {
     return notice("bad", [
       h("strong", { text: "Tombstones unreadable." }),
-      " Contexer could not parse this repo's tombstone sidecar, so which decisions were deleted is unknown — this is not the same as nothing having been deleted. Deleting is refused until the file is moved aside, so nothing more can be lost.",
+      " Contexer could not parse this repo's tombstone sidecar, so which decisions were deleted is unknown - this is not the same as nothing having been deleted. Deleting is refused until the file is moved aside, so nothing more can be lost.",
       error ? h("div", { class: "mono", text: String(error) }) : null,
     ]);
   }
@@ -1127,7 +1127,7 @@
    *
    *  The word-level marks are an aid on top of that, not the view itself, and they are drawn ONLY
    *  when the change is small (`DIFF_MARK_MIN_SAME`, or a short pair whatever it scores). A
-   *  rewrite shares almost nothing, so LCS matches only filler — "the", "is", "access" — and
+   *  rewrite shares almost nothing, so LCS matches only filler - "the", "is", "access" - and
    *  marking it paints nearly every word, which reads as noise over both columns and hides the
    *  handful of words that did survive. Unmarked columns say the same thing more honestly there. */
   function diffView(before, after) {
@@ -1162,7 +1162,7 @@
       "Everything Contexer has stored for this repository, on this machine.",
       [
         data.repo_path ? String(data.repo_path) : null,
-        "store touched " + (fmtAgo(data.mtime) || "—"),
+        "store touched " + (fmtAgo(data.mtime) || "-"),
         num(counts.decisions) + " rows",
       ],
       [
@@ -1274,7 +1274,7 @@
         ? notice("warn", [
             "Team context last synced " +
               (fmtDuration(stale.age_seconds) ? fmtDuration(stale.age_seconds) + " ago" : "a while ago") +
-              " — it may be stale. ",
+              " - it may be stale. ",
             h("a", { class: "mono", href: hrefFor("team", slug), text: "pull now" }),
           ])
         : null;
@@ -1283,7 +1283,7 @@
     const tombNote =
       tombstones.ok === false
         ? notice("warn", [
-            "Deleted decisions are unknown — this repo's tombstone sidecar could not be parsed. ",
+            "Deleted decisions are unknown - this repo's tombstone sidecar could not be parsed. ",
             h("a", { class: "mono", href: hrefFor("deleted", slug), text: "open Deleted" }),
           ])
         : null;
@@ -1570,7 +1570,7 @@
               return h("div", { class: "rev" + (isCur ? " is-current" : "") }, [
                 h("div", { class: "rev-head" }, [
                   h("span", { class: "rev-v", text: "v" + num(r.version_number) }),
-                  h("span", { class: "rev-meta", text: "source " + String(r.source || "—") }),
+                  h("span", { class: "rev-meta", text: "source " + String(r.source || "-") }),
                   h("span", { class: "rev-meta", text: fmtStamp(r.created_at) }),
                   typeof r.confidence_score === "number"
                     ? h("span", { class: "rev-meta", text: r.confidence_score + "%" })
@@ -1648,7 +1648,7 @@
                     "/api/store/" + encodeURIComponent(slug) + "/decisions/" + encodeURIComponent(id),
                     "DELETE",
                     undefined,
-                    "Deleted — restorable from Deleted.",
+                    "Deleted - restorable from Deleted.",
                     () => {
                       state.confirm = "";
                     }
@@ -1679,8 +1679,8 @@
       chips,
       h("div", { class: "head-meta" }, [
         h("span", { text: "id " + shortId(id) }),
-        h("span", { text: "created " + (fmtStamp(d.timestamp) || "—") }),
-        h("span", { text: "updated " + (fmtStamp(d.updated_at) || "—") }),
+        h("span", { text: "created " + (fmtStamp(d.timestamp) || "-") }),
+        h("span", { text: "updated " + (fmtStamp(d.updated_at) || "-") }),
         h("span", { text: "v" + num(d.revision) }),
       ]),
       body,
@@ -1764,7 +1764,7 @@
           },
           // An entry with no stored subtype gets an explicit "unclassified" option, selected.
           // Offering only the four real values showed "architecture" for a decision whose
-          // subtype is "" — a value the store does not hold. The option is not offered once a
+          // subtype is "" - a value the store does not hold. The option is not offered once a
           // subtype IS set: "" means "leave it alone" on the wire, so it cannot clear one.
           (draft.stored === NO_SUBTYPE ? [NO_SUBTYPE].concat(SUBTYPES) : SUBTYPES).map((s) =>
             h("option", {
@@ -1806,7 +1806,7 @@
               if (draft.subtype !== draft.stored) payload.subtype = draft.subtype;
               // The draft is closed in `onOk`, i.e. ONLY once the daemon has taken it. Clearing
               // it before the await threw away a rewritten decision on every rejection the write
-              // can draw — a 409 from a concurrent MCP session, a 400 on empty content, a 429 off
+              // can draw - a 409 from a concurrent MCP session, a 400 on empty content, a 429 off
               // the mutation budget, a 500, a NetworkError that req() deliberately does not retry.
               await act(
                 "/api/store/" + encodeURIComponent(slug) + "/decisions/" + encodeURIComponent(id),
@@ -1960,7 +1960,7 @@
             text: "Reject update",
             on: { click: () => approve(slug, id, "reject") },
           }),
-          h("span", { class: "muted mono", text: "proposed " + (fmtStamp(prop.created_at) || "—") }),
+          h("span", { class: "muted mono", text: "proposed " + (fmtStamp(prop.created_at) || "-") }),
         ]),
       ]);
     });
@@ -2152,7 +2152,7 @@
   // ── View: team ────────────────────────────────────────────────────────────────────────
   /** The share selection for ONE repo. A selection is a set of ids that only mean anything to
    *  the store they were listed from, so asking for another slug starts an empty one rather than
-   *  handing back the previous repo's — which is what let "3 selected" sit above five unchecked
+   *  handing back the previous repo's - which is what let "3 selected" sit above five unchecked
    *  boxes and POST ids that repo could not resolve. Returning to the same repo keeps its ticks. */
   function shareSelectionFor(slug) {
     const key = String(slug || "");
@@ -2200,7 +2200,7 @@
           emptyState("Local mode", [
             "This machine is not connected to a team endpoint. Logging in connects it and writes the endpoint to ",
             h("code", { text: "config.toml" }),
-            " — the same flow as ",
+            " - the same flow as ",
             h("code", { text: "contexer login" }),
             ".",
             h("div", { class: "btn-row mt-3" }, [loginButton("Log in", null), loginStatusLine()]),
@@ -2212,7 +2212,7 @@
     const staleNote =
       stale.stale === true
         ? notice("warn", [
-            "Cache is stale — last successful sync " +
+            "Cache is stale - last successful sync " +
               (fmtDuration(stale.age_seconds) ? fmtDuration(stale.age_seconds) + " ago" : "unknown") +
               ".",
           ])
@@ -2436,7 +2436,7 @@
     const head = pageHead(
       "· config",
       ["Console ", h("span", { class: "serif-em", text: "settings" })],
-      "Written back to ~/.contexer/config.toml. No credential is shown or accepted here — the Teams session is started and ended, never edited.",
+      "Written back to ~/.contexer/config.toml. No credential is shown or accepted here - the Teams session is started and ended, never edited.",
       [
         data.config_path ? String(data.config_path) : null,
         data.store_dir ? String(data.store_dir) : null,
@@ -2499,7 +2499,7 @@
                 }
                 const body = {};
                 body[key] = n;
-                act("/api/config", "PUT", body, "Saved — restart the daemon to apply.");
+                act("/api/config", "PUT", body, "Saved - restart the daemon to apply.");
               },
             },
           }),
@@ -2513,7 +2513,7 @@
         toggle(
           "Autostart",
           [
-            "Start this console automatically at session start. Off by default — installing Contexer must not imply a background listener.",
+            "Start this console automatically at session start. Off by default - installing Contexer must not imply a background listener.",
           ],
           "autostart",
           ui.autostart
@@ -2602,7 +2602,7 @@
         h("code", { text: "/api/config" }),
         " carries no credential, and a ",
         h("code", { text: "PUT" }),
-        " to it refuses credential keys — the token and endpoint are written by the login itself.",
+        " to it refuses credential keys - the token and endpoint are written by the login itself.",
       ]),
     ]);
 
@@ -2625,7 +2625,7 @@
   }
 
   /** The Teams session, as `auth_state` reports it: which of the five states, when it expires,
-   *  the daemon's own sentence about it, and the two buttons. Never a token — the payload has
+   *  the daemon's own sentence about it, and the two buttons. Never a token - the payload has
    *  none to render. */
   function sessionRow(session) {
     const kind = sessionState(session);
@@ -2860,7 +2860,7 @@
   window.addEventListener("hashchange", () => {
     state.confirm = "";
     // The recovery panel belongs to the pull that failed on the view being left. A login already
-    // in flight is NOT cancelled — leaving the Team view mid-browser-flow is normal, and its
+    // in flight is NOT cancelled - leaving the Team view mid-browser-flow is normal, and its
     // status line reappears wherever it is rendered next.
     state.authPanel = null;
     render();

@@ -1,6 +1,6 @@
 """Tests for contexer/conflicts.py: labeled dual injection + resolution memos (issue #193).
 
-The seams stay in store.py — the render loops (`get_context`, `_render_prompt_decisions`,
+The seams stay in store.py - the render loops (`get_context`, `_render_prompt_decisions`,
 `session_start_payload`, `_rehydrate_working_set`, `format_pending_review`) are what a session
 actually sees, so these exercise store's public surface and assert on what it renders; `store`
 is imported directly for the entry-construction helpers the fixtures need (borrowed pattern:
@@ -22,7 +22,7 @@ def _entry(repo: str, eid: str) -> dict:
 
 def _conflicted(repo: str, standing: str = CONFLICT_STANDING, update: str = CONFLICT_UPDATE,
                 subtype: str = "architecture") -> str:
-    """An approved decision carrying an ai-sourced Suggested Update — the shape #193 renders."""
+    """An approved decision carrying an ai-sourced Suggested Update - the shape #193 renders."""
     store.update_decision(repo, standing, "s1", subtype)
     data = store._load(repo)
     entry = next(e for e in data["entries"]
@@ -75,7 +75,7 @@ class TestConflictDualInjection:
 
     def test_session_start_project_rules_carry_both_sides(self, tmp_repo):
         # Deliberate pin: an `ai` replace_id proposal on an APPROVED constraint now renders,
-        # labeled, inside the trusted project-rules block — the trust call made visible.
+        # labeled, inside the trusted project-rules block - the trust call made visible.
         eid = _conflicted(tmp_repo, "Never log secrets to stdout",
                           "Never log secrets or bearer tokens to stdout or stderr", "constraint")
         ctx = store.session_start_payload(tmp_repo)["context"]
@@ -289,7 +289,7 @@ class TestConflictRetrieval:
         eid = _conflicted(tmp_repo)
         _poke_proposal(tmp_repo, eid, source="scan")   # _save rebuilds the retrieval index
         out = store.get_context_for_prompt(tmp_repo, "why are we using dynamodb here?")
-        # The row used to rank on the hidden proposal's terms and inject its STANDING content —
+        # The row used to rank on the hidden proposal's terms and inject its STANDING content -
         # an answer about Postgres to a question about DynamoDB.
         assert "SQLite" not in out and "DynamoDB" not in out
 

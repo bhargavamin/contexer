@@ -46,7 +46,7 @@ class TestCodexInstall:
         assert any("session_from_hook_stdin" in c for c in cmds)
 
     def test_migrates_stale_session_start_to_thread_session_id(self, home):
-        # An older install has pull_team but predates session-id threading — must still be
+        # An older install has pull_team but predates session-id threading - must still be
         # replaced on reinstall so the current ss_code (session-id-aware) is installed.
         hooks_path = home / ".codex" / "hooks.json"
         hooks_path.parent.mkdir(parents=True)
@@ -300,7 +300,7 @@ class TestCodexInstall:
 class TestCodexBookkeepingWritesAreFailSoft:
     """#152 was reported against Codex specifically: its managed sandbox leaves the
     workspace writable while ~/.contexer may not be, so the SessionStart hook's
-    best-effort `.current_repo` write raised PermissionError and aborted the whole hook —
+    best-effort `.current_repo` write raised PermissionError and aborted the whole hook -
     Contexer looked broken over a pointer file it did not need to read context."""
 
     def _cmds(self, home: Path, event: str) -> list[str]:
@@ -314,7 +314,7 @@ class TestCodexBookkeepingWritesAreFailSoft:
         assert not any(".current_repo').write_text" in c for c in cmds)
 
     def test_post_tool_use_is_the_python_post_write_entrypoint(self, home):
-        # #175 Task 2: reuses claude.post_write verbatim — it records edited files and
+        # #175 Task 2: reuses claude.post_write verbatim - it records edited files and
         # touches .pending_capture itself, best-effort inside a Python try/except, not a
         # shelled-out `touch`.
         codex.install(home)
@@ -387,7 +387,7 @@ class TestCodexBookkeepingWritesAreFailSoft:
         assert 'rm -f "$FLAG" 2>/dev/null || true' in anchors[0]
 
     def test_reinstall_is_idempotent(self, home):
-        # Every migration gate must recognize its own output — otherwise install strips
+        # Every migration gate must recognize its own output - otherwise install strips
         # and re-adds hooks forever. This is the property that catches a gate keyed on a
         # marker it can never match (see TestCodexQuotedMarkerGate).
         codex.install(home)
@@ -398,8 +398,8 @@ class TestCodexBookkeepingWritesAreFailSoft:
 
 class TestCodexQuotedMarkerGate:
     """The team-poll migration gate is keyed on the QUOTED marker `'codex'`. It used
-    `_in_groups`, which matches a dict *repr* — where the quotes come back escaped as
-    \\'codex\\' — so the gate never recognized the very hook it had just installed and
+    `_in_groups`, which matches a dict *repr* - where the quotes come back escaped as
+    \\'codex\\' - so the gate never recognized the very hook it had just installed and
     re-fired on every install, stripping and re-appending the group. Functionally
     harmless (the tagged hook was always what ended up installed) but it meant no Codex
     install was ever idempotent, and the same trap waits for any future quoted marker."""
@@ -410,7 +410,7 @@ class TestCodexQuotedMarkerGate:
 
     def test_in_groups_cannot_match_a_quoted_marker(self):
         # The root cause, pinned directly: this is why the gate needs _in_commands.
-        # Note the `"` in the command — that is what makes the bug bite. Python's repr
+        # Note the `"` in the command - that is what makes the bug bite. Python's repr
         # only escapes `'` when it cannot use `"` as the delimiter, so a command with
         # single quotes ALONE reprs them untouched and _in_groups appears to work. Every
         # real hook command is `py -c "..."`, i.e. holds both quote kinds, which flips
@@ -419,8 +419,8 @@ class TestCodexQuotedMarkerGate:
             return [{"hooks": [{"type": "command", "command": cmd}]}]
 
         real = """py -c "print(team_poll(x, 'codex'))" "$REPO\""""
-        assert not base._in_groups(_grp(real), "'codex'"), "repr escaping — the bug"
-        assert base._in_commands(_grp(real), "'codex'"), "raw command match — the fix"
+        assert not base._in_groups(_grp(real), "'codex'"), "repr escaping - the bug"
+        assert base._in_commands(_grp(real), "'codex'"), "raw command match - the fix"
         # Same marker, no double quote in the command: _in_groups happens to work, which
         # is exactly why this went unnoticed. _in_commands is correct in both cases.
         naive = "print(team_poll(x, 'codex'))"
@@ -504,7 +504,7 @@ class TestCodexUninstall:
 
 class TestCodexPostWriteRepoResolutionParity:
     """issue #175 Task 2: Codex reuses claude.post_write VERBATIM, and its $REPO
-    resolution must be copied character-for-character from claude.py's own post_write_cmd —
+    resolution must be copied character-for-character from claude.py's own post_write_cmd -
     not from this file's usual `|| pwd` sibling fallback. A cwd-vs-toplevel mismatch here
     would silently key record_edited_file's write under a different sidecar slug than
     Task 3's capture-time read (the doc-drift hazard)."""
@@ -518,11 +518,11 @@ class TestCodexPostWriteRepoResolutionParity:
         codex_post_write = next(c for c in cmds if "claude.post_write" in c)
         codex_prefix = codex_post_write.split("&&")[0] + "&&"
 
-        # claude.py's own post_write_cmd is generated the same way — reconstruct it via a
+        # claude.py's own post_write_cmd is generated the same way - reconstruct it via a
         # real claude.install() and compare prefixes rather than duplicating the literal.
         # claude_adapter.install() also runs clean_legacy_repo_settings against
-        # store._git_root(os.getcwd()) — the PROCESS cwd's git root, unaffected by
-        # claude_home — so chdir into an untracked temp dir before calling it, exactly
+        # store._git_root(os.getcwd()) - the PROCESS cwd's git root, unaffected by
+        # claude_home - so chdir into an untracked temp dir before calling it, exactly
         # like the parity fixtures in test_plugin_hooks.py / test_adapters.py; otherwise
         # this could silently rewrite the real checkout's <repo>/.claude/settings.json.
         claude_home = home.parent / "claude_home_for_parity"
@@ -538,7 +538,7 @@ class TestCodexPostWriteRepoResolutionParity:
         if real_settings is not None:
             after = real_settings.read_bytes() if real_settings.is_file() else None
             assert after == before, (
-                f"claude.install() must never touch the real {real_settings} — "
+                f"claude.install() must never touch the real {real_settings} - "
                 "cwd isolation leaked")
         claude_settings = json.loads((claude_home / ".claude" / "settings.json").read_text())
         claude_cmds = [h["command"] for g in claude_settings["hooks"]["PostToolUse"]

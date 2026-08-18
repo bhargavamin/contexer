@@ -2,7 +2,7 @@
 
 A skeptical outsider should be able to run this and re-derive every headline
 number straight from the raw ``runs.jsonl`` rows. It deliberately does NOT import
-``report.py`` — the median / delta / pairing math is re-implemented here from
+``report.py`` - the median / delta / pairing math is re-implemented here from
 scratch so the two never share a bug. It fails loudly on integrity problems and
 warns on statistical smells that don't prove tampering but deserve a human look.
 
@@ -115,7 +115,7 @@ def validate(campaign_dir):
         except json.JSONDecodeError as exc:
             failures.append(f"campaign.json is not valid JSON: {exc}")
     else:
-        warnings.append("campaign.json missing — reps/model cross-checks skipped")
+        warnings.append("campaign.json missing - reps/model cross-checks skipped")
 
     try:
         rows = _load_rows(runs_path)
@@ -185,7 +185,7 @@ def _check_coverage(rows, reps, warnings, recomputed):
 
     A short cell is a warning, not a failure. Cells are derived from the rows
     themselves (not tasks.json) so a small partial campaign isn't drowned in
-    warnings for tasks it never intended to run — yet a genuinely absent cell
+    warnings for tasks it never intended to run - yet a genuinely absent cell
     (its task appears in the other condition) is still caught at zero rows.
     """
     tasks = sorted({r.get("task_id") for r in rows})
@@ -211,7 +211,7 @@ def _median_rows(ok_rows):
     """Rows eligible for median recomputation.
 
     Legacy campaigns: every non-errored row, unchanged. Memory campaigns (any row
-    carries "arm"): measured, non-enforcement rows only — the same exclusion
+    carries "arm"): measured, non-enforcement rows only - the same exclusion
     report.py already applies. Folding them in would put teach rows (success always
     False, and their own token cost) and enforcement rows (success hardcoded True
     for the "with" arm) into the very medians MEMORY_CAMPAIGN.md publishes."""
@@ -231,7 +231,7 @@ def _recompute_medians(ok_rows):
 
 
 def _check_anomalies(rows, ok_rows, err_rows, warnings, recomputed):
-    """Check 5: statistical smells — all warnings, none proves tampering."""
+    """Check 5: statistical smells - all warnings, none proves tampering."""
     # zero-token non-errored rows
     for r in ok_rows:
         if int(r.get("tokens_total", 0) or 0) == 0:
@@ -273,7 +273,7 @@ def _check_anomalies(rows, ok_rows, err_rows, warnings, recomputed):
             detail = ", ".join(f"{c}={rates[c]:.0%}" for c in conds)
             warnings.append(f"error-rate asymmetry {gap:.1f}pp between conditions "
                             f"({detail})")
-    # rationale tasks scoring identically extreme in with AND without — the pair
+    # rationale tasks scoring identically extreme in with AND without - the pair
     # where an identical extreme signals a leak or a broken injection.
     rat_tasks = sorted({r.get("task_id") for r in ok_rows if r.get("kind") == "rationale"})
     def _rat_median(task_id, cond):
@@ -348,7 +348,7 @@ def _check_paired(ok_rows, warnings, recomputed):
                         direction = f"{a}-better" if net > 0 else f"{a}-worse"
                         warnings.append(
                             f"paired {metric} ({pair_name}) direction ({direction}) "
-                            f"is driven by a single task '{lead_task}' — removing it "
+                            f"is driven by a single task '{lead_task}' - removing it "
                             f"flips/erases the sign")
     recomputed["paired"] = paired
 
@@ -377,7 +377,7 @@ def _check_interleaving(rows, warnings):
     without ``ts`` (old artifacts) skip the check with a warning.
     """
     if any("ts" not in r for r in rows):
-        warnings.append("row(s) missing 'ts' — interleaving check skipped "
+        warnings.append("row(s) missing 'ts' - interleaving check skipped "
                         "(pre-timestamp artifact?)")
         return
     conds = _conditions_present(rows)
@@ -389,14 +389,14 @@ def _check_interleaving(rows, warnings):
         others = [t for oc in conds if oc != c for t in ts_by[oc]]
         if ts_by[c] and others and max(ts_by[c]) < min(others):
             warnings.append(f"condition '{c}' ran as one contiguous time block "
-                            f"before all other conditions — conditions were not "
+                            f"before all other conditions - conditions were not "
                             f"interleaved")
 
 
 def _check_memory_isolation(rows, failures):
     """Check 9 (memory campaign): a measured row that leaked state across arms
     (contaminated=True) is a failure. Teach rows are exempt; enforcement rows are
-    NOT — `contaminated` measures the opponent's state leaking into the HOME, which
+    NOT - `contaminated` measures the opponent's state leaking into the HOME, which
     has nothing to do with the fixture mutations that make enf rows special. No-op
     for legacy campaigns whose rows predate Task 6's arm/tier/phase fields."""
     for r in rows:
@@ -437,7 +437,7 @@ def render_validation(v):
     ok = v.get("ok")
     lines = ["## Independent Validation",
              "",
-             f"**Status: {'PASS' if ok else 'FAIL'}** — "
+             f"**Status: {'PASS' if ok else 'FAIL'}** - "
              f"{len(v.get('failures', []))} failure(s), "
              f"{len(v.get('warnings', []))} warning(s)",
              ""]

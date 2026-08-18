@@ -18,4 +18,4 @@ labels: enhancement
 
 ## Additional context
 
-<!-- Anything else that would help — examples, related issues, screenshots. -->
+<!-- Anything else that would help - examples, related issues, screenshots. -->

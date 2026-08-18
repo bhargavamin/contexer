@@ -115,7 +115,7 @@ class TestClaudeCaptureEntrypoints:
 
     def test_capture_constraint_deictic_directive_acks_pending(self, tmp_repo):
         # decision ceb955f5: a deictic directive is stored but the ack must say PENDING
-        # review, not "stored as a constraint" — it is not auto-trusted.
+        # review, not "stored as a constraint" - it is not auto-trusted.
         raw = _json.dumps({
             "prompt": "I'm not going to accept any performance degradation so ensure you "
                       "clarify and ensure this feature is actual improvement",
@@ -132,7 +132,7 @@ class TestClaudeCaptureEntrypoints:
     def test_rationale_injects_when_decisions_match(self, populated_repo):
         # Targets the fixture's retrievable (suggested) decision. The JWT entry classifies
         # as pending_approval and is deliberately not auto-injected (only approved/suggested
-        # decisions reach the index — pending ones surface via review_pending).
+        # decisions reach the index - pending ones surface via review_pending).
         raw = _json.dumps({"prompt": "why did we choose bcrypt for password hashing?"})
         out = _json.loads(claude.rationale(populated_repo, raw))
         assert "additionalContext" in out["hookSpecificOutput"]
@@ -143,7 +143,7 @@ class TestClaudeCaptureEntrypoints:
 
     def test_rationale_note_shows_tokens_saved(self, tmp_repo):
         # Above the _COST_NOTE_TOKENS gate the notice reports estimated SAVINGS
-        # (est × (_SAVED_MULTIPLIER − 1), nearest 10) — never the injected count.
+        # (est × (_SAVED_MULTIPLIER − 1), nearest 10) - never the injected count.
         # Same "constraint:" wording as the populated_repo fixture's retrievable
         # entry, padded long enough that the injected ctx exceeds the gate.
         content = (
@@ -201,7 +201,7 @@ class TestClaudePostWrite:
 
     def test_fail_soft_on_garbage_stdin(self, tmp_repo):
         assert claude.post_write(tmp_repo, "not json") == "{}"
-        # Still arms the flag — a malformed payload must not cost the deterministic
+        # Still arms the flag - a malformed payload must not cost the deterministic
         # capture-reminder signal, only the edited-file recording (which has nothing to record).
         assert (store.STORE_DIR / ".pending_capture").exists()
 
@@ -240,7 +240,7 @@ class TestClaudePostWrite:
     def test_record_edited_file_failure_does_not_skip_the_pending_capture_arm(self, tmp_repo, monkeypatch):
         # The two best-effort signals must fail independently: a non-OSError escaping
         # record_edited_file (e.g. from guard_engine) must not also cost the deterministic
-        # capture-reminder flag — they are wrapped in separate try/except blocks.
+        # capture-reminder flag - they are wrapped in separate try/except blocks.
         monkeypatch.setattr(store, "record_edited_file",
                              lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
@@ -251,7 +251,7 @@ class TestClaudePostWrite:
 
 class TestClaudePostWriteRepoResolutionParity:
     """The doc-drift hazard: post_write's shell wrapper must resolve $REPO IDENTICALLY to
-    every sibling UserPromptSubmit hook (git-toplevel, never raw cwd) — a mismatch would
+    every sibling UserPromptSubmit hook (git-toplevel, never raw cwd) - a mismatch would
     key record_edited_file's write and Task 3's capture-time read under different sidecar
     slugs, silently killing the feature for any project not opened at its git root."""
 
@@ -272,8 +272,8 @@ class TestClaudePostWriteRepoResolutionParity:
 
     def test_post_write_prefix_matches_sibling_user_prompt_submit_hooks(self, tmp_path, monkeypatch):
         # Patching HOME alone isn't enough: cli.install() -> claude.install(home) also
-        # runs clean_legacy_repo_settings against store._git_root(os.getcwd()) — the
-        # PROCESS cwd's git root, unaffected by HOME — to strip a pre-CLI installer's
+        # runs clean_legacy_repo_settings against store._git_root(os.getcwd()) - the
+        # PROCESS cwd's git root, unaffected by HOME - to strip a pre-CLI installer's
         # repo-level hooks. Left unpatched, running this test from a checkout whose
         # <repo>/.claude/settings.json carries legacy Contexer markers would rewrite
         # that real file. chdir(tmp_path) contains it structurally (tmp_path has no
@@ -291,7 +291,7 @@ class TestClaudePostWriteRepoResolutionParity:
         if real_settings is not None:
             after = real_settings.read_bytes() if real_settings.is_file() else None
             assert after == before, (
-                f"install() must never touch the real {real_settings} — cwd isolation leaked")
+                f"install() must never touch the real {real_settings} - cwd isolation leaked")
 
         post_write_cmd = self._post_toolusecmd(tmp_path)
         sibling_prefix = self._sibling_prefix(tmp_path)

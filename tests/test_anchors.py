@@ -57,7 +57,7 @@ def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
                  status="approved", source_files=None, title="", session_id="test-session"):
     """Build a decision entry via the real entry constructor (revisions/status/
     current_revision_id all shaped exactly like production data), append it to the repo
-    store, and stamp source_files/anchor_commit directly — bypassing _anchor_sources
+    store, and stamp source_files/anchor_commit directly - bypassing _anchor_sources
     since tests want to control the exact anchor list without depending on capture flow."""
     entry = store._new_decision_entry(content, session_id, subtype,
                                        created_by=created_by, status=status, title=title)
@@ -90,7 +90,7 @@ class TestParseRenameTarget:
         assert anchors._parse_rename_target(out, "old.py") is None
 
     def test_same_target_repeated_is_confident(self):
-        # Not actually ambiguous — the same single target reported twice collapses to one.
+        # Not actually ambiguous - the same single target reported twice collapses to one.
         out = "R100\told.py\tnew.py\nR100\told.py\tnew.py"
         assert anchors._parse_rename_target(out, "old.py") == "new.py"
 
@@ -133,7 +133,7 @@ class TestFastPathAndTTL:
         entry = _reload(repo)
         assert entry.get("proposed_revision") is not None
         # Second forced call must still run (force bypasses TTL) even though a proposal
-        # already exists — but the entry is now skipped as a participant (has a proposal).
+        # already exists - but the entry is now skipped as a participant (has a proposal).
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 0}
 
@@ -162,7 +162,7 @@ class TestRenameReanchor:
     def test_multi_hop_rename_chain_reanchors_to_final_target(self, repo):
         # Greptile P1 repro: a -> b -> c across two commits. `old.py`'s single
         # most-recent-touch commit only ever resolves to `mid.py`, which no longer exists
-        # either (it was renamed on again) — the fix must chase that hop too and land on
+        # either (it was renamed on again) - the fix must chase that hop too and land on
         # `new.py`, not fall through to "missing, no rename".
         _write(repo, "old.py", "a\nb\nc\n")
         _git(repo, "add", "old.py")
@@ -184,7 +184,7 @@ class TestRenameReanchor:
         assert reloaded["anchor_commit"] == store._git(str(repo), "rev-parse", "HEAD")
 
     def test_rename_chain_exceeding_hop_cap_treated_as_missing(self, repo, monkeypatch):
-        # A chain longer than _RENAME_CHAIN_MAX must NOT be chased indefinitely — it's
+        # A chain longer than _RENAME_CHAIN_MAX must NOT be chased indefinitely - it's
         # treated as a plain miss, same as no rename at all, and (since it's the only
         # anchored file) falls through to the total-loss proposal path.
         monkeypatch.setattr(anchors, "_RENAME_CHAIN_MAX", 2)
@@ -193,7 +193,7 @@ class TestRenameReanchor:
         _commit(repo)
         _seed_entry(repo, "Decision about p0.py", source_files=["p0.py"])
 
-        # Three rename hops: p0 -> p1 -> p2 -> p3 — one more than the capped chain length.
+        # Three rename hops: p0 -> p1 -> p2 -> p3 - one more than the capped chain length.
         for i in range(3):
             _git(repo, "mv", f"p{i}.py", f"p{i + 1}.py")
             _commit(repo, f"rename hop {i}")
@@ -201,14 +201,14 @@ class TestRenameReanchor:
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 1}
         reloaded = _reload(repo)
-        assert reloaded["source_files"] == ["p0.py"]   # untouched — no rename applied
+        assert reloaded["source_files"] == ["p0.py"]   # untouched - no rename applied
         prop = reloaded.get("proposed_revision")
         assert prop is not None
         assert "p0.py no longer exist" in prop["content"]
 
     def test_ambiguity_mid_chain_not_confident(self, repo, monkeypatch):
         # Hop 1 (old.py -> mid.py) is confident; hop 2 (mid.py -> ???) is ambiguous. The
-        # whole chain must be rejected — not confident — rather than stopping at the
+        # whole chain must be rejected - not confident - rather than stopping at the
         # ambiguous hop and treating the last confident hop as good enough.
         _write(repo, "old.py", "a\n")
         _write(repo, "keep.py", "b\n")
@@ -247,7 +247,7 @@ class TestRenameReanchor:
     def test_budget_exhaustion_mid_chain_leaves_entry_unverified(self, repo, monkeypatch):
         # The budget can run out partway through a rename chain (after hop 1's log+show,
         # before hop 2's log). That must surface as _BudgetExceeded like any other
-        # mid-entry exhaustion — the entry left completely untouched, not misclassified.
+        # mid-entry exhaustion - the entry left completely untouched, not misclassified.
         _write(repo, "old.py", "a\n")
         _git(repo, "add", "old.py")
         _commit(repo)
@@ -345,8 +345,8 @@ class TestTotalLoss:
         prop = reloaded.get("proposed_revision")
         assert prop is not None
         # Rule-shaped: approving must yield a sane live revision, so the proposal starts
-        # with the original rule text, not a status memo. Closed, factual wording — not
-        # an open action-request — since approving bakes this text in as the live content.
+        # with the original rule text, not a status memo. Closed, factual wording - not
+        # an open action-request - since approving bakes this text in as the live content.
         assert prop["content"].startswith(content)
         assert "(anchors withdrawn on re-verification: gone.py no longer exist)" in prop["content"]
         assert "confirm whether" not in prop["content"]
@@ -391,7 +391,7 @@ class TestTotalLoss:
         # `anchor_candidates` legitimately SURVIVE on an already-approved entry (the
         # pending-twin promote path and _route_containment neither bless nor pop them), so
         # a retirement approval can meet a stale guess. _promote_proposal clears
-        # source_files/anchor_commit — and the candidate-blessing branch right after it
+        # source_files/anchor_commit - and the candidate-blessing branch right after it
         # used to read that now-empty anchor as "nothing anchors this entry" and promote
         # the stale guess into a REAL anchor, re-anchoring the just-retired decision to
         # unrelated files and dragging it straight back into decay participation.
@@ -424,7 +424,7 @@ class TestTotalLoss:
         assert _reload(repo).get("proposed_revision") is None
 
     def test_retirement_approval_preserves_curated_title(self, repo, monkeypatch):
-        # The retirement proposal is bookkeeping — it must not rewrite the decision's
+        # The retirement proposal is bookkeeping - it must not rewrite the decision's
         # curated title into one derived from content + the withdrawal clause.
         curated = "Thing configuration lives in gone.py"
         _write(repo, "gone.py")
@@ -537,12 +537,12 @@ class TestTotalLoss:
 class TestBudget:
     def test_budget_exhaustion_leaves_remaining_entries_unverified(self, repo, monkeypatch):
         # Reviewer's exact repro: 6 entries, each with a REAL git-mv rename (no mocking of
-        # git at all — this exercises the true 3-call-per-reanchor cost: log + show +
+        # git at all - this exercises the true 3-call-per-reanchor cost: log + show +
         # rev-parse). The budget is pinned to 10 HERE rather than read from the module, so
         # this test keeps exercising the exhaustion semantics regardless of what the real
         # constant is set to: 10 covers exactly 3 full re-anchors (9 calls); the 4th
         # entry's rename check spends the 10th call on `log`, then hits exhaustion on
-        # `show` and must be left completely untouched — not misclassified as a total
+        # `show` and must be left completely untouched - not misclassified as a total
         # loss (the old return-None-on-exhaustion bug) and not partially applied.
         monkeypatch.setattr(anchors, "_ANCHOR_GIT_BUDGET", 10)
         names = [f"old_{i}.py" for i in range(6)]
@@ -579,7 +579,7 @@ class TestBudget:
 
     def test_budget_covers_one_worst_case_entry_so_the_run_progresses(self, repo, monkeypatch):
         # Starvation repro: a single fat entry must never be able to exhaust the budget
-        # INSIDE its own file loop — that entry, and every entry after it, would then be
+        # INSIDE its own file loop - that entry, and every entry after it, would then be
         # skipped on every single run, forever, silently. 8 missing committed files cost
         # 16 git calls (log + show each), well past the old budget of 10; the budget now
         # covers the worst case an entry can present (2 * _MAX_SOURCE_FILES + 1), so this
@@ -627,7 +627,7 @@ class TestFailSoft:
         assert anchors._anchor_verify_stamp_path(str(repo)).exists()   # stamp written first
 
         # A subsequent un-forced call must be gated by the TTL stamp that survived the
-        # crash — no retry storm.
+        # crash - no retry storm.
         calls = []
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
         anchors.verify_anchors(str(repo))
@@ -664,7 +664,7 @@ class TestSessionStartWiring:
 
 class TestImportOrderRegression:
     """anchors.py imports `store` at its own top level and store.py calls back into
-    `anchors` from the session-start path — the same shape that once broke guard_engine
+    `anchors` from the session-start path - the same shape that once broke guard_engine
     (see test_guard_engine.py's TestImportOrderRegression). A fresh subprocess is the only
     honest check: pytest has already imported both modules in this process, in the safe
     order, so an in-process assertion would prove nothing. `import contexer.anchors` as the

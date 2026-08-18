@@ -17,11 +17,11 @@ uv tool install contexer
 contexer install
 ```
 
-> Do **not** run `contexer install` with `sudo` — it writes to config files in *your* home directory. Under `sudo` it would target root's home directory and your assistant would never see the config.
+> Do **not** run `contexer install` with `sudo` - it writes to config files in *your* home directory. Under `sudo` it would target root's home directory and your assistant would never see the config.
 
 That's it. The second command auto-detects supported assistants and registers the MCP server and hooks.
 
-Verify the server is connected — open any Claude Code session and run:
+Verify the server is connected - open any Claude Code session and run:
 
 ```
 /mcp
@@ -39,11 +39,11 @@ contexer install --target cursor     # or: contexer install (auto-detects ~/.cur
 
 This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires `sessionStart` +
 `beforeSubmitPrompt` hooks in `~/.cursor/hooks.json`. On each session start in a repo, Contexer
-also drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc` (marker-guarded —
+also drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc` (marker-guarded -
 your own rule files are never touched) that steers the agent to call Contexer's `get_context`
 before reading files and to save rules via `update_context` instead of native rule files.
 
-The first time Cursor calls a Contexer MCP tool it will ask you to approve it — approve once and
+The first time Cursor calls a Contexer MCP tool it will ask you to approve it - approve once and
 Cursor remembers. (Contexer does not silently pre-approve its own tools.)
 
 ---
@@ -82,7 +82,7 @@ code path end users run. Re-run the script after editing source to rebuild. To r
 
 ## Token cost at a glance
 
-Contexer injects stored decisions before Claude responds — not during. Cost is paid once per session.
+Contexer injects stored decisions before Claude responds - not during. Cost is paid once per session.
 
 | Pre-loaded rules | Tokens injected | % of a typical session |
 |---|---|---|
@@ -90,7 +90,7 @@ Contexer injects stored decisions before Claude responds — not during. Cost is
 | 10 rules | ~250 | ~0.3% |
 | 25 rules | ~625 | ~0.8% |
 
-Only `constraint` and `convention` decisions are pre-loaded. `architecture` and `pattern` decisions cost 0 tokens at session start and are fetched on demand. Store lookups take 0.03–0.27ms regardless of store size — imperceptible. See the [Benchmark & Token Cost](https://app.notion.com/p/378223d61ba281ccb680f5405afa9f96) page for full numbers.
+Only `constraint` and `convention` decisions are pre-loaded. `architecture` and `pattern` decisions cost 0 tokens at session start and are fetched on demand. Store lookups take 0.03–0.27ms regardless of store size - imperceptible. See the [Benchmark & Token Cost](https://app.notion.com/p/378223d61ba281ccb680f5405afa9f96) page for full numbers.
 
 ---
 
@@ -100,16 +100,16 @@ Open Claude Code in any git repo. On your first message, Claude will ask:
 
 > "Contexer: no project context stored for this repo. How should I set up context for future sessions?"
 
-The offer is a numbered list of at most four options — asked as an interactive multiple-choice question when your assistant has one (Claude Code's `AskUserQuestion`), and as plain numbered text everywhere else. In the picker you select an option — or type the keyword through its `Other` field; in plain-text mode you reply with the number or the keyword.
+The offer is a numbered list of at most four options - asked as an interactive multiple-choice question when your assistant has one (Claude Code's `AskUserQuestion`), and as plain numbered text everywhere else. In the picker you select an option - or type the keyword through its `Other` field; in plain-text mode you reply with the number or the keyword.
 
-Which options lead adapts to how well you know the repo, judged from its git history — if you have commits there it leads with quick/full; if not, it leads with scan instead of quizzing you; if it can't tell, it asks. Asking a newcomer question as your first message ("what is this repo doing?") skips the menu entirely: Contexer confirms it should scan, stores what it finds, and answers you. All options stay available either way:
+Which options lead adapts to how well you know the repo, judged from its git history - if you have commits there it leads with quick/full; if not, it leads with scan instead of quizzing you; if it can't tell, it asks. Asking a newcomer question as your first message ("what is this repo doing?") skips the menu entirely: Contexer confirms it should scan, stores what it finds, and answers you. All options stay available either way:
 
-- **Quick** — one question (what does this repo do?), answer stored, then Claude answers your original question.
-- **Full** — guided setup: Claude scans your stack, then asks a few questions about intent and constraints one at a time. Each is its own multiple-choice question ending in `Skip this one`; `Correct` plus the scan's assumption appears only where that assumption actually answers the question, and likely alternatives only where there are distinct ones to offer — otherwise the question is simply asked openly. Free text is always accepted. Best if you develop or maintain the repo.
-- **Scan** — you didn't build this repo, or you're seeing it for the first time: nothing you can't answer. Contexer scans the code and docs, stores what it finds, and asks one short question — what you're planning to do here. In the "can't tell" variant that row also stands in for `some`, so it asks up to two: that, plus what the repo does.
-- **Skip** — Claude answers your original question immediately. Bootstrap is skipped.
+- **Quick** - one question (what does this repo do?), answer stored, then Claude answers your original question.
+- **Full** - guided setup: Claude scans your stack, then asks a few questions about intent and constraints one at a time. Each is its own multiple-choice question ending in `Skip this one`; `Correct` plus the scan's assumption appears only where that assumption actually answers the question, and likely alternatives only where there are distinct ones to offer - otherwise the question is simply asked openly. Free text is always accepted. Best if you develop or maintain the repo.
+- **Scan** - you didn't build this repo, or you're seeing it for the first time: nothing you can't answer. Contexer scans the code and docs, stores what it finds, and asks one short question - what you're planning to do here. In the "can't tell" variant that row also stands in for `some`, so it asks up to two: that, plus what the repo does.
+- **Skip** - Claude answers your original question immediately. Bootstrap is skipped.
 
-**Some** — you work with the repo but didn't build it — no longer has a numbered row of its own (four options is the picker's limit). Typing `some` still works, but in the variant where it would have appeared it is now identical to **scan**: the same scan, and the same two short questions (what the repo does, and what you're working on).
+**Some** - you work with the repo but didn't build it - no longer has a numbered row of its own (four options is the picker's limit). Typing `some` still works, but in the variant where it would have appeared it is now identical to **scan**: the same scan, and the same two short questions (what the repo does, and what you're working on).
 
 To trigger bootstrap manually at any time:
 
@@ -138,7 +138,7 @@ uv tool upgrade contexer
 contexer reinstall
 ```
 
-Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed. Then restart your AI assistant: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
+Run `contexer reinstall` after upgrading - it re-syncs the MCP registration and hooks in case they changed. Then restart your AI assistant: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
 
 > If `uv tool upgrade` doesn't pick up a release published minutes ago, force past the cache: `uv tool install --reinstall --refresh contexer`.
 

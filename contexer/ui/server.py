@@ -45,7 +45,7 @@ REQUEST_TIMEOUT = 10.0          # a loopback client cannot honestly need longer 
 # them; a preconnect never carries a response, so `Connection: close` never applies to it and it
 # sits in the browser's pool. Timing those out at REQUEST_TIMEOUT meant the server FIN'd a pooled
 # socket at 10s while the console polls every 10s, so the next poll landed on a just-closed
-# socket, got an empty reply, and fetch() rejected — the "Disconnected from the Contexer daemon"
+# socket, got an empty reply, and fetch() rejected - the "Disconnected from the Contexer daemon"
 # banner, with nothing in the log because no request was ever parsed. This must stay comfortably
 # above any client's polling interval. The half-sent-body defence is unaffected: the tighter
 # REQUEST_TIMEOUT is armed once the first byte arrives.
@@ -88,7 +88,7 @@ class _BodyTooLarge(Exception):
 class ConsoleServer(ThreadingHTTPServer):
     """Loopback server holding the console's auth material, idle clock and rate budget.
 
-    Binds 127.0.0.1 only — never 0.0.0.0. `port=0` takes an ephemeral port (tests), and
+    Binds 127.0.0.1 only - never 0.0.0.0. `port=0` takes an ephemeral port (tests), and
     `self.port` is always the port actually bound, which is what the Host/Origin checks
     compare against."""
 
@@ -107,7 +107,7 @@ class ConsoleServer(ThreadingHTTPServer):
         self.request_timeout = request_timeout
         self.idle_timeout = idle_timeout
         # Minted per daemon start and held in memory ONLY: never persisted, never logged.
-        # The session cookie is HttpOnly so the page cannot read it — which is exactly why a
+        # The session cookie is HttpOnly so the page cannot read it - which is exactly why a
         # separate value has to authorize mutations.
         self.csrf = secrets.token_urlsafe(32)
         self.port = self.server_address[1]
@@ -138,7 +138,7 @@ class ConsoleServer(ThreadingHTTPServer):
 
     def stop(self, reason: str) -> None:
         """Ask serve_forever to return. `shutdown()` blocks until the loop exits, so it runs
-        on its own thread — calling it from a request thread would deadlock."""
+        on its own thread - calling it from a request thread would deadlock."""
         self.exit_reason = reason
         self.stopping.set()
         threading.Thread(target=self.shutdown, daemon=True).start()
@@ -193,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
         """Route unknown verbs (TRACE, PROPFIND, FOO) through the guard as well.
 
         http.server answers a missing `do_<VERB>` with its own 501, which skips the Host check,
-        the credential gate and the security headers — an unauthenticated surface."""
+        the credential gate and the security headers - an unauthenticated surface."""
         if name.startswith("do_"):
             return lambda: self._handle(self.command)
         raise AttributeError(name)
@@ -227,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(403, {"error": f"{TOKEN_HEADER} and a same-origin "
                                                      "Origin are required to change anything"})
                 if not self.server.allow_mutation():
-                    return self._json(429, {"error": "too many changes — slow down"})
+                    return self._json(429, {"error": "too many changes - slow down"})
             # A polling background tab must not keep the daemon alive forever, so its
             # requests deliberately leave the idle clock alone.
             if self.headers.get(POLL_HEADER) != "1":
@@ -284,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
         """A pairing code authenticates the exchange route and nothing else.
 
         Codes are short-lived, but they land in transcripts on disk. Confining them to `/` means
-        a leaked one can only start a session in a browser — never read the store or write a
+        a leaked one can only start a session in a browser - never read the store or write a
         global rule straight from the query string."""
         if path != "/":
             return False
@@ -292,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         return bool(codes) and daemon.verify_pairing_code(self.server.token, codes[0])
 
     def _credentialed(self, query: dict, path: str) -> bool:
-        """Every route needs one of these three. There is no unauthenticated surface at all —
+        """Every route needs one of these three. There is no unauthenticated surface at all -
         not /healthz, not the static assets, not an unknown verb."""
         return self._pairing_ok(query, path) or self._token_ok() or self._cookie_ok()
 
@@ -364,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
         """The policy headers ride on EVERY response. No CORS headers, ever.
 
         Overridden rather than called from `_finish_headers` so that the replies http.server
-        writes on its own — send_error() for a request line it could not parse — carry them."""
+        writes on its own - send_error() for a request line it could not parse - carry them."""
         self.send_header("Content-Security-Policy", CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -384,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
     # ── logging ─────────────────────────────────────────────────────────────────
 
     def log_request(self, code="-", size="-"):
-        # getattr, not self.path: parse_request() calls send_error() — which logs through here —
+        # getattr, not self.path: parse_request() calls send_error() - which logs through here -
         # for a bad request version, bad request syntax and a 414, all before `path` exists.
         # The query string is dropped as well as redacted; `?p=` carries a live credential.
         path = getattr(self, "path", "").split("?", 1)[0]
@@ -407,7 +407,7 @@ def watchdog(server: ConsoleServer, *, clock=time.monotonic, tick: float = WATCH
     while not server.stopping.wait(tick):
         if daemon.idle_deadline_exceeded(server.last_request, server.idle_timeout_seconds,
                                          now=clock()):
-            _log(f"idle for {server.idle_timeout_seconds:.0f}s — shutting down")
+            _log(f"idle for {server.idle_timeout_seconds:.0f}s - shutting down")
             server.stop("idle")
             return
 
@@ -510,7 +510,7 @@ def _scrub(message: str) -> str:
 
 def _log(message: str) -> None:
     """Append one line to ~/.contexer/ui.log. NEVER the token, the csrf secret, or decision
-    content — this file gets pasted into bug reports.
+    content - this file gets pasted into bug reports.
 
     Timestamp comes from daemon._now_iso (the same clock daemon's own lines use, so one log
     file never mixes two formats); the `console:` prefix and the _scrub pass are what make
@@ -520,7 +520,7 @@ def _log(message: str) -> None:
     this file. It is not a property of ui.log as a whole: daemon._log writes its own lines
     unscrubbed and daemon._spawn pipes the child's raw stdout/stderr in. Unifying all three
     behind one scrubbing writer is a real improvement and a behaviour change to daemon
-    logging — deliberately not folded into a cleanup pass."""
+    logging - deliberately not folded into a cleanup pass."""
     message = _scrub(message)
     try:
         daemon.LOG_PATH.parent.mkdir(mode=0o700, exist_ok=True)

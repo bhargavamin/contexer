@@ -21,7 +21,7 @@ class TestBuildWebapi:
         assert len(list((repo / "tests").glob("test_*.py"))) >= 3
 
     def test_pyproject_is_uv_runnable(self, repo):
-        # `uv run` refuses a [project] table without `version` — every check_cmd
+        # `uv run` refuses a [project] table without `version` - every check_cmd
         # would exit 2 regardless of the model's work (campaign-1 bug).
         import tomllib
         proj = tomllib.loads((repo / "pyproject.toml").read_text())["project"]

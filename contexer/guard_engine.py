@@ -35,12 +35,12 @@ def _staged_files(repo: str) -> list[str]:
     """Repo-relative paths of staged Added/Copied/Modified/Renamed files. R is
     included deliberately: renamed files must still be scanned, and `--name-only`
     on an R entry yields only the new path, which is exactly what the guard scans.
-    Deleted files (filter D) are excluded — nothing to scan. `[]` on any git
+    Deleted files (filter D) are excluded - nothing to scan. `[]` on any git
     failure (fail-soft, never raises).
 
     `-z` (NUL-separated, splitting on b"\\0") is load-bearing, not a style
     choice: without it git C-QUOTES any path holding a non-ASCII byte, a quote,
-    or a backslash — `"caf\\303\\251/m\\303\\263dulo.py"` — and that quoted
+    or a backslash - `"caf\\303\\251/m\\303\\263dulo.py"` - and that quoted
     spelling survives canonicalization intact, only to make the later
     `git show :<path>` fail. _staged_content then returns "" and every armed
     Tier-2 rule silently skips the file, so a secret in it ships. `-z` turns
@@ -49,11 +49,11 @@ def _staged_files(repo: str) -> list[str]:
     since the separator is a byte.
 
     Decoded with `errors="surrogateescape"`, not "replace": a filename holding a
-    byte sequence that isn't valid UTF-8 (rare, but real — a stray Latin-1 export,
+    byte sequence that isn't valid UTF-8 (rare, but real - a stray Latin-1 export,
     a broken merge tool) would otherwise collapse to U+FFFD, an information-losing
     spelling that can no longer round-trip back to the real path. `git show
     :<path>` on that mangled spelling then fails, and _staged_content's "" return
-    makes every armed regex/secret rule silently skip the file — the exact
+    makes every armed regex/secret rule silently skip the file - the exact
     silent-bypass class this whole module exists to close. surrogateescape keeps
     each unmappable byte recoverable (as a lone surrogate codepoint), so
     _staged_content can re-encode the SAME bytes back out via os.fsencode and the
@@ -72,10 +72,10 @@ def _staged_files(repo: str) -> list[str]:
 
 
 def _staged_content(repo: str, path: str) -> str:
-    """Staged (index) content of `path` via `git show :<path>` — deliberately NOT
+    """Staged (index) content of `path` via `git show :<path>` - deliberately NOT
     the working-tree version, since the guard must judge what's about to be
     committed. `""` when: git fails, the content exceeds _GUARD_MAX_FILE_BYTES, or
-    a null byte appears in the first 1024 bytes (binary skip — a regex over binary
+    a null byte appears in the first 1024 bytes (binary skip - a regex over binary
     content can false-match encoded bytes). Reads raw bytes directly rather than
     through the text-mode `_git` helper, because the binary/size checks need the
     untouched byte stream; only decodes utf-8 (errors="replace") once those checks
@@ -84,11 +84,11 @@ def _staged_content(repo: str, path: str) -> str:
     `path` may carry surrogate-escaped bytes from _staged_files's
     surrogateescape decode (an invalid-UTF-8 filename). A plain f-string arg
     would hand subprocess a str it re-encodes with the *default* filesystem
-    error handler — surrogateescape on POSIX too, so this usually round-trips,
+    error handler - surrogateescape on POSIX too, so this usually round-trips,
     but relying on that default is exactly the kind of implicit behavior that
     broke once already (the C-quoting bug this module's docstring above
-    describes). Building the argv element as bytes explicitly — b":" +
-    os.fsencode(path) — makes the byte-for-byte round trip the actual
+    describes). Building the argv element as bytes explicitly - b":" +
+    os.fsencode(path) - makes the byte-for-byte round trip the actual
     contract, not an accident of subprocess's default encoding path."""
     try:
         out = subprocess.run(
@@ -118,7 +118,7 @@ def _guard_relpath(repo: str, path: str) -> str:
     """THE single canonicalization chokepoint for the commit-time guard: any
     absolute or relative spelling of a file resolves to one normalized
     repo-relative POSIX (forward-slash) path. Every hash and path-pairing
-    comparison downstream must consume only this function's output — never a raw
+    comparison downstream must consume only this function's output - never a raw
     staged path or artifact string. Works for paths that don't exist on disk yet
     (Path.resolve() is non-strict), since guard callers canonicalize staged paths
     that may not exist in the working tree in every context. Fail-soft: any
@@ -149,7 +149,7 @@ def _pathlike_artifact(artifact: str) -> bool:
     pairing against a staged file: a relative path with an extension (e.g.
     "contexer/store.py", no leading "/") or a dotted module (e.g.
     "contexer.store", no "/"). Excludes symbol artifacts ("FooError"),
-    route-shaped strings ("/api/users"), and bare names — none of those pair
+    route-shaped strings ("/api/users"), and bare names - none of those pair
     against a staged file path."""
     if not isinstance(artifact, str) or not artifact:
         return False
@@ -158,7 +158,7 @@ def _pathlike_artifact(artifact: str) -> bool:
 
 
 def _artifact_path_match(artifact: str, staged: str) -> bool:
-    """Pure — no I/O. `staged` is assumed already canonical (see _guard_relpath).
+    """Pure - no I/O. `staged` is assumed already canonical (see _guard_relpath).
     True iff: exact relpath equality; OR `artifact` is a dotted module that maps
     onto `staged` ("contexer.store" -> "contexer/store.py" or
     "contexer/store/__init__.py"); OR `artifact` contains "/" and `staged` ends
@@ -167,7 +167,7 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
 
     Bare basename matching is forbidden by construction: a slashless artifact
     that isn't an exact match and isn't a mapping dotted module (e.g. "utils.py"
-    against staged "a/utils.py") falls through to the final `return False` —
+    against staged "a/utils.py") falls through to the final `return False` -
     it never reaches the suffix-match branch, which requires "/" in `artifact`."""
     if not artifact or not staged:
         return False
@@ -181,7 +181,7 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
     return False
 
 
-# ── Commit-time guard: Tier-1 advisory engine (Task 2) — pairing, throttle, ──
+# ── Commit-time guard: Tier-1 advisory engine (Task 2) - pairing, throttle, ──
 # dismissals. Builds on Task 1's plumbing above. The whole engine is READ-ONLY
 # against the decision store (never calls _save/_save_global) and its public
 # entrypoint (guard_staged) never raises. Only the guard's own sidecar files
@@ -196,7 +196,7 @@ _GUARD_THROTTLE_CAP = 500
 def _guard_trusted(entry: dict) -> bool:
     """A decision may only pair as an advisory if it is BOTH developer-approved
     (status) and EITHER born from a trusted provenance (current revision's source)
-    OR explicitly ratified by a human (`approved_by == "human"`) — an AI-inferred
+    OR explicitly ratified by a human (`approved_by == "human"`) - an AI-inferred
     or memory-imported entry never nags at commit time on its own confidence, no
     matter how strong, until a human has actually looked at it. `plan` is trusted
     too: a plan-sourced decision that survived reconciliation AND developer
@@ -204,11 +204,11 @@ def _guard_trusted(entry: dict) -> bool:
     unapproved plan suggestion untrusted.
 
     The `approved_by` clause (issue #180) is the refinement: the gate's real job
-    is excluding entries that reached `approved` WITHOUT a human ever looking —
+    is excluding entries that reached `approved` WITHOUT a human ever looking -
     not entries a human explicitly looked at and blessed. `approved_by` is set
     ONLY at genuine ratification points (`_apply_approval`'s approve/edit paths,
-    including bulk `approve_decision("all")`/comma-list approvals — reviewing a
-    shown list and approving it is a real ratification gesture — and the
+    including bulk `approve_decision("all")`/comma-list approvals - reviewing a
+    shown list and approving it is a real ratification gesture - and the
     constraint-restatement promotions in `capture_user_constraint`), never on any
     auto-approval route (born-`approved` scan/bootstrap/memory/legacy-migration
     entries, or an `ai`-captured entry whose content happens to match a scan-fact
@@ -217,7 +217,7 @@ def _guard_trusted(entry: dict) -> bool:
     entry a human never reviewed stays untrusted regardless of status.
 
     A falsy revision `source` (legacy entries that predate provenance tracking)
-    falls back to the decision's `created_by` for this check ONLY — a read-time
+    falls back to the decision's `created_by` for this check ONLY - a read-time
     fallback, not a storage rewrite. `share.py`'s `_wire_source` deliberately
     preserves a stored `source: None` end-to-end (the cloud stores NULL = honest
     unknown provenance); back-stamping it in storage would fabricate a false
@@ -236,26 +236,26 @@ def _guard_trusted(entry: dict) -> bool:
 
 
 def _guard_hash(decision_id: str, relpath: str) -> str:
-    """Identity for one (decision, staged-file) advisory pair — sha1 of
+    """Identity for one (decision, staged-file) advisory pair - sha1 of
     "<decision_id>\\n<relpath>", first 12 hex chars. `relpath` must already be
     _guard_relpath's canonical output; the caller owns that, this function is
     pure. Ports the shape of doc-drift's `_drift_hash` (see
     `git show feat/doc-drift:contexer/store.py`): keying on (decision, FILE) only
-    — never content or line — means ordinary editing of the file never
+    - never content or line - means ordinary editing of the file never
     resurrects a dismissed or already-advised pair.
 
     Encoded with errors="surrogateescape", not "replace": `relpath` can carry
     surrogate-escaped bytes from an invalid-UTF-8 filename (see _staged_files),
     and "replace" would collapse every such byte to the same literal "?",
     letting two DIFFERENT exotic filenames collide onto the same pair hash.
-    surrogateescape recovers the original bytes instead, so the hash — like
-    the git lookup in _staged_content — stays keyed on the real path."""
+    surrogateescape recovers the original bytes instead, so the hash - like
+    the git lookup in _staged_content - stays keyed on the real path."""
     return hashlib.sha1(
         f"{decision_id}\n{relpath}".encode("utf-8", "surrogateescape")).hexdigest()[:12]
 
 
 def _guard_content_hash(text: str) -> str:
-    """Full sha1 hex digest of staged file content — the throttle key's value.
+    """Full sha1 hex digest of staged file content - the throttle key's value.
     Deliberately untruncated (unlike _guard_hash): this hashes arbitrary file
     content, not a short identity string, so the full digest is cheap insurance
     against collision."""
@@ -285,7 +285,7 @@ def dismiss_guard(repo_path: str, decision_id: str, source_ref: str) -> None:
     hashing, so an absolute or relative spelling of the same file dismisses the
     identical pair. This is the MANAGEMENT path (the CLI's `--dismiss`), not the
     guard run path: unlike every other guard helper it is deliberately NOT
-    fail-soft — a write failure here must surface to the developer, not vanish
+    fail-soft - a write failure here must surface to the developer, not vanish
     silently, since a dismissal the developer believes succeeded but didn't
     would let a "permanent" suppression silently not stick."""
     relpath = _guard_relpath(repo_path, source_ref)
@@ -320,11 +320,11 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
     {pair_hash: staged_content_sha1} for every advisory just surfaced. A refreshed
     entry is moved to the end (re-inserted) so the cap evicts truly-stale pairs
     first, not a pair that just advised again with new content. Capped at
-    _GUARD_THROTTLE_CAP, oldest dropped. Never raises — a failed stamp write only
+    _GUARD_THROTTLE_CAP, oldest dropped. Never raises - a failed stamp write only
     costs one extra (harmless) re-advisory next run, never blocks anything. The
     except is deliberately BROAD (not just OSError): this runs after the
-    advisories are already computed, so ANY failure here — a corrupt stamp file
-    deserializing oddly, a JSON encoding error — would otherwise propagate into
+    advisories are already computed, so ANY failure here - a corrupt stamp file
+    deserializing oddly, a JSON encoding error - would otherwise propagate into
     guard_staged's fail-open handler and convert real, computed advisories into
     a spurious "internal error"."""
     try:
@@ -370,7 +370,7 @@ class _GuardBudgetExceeded(Exception):
 def _guard_artifact_matches(artifact: str, staged_set: set[str],
                              staged_by_base: dict[str, list[str]]) -> list[str]:
     """Every staged path `artifact` pairs with, resolved by LOOKUP rather than a
-    scan over the whole staged list — semantically identical to filtering
+    scan over the whole staged list - semantically identical to filtering
     staged paths through _artifact_path_match, but O(1) for the two cases that
     demand exact equality:
 
@@ -379,7 +379,7 @@ def _guard_artifact_matches(artifact: str, staged_set: set[str],
 
     Only the "/"-suffix case genuinely needs a scan (any staged path may END
     with the artifact), and even there a suffix match at a path boundary
-    REQUIRES the last segment to be equal — so the scan runs over just the
+    REQUIRES the last segment to be equal - so the scan runs over just the
     staged paths sharing the artifact's basename, never the full list. The
     endswith test is still applied, so the semantics are exactly
     _artifact_path_match's ("za/utils.py" still doesn't match "a/utils.py")."""
@@ -403,17 +403,17 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
     """Candidate generation: pair every staged file against every trusted decision
     from the repo store AND the global store (loaded via _load / _load_global).
     `decisions=` overrides BOTH loaded sources with the given list (tagged
-    scope="personal") — an extension point that keeps this engine reusable by a
+    scope="personal") - an extension point that keeps this engine reusable by a
     future CI runner without touching this function's body.
 
     A candidate is produced only when there is an actual pairing SIGNAL: the
     staged file is one of the decision's `source_files` (repo-store entries
-    only — global entries never carry source_files and pair via artifact match
+    only - global entries never carry source_files and pair via artifact match
     only), or a path/module-shaped artifact extracted from the decision's
     content matches the staged path (_artifact_path_match). No signal -> no
     candidate at all (not even a rejected one). When a signal exists, the
     decision must ALSO pass _guard_trusted or the candidate is emitted=False
-    with reason="rejected: untrusted provenance" — trust is checked AFTER
+    with reason="rejected: untrusted provenance" - trust is checked AFTER
     matching so an untrusted/irrelevant decision never manufactures noise for
     every staged file it happens not to mention.
 
@@ -434,7 +434,7 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
 
     # Built ONCE for the whole call: matching is then a lookup per artifact
     # instead of a scan over every staged path per artifact (the pairing loop
-    # used to be files x decisions x artifacts — seconds on a large staged set).
+    # used to be files x decisions x artifacts - seconds on a large staged set).
     staged_set = set(staged_rel)
     staged_by_base: dict[str, list[str]] = {}
     for relpath in staged_rel:
@@ -450,7 +450,7 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
             content = rev.get("content", "") if rev else entry.get("content", "")
             title = entry.get("title") or store._derive_title(content)
             # source_files goes through _guard_relpath like every other path the
-            # guard compares — a decision anchored with an absolute or "./"-
+            # guard compares - a decision anchored with an absolute or "./"-
             # prefixed spelling must still pair (fail-soft: unresolvable -> dropped).
             source_files = ({p for p in (_guard_relpath(repo_path, f)
                                           for f in (entry.get("source_files") or [])) if p}
@@ -486,12 +486,12 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
 
 def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | None = None,
                      deadline: float | None = None) -> list[dict]:
-    """_guard_pairs plus the dismiss/throttle checks — still entirely read-only
+    """_guard_pairs plus the dismiss/throttle checks - still entirely read-only
     (no stamp mutation, that's guard_staged's job after capping). Every
     candidate from _guard_pairs comes through; one that matched, was trusted,
     but is dismissed or throttled has its reason/emitted flipped to say why it
     stops short of surfacing. A staged file's content is read (and hashed) at
-    most once per call regardless of how many decisions pair to it — and only
+    most once per call regardless of how many decisions pair to it - and only
     for a pair the throttle actually has a stamp for, so a run that surfaces N
     fresh advisories costs no `git show` per pair.
 
@@ -536,7 +536,7 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
     return [p for p in (_guard_relpath(repo_path, s) for s in raw) if p]
 
 
-# ── Assisted anchor backfill (Task 1 of #175) — read-only candidate derivation ─
+# ── Assisted anchor backfill (Task 1 of #175) - read-only candidate derivation ─
 # for `contexer guard anchors`. The stock converter: the existing corpus is
 # unanchored (trusted+anchored == 0 on real stores), so this mines each trusted
 # decision's OWN content for candidate anchors instead of waiting for a future
@@ -546,7 +546,7 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
 
 def _artifact_path_spellings(artifact: str) -> list[str]:
     """Every repo-relative path spelling `artifact` could refer to, before an
-    existence check. The literal artifact is always tried first — a two-segment
+    existence check. The literal artifact is always tried first - a two-segment
     filename like "config.yaml" also satisfies _GUARD_MODULE_ARTIFACT_RE's
     lowercase-dotted-segments shape, so treating module-mapping as exclusive of
     the literal spelling would mistake it for a "config/yaml.py" module and
@@ -567,7 +567,7 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     path-like artifact it mentions (_guard_content_artifacts), expanded to its
     possible file spellings (_artifact_path_spellings), canonicalized, and kept
     only if the file exists in the working tree. Deduped (first-seen order)
-    and capped at store._MAX_SOURCE_FILES — the same cap _anchor_sources
+    and capped at store._MAX_SOURCE_FILES - the same cap _anchor_sources
     itself enforces on write."""
     seen: set[str] = set()
     results: list[str] = []
@@ -588,7 +588,7 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
 def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
     """For every trusted, unanchored decision in the repo store, derive
     candidate anchor paths from its content (_candidate_paths_for_entry) and
-    skip decisions with no surviving candidates — no rename detection, so a
+    skip decisions with no surviving candidates - no rename detection, so a
     renamed file yields nothing rather than a guess.
 
     Returns [{decision_id, title, candidates}, ...]. Read-only (never calls
@@ -616,13 +616,13 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
         return []
 
 
-# ── Commit-time guard: Tier-2 armed rules (Task 3) — machine-checkable, ──────
+# ── Commit-time guard: Tier-2 armed rules (Task 3) - machine-checkable, ──────
 # blocking. Two paths, sharply separated:
 #   MANAGEMENT (arm_guard / disarm_guard): under _store_lock, WRITES the store,
-#   and MAY raise ValueError — arming/disarming is a deliberate developer act, so
+#   and MAY raise ValueError - arming/disarming is a deliberate developer act, so
 #   a malformed request should fail loudly, not degrade silently.
 #   RUN (_armed_rules / _rule_violations, and guard_staged's violations half):
-#   store-READ-ONLY and fail-soft, exactly like the Tier-1 engine above — rule
+#   store-READ-ONLY and fail-soft, exactly like the Tier-1 engine above - rule
 #   evaluation must never raise out of guard_staged and never block a commit on
 #   its own failure (see _GUARD_TIME_BUDGET below: a catastrophic regex fails
 #   OPEN, never partial-blocks).
@@ -630,7 +630,7 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
 _GUARD_CHECK_TYPES = frozenset({"regex", "secret"})
 _GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
 # Wall-clock seconds, across the WHOLE guard_staged call: the deadline is stamped
-# at the top of guard_staged and threaded through BOTH tiers — Tier-2 rule
+# at the top of guard_staged and threaded through BOTH tiers - Tier-2 rule
 # evaluation (checked between files/rules) and Tier-1 pairing (checked per
 # decision, bailing via _GuardBudgetExceeded). Either overrun fails OPEN with
 # error=True; neither tier can run unbounded while the developer waits to commit.
@@ -638,7 +638,7 @@ _GUARD_TIME_BUDGET = 2.0
 
 
 def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
-    """Refuse anything not deterministically machine-checkable — the structural
+    """Refuse anything not deterministically machine-checkable - the structural
     half of arm_guard's refusal contract (entry existence and approval status are
     checked by the caller, which needs the store loaded first). Every failure
     here raises the SAME message: the caller only needs to know arming was
@@ -647,7 +647,7 @@ def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
     if check_type not in _GUARD_CHECK_TYPES:
         raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
     if check_type == "secret":
-        # `secret` always means "match redact.HIGH_CONFIDENCE_PATTERNS" — a
+        # `secret` always means "match redact.HIGH_CONFIDENCE_PATTERNS" - a
         # pattern alongside it is nonsensical, not merely redundant.
         if pattern:
             raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
@@ -664,16 +664,16 @@ def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
 
 def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
               flags: str = "", paths: str = "", message: str = "") -> str:
-    """Arm a decision with a machine-checkable commit-time rule — the blocking
+    """Arm a decision with a machine-checkable commit-time rule - the blocking
     (Tier-2) counterpart to Tier-1's advisory pairing. MANAGEMENT path: under
     _store_lock, may raise ValueError (see _validate_guard_check for the
     machine-checkable refusals; separately refuses an entry that doesn't exist,
-    or one whose _entry_status isn't "approved" — an armed rule must already be
+    or one whose _entry_status isn't "approved" - an armed rule must already be
     developer-trusted, since arming an unreviewed AI guess would let it block a
     commit no human ever signed off on).
 
     Id resolution mirrors approve_decision's (_apply_approval): exact id, then
-    an 8-char prefix — tried against the REPO store first, then the GLOBAL
+    an 8-char prefix - tried against the REPO store first, then the GLOBAL
     store, so a global armed rule (see _armed_rules) also blocks every repo's
     commits, matching how global rules are already injected everywhere else."""
     _validate_guard_check(check_type, pattern, flags)
@@ -707,9 +707,9 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
 
 def disarm_guard(repo_path: str, entry_id: str) -> str:
     """Remove a decision's guard_check (Tier-2 armed rule), repo store first then
-    global — same id-resolution order as arm_guard. MANAGEMENT path: under
+    global - same id-resolution order as arm_guard. MANAGEMENT path: under
     _store_lock, raises ValueError when the id resolves in neither store. A
-    resolved entry that isn't currently armed is a no-op (not an error) —
+    resolved entry that isn't currently armed is a no-op (not an error) -
     disarming an already-unarmed decision is a harmless idempotent request."""
     repo = store._resolve_repo(repo_path)
 
@@ -738,7 +738,7 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
 
 def _armed_rules(entries: list[dict]) -> list[dict]:
     """The subset of `entries` that are BOTH carrying a guard_check AND STILL
-    _entry_status == "approved" right now — status is re-checked at RUN time,
+    _entry_status == "approved" right now - status is re-checked at RUN time,
     never trusted from arm time, so a decision later ignored or superseded
     stops firing without an explicit disarm. Pure, no I/O; the caller gathers
     from repo + global stores by calling this once per store and concatenating
@@ -753,10 +753,10 @@ def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
     skipped entirely (empty paths = applies to every staged file).
 
     `regex` rules match line-by-line (so a hit's reported line number is exact);
-    an unparseable pattern (defensive only — arm_guard already validates at arm
+    an unparseable pattern (defensive only - arm_guard already validates at arm
     time) is skipped rather than raised. `secret` rules match any hit from
     redact.HIGH_CONFIDENCE_PATTERNS against the WHOLE file content, not
-    per-line — the PEM private-key pattern spans multiple lines (BEGIN/…/END),
+    per-line - the PEM private-key pattern spans multiple lines (BEGIN/…/END),
     so per-line splitting would silently defeat it; the line number is then
     derived from the match's character offset via a newline count.
 
@@ -794,12 +794,12 @@ def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
 def _guard_violations(repo: str, staged: list[str], deadline: float) -> tuple[list[dict], bool]:
     """Run every armed rule (repo + global stores) against every staged file,
     checked against `deadline` (an absolute time.time() value) between files AND
-    between rules — Python's `re` has no per-call timeout, so this is the only
+    between rules - Python's `re` has no per-call timeout, so this is the only
     budget enforcement possible; a single catastrophically backtracking regex
     can still overrun mid-match, which is the documented, deliberate residual
     risk (fail OPEN when that happens, never partial-block). Returns
     (violations, budget_exceeded); on overrun the caller discards whatever
-    violations were gathered so far — an overrun run reports nothing, not a
+    violations were gathered so far - an overrun run reports nothing, not a
     partial scan, so a commit is never blocked on an incomplete evaluation."""
     rules = (_armed_rules(store._load(repo).get("entries") or [])
              + _armed_rules(store._load_global().get("entries") or []))
@@ -823,20 +823,20 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     """The commit-time entrypoint (Task 4's CLI hook) combining Tier-1's
     advisory engine with Tier-2's armed blocking rules. Store-READ-ONLY (never
     calls _save/_save_global) and fail-soft: the ENTIRE body is wrapped so any
-    exception — or a Tier-2 time-budget overrun — degrades to
+    exception - or a Tier-2 time-budget overrun - degrades to
     {"advisories": [], "violations": [], "error": True} rather than raising or
     ever blocking a commit on the guard's OWN failure.
 
     Order: CONTEXER_GUARD=0 short-circuits before any other work; then the
-    deadline is stamped — _GUARD_TIME_BUDGET wall-clock seconds covering
+    deadline is stamped - _GUARD_TIME_BUDGET wall-clock seconds covering
     EVERYTHING below it, both tiers; then repo resolution; then the staged-file
     list (empty -> empty result); then Tier-2 violations run FIRST (budget
     checked between files/rules), then Tier-1 pairing (checked per decision, via
-    _GuardBudgetExceeded) — on overrun in either tier, both advisories and
+    _GuardBudgetExceeded) - on overrun in either tier, both advisories and
     violations come back empty with error=True, since a hung run must fail open,
     never half-block; then the merge-in-progress check (Tier-1's advisory pairing is
     skipped during a merge, but Tier-2's violations already ran above and are
-    still reported — a merge conflict is not a license to skip a blocking
+    still reported - a merge conflict is not a license to skip a blocking
     rule); then pairing -> drop dismissed -> drop throttled -> cap at
     _GUARD_MAX_ADVISORIES (the true count is reported as "total_advisories"
     only when capping actually happened) -> best-effort stamp the throttle for
@@ -878,7 +878,7 @@ def guard_candidates(repo_path: str, paths: list[str] | None = None, explain: bo
     """Read-only `--explain` counterpart to guard_staged: the identical pairing +
     dismiss/throttle pipeline, but NEVER mutates the throttle stamp (or anything
     else). explain=False returns only candidates that would actually surface
-    right now (matched, trusted, not dismissed, not throttled) — unlike
+    right now (matched, trusted, not dismissed, not throttled) - unlike
     guard_staged, NOT capped at _GUARD_MAX_ADVISORIES, since this is a diagnostic
     listing, not the noise-controlled commit-time nag. explain=True additionally
     includes every rejected candidate, each carrying its reason. Fail-soft: any
@@ -896,10 +896,10 @@ def guard_candidates(repo_path: str, paths: list[str] | None = None, explain: bo
         return []
 
 
-# ── Decisions-for-files retrieval (Task 1 of #174) — reuses the Tier-1 pairing ─
+# ── Decisions-for-files retrieval (Task 1 of #174) - reuses the Tier-1 pairing ─
 # signals (source_files membership, path-like content artifacts) but is pure
 # RETRIEVAL, not advisory noise control: unlike _guard_pairs there is no
-# guard-trust filter (a pending/suggested decision can still govern a file —
+# guard-trust filter (a pending/suggested decision can still govern a file -
 # the caller decides what to do with its status) and no throttle/dismissals
 # (nothing here is ever surfaced repeatedly at commit time, so there is
 # nothing to suppress). Every non-ignored entry of BOTH stores participates.
@@ -913,19 +913,19 @@ def decisions_for_files(repo_path: str, files: list[str],
     like every other path this module compares.
 
     Pairing signal per decision (mirrors `_guard_pairs`): the decision's
-    `source_files` (repo-store entries only — global entries never carry
+    `source_files` (repo-store entries only - global entries never carry
     `source_files` and pair via artifact match only), OR a path/module-shaped
     artifact extracted from its content (`_guard_content_artifacts`) matching one
     of the given files (`_artifact_path_match`, via the same O(1)
     `_guard_artifact_matches` lookup `_guard_pairs` uses). No signal -> the
-    decision is simply absent from the result, not emitted-false — there is no
+    decision is simply absent from the result, not emitted-false - there is no
     rejected-candidate concept here, only hits.
 
     `files_matched` lists, in the CALLER'S input order, which of the queried files
-    matched this decision — the reverse-tracing property: given a decision back
+    matched this decision - the reverse-tracing property: given a decision back
     from this call, the caller can tell which of the files it asked about are the
     ones this decision actually governs. `reason` is the single strongest signal
-    across every matched file for this decision — `source_files match` beats any
+    across every matched file for this decision - `source_files match` beats any
     artifact reason, mirroring `_guard_pairs`' per-file `matched.setdefault` order
     (source_files inserted first, artifacts only fill gaps).
 
@@ -961,7 +961,7 @@ def decisions_for_files(repo_path: str, files: list[str],
                 source_files = ({p for p in (_guard_relpath(repo_path, f)
                                               for f in (entry.get("source_files") or [])) if p}
                                  if scope == "personal" else set())
-                # relpath -> reason, source_files winning over artifacts — same
+                # relpath -> reason, source_files winning over artifacts - same
                 # setdefault order _guard_pairs uses for its per-file matched dict.
                 matched: dict[str, str] = {p: "source_files match"
                                            for p in source_files & canon_set}

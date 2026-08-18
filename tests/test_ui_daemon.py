@@ -26,7 +26,7 @@ ALLOWED_IMPORTS = {
 
 @pytest.fixture(autouse=True)
 def ui_paths(tmp_path, monkeypatch):
-    """Redirect the statefile and log into a temp dir — never the real ~/.contexer."""
+    """Redirect the statefile and log into a temp dir - never the real ~/.contexer."""
     monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / ".contexer" / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ".contexer" / "ui.log")
     return tmp_path / ".contexer"
@@ -48,7 +48,7 @@ def spawns(monkeypatch):
 
 @pytest.fixture
 def kills(monkeypatch):
-    """Record signals instead of sending them — a recorded pid may exist on this machine."""
+    """Record signals instead of sending them - a recorded pid may exist on this machine."""
     sent = []
     monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((pid, sig)))
     return sent
@@ -169,7 +169,7 @@ def test_is_alive_defers_to_the_probe(monkeypatch):
 
 
 def test_is_alive_lets_the_probe_settle_a_recycled_pid(monkeypatch):
-    """os.kill EPERM means some other user's process holds that pid — only the token decides."""
+    """os.kill EPERM means some other user's process holds that pid - only the token decides."""
     monkeypatch.setattr(os, "kill", raises(PermissionError()))
     monkeypatch.setattr(daemon, "probe", lambda port, token: True)
     assert daemon.is_alive(a_state())
@@ -195,7 +195,7 @@ def test_probe_rejects_a_closed_port():
 
 
 def test_probe_rejects_a_foreign_socket_without_hanging():
-    """A listener that never answers HTTP is not our daemon — and must not stall the hook."""
+    """A listener that never answers HTTP is not our daemon - and must not stall the hook."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -363,7 +363,7 @@ def test_ensure_running_version_skew_terminates_the_old_daemon(monkeypatch, spaw
 
 def test_ensure_running_waits_for_the_old_port_before_spawning(monkeypatch, spawns, kills):
     """SIGTERM is asynchronous. Spawning straight after it launched the replacement into
-    EADDRINUSE, and by the time it probed, the daemon it collided with had closed its socket —
+    EADDRINUSE, and by the time it probed, the daemon it collided with had closed its socket -
     so the child exited 1 and the URL the caller printed was dead."""
     order = []
     monkeypatch.setattr(daemon, "current_version", lambda: "9.9.9")
@@ -433,7 +433,7 @@ def test_ensure_running_heals_a_corrupt_statefile(monkeypatch, spawns, ui_paths)
 
 @pytest.mark.parametrize("body", ["", "{\"pid\": 1}", "\x00\x00"])
 def test_ensure_running_heals_a_stale_unparseable_statefile(monkeypatch, spawns, ui_paths, body):
-    """Once the mint grace has passed, anything that does not parse is wreckage — including the
+    """Once the mint grace has passed, anything that does not parse is wreckage - including the
     zero-byte file a process that died between creating and filling it left behind."""
     monkeypatch.setattr(daemon, "current_version", lambda: "1.2.3")
     ui_paths.mkdir(parents=True)
@@ -487,7 +487,7 @@ def test_a_version_upgrade_leaves_a_daemon_that_answers_the_printed_url(tmp_path
     # default (a fresh snapshot of `os.environ` at call time) to still carry the HOME
     # override above: this is the one test in the whole suite that spawns a REAL,
     # independent process running contexer.ui.server, which does its own fresh
-    # Path.home() resolution — the exact "resolve paths from Path.home()" case the
+    # Path.home() resolution - the exact "resolve paths from Path.home()" case the
     # leak-guard in conftest.py warns about. An explicit env= closes any window where
     # os.environ could be read by the child before this monkeypatch is visible to it
     # (e.g. under a slow/contended CI runner), so a real console can never bind against
@@ -756,7 +756,7 @@ def test_importing_the_daemon_does_not_import_the_store():
 class TestClaimStateWaitsOutARival:
     """`_claim_state` loses to whoever wins O_EXCL and then has to READ what they wrote.
 
-    The wait used to be 20 iterations with no sleep — well under a millisecond of real time, so
+    The wait used to be 20 iterations with no sleep - well under a millisecond of real time, so
     on anything slower than a warm page cache it gave up and returned None, costing the console
     for that whole session. It is a deadline now, so the budget is a DURATION. The fakes below
     are therefore keyed on elapsed time, not on a call count: a count-based fake passes against

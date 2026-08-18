@@ -1,4 +1,4 @@
-"""Tests for edit_decision — the console's explicit-edit write path."""
+"""Tests for edit_decision - the console's explicit-edit write path."""
 import pytest
 
 from contexer import store
@@ -125,7 +125,7 @@ class TestStatusPreserved:
         store.edit_decision(tmp_repo, entry["id"], content="Use Memcached for hot-read caching")
         after = _entry(tmp_repo, entry["id"])
         assert after["status"] == "approved"
-        # An edit never invents an approver — it only preserves what was already there.
+        # An edit never invents an approver - it only preserves what was already there.
         assert after.get("approved_by") == entry.get("approved_by")
         assert after["revisions"][-1]["approved_at"] is not None
         assert store.get_pending_decisions(tmp_repo) == []
@@ -190,7 +190,7 @@ class TestNoProposalRouting:
         assert store.get_pending_decisions(tmp_repo) == []
 
     def test_near_identical_edit_still_creates_a_revision(self, tmp_repo):
-        # >70% token overlap with the previous content — a dedup-routed path would drop it.
+        # >70% token overlap with the previous content - a dedup-routed path would drop it.
         entry = _approved(tmp_repo)
         store.edit_decision(tmp_repo, entry["id"], content=APPROVED + " under load")
         after = _entry(tmp_repo, entry["id"])
@@ -237,7 +237,7 @@ class TestSubtype:
 
     @pytest.mark.parametrize("subtype", ["", "   ", "\t"])
     def test_a_blank_subtype_means_leave_it_alone(self, tmp_repo, subtype):
-        # Capture is permissive, so an unsubtyped legacy entry carries "" — and the console
+        # Capture is permissive, so an unsubtyped legacy entry carries "" - and the console
         # posts the field on every save. Rejecting "" made those decisions uneditable.
         entry = _approved(tmp_repo, subtype="architecture")
         ok, msg, payload = store.edit_decision(tmp_repo, entry["id"], title="Cache hot reads",
@@ -383,7 +383,7 @@ class TestSupersededProposal:
     def test_content_edit_supersedes_the_proposal(self, tmp_repo):
         entry = self._with_proposal(tmp_repo)
         ok, msg, _p = store.edit_decision(tmp_repo, entry["id"],
-                                          content="Use MySQL — Postgres was rejected on cost")
+                                          content="Use MySQL - Postgres was rejected on cost")
         assert ok
         assert "superseded" in msg
         assert "proposed_revision" not in _entry(tmp_repo, entry["id"])
@@ -391,7 +391,7 @@ class TestSupersededProposal:
     def test_approving_after_a_content_edit_cannot_revert_it(self, tmp_repo):
         entry = self._with_proposal(tmp_repo)
         store.edit_decision(tmp_repo, entry["id"],
-                            content="Use MySQL — Postgres was rejected on cost")
+                            content="Use MySQL - Postgres was rejected on cost")
         store.approve_decision(tmp_repo, entry["id"], "approve")
         # The whole point: the developer's edit is still what a session would replay.
         assert _entry(tmp_repo, entry["id"])["content"].startswith("Use MySQL")
@@ -399,7 +399,7 @@ class TestSupersededProposal:
     def test_the_superseded_proposal_is_kept_for_the_timeline(self, tmp_repo):
         entry = self._with_proposal(tmp_repo)
         store.edit_decision(tmp_repo, entry["id"],
-                            content="Use MySQL — Postgres was rejected on cost")
+                            content="Use MySQL - Postgres was rejected on cost")
         superseded = _entry(tmp_repo, entry["id"])["superseded_proposals"]
         assert len(superseded) == 1
         assert "read replicas" in superseded[0]["content"]

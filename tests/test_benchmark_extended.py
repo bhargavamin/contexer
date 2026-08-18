@@ -1,18 +1,18 @@
 """
-Extended Contexer benchmark — accuracy and reliability validation.
+Extended Contexer benchmark - accuracy and reliability validation.
 
 Run with:
     uv run pytest tests/test_benchmark_extended.py -v -s
 
 Tests:
-  1. Statistical reliability  — 100 runs per operation, p50/p95/p99/stddev
-  2. Token approximation      — validate word×1.3 vs char÷4 vs known examples
-  3. Display cap boundaries   — exactly at cap, one over, one under
-  4. Storage at capacity      — 500-entry cap enforcement and filter performance
-  5. Realistic prompt noise   — typos, truncation, multi-intent, indirect phrasing
-  6. Novelty threshold        — sensitivity sweep 50%–90% with false-neg/pos counts
-  7. Decision length          — short (5w), medium (25w), long (80w) effects on filter and tokens
-  8. Concurrent session       — atomic-write invariants: no torn JSON under concurrent writers/readers
+  1. Statistical reliability  - 100 runs per operation, p50/p95/p99/stddev
+  2. Token approximation      - validate word×1.3 vs char÷4 vs known examples
+  3. Display cap boundaries   - exactly at cap, one over, one under
+  4. Storage at capacity      - 500-entry cap enforcement and filter performance
+  5. Realistic prompt noise   - typos, truncation, multi-intent, indirect phrasing
+  6. Novelty threshold        - sensitivity sweep 50%–90% with false-neg/pos counts
+  7. Decision length          - short (5w), medium (25w), long (80w) effects on filter and tokens
+  8. Concurrent session       - atomic-write invariants: no torn JSON under concurrent writers/readers
 """
 
 import json
@@ -91,11 +91,11 @@ BASE_DECISIONS = [
     ("Authentication uses JWT access tokens with 15-minute expiry and httpOnly refresh cookies",    "architecture"),
     ("All services communicate internally via gRPC and expose REST only at the API gateway",        "architecture"),
     ("Always use conventional commits: feat fix docs refactor chore test as allowed types",         "convention"),
-    ("TypeScript strict mode is enabled globally — no any types allowed in production code",        "convention"),
+    ("TypeScript strict mode is enabled globally - no any types allowed in production code",        "convention"),
     ("No raw SQL outside repository classes to maintain clean data access boundaries",              "pattern"),
     ("Circuit breaker wraps every external HTTP call to prevent cascade failures across services",  "pattern"),
-    ("Never commit untested code to main — CI blocks merge if test coverage drops below threshold", "constraint"),
-    ("PII must never appear in logs — strip emails phone numbers and card data before logging",     "constraint"),
+    ("Never commit untested code to main - CI blocks merge if test coverage drops below threshold", "constraint"),
+    ("PII must never appear in logs - strip emails phone numbers and card data before logging",     "constraint"),
 ]
 
 
@@ -131,7 +131,7 @@ class TestStatisticalReliability:
     @pytest.mark.perf
     def test_get_context_latency_distribution(self):
         print(f"\n{'='*60}")
-        print(f"BENCHMARK 1 — Statistical reliability ({RUNS} runs each)")
+        print(f"BENCHMARK 1 - Statistical reliability ({RUNS} runs each)")
         print(f"{'='*60}")
 
         times_cold, times_warm = [], []
@@ -142,7 +142,7 @@ class TestStatisticalReliability:
             (times_cold if i == 0 else times_warm).append(elapsed)
 
         warm = _pstats(times_warm)
-        print(f"\n  get_context(query='postgresql') — {RUNS} runs")
+        print(f"\n  get_context(query='postgresql') - {RUNS} runs")
         print(f"    Cold (run 1):  {times_cold[0]:.3f}ms")
         _print_stats("Warm (runs 2-100)", warm)
         assert warm["p99"] < 5.0, f"p99 too slow: {warm['p99']:.3f}ms"
@@ -155,7 +155,7 @@ class TestStatisticalReliability:
             for _ in range(RUNS)
         ]
         stats = _pstats(times)
-        print(f"\n  get_context_for_prompt (rationale hit) — {RUNS} runs")
+        print(f"\n  get_context_for_prompt (rationale hit) - {RUNS} runs")
         _print_stats("Stats", stats)
         assert stats["p99"] < 10.0
 
@@ -168,7 +168,7 @@ class TestStatisticalReliability:
             times.append((time.perf_counter() - t) * 1000)
             assert result == ""
         stats = _pstats(times)
-        print(f"\n  get_context_for_prompt (no-op miss) — {RUNS} runs")
+        print(f"\n  get_context_for_prompt (no-op miss) - {RUNS} runs")
         _print_stats("Stats", stats)
         assert stats["mean"] < 1.0, f"No-op too slow: {stats['mean']:.3f}ms"
 
@@ -180,10 +180,10 @@ class TestStatisticalReliability:
             times.append((time.perf_counter() - t) * 1000)
         stats = _pstats(times)
         cv = stats["stddev"] / stats["mean"]
-        print(f"\n  Timing variance — get_context, {RUNS} runs")
+        print(f"\n  Timing variance - get_context, {RUNS} runs")
         print(f"    mean={stats['mean']:.3f}ms  stddev={stats['stddev']:.3f}ms  CV={cv:.2f}")
         if cv > 2.0:
-            print(f"    WARNING: high variance (CV={cv:.2f}) — single-run timing unreliable")
+            print(f"    WARNING: high variance (CV={cv:.2f}) - single-run timing unreliable")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -202,7 +202,7 @@ class TestTokenApproximationAccuracy:
 
     def test_word_vs_char_disagreement(self):
         print(f"\n{'='*60}")
-        print("BENCHMARK 2 — Token approximation accuracy")
+        print("BENCHMARK 2 - Token approximation accuracy")
         print(f"{'='*60}")
         print(f"\n  {'Text (first 50 chars)':<52} {'word×1.3':>10} {'char÷4':>8} {'diff%':>7}")
         print(f"  {'-'*77}")
@@ -213,7 +213,7 @@ class TestTokenApproximationAccuracy:
             errors.append(diff)
             print(f"  {text[:52]:<52} {w:>10} {c:>8} {diff:>6.1f}%")
         avg = statistics.mean(errors)
-        print(f"\n  Avg disagreement: {avg:.1f}%  — treat all token figures as ±20% estimates")
+        print(f"\n  Avg disagreement: {avg:.1f}%  - treat all token figures as ±20% estimates")
         assert avg < 40, f"Estimators diverge too much: {avg:.1f}%"
 
     def test_scales_linearly(self):
@@ -261,7 +261,7 @@ class TestDisplayCapBoundaries:
         shown = self._count(result)
         has_note = "showing" in result
         print(f"\n{'='*60}")
-        print("BENCHMARK 3 — Display cap boundaries")
+        print("BENCHMARK 3 - Display cap boundaries")
         print(f"{'='*60}")
         print(f"\n  Unfiltered cap=10:  10 stored → shows {shown}  truncation note: {'yes' if has_note else 'no'}")
         assert shown == 10
@@ -317,7 +317,7 @@ class TestStorageAtCapacity:
         repo = "/bench/full"
         original = store.STORE_DIR
         store.STORE_DIR = d
-        _write_direct(repo, 505)   # write 505 directly — cap keeps last 500
+        _write_direct(repo, 505)   # write 505 directly - cap keeps last 500
         store.STORE_DIR = original
         return d, repo
 
@@ -332,7 +332,7 @@ class TestStorageAtCapacity:
         data = json.loads((self.d / f"{slug}.json").read_text())
         count = len(data["entries"])
         print(f"\n{'='*60}")
-        print("BENCHMARK 4 — Storage at capacity (500 entries)")
+        print("BENCHMARK 4 - Storage at capacity (500 entries)")
         print(f"{'='*60}")
         print(f"\n  Wrote 505 directly → stored: {count}  (cap={store.MAX_ENTRIES})")
         assert count == store.MAX_ENTRIES
@@ -359,7 +359,7 @@ class TestStorageAtCapacity:
         stats = _pstats(times)
         print("\n  Retrieval latency at 500 entries (50 runs):")
         _print_stats("Stats", stats)
-        # Median is the real SLO — retrieval stays fast at capacity. p99 over 50 runs is the
+        # Median is the real SLO - retrieval stays fast at capacity. p99 over 50 runs is the
         # single worst sample, dominated by GC/scheduler hiccups on shared CI, so it gets 3x
         # headroom: it still catches a gross (e.g. O(n^2)) regression without flaking on noise.
         assert stats["p50"] < 50.0
@@ -401,7 +401,7 @@ class TestStorageAtCapacity:
 NOISY_PROMPTS = [
     # prompt, expected_hit, note
     ("why did we chooose postgresql over mongodb?",
-     True,  "✓ typo in 'chooose' — 'postgresql'(10) is keyword #1, matches decision"),
+     True,  "✓ typo in 'chooose' - 'postgresql'(10) is keyword #1, matches decision"),
     ("what was the reason we chose gRPC?",
      True,  "✓ 'chose'=stop word; only 'grpc'(4) extracted, matches decision"),
     ("why postgres?",
@@ -420,7 +420,7 @@ NOISY_PROMPTS = [
      False, "✓ fixed: \bover no longer matches 'coverage'; 'rendering' not stored → correct miss"),
     ("what is the reason for the repo pattern?",
      True,  "✓ Retrieval V1 (post-review): 'repo' prefix-expands to 'repository', matching the "
-            "'no raw SQL outside repository classes' decision — restores legacy \\bprefix parity "
+            "'no raw SQL outside repository classes' decision - restores legacy \\bprefix parity "
             "(the indexed path used to miss this while legacy substring-matched it)"),
 ]
 
@@ -434,12 +434,12 @@ class TestRealisticPromptNoise:
 
     def test_noisy_prompt_distribution(self):
         print(f"\n{'='*60}")
-        print("BENCHMARK 5 — Realistic prompt noise")
+        print("BENCHMARK 5 - Realistic prompt noise")
         print(f"{'='*60}")
         print("\n  Algorithm constraints:")
         print("    - Rationale word required (why/reason/rationale/decided...)")
         print("    - Content keyword: isalpha AND len >= 3 AND not stop word (jwt/api/sdk now included)")
-        print("    - Top 3 keywords by length searched (\\b left-boundary match — no mid-word false positives)")
+        print("    - Top 3 keywords by length searched (\\b left-boundary match - no mid-word false positives)")
         print(f"\n  {'Prompt':<55} {'Exp':>5} {'Act':>5} {'OK':>4}  Note")
         print(f"  {'-'*100}")
 
@@ -467,7 +467,7 @@ class TestRealisticPromptNoise:
         print("    - Top-3-by-length rule risks excluding the relevant keyword if 3+ longer irrelevant words exist")
         print("    - Short common words ('over') produce false positives via substring ('coverage')")
 
-        # All expected values were derived by tracing the algorithm — they should all match
+        # All expected values were derived by tracing the algorithm - they should all match
         assert correct == len(NOISY_PROMPTS), (
             f"Prediction mismatch: expected all {len(NOISY_PROMPTS)}, got {correct}. "
             f"This means the algorithm changed."
@@ -498,12 +498,12 @@ THRESHOLD_PAIRS = [
     (
         "authentication uses jwt tokens with short expiry and refresh cookie storage",
         "authentication relies on tokens with short expiry but different refresh mechanism",
-        "significant rewording — ~55% overlap",
+        "significant rewording - ~55% overlap",
     ),
     (
         "use typescript strict mode for type safety across all packages",
         "use python type hints for safety checking in backend services",
-        "different technology — ~20% overlap",
+        "different technology - ~20% overlap",
     ),
 ]
 
@@ -511,7 +511,7 @@ class TestNoveltyThresholdSensitivity:
 
     def test_measured_overlaps(self):
         print(f"\n{'='*60}")
-        print("BENCHMARK 6 — Novelty threshold sensitivity")
+        print("BENCHMARK 6 - Novelty threshold sensitivity")
         print(f"{'='*60}")
         print("\n  Measured overlap for each pair:")
         print(f"  {'Label':<45} {'Overlap':>8}")
@@ -521,7 +521,7 @@ class TestNoveltyThresholdSensitivity:
 
     def test_threshold_sweep(self):
         thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
-        print("\n  Threshold sweep — B=blocked (duplicate), P=passed (novel):")
+        print("\n  Threshold sweep - B=blocked (duplicate), P=passed (novel):")
         print(f"  {'Pair':<43}", end="")
         for t in thresholds:
             print(f"  {t:.2f}", end="")
@@ -558,7 +558,7 @@ class TestNoveltyThresholdSensitivity:
               f"→ {'PASSES (false negative)' if ov_c <= 0.70 else 'BLOCKED'} at 0.70")
         print(f"    Without commas vs no-commas rewrite: overlap={ov_k*100:.1f}%  "
               f"→ {'BLOCKED (correct)' if ov_k > 0.70 else 'PASSES'} at 0.70")
-        print(f"    Delta: {(ov_k - ov_c)*100:.1f}% — commas reduce measured overlap")
+        print(f"    Delta: {(ov_k - ov_c)*100:.1f}% - commas reduce measured overlap")
         assert ov_c < ov_k, "Commas must reduce measured overlap (confirms known limitation)"
 
 
@@ -602,7 +602,7 @@ class TestDecisionLengthSensitivity:
 
     def test_token_cost_by_length(self):
         print(f"\n{'='*60}")
-        print("BENCHMARK 7 — Decision length sensitivity")
+        print("BENCHMARK 7 - Decision length sensitivity")
         print(f"{'='*60}")
         print("\n  Token cost by length:")
         print(f"  {'Category':<12} {'Avg words':>10} {'word×1.3':>10} {'char÷4':>8}")
@@ -644,7 +644,7 @@ class TestDecisionLengthSensitivity:
         stored, _ = store.update_decision(self.repo, near_dup, SESSION, "architecture")
         print("\n  Long decision novelty filter (~80 words, minor conclusion change):")
         print(f"    Overlap: {ov*100:.1f}%  → {'BLOCKED ✓' if not stored else 'PASSED (false negative)'}")
-        print("    Long decisions are more robust to minor rewording — more signal tokens")
+        print("    Long decisions are more robust to minor rewording - more signal tokens")
 
     def test_session_start_tokens_by_length(self):
         print("\n  Session start tokens by decision length (all stored as convention/constraint):")
@@ -690,20 +690,20 @@ class TestConcurrentSessionIsolation:
         valid = final in (repo_a, repo_b)
 
         print(f"\n{'='*60}")
-        print("BENCHMARK 8 — Concurrent session isolation")
+        print("BENCHMARK 8 - Concurrent session isolation")
         print(f"{'='*60}")
         print("\n  .current_repo race (2 threads × 50 writes each):")
         print(f"    Final value:   {final!r}")
         print(f"    Corrupt:       {'no ✓' if valid else 'YES ✗'}")
         print("    Risk:          stale context (wrong repo), not corrupted data")
-        print("    Severity:      low — anchor hook corrects it on the next prompt")
+        print("    Severity:      low - anchor hook corrects it on the next prompt")
         assert valid, f"File corrupted: {final!r}"
 
     def test_store_file_integrity_under_concurrent_writes(self, tmp_path, monkeypatch):
         # INVARIANT: _save is atomic (temp file + os.replace), so no matter how
         # writers interleave, the store file on disk is always complete valid JSON.
-        # Lost updates (last-write-wins) can still happen — that needs locking and
-        # is reported informationally below — but a torn/corrupt file cannot.
+        # Lost updates (last-write-wins) can still happen - that needs locking and
+        # is reported informationally below - but a torn/corrupt file cannot.
         monkeypatch.setattr(store, "STORE_DIR", tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         repo = "/bench/concurrent"
@@ -728,7 +728,7 @@ class TestConcurrentSessionIsolation:
             t.join()
 
         store_file = tmp_path / f"{store._slug(repo)}.json"
-        data = json.loads(store_file.read_text())  # must parse — atomic save invariant
+        data = json.loads(store_file.read_text())  # must parse - atomic save invariant
         count = len(data["entries"])
 
         print("\n  Concurrent store writes (3 threads × 10 writes = 30 attempted):")
@@ -744,7 +744,7 @@ class TestConcurrentSessionIsolation:
 
     def test_reader_never_sees_torn_json_during_writes(self, tmp_path, monkeypatch):
         # INVARIANT: while writers continuously rewrite the store, every read of the
-        # file parses as valid JSON — readers see old-or-new content, never partial.
+        # file parses as valid JSON - readers see old-or-new content, never partial.
         # With the previous non-atomic write_text() this flaked; os.replace makes it law.
         monkeypatch.setattr(store, "STORE_DIR", tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)

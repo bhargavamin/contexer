@@ -105,7 +105,7 @@ class TestBuildEntries:
         entries = memory_sync._build_entries(memory_sync._parse_fact(MULTI), "project_spec.md")
         assert len(entries) == 3
         subtypes = {s for _, s, _ in entries}
-        # each section classified on its own — architecture + convention + constraint
+        # each section classified on its own - architecture + convention + constraint
         assert "architecture" in subtypes and "convention" in subtypes and "constraint" in subtypes
         assert all(c.startswith("[memory:project-spec]") for c, _, _ in entries)
         keys = {k for _, _, k in entries}
@@ -177,7 +177,7 @@ class TestUpdateInPlace:
         f = mem / "rule.md"
         f.write_text(_md("Use ruff", "Always run ruff before commit."))
         assert memory_sync.import_dir(mem, tmp_repo) == 1
-        # large rewrite — previously this added a near-duplicate; now it updates in place
+        # large rewrite - previously this added a near-duplicate; now it updates in place
         f.write_text(_md("Switch to black", "We now use black not ruff for all formatting and import sorting."))
         assert memory_sync.import_dir(mem, tmp_repo) == 0       # updated, not created
         data = json.loads(store._store_path(tmp_repo).read_text())

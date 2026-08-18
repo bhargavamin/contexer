@@ -2,7 +2,7 @@
 
 Module-level imports are confined to a small stdlib set on purpose. `ensure_running` runs on the
 SessionStart hook path, where importing `contexer.store` costs a measured 134ms and
-`importlib.metadata` a further 28ms — against a whole-check budget of ~0.3ms warm. Anything
+`importlib.metadata` a further 28ms - against a whole-check budget of ~0.3ms warm. Anything
 heavier than the imports below (config, http.client, tempfile) is imported inside the one
 function that needs it, or hand-rolled. A test enforces the allowlist.
 
@@ -33,7 +33,7 @@ MINT_GRACE_SECONDS = 1.0     # how long an empty statefile is assumed to be a li
 CLAIM_WAIT_SECONDS = 0.25
 CLAIM_WAIT_TICK = 0.002
 
-# Path duplicated instead of taken from store.STORE_DIR — see the module docstring.
+# Path duplicated instead of taken from store.STORE_DIR - see the module docstring.
 _STATE_DIR = pathlib.Path.home() / ".contexer"
 STATE_PATH = _STATE_DIR / "ui.json"
 LOG_PATH = _STATE_DIR / "ui.log"
@@ -123,7 +123,7 @@ def probe(port: int, token: str) -> bool:
 
 
 def port_occupied(port: int) -> bool:
-    """True when something accepts a connection on `port`. Says nothing about what it is —
+    """True when something accepts a connection on `port`. Says nothing about what it is -
     telling our daemon from a foreign process is `probe`'s job."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT):
@@ -162,14 +162,14 @@ def ensure_running(port: int | None = None) -> tuple[int, str] | None:
     """Return (port, token) of a live console daemon, spawning one if needed, else None.
 
     `port` says where a NEW daemon binds; a live one always wins, so the port returned can differ
-    from the port asked for — one console per machine, one statefile describing it. A caller that
+    from the port asked for - one console per machine, one statefile describing it. A caller that
     must honour a requested port checks read_state()/is_alive() itself first (cli.ui_cmd refuses
     rather than print a URL for a port nothing is bound on); moving a live console means stopping
     it, which is the caller's decision to take, not this function's.
 
     Never raises and never waits on the child: a console failure must cost the caller nothing but
     the console. The warm path does no I/O beyond one read and one probe. The only sleep is the
-    upgrade path's wait for the old daemon's port, which a caller cannot be spared — without it
+    upgrade path's wait for the old daemon's port, which a caller cannot be spared - without it
     the URL returned here would be dead."""
     try:
         version = current_version()
@@ -235,7 +235,7 @@ def pairing_code(token: str, now: float | None = None) -> str:
 
 
 def verify_pairing_code(token: str, code: str, now: float | None = None) -> bool:
-    """Accept the current or previous window — a URL printed at 09:59 is still clickable at
+    """Accept the current or previous window - a URL printed at 09:59 is still clickable at
     10:01. Constant-time, and tolerant of arbitrary query-string bytes."""
     window = _window(now)
     supplied = code.encode("utf-8", "replace")  # a real code is base32; any byte is comparable
@@ -265,8 +265,8 @@ def _code(token: str, window: int) -> str:
 def _stale_statefile() -> bool:
     """True when the statefile exists but cannot describe any daemon, so re-minting is safe.
 
-    A zero-byte file is the one shape that might be a live race — `_claim_state` creates the file
-    before filling it — so it gets a grace window. Anything non-empty that still does not parse is
+    A zero-byte file is the one shape that might be a live race - `_claim_state` creates the file
+    before filling it - so it gets a grace window. Anything non-empty that still does not parse is
     wreckage: no writer of ours produces it, and nothing is coming back to finish it."""
     try:
         stat = STATE_PATH.stat()

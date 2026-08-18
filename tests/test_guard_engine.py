@@ -34,7 +34,7 @@ def git_repo(tmp_path, monkeypatch):
     return repo
 
 
-# "café/módulo.py" — built from escapes on purpose: a pasted glyph is invisible
+# "café/módulo.py" - built from escapes on purpose: a pasted glyph is invisible
 # in a diff and easy to mangle. Any path outside ASCII is C-quoted by
 # `git diff --cached --name-only` without `-z`.
 _NON_ASCII_REL = "caf\u00e9/m\u00f3dulo.py"
@@ -61,7 +61,7 @@ def _commit(repo, message="init"):
 
 @pytest.fixture
 def repo(git_repo, monkeypatch):
-    """`git_repo` with STORE_DIR redirected to a sibling temp dir — for Task-2 tests
+    """`git_repo` with STORE_DIR redirected to a sibling temp dir - for Task-2 tests
     that read/write the store or the guard's sidecar files, not just git plumbing.
     Same pattern as test_store.py's tmp_repo / session_repo_preferred_over_pointer."""
     monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
@@ -73,7 +73,7 @@ def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
                  title="", session_id="test-session", approved_by=None):
     """Build a decision entry via the real entry constructor (so revisions/
     current_revision_id/status/source all come out shaped exactly like production
-    data) and append it directly to the (repo or global) store — bypassing the
+    data) and append it directly to the (repo or global) store - bypassing the
     novelty filter, which is irrelevant to the guard engine's own tests."""
     entry = store._new_decision_entry(content, session_id, subtype,
                                        created_by=created_by, status=status, title=title)
@@ -139,7 +139,7 @@ class TestStagedFiles:
     def test_non_ascii_path_is_returned_unquoted(self, git_repo):
         """`--name-only` C-quotes any path outside ASCII (\"caf\\303\\251/...\"),
         and the quoted spelling survives canonicalization only to make every
-        later `git show :<path>` fail — silently skipping the file. `-z` turns
+        later `git show :<path>` fail - silently skipping the file. `-z` turns
         quoting off entirely."""
         relpath = _NON_ASCII_REL
         _write(git_repo, relpath, "x = 1\n")
@@ -159,7 +159,7 @@ class TestStagedContent:
     def test_returns_index_not_working_tree_content(self, git_repo):
         _write(git_repo, "f.py", "committed\n")
         _git(git_repo, "add", "f.py")
-        # edit working tree WITHOUT staging — index still holds the old content
+        # edit working tree WITHOUT staging - index still holds the old content
         _write(git_repo, "f.py", "working-tree-only\n")
 
         assert guard_engine._staged_content(str(git_repo), "f.py") == "committed\n"
@@ -210,7 +210,7 @@ class TestMergeInProgress:
         _git(git_repo, "add", "a.txt")
         _commit(git_repo, "main change")
 
-        # conflicting merge — leaves MERGE_HEAD without completing
+        # conflicting merge - leaves MERGE_HEAD without completing
         _git(git_repo, "merge", "other", check=False)
 
         assert guard_engine._merge_in_progress(str(git_repo)) is True
@@ -237,7 +237,7 @@ class TestGuardRelpath:
 
     def test_nonexistent_file_still_canonicalizes(self, git_repo):
         # guard scans staged paths before they necessarily exist on disk in every
-        # caller's mental model — canonicalization must not require existence.
+        # caller's mental model - canonicalization must not require existence.
         assert guard_engine._guard_relpath(str(git_repo), "src/does_not_exist.py") == "src/does_not_exist.py"
 
     def test_root_level_file(self, git_repo):
@@ -245,7 +245,7 @@ class TestGuardRelpath:
         assert guard_engine._guard_relpath(str(git_repo), "top.py") == "top.py"
 
     def test_failure_returns_empty_string(self):
-        # a None path can't be resolved — must fail soft, never raise
+        # a None path can't be resolved - must fail soft, never raise
         assert guard_engine._guard_relpath("/tmp/somewhere", None) == ""
 
 
@@ -296,7 +296,7 @@ class TestArtifactPathMatch:
 
     def test_multisegment_suffix_requires_path_boundary(self):
         # "za/utils.py" ends with "a/utils.py" as raw characters but NOT at a "/"
-        # boundary — must not match.
+        # boundary - must not match.
         assert guard_engine._artifact_path_match("a/utils.py", "za/utils.py") is False
 
     def test_bare_basename_never_matches_nested_file(self):
@@ -319,7 +319,7 @@ class TestArtifactPathMatch:
         assert guard_engine._artifact_path_match("contexer/store.py", "") is False
 
 
-# ── Task 2: Tier-1 advisory engine — pairing, throttle, dismissals ──────────
+# ── Task 2: Tier-1 advisory engine - pairing, throttle, dismissals ──────────
 
 
 # ── _guard_trusted ────────────────────────────────────────────────────────────
@@ -394,7 +394,7 @@ class TestGuardTrusted:
 
     def test_ai_created_without_approved_by_stays_untrusted(self, repo):
         # Regression pin: approved status alone (no approved_by) must NOT be
-        # enough for an ai-sourced entry — this is the pre-#180 behavior and
+        # enough for an ai-sourced entry - this is the pre-#180 behavior and
         # must still hold for entries no human ever explicitly ratified.
         entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
                              status="approved")
@@ -402,7 +402,7 @@ class TestGuardTrusted:
         assert guard_engine._guard_trusted(entry) is False
 
     def test_approved_by_human_without_approved_status_stays_untrusted(self, repo):
-        # The status gate is still checked FIRST — approved_by alone can't
+        # The status gate is still checked FIRST - approved_by alone can't
         # short-circuit a pending/suggested/ignored entry.
         entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="ai",
                              status="pending_approval", approved_by="human")
@@ -470,7 +470,7 @@ class TestDismissGuard:
         assert guard_engine._dismissed_guard(str(repo)) == set()
 
     def test_dismiss_can_raise_on_bad_store_dir(self, repo, monkeypatch):
-        # dismiss_guard is the management path — deliberately NOT fail-soft, unlike
+        # dismiss_guard is the management path - deliberately NOT fail-soft, unlike
         # the run path. Point STORE_DIR at a location that can't be created (a file,
         # not a dir, in its place) and confirm the error propagates.
         blocker = repo.parent / "not_a_dir"
@@ -498,7 +498,7 @@ class TestGuardPairs:
 
     def test_source_files_are_canonicalized_before_comparison(self, repo):
         """source_files must go through _guard_relpath like every other path the
-        guard compares — an absolute or "./"-prefixed anchor still names the same
+        guard compares - an absolute or "./"-prefixed anchor still names the same
         staged file."""
         entry = _seed_entry(repo, "Decided to use JWT for auth",
                              source_files=[str(repo / "auth" / "jwt.py"), "./other.py"])
@@ -585,7 +585,7 @@ class TestGuardPairs:
         assert pairs[0]["emitted"] is True
 
     def test_global_decision_source_files_never_consulted(self, repo):
-        # Brief: global entries have no source_files — they pair via artifact match
+        # Brief: global entries have no source_files - they pair via artifact match
         # only. Even if a global entry somehow carried source_files, guard must not
         # honor them for scope=global.
         _seed_entry(repo, "Unrelated content with no artifacts", global_store=True,
@@ -616,13 +616,13 @@ class TestGuardPairs:
     def test_anchor_candidates_never_pair_but_pair_after_approval(self, repo):
         """THE invariant test for issue #175 Task 3: a decision captured without
         source_files, whose session edited auth/jwt.py, accrues that file only as an
-        `anchor_candidates` guess — never real `source_files` — so it must pair NOTHING
+        `anchor_candidates` guess - never real `source_files` - so it must pair NOTHING
         with the guard while pending. Only the human's approval blesses the candidate
         into a real anchor via _anchor_sources, at which point it pairs normally.
 
         created_by="plan" (not the "ai" default) so the entry both lands pending_approval
         (constraint subtype forces approval_required for plan too, same as ai) AND is a
-        _guard_trusted-eligible source once approved — an "ai"-sourced entry stays
+        _guard_trusted-eligible source once approved - an "ai"-sourced entry stays
         guard-untrusted forever regardless of approval, which would make this test unable
         to observe the "pairs after approval" half of the invariant."""
         store.record_edited_file(str(repo), "auth/jwt.py")
@@ -635,7 +635,7 @@ class TestGuardPairs:
         assert "source_files" not in entry
         assert entry["status"] == "pending_approval"
 
-        # Pending: candidates carry zero pairing signal — not even an untrusted candidate.
+        # Pending: candidates carry zero pairing signal - not even an untrusted candidate.
         pairs = guard_engine._guard_pairs(str(repo), ["auth/jwt.py"])
         assert pairs == []
 
@@ -657,7 +657,7 @@ class TestGuardPairs:
 class TestGuardTrustsLegacyRevisionsAtReadTime:
     """A legacy store entry whose revision carries an explicit falsy `source` (predates
     provenance tracking) becomes trust-eligible via `_guard_trusted`'s read-time fallback
-    to `created_by` — NOT via any storage rewrite. Binding ruling: the stored `source`
+    to `created_by` - NOT via any storage rewrite. Binding ruling: the stored `source`
     must stay exactly as persisted (None stays None) because `share.py`'s `_wire_source`
     deliberately preserves `source: None` end-to-end as honest unknown provenance on the
     push wire; back-stamping it in storage would fabricate a false provenance there."""
@@ -711,7 +711,7 @@ class TestGuardTrustsLegacyRevisionsAtReadTime:
     def test_legacy_source_stays_none_through_load_and_share_projection(self, repo):
         """Regression pin for the binding ruling: `_load` must never fabricate a
         provenance value onto a legacy revision's falsy `source`, and the share wire
-        projection built from that loaded entry must still carry `source: None` —
+        projection built from that loaded entry must still carry `source: None` -
         `share._wire_source` relies on this to pass None through as honest unknown
         provenance rather than coercing it to a false "ai"."""
         store._save(str(repo), self._legacy_data(created_by="human", rev_source=None))
@@ -756,7 +756,7 @@ class TestGuardStaged:
 
     def test_constraint_capture_to_advisory_end_to_end(self, repo):
         """The full flow loop, finally guard-visible (issue #175, review fix I3): a deictic
-        user constraint captured in the HOOK process (pending_approval, created_by="human" —
+        user constraint captured in the HOOK process (pending_approval, created_by="human" -
         guard-TRUSTED once approved, so the highest-value candidate carrier there is)
         accrues the repo's edited files as candidates, pairs NOTHING while pending, and
         surfaces a real advisory through guard_staged once the developer approves it."""
@@ -853,7 +853,7 @@ class TestGuardStaged:
         assert result["total_advisories"] == 7
 
     def test_capped_pairs_beyond_limit_not_stamped(self, repo):
-        # Only the surfaced (capped) advisories are stamped — an uncapped pair must
+        # Only the surfaced (capped) advisories are stamped - an uncapped pair must
         # still be free to advise on a later run once earlier ones are dismissed.
         for i in range(7):
             _seed_entry(repo, f"Decision number {i} about auth handling",
@@ -905,13 +905,13 @@ class TestGuardStaged:
     def test_paths_override_used_instead_of_git_staged(self, repo):
         _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         _write(repo, "auth/jwt.py", "token = 1\n")
-        # deliberately not `git add`ed — paths= must be honored over real staged state
+        # deliberately not `git add`ed - paths= must be honored over real staged state
         result = guard_engine.guard_staged(str(repo), paths=["auth/jwt.py"])
         assert len(result["advisories"]) == 1
 
 
 class TestApprovalTimeAnchorGuardPairing:
-    """End-to-end: this is the reason issue #172 exists — a decision anchored at
+    """End-to-end: this is the reason issue #172 exists - a decision anchored at
     APPROVAL time (not just at capture time) must pair in guard_staged."""
 
     def test_approve_with_source_files_pairs_in_guard_staged(self, repo):
@@ -920,7 +920,7 @@ class TestApprovalTimeAnchorGuardPairing:
         _commit(repo, "init")
 
         # created_by="plan" + subtype="constraint": lands pending_approval (needs a human
-        # look), but its revision source ("plan") is guard-trusted once approved — unlike
+        # look), but its revision source ("plan") is guard-trusted once approved - unlike
         # "ai", which stays untrusted even after approval (see TestGuardTrusted).
         stored, eid = store.update_decision(str(repo), "Always use JWT for session auth, "
                                              "never plain cookies", "s1", "constraint",
@@ -948,7 +948,7 @@ class TestApprovalTimeAnchorGuardPairing:
     def test_approve_ai_captured_pairs_in_guard_staged_180(self, repo):
         """Issue #180: an ai-captured decision (the dominant capture path) that a
         developer EXPLICITLY approves must clear the guard's provenance gate via
-        `approved_by == "human"`, even though its revision `source` stays 'ai' —
+        `approved_by == "human"`, even though its revision `source` stays 'ai' -
         never itself a member of `_GUARD_TRUSTED_SOURCES`. Before #180 this entry
         stayed guard-inert forever; only `plan`-sourced captures gained
         guard-visible anchors at approval time."""
@@ -1045,7 +1045,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
             "timestamp": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
             "revision": 1,
-            # status/created_by deliberately absent — pre-provenance entry.
+            # status/created_by deliberately absent - pre-provenance entry.
         }
         store._save(str(repo), {"entries": [legacy]})
         entry = store._load(str(repo))["entries"][0]
@@ -1056,7 +1056,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
 
     def test_global_ai_capture_never_sets_approved_by(self, repo):
         # update_global_decision's MCP path (update_global_context) leaves
-        # created_by at its "ai" default and stores status="approved" directly —
+        # created_by at its "ai" default and stores status="approved" directly -
         # no _apply_approval involvement, so approved_by is never set.
         ok, eid = store.update_global_decision("Never log raw request bodies", "s1",
                                                 "constraint")
@@ -1073,7 +1073,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
 class TestApprovedByStampInvalidatedByNonHumanRevision:
     """`approved_by` is an ENTRY-level stamp, but pattern/convention trivial updates via
     `update_context(replace_id=...)` (and memory-sync refreshes) apply IN PLACE as a new
-    current revision (`_append_revision`) — before this fix the entry kept its 'human' stamp
+    current revision (`_append_revision`) - before this fix the entry kept its 'human' stamp
     while the live content became unreviewed AI/tool text, so the guard trusted (and advised
     with) content the developer never actually saw. `_append_revision` now pops `approved_by`
     whenever the new revision's `source` isn't 'human'; a genuine ratification site
@@ -1106,7 +1106,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
     def test_developer_approving_the_change_restores_trust(self, repo):
         """A significant (architecture/constraint) AI change to a human-approved entry
-        lands as a Suggested Update instead of applying silently — the live entry (and its
+        lands as a Suggested Update instead of applying silently - the live entry (and its
         stamp) stays untouched until the developer actually approves it, at which point
         trust is restored on the new content."""
         entry = _seed_entry(repo, "Rollback endpoint is /api/v1/rollback", created_by="ai",
@@ -1135,7 +1135,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
     def test_suggested_update_promotion_ordering_pin(self, repo):
         """Ordering pin: `_apply_approval` stamps `approved_by` AFTER `_promote_proposal`
-        (which calls `_append_revision` with the proposal's own source — 'ai' by default,
+        (which calls `_append_revision` with the proposal's own source - 'ai' by default,
         NOT 'human'). If a future change stamped BEFORE promoting again, the chokepoint's
         invalidation would immediately erase the stamp the approval action just set, and
         this assertion would catch it. The promoted revision's own `source` field stays
@@ -1157,7 +1157,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
     def test_memory_sync_in_place_update_invalidates_stamp(self, repo):
         """A memory-imported fact refreshed in place (source='memory') is tool-written, not
-        human-reviewed — the same invalidation must apply."""
+        human-reviewed - the same invalidation must apply."""
         entry = _seed_entry(repo, "Use bcrypt for password hashing", created_by="memory",
                              status="approved", approved_by="human",
                              source_files=["auth/hash.py"])
@@ -1182,7 +1182,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
 class TestConfidenceRecomputedAfterStampInvalidation:
     """`_append_revision` used to snapshot confidence (`_compute_confidence`) BEFORE
-    popping `approved_by` — so a non-human revision replacing human-approved content still
+    popping `approved_by` - so a non-human revision replacing human-approved content still
     carried the ~40-point approval bonus and the "Approved by developer" evidence factor on
     the freshly-created revision (and the resynced head cache), even though `approved_by`
     itself was gone from the entry a moment later. The fix pops the stamp first, then
@@ -1315,7 +1315,7 @@ class TestGuardCandidates:
         _git(repo, "add", "auth/jwt.py")
         guard_engine.guard_candidates(str(repo), explain=True)
         assert guard_engine._guard_advised(str(repo)) == {}
-        # A subsequent guard_staged run must still advise — proof nothing was stamped.
+        # A subsequent guard_staged run must still advise - proof nothing was stamped.
         result = guard_engine.guard_staged(str(repo))
         assert len(result["advisories"]) == 1
 
@@ -1361,7 +1361,7 @@ class TestDecisionsForFiles:
         assert hits == []
 
     def test_pending_decision_still_hits(self, repo):
-        # Unlike _guard_pairs, retrieval has no guard-trust filter — an untrusted
+        # Unlike _guard_pairs, retrieval has no guard-trust filter - an untrusted
         # (pending/ai) decision still governs the file, it just carries its real
         # status so the caller can render a [pending] tag.
         entry = _seed_entry(repo, "Decided to use JWT for auth", created_by="ai",
@@ -1387,7 +1387,7 @@ class TestDecisionsForFiles:
 
     def test_source_files_beats_artifact_reason(self, repo):
         # A decision whose content also mentions an artifact for a DIFFERENT queried
-        # file must still report "source_files match" as its overall reason — the
+        # file must still report "source_files match" as its overall reason - the
         # strongest signal wins, even though it wasn't the first file matched.
         entry = _seed_entry(
             repo,
@@ -1514,7 +1514,7 @@ class TestAnchorCandidatesForBackfill:
 
     def test_two_segment_literal_filename_not_mistaken_for_module(self, repo):
         # "config.yaml" also satisfies the dotted-module shape (two lowercase
-        # segments) — it must still resolve to the literal file, not a bogus
+        # segments) - it must still resolve to the literal file, not a bogus
         # "config/yaml.py" module guess.
         _write(repo, "config.yaml", "key: value\n")
         entry = _seed_entry(repo, "See config.yaml for the tool's default settings")
@@ -1525,7 +1525,7 @@ class TestAnchorCandidatesForBackfill:
 
     def test_literal_and_module_spellings_coexist_as_separate_candidates(self, repo):
         # A literal file named "contexer.store" (no extension) alongside the real
-        # module file "contexer/store.py" — both existing spellings of the same
+        # module file "contexer/store.py" - both existing spellings of the same
         # dotted artifact surface as separate candidates. Accepted behavior (the
         # literal-first, module-mapping-as-additional-guesses shape in
         # _artifact_path_spellings does not treat the two as exclusive), now
@@ -1634,7 +1634,7 @@ class TestApplyBackfillAnchors:
     def test_already_anchored_entry_is_never_overwritten(self, repo):
         """Write-layer invariant: a decision already anchored by the time this batch
         runs (e.g. a concurrent session anchored it while the developer was mid-loop
-        in `guard anchors`) must be left byte-identical — never re-anchored — even
+        in `guard anchors`) must be left byte-identical - never re-anchored - even
         though it was explicitly selected in this batch. Other selections in the
         SAME batch still apply normally."""
         _write(repo, "auth/jwt.py", "x\n")
@@ -1644,7 +1644,7 @@ class TestApplyBackfillAnchors:
         already_anchored = _seed_entry(repo, "See auth/jwt.py for the JWT decision",
                                         source_files=["auth/jwt.py"])
         # No anchor_commit stamped by _seed_entry (it sets source_files directly,
-        # bypassing _anchor_sources) — a real pre-existing anchor snapshot to diff
+        # bypassing _anchor_sources) - a real pre-existing anchor snapshot to diff
         # against for byte-identity.
         before = copy.deepcopy(
             next(e for e in store._load(str(repo))["entries"]
@@ -1669,7 +1669,7 @@ class TestAnchorBackfillEndToEnd:
     def test_backfilled_decision_pairs_when_file_staged(self, repo):
         """What backfill actually buys, stated discriminatingly: every backfill candidate is
         mined from the decision's own content by the SAME extraction _guard_pairs uses, so
-        the decision ALREADY pairs before backfill — via `path artifact ...`. Backfill turns
+        the decision ALREADY pairs before backfill - via `path artifact ...`. Backfill turns
         that into a real `source_files` anchor: the pairing reason firms up to `source_files
         match`, and (the real prize) the entry gains the anchor_commit that _staleness_note
         needs. It does NOT add new Tier-1 advisories."""
@@ -1697,7 +1697,7 @@ class TestAnchorBackfillEndToEnd:
             str(repo), {entry["id"]: candidates[0]["candidates"]})
         assert applied == 1
 
-        # AFTER: the SAME single advisory, now on the firmer signal — plus the anchor
+        # AFTER: the SAME single advisory, now on the firmer signal - plus the anchor
         # (source_files + anchor_commit) staleness tracking requires. The staged content is
         # changed first: the throttle is content-keyed, so re-running against the identical
         # blob would surface nothing regardless of the anchor.
@@ -1982,7 +1982,7 @@ class TestGuardStagedViolations:
     def test_non_ascii_filename_is_actually_scanned(self, repo):
         """Regression: a C-quoted staged path made `git show :<path>` fail, so
         `_staged_content` returned "" and every armed rule silently skipped the
-        file — a secret in it would have sailed through."""
+        file - a secret in it would have sailed through."""
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
         _write(repo, _NON_ASCII_REL, "# TODO fix this\n")
@@ -1996,12 +1996,12 @@ class TestGuardStagedViolations:
         bytes are not valid UTF-8 at all (not just non-ASCII). Decoding it with
         errors="replace" (the pre-fix behaviour) collapses the bad byte to
         U+FFFD, a lossy spelling that can never round-trip back through `git
-        show :<path>` — _staged_content then returns "" and every armed rule
+        show :<path>` - _staged_content then returns "" and every armed rule
         silently skips the file, the same silent-bypass class the C-quoting fix
         closed one layer up. errors="surrogateescape" + re-encoding via
         os.fsencode keeps the real bytes addressable end to end.
 
-        Built from raw bytes via os.open on a bytes path — never a pasted
+        Built from raw bytes via os.open on a bytes path - never a pasted
         glyph, and never routed through the str-based _write/_git helpers,
         since a genuinely invalid byte can't round-trip through a Python str
         without surrogateescape already applied. macOS (APFS) rejects
@@ -2132,7 +2132,7 @@ class TestGuardStagedViolations:
         assert result == {"advisories": [], "violations": [], "error": True}
 
     def test_large_repo_completes_well_inside_the_budget(self, repo):
-        """Perf regression (functional, not a benchmark — the budget is a hard
+        """Perf regression (functional, not a benchmark - the budget is a hard
         bound the guard fails open on): 500 staged paths against a 500-decision
         store used to run the pairing loop as files x decisions x artifacts,
         measured at ~9s for 1000 staged files. Bound generously so CI variance
@@ -2194,7 +2194,7 @@ class TestWireSafety:
 
     def test_share_projection_source_files_present_but_guard_and_anchor_never_egress(self, repo):
         # issue #174 Task 5: source_files becomes a deliberate projection field, but that must
-        # not loosen the whitelist — guard_check/anchor_candidates/anchor_commit still never
+        # not loosen the whitelist - guard_check/anchor_candidates/anchor_commit still never
         # appear, even on an entry that carries all of them at once.
         entry = _seed_entry(repo, "Use JWT tokens for session auth",
                             source_files=["auth/jwt.py"])
@@ -2236,7 +2236,7 @@ class TestStoreReexportIdentity:
 
 class TestImportOrderRegression:
     """store.py's guard re-export used to be an eager `from contexer.guard_engine
-    import ...` at the bottom of the file — a real cycle with guard_engine's own
+    import ...` at the bottom of the file - a real cycle with guard_engine's own
     top-level `from contexer import store`, which only resolved when store.py
     happened to be the module that started loading first. `import
     contexer.guard_engine` (or `from contexer import guard_engine`) as the very

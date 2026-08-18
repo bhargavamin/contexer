@@ -109,7 +109,7 @@ class TestGeminiRuntime:
 
     def test_after_write_records_edited_file(self, home, tmp_path):
         # issue #175 Task 2: the same edited-files signal Claude/Codex record via
-        # PostToolUse — Gemini records it from AfterTool(write_file|replace) instead.
+        # PostToolUse - Gemini records it from AfterTool(write_file|replace) instead.
         repo = str(tmp_path / "repo")
         raw = json.dumps({
             "session_id": "s1",
@@ -148,7 +148,7 @@ class TestGeminiRuntime:
     def test_compress_flag_rehydrates_working_set(self, home, tmp_path):
         # session_id threading (Retrieval V1 compact-reload parity): a reload after
         # compression rehydrates the CONTENT of decisions the router already surfaced this
-        # session, not just the general rules — mirroring Claude's SessionStart(compact).
+        # session, not just the general rules - mirroring Claude's SessionStart(compact).
         repo = str(tmp_path / "repo")
         store.update_decision(
             repo, "JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies",
@@ -180,7 +180,7 @@ class TestGeminiRuntime:
 
     def test_reload_still_fires_review_nudge(self, home, tmp_path):
         # Greptile #3: a reload reloads get_context (which EXCLUDES pending decisions), so the
-        # review nudge must still fire — not be silently swallowed by the reload branch.
+        # review nudge must still fire - not be silently swallowed by the reload branch.
         repo = str(tmp_path / "repo")
         raw = json.dumps({"session_id": "s1", "prompt": "continue"})
         store.update_decision(repo, "Never deploy on Fridays", "s1", "constraint")
@@ -222,8 +222,8 @@ class TestGeminiRuntime:
 class TestGeminiAfterWriteHookCwdFallback:
     """Greptile P1, PR #181: in a non-git project the installed AfterTool hook's shell
     wrapper computes an empty $REPO (`git rev-parse --show-toplevel || true`), and
-    after_write used to resolve that via `store._resolve_repo`, which — in this
-    hook-invoked process (not the MCP server, so `_SESSION_REPO` is always empty) —
+    after_write used to resolve that via `store._resolve_repo`, which - in this
+    hook-invoked process (not the MCP server, so `_SESSION_REPO` is always empty) -
     falls through to the shared `.current_repo` pointer, recording the edit under
     whatever OTHER repo that pointer names (or discarding it). Fixed by falling back to
     the hook's own cwd (`store._hook_cwd_repo`), matching claude.post_write."""
@@ -270,13 +270,13 @@ class TestGeminiAfterWriteHookCwdFallback:
 
 class TestGeminiBeforeAgentHookCwdFallback:
     """Greptile P1 #2, PR #181, follow-up to 3fde7aa: after_write records the edited-file
-    signal under `store._hook_cwd_repo`, but `before_agent` — where CAPTURE actually runs
-    (`capture_user_constraint`, plus the pending-review nudge and context payloads) — used
+    signal under `store._hook_cwd_repo`, but `before_agent` - where CAPTURE actually runs
+    (`capture_user_constraint`, plus the pending-review nudge and context payloads) - used
     to resolve its repo via bare `store._resolve_repo`, which in this hook-invoked process
     (not the MCP server, so `_SESSION_REPO` is always empty) falls through to the shared
     `.current_repo` pointer on an empty hook-supplied repo. In a non-git project, if another
     session moved the pointer between hook events, the edit was recorded under the
-    cwd-keyed store while capture read anchor candidates from the pointer-keyed store — a
+    cwd-keyed store while capture read anchor candidates from the pointer-keyed store - a
     writer/reader repo-key split, the same shape as the session-id bug covered by
     TestAnchorCandidates.test_hook_written_signal_reaches_a_different_server_session in
     test_store.py, now at the repo-key level. Fixed by resolving through
@@ -307,7 +307,7 @@ class TestGeminiBeforeAgentHookCwdFallback:
         assert entries[0]["status"] == "pending_approval"
         assert entries[0].get("anchor_candidates") == ["src/a.py"], (
             "capture must read anchor candidates from the SAME cwd-keyed store after_write "
-            "recorded the edit into — this is the writer/reader agreement regression test"
+            "recorded the edit into - this is the writer/reader agreement regression test"
         )
 
     def test_pointer_never_hijacks_either_side(self, home, tmp_path, monkeypatch):

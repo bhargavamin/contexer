@@ -1,6 +1,6 @@
 """Tests for the console's auth guard: pairing codes, cookie, csrf, Host/Origin, allowlists.
 
-Every test drives a REAL server bound to an ephemeral loopback port over http.client — the
+Every test drives a REAL server bound to an ephemeral loopback port over http.client - the
 guard lives in header handling, so a direct call to the handler would prove nothing.
 """
 import http.client
@@ -57,7 +57,7 @@ class Reply:
 
 def call(srv, method, path, *, body=None, raw=None, host=None, cookie=None, token=None,
          origin=None, poll=False, extra=None):
-    """One request with exactly the headers a test asks for — no implicit credentials."""
+    """One request with exactly the headers a test asks for - no implicit credentials."""
     headers = {"Host": f"127.0.0.1:{srv.port}" if host is None else host}
     if cookie is not None:
         headers["Cookie"] = f"ctx_ui={cookie}"
@@ -81,7 +81,7 @@ def call(srv, method, path, *, body=None, raw=None, host=None, cookie=None, toke
 
 
 def raw(srv, payload: bytes, *, timeout=10.0) -> bytes:
-    """A request written straight onto the socket — http.client refuses to send these."""
+    """A request written straight onto the socket - http.client refuses to send these."""
     with socket.create_connection(("127.0.0.1", srv.port), timeout=timeout) as sock:
         sock.sendall(payload)
         received = b""
@@ -216,7 +216,7 @@ def test_a_pairing_code_authenticates_the_exchange_route_and_nothing_else(consol
 
 def test_a_pairing_code_alone_cannot_write_a_global_rule(console):
     """The exploit chain, blocked at its first step: `?p=CODE` on /healthz used to hand out the
-    csrf value, and the two together wrote a global rule — persistent prompt injection into
+    csrf value, and the two together wrote a global rule - persistent prompt injection into
     every repo on the machine. A code buys a redirect and a cookie, nothing else."""
     code = daemon.pairing_code(console.token)
     assert call(console, "GET", f"/healthz?p={code}").status == 403
@@ -252,7 +252,7 @@ def test_a_wrong_token_or_cookie_is_rejected(console):
 
 def test_the_csrf_value_in_the_token_header_authenticates(console):
     """The contract accepts either secret in X-Contexer-Token. The csrf value only ever comes
-    from an already-authenticated /healthz, so honouring it grants no new reach — and the outer
+    from an already-authenticated /healthz, so honouring it grants no new reach - and the outer
     gate must not reject the very header the mutation guard then asks for."""
     assert call(console, "GET", "/api/stores", token=console.csrf).status == 200
 
@@ -281,7 +281,7 @@ def test_the_file_filter_param_sends_no_cors_header(console):
                                    "..%2f..%2fetc%2fpasswd", "a" * 2000])
 def test_the_file_filter_param_cannot_reach_past_an_unknown_slug(console, value):
     """An escape-shaped or oversized `file=` value against a slug that names no store is
-    still a plain 404 from slug resolution — the param is never read far enough to probe the
+    still a plain 404 from slug resolution - the param is never read far enough to probe the
     filesystem or crash the request."""
     reply = read(console, f"/api/store/does-not-exist/decisions?file={value}")
     assert reply.status == 404
@@ -406,7 +406,7 @@ def test_the_security_headers_are_present(console):
 @pytest.mark.parametrize("method", UNKNOWN_METHODS)
 def test_an_unknown_verb_is_gated_like_every_other_route(console, method):
     """http.server answers a missing `do_<VERB>` with its own 501, which skipped the Host check,
-    the credential gate and every security header — an unauthenticated surface."""
+    the credential gate and every security header - an unauthenticated surface."""
     anonymous = call(console, method, "/")
     assert anonymous.status == 403 and anonymous.data["error"] == "not authenticated"
     assert anonymous.headers["Content-Security-Policy"] == server.CSP
@@ -573,7 +573,7 @@ def test_an_idle_preconnect_is_not_closed_at_the_request_deadline(console):
     Browsers pre-open sockets and send nothing on them. A preconnect never carries a response, so
     `Connection: close` never applies and it stays in the browser's pool. Timing it out at
     request_timeout FIN'd it at 10s while the console polls every 10s, so the next poll reused a
-    just-closed socket, got an empty reply, and fetch() rejected — no status, no log line. The
+    just-closed socket, got an empty reply, and fetch() rejected - no status, no log line. The
     two deadlines must stay distinct: waiting for a request to START is not waiting for one to
     FINISH."""
     console.request_timeout = 0.3
@@ -605,7 +605,7 @@ def test_the_idle_deadline_still_ends_a_silent_squatter(console):
 
 def test_sigterm_clears_the_statefile_with_a_half_sent_request_open(home, monkeypatch):
     """Shutdown must not be at a stalled client's mercy: the statefile is a liveness claim and it
-    is only dropped after server_close(). A guard, not a repro — ThreadingMixIn's join skips
+    is only dropped after server_close(). A guard, not a repro - ThreadingMixIn's join skips
     daemon threads, so this holds today through `daemon_threads` and `block_on_close` both."""
     thread, srv = main_in_a_thread(monkeypatch)
     srv.request_timeout = 3.0  # longer than the join below, so only a non-blocking close passes

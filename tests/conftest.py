@@ -12,7 +12,7 @@ def pytest_collection_modifyitems(config, items):
     `perf` tests whenever coverage is measuring, because a wall-clock number taken under a
     tracer is not the number the assertion is about.
 
-    ponytail: one marker, not a tier taxonomy — the harness files are the only
+    ponytail: one marker, not a tier taxonomy - the harness files are the only
     slow ones (~45s vs ~30s for everything else combined). Split further only if
     a second slow area appears.
 
@@ -51,7 +51,7 @@ def tmp_repo(tmp_path, monkeypatch):
 # from Path.home() at import time, so a test that patches the port (or only STORE_DIR)
 # but not HOME spawns a REAL console daemon against the real store. That happened twice
 # while this feature was being built, once leaving a daemon listening for 15 minutes.
-# The check is deliberately narrow — it names only files a test has no business creating,
+# The check is deliberately narrow - it names only files a test has no business creating,
 # so the live SessionStart/PostToolUse hooks writing .pending_capture or a team cache
 # alongside the suite can never fail the run.
 _FORBIDDEN = ("ui.json", "ui.log")
@@ -79,7 +79,7 @@ def _real_config_bytes(real_store_dir: Path) -> bytes | None:
 @pytest.fixture(scope="session", autouse=True)
 def console_paths_never_resolve_the_real_home(tmp_path_factory):
     """Baseline the three import-time `Path.home()` globals somewhere disposable, for the
-    WHOLE session — so undoing a per-test monkeypatch restores a sandbox, not the real one.
+    WHOLE session - so undoing a per-test monkeypatch restores a sandbox, not the real one.
 
     A per-test `monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ...)` protects only the
     window in which that test is running. The console is a threaded HTTP server whose handler
@@ -88,7 +88,7 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
     EVERY request logs through `server._log` -> `daemon.LOG_PATH`. A handler still in flight
     when the test ends therefore reaches its `send_response` -> `log_request` AFTER monkeypatch
     has restored `LOG_PATH` to `~/.contexer/ui.log`, and writes the real developer's store dir
-    from a thread nobody is waiting on — minutes of test time later, under whatever unrelated
+    from a thread nobody is waiting on - minutes of test time later, under whatever unrelated
     test happens to be running then.
 
     That is the CI flake this fixture closes: `test_ui_auth.py::
@@ -100,7 +100,7 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
 
     Fixing that one test would not close the class: any of the ~300 console requests in
     test_ui_api.py / test_ui_auth.py can be the one still in flight. One baseline is the
-    chokepoint — after it, no in-process code path can name the real ui.json / ui.log /
+    chokepoint - after it, no in-process code path can name the real ui.json / ui.log /
     config.toml no matter which thread runs when.
 
     `no_real_store_writes` keeps its teeth for what this cannot reach: a SUBPROCESS resolves
@@ -121,7 +121,7 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
 
 @pytest.fixture(scope="session", autouse=True)
 def no_real_store_writes():
-    """Fail the run if the suite leaked console artefacts into — or rewrote — the real store.
+    """Fail the run if the suite leaked console artefacts into - or rewrote - the real store.
 
     config.toml is checked by content, not existence: `PUT /api/config` rewrites it in place
     (and drops the developer's comments), so a test that reaches the real path would leave the
@@ -146,13 +146,13 @@ def no_real_store_writes():
 class FakeTeamsServer:
     """In-memory stand-in for the Teams MCP server (E2E integration tests).
 
-    Implements just enough of push_decision + get_context — idempotency on decisionId,
-    scope, `updatedSince` filtering, and a monotonic cursor — to drive the full OSS sync
+    Implements just enough of push_decision + get_context - idempotency on decisionId,
+    scope, `updatedSince` filtering, and a monotonic cursor - to drive the full OSS sync
     path (share/pull/poll) with only the network hop faked.
 
     `title` is echoed through the same way `content`/`rationale` are: stored on push
     (absent -> None, mirroring the real server's nullable column) and returned by
-    get_context. Title is NEVER required — `add_team_decision` (a row injected directly,
+    get_context. Title is NEVER required - `add_team_decision` (a row injected directly,
     simulating one added before Decision Titles v2 or by an older client) defaults it to
     None, and `get_context`'s projection tolerates a row with no "title" key at all."""
 
@@ -199,7 +199,7 @@ class FakeTeamsServer:
     def add_team_decision(self, content: str, type: str = "architecture",
                           title: str | None = None) -> str:
         """Inject a row directly as already team-approved (bypasses push_decision). `title`
-        defaults to None — an older client / pre-Titles-v2 row — so callers proving the
+        defaults to None - an older client / pre-Titles-v2 row - so callers proving the
         untitled path don't have to pass anything."""
         did = f"team-{self._tick()}"
         self.rows[did] = {"id": did, "type": type, "title": title, "content": content,
@@ -211,8 +211,8 @@ class FakeTeamsServer:
         repo, since = args.get("repo"), args.get("updatedSince")
         matched = [r for r in self.rows.values() if repo is None or r["repo"] == repo]
         rows = matched if since is None else [r for r in matched if r["updated_at"] > since]
-        # .get(k) (not r[k]) so a row dict with no "title" key at all — e.g. hand-built by a
-        # test predating this field — still projects cleanly as None; title stays optional.
+        # .get(k) (not r[k]) so a row dict with no "title" key at all - e.g. hand-built by a
+        # test predating this field - still projects cleanly as None; title stays optional.
         result = [{k: r.get(k) for k in ("id", "type", "title", "content", "rationale", "repo", "agent", "scope")}
                   for r in rows]
         cursor = max((r["updated_at"] for r in matched), default=None)
@@ -252,7 +252,7 @@ def team_stack(tmp_path, monkeypatch):
 @pytest.fixture
 def populated_repo(tmp_repo):
     """A repo with two decisions pre-loaded."""
-    store.update_decision(tmp_repo, "decided to use JWT instead of sessions — stateless, easier to scale", "sess-1")
+    store.update_decision(tmp_repo, "decided to use JWT instead of sessions - stateless, easier to scale", "sess-1")
     store.update_decision(tmp_repo, "constraint: never store plaintext passwords, always use bcrypt", "sess-1")
     return tmp_repo
 

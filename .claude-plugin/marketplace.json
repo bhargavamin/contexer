@@ -1,12 +1,12 @@
 {
   "name": "contexer",
   "owner": { "name": "bhargavamin" },
-  "description": "Contexer — MCP context engine for Claude Code",
+  "description": "Contexer - MCP context engine for Claude Code",
   "plugins": [
     {
       "name": "contexer",
       "source": "./",
-      "description": "MCP context engine — persists decisions and constraints across Claude Code sessions"
+      "description": "MCP context engine - persists decisions and constraints across Claude Code sessions"
     }
   ]
 }

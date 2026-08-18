@@ -1,6 +1,6 @@
 """Local console: a loopback web UI over the decision store.
 
-Import-light on purpose — `contexer.ui` is reached from the SessionStart hook path, so only
+Import-light on purpose - `contexer.ui` is reached from the SessionStart hook path, so only
 `daemon` (processes and sockets, no store) is imported here. `server` and `api` pull in
 http.server and the store; import those modules directly, from the daemon process.
 """

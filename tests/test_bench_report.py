@@ -160,7 +160,7 @@ class TestMemoryCampaignSection:
         assert "pre-registered headline number" in md
 
     def test_reviews_are_shown_and_left_out_of_the_denominator(self, tmp_path):
-        """Important 2: a review is "not yet scored", not a loss — counting it in n
+        """Important 2: a review is "not yet scored", not a loss - counting it in n
         would flatter Contexer, since hedged answers are what the memory arm
         (holding two contradictory statements) produces."""
         rows = [_mrow("sup-current", "memory", "implicit", rep=0, success=True,

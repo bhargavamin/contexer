@@ -1,6 +1,6 @@
 name: Manual publish to PyPI
 
-# Emergency fallback — use only if the release-please workflow fails.
+# Emergency fallback - use only if the release-please workflow fails.
 # Normal releases are handled automatically by release-please.yml on merge to main.
 on:
   workflow_dispatch:

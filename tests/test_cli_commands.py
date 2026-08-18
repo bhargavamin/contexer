@@ -15,7 +15,7 @@ from contexer.cli import install, reinstall, status, uninstall, version
 
 @pytest.fixture(autouse=True)
 def _no_network_update_check(monkeypatch):
-    """status() checks PyPI for updates — tests must never hit the network.
+    """status() checks PyPI for updates - tests must never hit the network.
     Yields the real function so opt-out tests can exercise it directly."""
     original = cli._latest_pypi_version
     monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
@@ -193,7 +193,7 @@ class TestStatusTeamSync:
 
     def test_a_non_numeric_expiry_costs_the_line_not_the_command(self, clean_home, capsys):
         """`.team_auth.json` is validated no further than "it is a dict", and main() runs
-        status outside _run_guarded — so comparing a hand-edited string expiry against the
+        status outside _run_guarded - so comparing a hand-edited string expiry against the
         clock replaced the whole diagnostic with a TypeError traceback."""
         store_dir = clean_home / ".contexer"
         store_dir.mkdir()
@@ -314,7 +314,7 @@ class TestPurgeConfirmation:
     def test_yes_flag_bypasses_prompt_non_interactively(self, installed_home, monkeypatch):
         (installed_home / ".contexer" / "repo.json").write_text("{}")
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        # No input() available — must not prompt.
+        # No input() available - must not prompt.
         monkeypatch.setattr("builtins.input", lambda _="": pytest.fail("should not prompt with --yes"))
         uninstall(rest=["--purge", "--yes"])
         assert not (installed_home / ".contexer").exists()
@@ -378,7 +378,7 @@ class TestMainDispatch:
 # ── status resilience ─────────────────────────────────────────────────────────
 
 class TestStatusResilience:
-    """status() is a diagnostic — it must survive any state it is asked to diagnose."""
+    """status() is a diagnostic - it must survive any state it is asked to diagnose."""
 
     def test_corrupt_store_file_does_not_crash(self, installed_home, capsys):
         (installed_home / ".contexer" / "broken.json").write_text('{"entries": [{"id"')
@@ -393,7 +393,7 @@ class TestStatusResilience:
         assert "(0 entries total)" in capsys.readouterr().out
 
     def test_corrupt_claude_json_warns_instead_of_advising_install(self, installed_home, capsys):
-        # A corrupt config must NOT produce "run `contexer install`" — install uses
+        # A corrupt config must NOT produce "run `contexer install`" - install uses
         # the strict loader and would crash on exactly this file.
         (installed_home / ".claude.json").write_text('{"mcpServers": {')
         status()
@@ -447,7 +447,7 @@ class TestStatusResilience:
 
     def test_sweeps_stale_temp_files(self, installed_home, capsys):
         store_dir = installed_home / ".contexer"
-        old = time.time() - 7200  # 2h — well past the 1h in-flight grace window
+        old = time.time() - 7200  # 2h - well past the 1h in-flight grace window
         for name in ("repo.json.abc123.tmp", "other.json.def456.tmp"):
             tmp = store_dir / name
             tmp.write_text("orphaned")
@@ -459,7 +459,7 @@ class TestStatusResilience:
 
     def test_fresh_temp_file_is_not_swept(self, installed_home, capsys):
         # A recent .tmp may belong to an in-flight atomic write in another
-        # process — unlinking it would make that process's os.replace fail.
+        # process - unlinking it would make that process's os.replace fail.
         store_dir = installed_home / ".contexer"
         (store_dir / "repo.json.live01.tmp").write_text("in-flight")
         status()
@@ -471,7 +471,7 @@ class TestStatusResilience:
         assert "cleaned:" not in capsys.readouterr().out
 
     def test_install_on_corrupt_claude_json_fails_loudly(self, clean_home):
-        # Deliberate: mutating commands keep the strict loader — a corrupt config
+        # Deliberate: mutating commands keep the strict loader - a corrupt config
         # must not be silently replaced with a fresh minimal one.
         (clean_home / ".claude.json").write_text('{"mcpServers": {')
         with pytest.raises(json.JSONDecodeError):
@@ -482,12 +482,12 @@ class TestStatusResilience:
 
 class TestPermissionDeniedGuidance:
     """Mutating commands turn PermissionError into actionable advice (exit 1),
-    instead of a raw traceback — and the advice is chown, never sudo."""
+    instead of a raw traceback - and the advice is chown, never sudo."""
 
     def test_install_into_unwritable_claude_dir(self, clean_home, monkeypatch, capsys):
         claude_dir = clean_home / ".claude"
         claude_dir.mkdir()
-        claude_dir.chmod(0o500)  # read+exec only — settings.json write must fail
+        claude_dir.chmod(0o500)  # read+exec only - settings.json write must fail
         try:
             monkeypatch.setattr(sys, "argv", ["contexer", "install"])
             with pytest.raises(SystemExit) as exc:
@@ -598,7 +598,7 @@ class TestStatusMultiTarget:
 
     def test_clean_home_default_target_still_reports_not_fully_installed(self, clean_home, capsys):
         # Regression guard: default target (no --target flag) on a clean home
-        # must still show "Not fully installed" — _resolve_targets([]) falls back
+        # must still show "Not fully installed" - _resolve_targets([]) falls back
         # to [claude], claude.is_installed(clean_home) is False.
         status()
         out = capsys.readouterr().out
@@ -616,7 +616,7 @@ class TestStatusMultiTarget:
 
 
 class TestInstallOnCorruptConfig:
-    """install must fail with clear, actionable advice on a corrupt config — not crash
+    """install must fail with clear, actionable advice on a corrupt config - not crash
     with an AttributeError/traceback, and not partially write (review finding C3)."""
 
     @pytest.mark.parametrize("payload", ["[]", "null", '"x"', "not json at all"])
@@ -632,7 +632,7 @@ class TestInstallOnCorruptConfig:
         (clean_home / ".claude.json").write_text("[]")
         with pytest.raises(SystemExit):
             cli._run_guarded(lambda: install([]))
-        # original left intact for the user to fix — not overwritten
+        # original left intact for the user to fix - not overwritten
         assert (clean_home / ".claude.json").read_text() == "[]"
 
     def test_install_aborts_on_non_object_settings_json(self, clean_home, capsys):
@@ -651,7 +651,7 @@ class TestLoginFailures:
 
     def test_an_unusable_config_toml_is_reported_cleanly(self, clean_home, monkeypatch, capsys):
         """ConfigError is not a ValueError subclass, so it fell through login_cmd's except
-        clause AND _run_guarded's — out of a login that had already spent the browser flow."""
+        clause AND _run_guarded's - out of a login that had already spent the browser flow."""
         from contexer import auth, config
 
         def boom(endpoint=None):
@@ -668,7 +668,7 @@ class TestLoginFailures:
 
 class TestReviewTitleHeadline:
     def test_pending_decision_shows_title_as_headline(self, tmp_repo, monkeypatch, capsys):
-        """The non-proposed branch of review() leads with the title, content beneath —
+        """The non-proposed branch of review() leads with the title, content beneath -
         mirrors TestReviewOverlapSection's real-store driving style in test_overlap_report.py
         (tmp_repo redirects STORE_DIR; _git_root is patched to point at it)."""
         from contexer import store
@@ -782,7 +782,7 @@ class TestReviewConflictMemo:
 
 @pytest.fixture
 def guard_repo(tmp_path, monkeypatch):
-    """A real throwaway git repo, STORE_DIR redirected, cwd chdir'd into it — the
+    """A real throwaway git repo, STORE_DIR redirected, cwd chdir'd into it - the
     CLI guard commands resolve their repo via os.getcwd() (contexer guard has no
     --repo flag), so unlike tmp_repo this fixture must actually chdir. Mirrors
     tests/test_guard.py's `repo` fixture."""
@@ -951,7 +951,7 @@ class TestGuardDismiss:
     def test_dismiss_uses_same_resolved_repo_as_candidates_lookup(
             self, guard_repo, monkeypatch, capsys):
         """Regression: dismiss_guard, unlike arm_guard/disarm_guard, does not call
-        _resolve_repo internally — it writes straight to whatever path it's given.
+        _resolve_repo internally - it writes straight to whatever path it's given.
         So the CLI must resolve the repo ONCE and reuse that exact value for both
         the candidates lookup and the dismiss call; resolving twice (git-root
         fails, falls back through the .current_repo pointer each time) would be
@@ -965,7 +965,7 @@ class TestGuardDismiss:
         h = store.guard_candidates(str(guard_repo))[0]["hash"]
 
         # Simulate a cwd git-root can't resolve, falling back to the shared
-        # .current_repo pointer instead — exactly the path where the two calls
+        # .current_repo pointer instead - exactly the path where the two calls
         # inside _guard_dismiss could diverge if not resolved once and reused.
         monkeypatch.setattr(store, "_git_root", lambda _cwd: "")
         assert store.anchor_repo(str(guard_repo))
@@ -1115,7 +1115,7 @@ class TestGuardArmDisarmList:
 
 
 def _input_sequence(monkeypatch, *answers):
-    """Feed successive `input()` calls from a fixed sequence — the anchors loop can
+    """Feed successive `input()` calls from a fixed sequence - the anchors loop can
     prompt more than once per decision (choice, then an [E]dit sub-prompt)."""
     it = iter(answers)
     monkeypatch.setattr("builtins.input", lambda *_a: next(it))
@@ -1123,7 +1123,7 @@ def _input_sequence(monkeypatch, *answers):
 
 def _input_sequence_raising(monkeypatch, *answers):
     """Like _input_sequence, but an exception CLASS in the sequence is raised at that
-    prompt instead of returned — how a Ctrl-C/EOF mid-loop actually reaches the caller."""
+    prompt instead of returned - how a Ctrl-C/EOF mid-loop actually reaches the caller."""
     it = iter(answers)
 
     def _next(*_a):
@@ -1255,7 +1255,7 @@ class TestGuardAnchors:
         loaded = next(e for e in store._load(str(guard_repo))["entries"]
                       if e["id"] == entry["id"])
         assert not loaded.get("source_files")
-        # Reappears next run — skip stores nothing.
+        # Reappears next run - skip stores nothing.
         from contexer import guard_engine
         assert len(guard_engine.anchor_candidates_for_backfill(str(guard_repo))) == 1
 
@@ -1291,7 +1291,7 @@ class TestGuardAnchors:
     def test_interrupt_at_the_choice_prompt_writes_nothing(self, guard_repo, monkeypatch,
                                                             capsys):
         """Ctrl-C/EOF is an abort, not a commit: selections ratified before the interrupt
-        must NOT be written. (A plain [Q]uit still writes them — that is documented.)"""
+        must NOT be written. (A plain [Q]uit still writes them - that is documented.)"""
         self._two_candidates(guard_repo)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
@@ -1331,7 +1331,7 @@ class TestGuardAnchors:
 
     def test_unknown_flag_is_rejected_instead_of_prompting(self, guard_repo, monkeypatch,
                                                             capsys):
-        """`guard anchors --dry-run` used to fall through into the interactive loop —
+        """`guard anchors --dry-run` used to fall through into the interactive loop -
         a flag that reads as read-only silently starting a write flow."""
         self._two_candidates(guard_repo)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -1369,7 +1369,7 @@ def _stub_guard_bin(monkeypatch, path="/usr/local/bin/contexer"):
     """Pretend `contexer` is on PATH at `path` AND that it supports `guard`.
 
     The capability probe shells out to the resolved binary, which does not exist
-    for these synthetic paths — stubbing it keeps the hook-writing tests about
+    for these synthetic paths - stubbing it keeps the hook-writing tests about
     hook writing. The probe itself is covered by its own tests below, against a
     real (throwaway) executable."""
     monkeypatch.setattr(cli.shutil, "which", lambda name: path)
@@ -1378,7 +1378,7 @@ def _stub_guard_bin(monkeypatch, path="/usr/local/bin/contexer"):
 
 def _fake_contexer_bin(tmp_path, name="contexer", usage="usage: contexer guard"):
     """A real, executable throwaway script standing in for an installed contexer
-    binary — used to exercise the capability probe for real."""
+    binary - used to exercise the capability probe for real."""
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(exist_ok=True)
     path = bin_dir / name
@@ -1475,7 +1475,7 @@ class TestGuardInstallHook:
             self, guard_repo, monkeypatch, capsys):
         """A hook we cannot decode is a hook we must not touch. Before the encoding
         pin these three paths read with the LOCALE codec, so an ordinary hook echoing
-        a non-ASCII message raised UnicodeDecodeError under LC_ALL=C — a traceback out
+        a non-ASCII message raised UnicodeDecodeError under LC_ALL=C - a traceback out
         of install, a traceback out of uninstall, and "not installed" from status."""
         _stub_guard_bin(monkeypatch)
         hook = _guard_hook_path(guard_repo)
@@ -1535,7 +1535,7 @@ class TestGuardInstallHook:
 
     def test_crlf_hook_keeps_its_line_endings(self, guard_repo, monkeypatch):
         """Byte-exactness, not just decodability. Text mode translates newlines, so a
-        CRLF hook read through it came back LF-only — every foreign line silently lost
+        CRLF hook read through it came back LF-only - every foreign line silently lost
         its \\r, and uninstall did not restore it. Reads/writes are bytes now, so the
         developer's endings survive and our own block stays LF (a \\r in a `#!/bin/sh`
         script breaks it under Git-for-Windows sh)."""
@@ -1560,7 +1560,7 @@ class TestGuardInstallHook:
         _stub_guard_bin(monkeypatch)
         hook = _guard_hook_path(guard_repo)
         hook.parent.mkdir(parents=True, exist_ok=True)
-        foreign = '#!/bin/sh\necho "✖ lint failed — naïve check"\n'
+        foreign = '#!/bin/sh\necho "✖ lint failed - naïve check"\n'
         hook.write_text(foreign, encoding="utf-8")
 
         _run_main(monkeypatch, "guard", "--install-hook")
@@ -1641,7 +1641,7 @@ class TestInstallStatusMentionGuardHook:
         install()
         out = capsys.readouterr().out
         assert "guard --install-hook" in out
-        # Installing the hook enables the ADVISORY tier only — blocking needs an
+        # Installing the hook enables the ADVISORY tier only - blocking needs an
         # explicit `contexer guard arm`, so the offer must not promise blocking.
         assert "blocking" not in out.lower()
 
@@ -1680,7 +1680,7 @@ class TestPreCommitFrameworkSpec:
 # ── scope-audit ─────────────────────────────────────────────────────────────
 
 class TestScopeAudit:
-    """`contexer scope-audit` — read-only report of decisions saved into the wrong store."""
+    """`contexer scope-audit` - read-only report of decisions saved into the wrong store."""
 
     def _store_dir(self, tmp_path, monkeypatch):
         from contexer import store

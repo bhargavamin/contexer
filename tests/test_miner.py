@@ -1,4 +1,4 @@
-"""Tests for contexer/miner.py — deterministic convention mining."""
+"""Tests for contexer/miner.py - deterministic convention mining."""
 import ast
 import json
 import os
@@ -87,7 +87,7 @@ class TestConfigConventions:
         assert "R7" in hit and "R8" not in hit and "…" in hit
 
     def test_empty_modern_select_beats_a_legacy_top_level_one(self, tmp_path):
-        """`lint.select` wins in ruff even when EMPTY — verified with ruff 0.15.4: this
+        """`lint.select` wins in ruff even when EMPTY - verified with ruff 0.15.4: this
         exact config reports "All checks passed!" on a file with two violations, while
         the legacy key alone finds both. Reading the modern key by presence rather than
         truthiness is what keeps us from advertising rules nothing enforces."""
@@ -244,7 +244,7 @@ class TestConfigConventions:
         # [tool.pytest.ini_options].addopts because that key is the ONLY
         # place _config_conventions can mine it from. Moving the flag to the
         # CI command line keeps enforcement but silently deletes the repo's
-        # own mined "coverage ≥85%" convention — which is exactly what a
+        # own mined "coverage ≥85%" convention - which is exactly what a
         # hygiene PR did once. If this test fails, put the flag back in
         # addopts and use --no-cov for subset runs instead.
         repo_root = Path(__file__).resolve().parents[1]
@@ -254,7 +254,7 @@ class TestConfigConventions:
             for i in items
         ), (
             "Coverage floor not minable from pyproject addopts, or its 85% "
-            "threshold changed without updating this pin — see the comment "
+            "threshold changed without updating this pin - see the comment "
             "above addopts in pyproject.toml"
         )
 

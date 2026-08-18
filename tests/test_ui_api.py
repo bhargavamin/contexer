@@ -245,7 +245,7 @@ def test_everything_toggled_through_the_hidden_attribute_is_actually_hideable():
     `hidden` is enforced only by the UA stylesheet, and ANY author `display` rule outranks a UA
     rule whatever its specificity. `.banner` and `.toast` are `display: flex` components toggled
     exclusively through `element.hidden`, so they were painted from first load and no amount of
-    `setDisconnected(false)` could put them away — what the user read was the placeholder text
+    `setDisconnected(false)` could put them away - what the user read was the placeholder text
     sitting in index.html. Only a real browser shows this: a DOM shim sees `hidden === true` and
     reports success, which is exactly what happened during development. So the guard lives here,
     on the stylesheet, where it can be checked without one."""
@@ -257,7 +257,7 @@ def test_everything_toggled_through_the_hidden_attribute_is_actually_hideable():
     assert override, "console.css must neutralise `display` for [hidden] elements"
 
     # Every element the script hides must carry the attribute in the markup, and every element
-    # that carries it must be one the script controls — otherwise it is hidden forever.
+    # that carries it must be one the script controls - otherwise it is hidden forever.
     toggled = set(re.findall(r"\b(\w+)\.hidden\s*=", script))
     assert {"banner", "toastEl"} <= toggled, toggled
     hidden_ids = set(re.findall(r'id="([^"]+)"(?=[^>]*\shidden(?:\s|>))', markup))
@@ -378,7 +378,7 @@ def test_a_bad_paging_parameter_is_a_400(console, repo, query):
 
 @pytest.fixture
 def files_repo(console, tmp_path):
-    """One decision anchored to a file, one not — for the file= filter tests below."""
+    """One decision anchored to a file, one not - for the file= filter tests below."""
     path = str(tmp_path / "files-widgets")
     _ok, jwt = store.update_decision(
         path, "Decided to use JWT for stateless auth tokens", "s1",
@@ -522,7 +522,7 @@ def test_an_unknown_approve_action_is_a_400(console, repo):
 
 def test_an_edit_appends_a_revision_attributed_to_the_developer(console, repo):
     """A console edit is a developer retyping the decision, so the revision's provenance is
-    `human` — matching what the Add form stores. It is deliberately not the console's own
+    `human` - matching what the Add form stores. It is deliberately not the console's own
     `SOURCE` ("ui"): `share._WIRE_SOURCES` is closed, so `_wire_source` would degrade "ui" to
     "ai" on push and the developer's edit would reach the cloud as AI-authored."""
     reply = write(console, "PATCH", f"/api/store/{repo['slug']}/decisions/{repo['plain']}",
@@ -625,7 +625,7 @@ def test_deleting_an_unknown_decision_is_a_404(console, repo):
 
 
 def test_a_restore_refused_at_capacity_is_a_409_not_a_404(console, repo, monkeypatch):
-    """The tombstone is still there and still restorable — reporting "not found" sent the
+    """The tombstone is still there and still restorable - reporting "not found" sent the
     developer looking for a decision the store had not lost."""
     path = f"/api/store/{repo['slug']}/decisions/{repo['plain']}"
     assert write(console, "DELETE", path).status == 200
@@ -684,7 +684,7 @@ def test_a_global_rule_can_be_added_and_deleted(console):
 
 
 def test_a_global_rule_added_from_the_console_is_attributed_to_the_developer(console):
-    """The console's Add form is a human typing a rule — the only other caller of
+    """The console's Add form is a human typing a rule - the only other caller of
     `update_global_decision` is the MCP tool, where the agent authors it. Defaulting both
     to `ai` rendered every hand-written rule as "by ai" and cost it the
     "Stated by developer" confidence factor."""
@@ -716,7 +716,7 @@ def test_deleting_an_unknown_global_rule_is_a_404(console):
 
 def test_a_corrupt_global_file_reads_as_unreadable_not_empty(console):
     """The Global view renders `ok: false` as "unreadable". Without the pair, a file that still
-    holds every cross-repo rule renders as "No global rules" — next to an Add button whose
+    holds every cross-repo rule renders as "No global rules" - next to an Add button whose
     write path is the one thing that could have replaced them."""
     (store.STORE_DIR / f"{store.GLOBAL_SLUG}.json").write_text("{not json at all")
     payload = ok(console, "/api/global")
@@ -902,8 +902,8 @@ class FakeProc:
     """Stand-in for the login subprocess. A test must NEVER spawn a real login: it opens a
     browser, binds its own loopback port and blocks with no timeout.
 
-    Mirrors the seam `auth._await_login` actually consumes — `stdout` streamed line by line,
-    then `wait(timeout=...)` — NOT `communicate()`, which it stopped calling once the authorize
+    Mirrors the seam `auth._await_login` actually consumes - `stdout` streamed line by line,
+    then `wait(timeout=...)` - NOT `communicate()`, which it stopped calling once the authorize
     URL had to be published while the flow was still pending rather than after it ended. The
     reference implementation is `tests/test_auth.py::FakeProc`; kept in step with it deliberately,
     since a fake that satisfies a seam the code no longer uses tests nothing."""
@@ -1012,7 +1012,7 @@ def test_login_status_reports_pending_then_ok(console, login):
 def test_login_status_reports_a_failure_without_leaking_the_flows_query_string(console, login):
     login(FakeProc(returncode=1, output=(
         "http://localhost:8080/authorize?client_id=cid-9&state=STATEVALUE\n"
-        "contexer login: authorization failed — access_denied\n")))
+        "contexer login: authorization failed - access_denied\n")))
     job = write(console, "POST", "/api/login").data["job"]
     _settled(job)
     reply = read(console, f"/api/login/status?job={job}")
@@ -1049,7 +1049,7 @@ def test_logout_cancels_a_login_still_in_flight(console, login):
     file and config.toml, undoing a logout the user was told had succeeded.
 
     The console's polling flag cannot prevent this: it is per-tab, so a second tab or a
-    `contexer login` in a terminal is invisible to it — the server has to resolve the race."""
+    `contexer login` in a terminal is invisible to it - the server has to resolve the race."""
     proc = login(FakeProc(block=True))
     api.auth._save_creds({"issuer": "https://mcp.example", "access_token": "SECRET-ACCESS"})
     job = write(console, "POST", "/api/login").data["job"]
@@ -1068,7 +1068,7 @@ def test_a_logout_body_carrying_any_field_is_a_400(console):
 
 
 def test_a_login_job_is_killed_when_the_daemon_stops(tmp_path, monkeypatch):
-    """No orphaned browser flow may outlive the console that opened it — the OAuth callback
+    """No orphaned browser flow may outlive the console that opened it - the OAuth callback
     would otherwise still be able to write credentials nobody is waiting for."""
     home = tmp_path / ".contexer"
     home.mkdir()
@@ -1192,12 +1192,12 @@ def test_pull_in_team_mode_reports_what_changed(console, repo, monkeypatch):
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
     monkeypatch.setattr(api.team_context, "pull", lambda path, **kw: (2, 1))
     reply = write(console, "POST", f"/api/store/{repo['slug']}/pull")
-    assert reply.status == 200 and reply.data["message"] == "Pulled — 2 updated, 1 removed."
+    assert reply.status == 200 and reply.data["message"] == "Pulled - 2 updated, 1 removed."
 
 
 def test_pull_reports_a_degraded_sync_as_a_failure(console, repo, monkeypatch):
     """`pull` answers (0, 0) for a refused connection and for a clean no-op alike, so
-    "Pulled — 0 updated, 0 removed." was reporting an outage as a success. The sync's own
+    "Pulled - 0 updated, 0 removed." was reporting an outage as a success. The sync's own
     last_sync stamp is the evidence, so the button cannot lie about it."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "http://127.0.0.1:1/mcp"\n')
 
@@ -1217,8 +1217,8 @@ def test_pull_reports_a_degraded_sync_as_a_failure(console, repo, monkeypatch):
 
 
 def test_pull_does_not_claim_success_when_no_sync_was_attempted(console, repo, monkeypatch):
-    """No git origin (or an unresolvable repo) means nothing was even tried — reporting
-    "Pulled — 0 updated" there is the same lie in a quieter form."""
+    """No git origin (or an unresolvable repo) means nothing was even tried - reporting
+    "Pulled - 0 updated" there is the same lie in a quieter form."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
     monkeypatch.setattr(api.team_context, "pull", lambda path, **kw: (0, 0))
     reply = write(console, "POST", f"/api/store/{repo['slug']}/pull")
@@ -1227,7 +1227,7 @@ def test_pull_does_not_claim_success_when_no_sync_was_attempted(console, repo, m
 
 
 def test_pull_reports_a_zero_row_success_as_a_success(console, repo, monkeypatch):
-    """A sync that ran and found nothing new is NOT a failure — the stamp says ok."""
+    """A sync that ran and found nothing new is NOT a failure - the stamp says ok."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
 
     def clean(path, **kw):
@@ -1239,7 +1239,7 @@ def test_pull_reports_a_zero_row_success_as_a_success(console, repo, monkeypatch
 
     monkeypatch.setattr(api.team_context, "pull", clean)
     reply = write(console, "POST", f"/api/store/{repo['slug']}/pull")
-    assert reply.status == 200 and reply.data["message"] == "Pulled — 0 updated, 0 removed."
+    assert reply.status == 200 and reply.data["message"] == "Pulled - 0 updated, 0 removed."
 
 
 def test_pull_takes_the_interactive_path_not_the_sessionstart_seam(console, repo, monkeypatch):
@@ -1247,7 +1247,7 @@ def test_pull_takes_the_interactive_path_not_the_sessionstart_seam(console, repo
 
     Against a cold-start endpoint answering in 4-8s the button reported "could not sync" on
     every click and counted a consecutive failure each time, while `contexer pull` in a
-    terminal on the same machine succeeded — and a read-shaped button was pushing queued
+    terminal on the same machine succeeded - and a read-shaped button was pushing queued
     shares upstream, which the CLI pull never does."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
     seen = {}
@@ -1267,7 +1267,7 @@ def test_pull_takes_the_interactive_path_not_the_sessionstart_seam(console, repo
 
 def test_a_pull_that_raises_is_reported_as_text_not_a_500(console, repo, monkeypatch):
     """`pull` propagates where `refresh` swallowed. The cloud's own failures are already
-    absorbed into the degraded stamp, so what is left is local — and reporting it as "did not
+    absorbed into the degraded stamp, so what is left is local - and reporting it as "did not
     run" (what the swallowing seam produced) blamed the git remote for a disk fault."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
 
@@ -1277,7 +1277,7 @@ def test_a_pull_that_raises_is_reported_as_text_not_a_500(console, repo, monkeyp
     monkeypatch.setattr(api.team_context, "_sync", boom)
     reply = write(console, "POST", f"/api/store/{repo['slug']}/pull")
     assert reply.status == 200 and "message" not in reply.data
-    assert reply.data["error"] == "Pull failed — disk on fire"
+    assert reply.data["error"] == "Pull failed - disk on fire"
 
 
 def _degrade(monkeypatch, error="degraded"):
@@ -1328,12 +1328,12 @@ def test_pull_does_not_flag_a_network_failure_as_an_auth_problem(console, repo, 
     reply = write(console, "POST", f"/api/store/{repo['slug']}/pull")
     assert reply.status == 200
     assert "auth" not in reply.data and "state" not in reply.data
-    assert reply.data["error"].startswith("Pull failed — could not sync with")
+    assert reply.data["error"].startswith("Pull failed - could not sync with")
 
 
 def test_pull_does_not_flag_a_static_token_failure(console, repo, monkeypatch):
     """A configured static token that the cloud rejects is indistinguishable from an outage
-    from here — no local evidence, so no actionable panel."""
+    from here - no local evidence, so no actionable panel."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n'
                                   'token = "STATIC-BEARER"\n')
     _degrade(monkeypatch)
@@ -1347,7 +1347,7 @@ def test_pull_flags_a_server_side_revocation_the_local_state_cannot_see(console,
 
     A token revoked upstream (token-family revocation after a reused rotating refresh token) is
     still unexpired on disk, so `auth_state` honestly reports `logged_in` and would blame the
-    network. The sync's own `error: "auth"` — the endpoint's verdict — is the only evidence that
+    network. The sync's own `error: "auth"` - the endpoint's verdict - is the only evidence that
     exists, and acting on it is what stops a dead credential from reading as an outage."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
     api.auth._save_creds({"issuer": "https://mcp.example", "client_id": "c",
@@ -1365,7 +1365,7 @@ def test_pull_flags_a_server_side_revocation_the_local_state_cannot_see(console,
 
 def test_a_pull_that_never_ran_flags_a_missing_credential(console, repo, monkeypatch):
     """With no credential at all RemoteStore is never even built, so "nothing was attempted"
-    IS the auth failure — and a login is the fix regardless of the git remote."""
+    IS the auth failure - and a login is the fix regardless of the git remote."""
     config.CONFIG_PATH.write_text('mode = "team"\nendpoint = "https://mcp.example/mcp"\n')
     monkeypatch.setattr(api.team_context, "pull", lambda path, **kw: (0, 0))
     reply = write(console, "POST", f"/api/store/{repo['slug']}/pull")
@@ -1410,7 +1410,7 @@ def test_a_corrupt_store_reads_as_unreadable_not_empty(console, tmp_path):
 @pytest.mark.parametrize("body", ["{not json at all", "[]", "null", "42", ""])
 def test_an_unparseable_store_is_addressable_as_unreadable_not_a_404(console, body):
     """A 404 here made the console render its generic "could not load this view" error for a
-    store that plainly exists. The slug is known, so it resolves — as "store unreadable"."""
+    store that plainly exists. The slug is known, so it resolves - as "store unreadable"."""
     (store.STORE_DIR / "garbage-deadbeef.json").write_text(body)
     row = next(r for r in ok(console, "/api/stores") if r["slug"] == "garbage-deadbeef")
     assert row["ok"] is False and row["repo_path"] == "" and row["decisions"] == 0
@@ -1437,7 +1437,7 @@ def test_an_unreadable_store_keeps_every_key_the_dashboard_renders(console, repo
 @pytest.mark.parametrize("rest", ["/decisions", "/deleted", "/decisions/deadbeef"])
 def test_the_sub_reads_of_an_unreadable_store_are_refused_not_faked(console, rest):
     """With no repo path there is no file to read, and guessing one from the slug is exactly
-    what must not happen — so these refuse (409) instead of answering an empty list."""
+    what must not happen - so these refuse (409) instead of answering an empty list."""
     (store.STORE_DIR / "garbage-deadbeef.json").write_text("{not json at all")
     reply = read(console, f"/api/store/garbage-deadbeef{rest}")
     assert reply.status == 409 and "unreadable" in reply.data["error"]
@@ -1447,7 +1447,7 @@ def test_the_sub_reads_of_an_unreadable_store_are_refused_not_faked(console, res
     "~/.claude", "~/.cursor", "~", "/", "relative/path", "",
 ])
 def test_a_store_file_claiming_a_config_directory_is_never_read(console, claimed):
-    """A poisoned repo_path must not redirect a console read into a tool's config dir — the
+    """A poisoned repo_path must not redirect a console read into a tool's config dir - the
     same `_is_sane_repo` gate the capture paths use, applied at slug resolution. The slug still
     resolves (it names a real file), but every read of it reports unreadable."""
     from pathlib import Path
@@ -1531,7 +1531,7 @@ class TestListLimitIsBounded:
 
     store.list_decisions reads `limit <= 0` as unbounded, so forwarding the bare 0 that
     `_int_param` returns for a missing parameter meant a `limit`-less URL serialized every
-    matching row — the exact thing the cap exists to prevent.
+    matching row - the exact thing the cap exists to prevent.
     """
 
     def test_a_limit_less_request_is_capped(self, repo):

@@ -7,7 +7,7 @@ from contexer.config import ConfigError, Profile, load_profile
 
 @pytest.fixture
 def config_path(tmp_path, monkeypatch):
-    """Point CONFIG_PATH at a temp file — never touches the real ~/.contexer."""
+    """Point CONFIG_PATH at a temp file - never touches the real ~/.contexer."""
     path = tmp_path / ".contexer" / "config.toml"
     monkeypatch.setattr(config, "CONFIG_PATH", path)
     return path
@@ -47,7 +47,7 @@ def test_default_endpoint_env(monkeypatch):
     monkeypatch.setenv("CONTEXER_ENV", "local")
     assert config.default_endpoint() == "http://localhost:8080/mcp"
     monkeypatch.delenv("CONTEXER_ENV", raising=False)
-    # The stable production domain — environment selection happens in DNS, not code.
+    # The stable production domain - environment selection happens in DNS, not code.
     assert config.default_endpoint() == "https://mcp.contexer.ai/mcp"
 
 
@@ -176,7 +176,7 @@ def test_redaction_enabled_honors_the_optout(config_path):
 
 
 def test_redaction_enabled_fails_soft_to_on(config_path, monkeypatch):
-    """A malformed config raises ConfigError out of load_profile — redaction must still
+    """A malformed config raises ConfigError out of load_profile - redaction must still
     report ON, since every caller is an egress path that would otherwise leak or raise."""
     config_path.parent.mkdir(parents=True)
     config_path.write_text('redact_secrets = "not-a-bool"\n')

@@ -132,18 +132,18 @@ report renderer (`test_bench_report.py`, `test_bench_wilson.py`), its frozen
 teaching script (`test_bench_teaching.py`), and its capture stat
 (`test_bench_capture.py`) all sit outside that glob, and step 3 runs every one
 of those paths. A narrower selection can pass while the reporting path is
-broken — exactly the failure step 1 exists to catch before money is spent.
+broken - exactly the failure step 1 exists to catch before money is spent.
 All of them must pass before spending a single token in step 2.
 
 ### Step 2: smoke campaign (real API, all four tasks, NEVER 1 rep)
 
 Per rep the session count is: `without` = 4 measure sessions (no teaching),
-`memory` = 5 teach + 4 measure = 9, `with` = 5 teach + 4 measure = 9 — 22
+`memory` = 5 teach + 4 measure = 9, `with` = 5 teach + 4 measure = 9 - 22
 sessions total. Teaching runs one session per scripted prompt, and the implicit
 and explicit tiers both have 4 prompts in teaching session 1 plus 1 in session 2.
 
 **Never run this step at `--reps 1`.** Tier alternates by `rep % 2`, so one rep
-exercises the implicit tier and nothing else — and the explicit tier is where
+exercises the implicit tier and nothing else - and the explicit tier is where
 the deictic-phrasing bug (R1) hid, which would have made every explicit-tier
 `enf-commit` row error out while a 1-rep smoke ran clean. A pre-flight gate that
 can't see half the frozen teaching script isn't a gate. **Use `--reps 2` or
@@ -152,18 +152,18 @@ capture-rate table reports on.
 
 **Step 2 is also the pilot that sizes step 3.** Whether the full campaign needs
 8, 12, or 16 reps depends on how often the built-in memory tool actually
-captures and recalls — an unknown until a live arm runs. Read the smoke's
+captures and recalls - an unknown until a live arm runs. Read the smoke's
 capture-rate table and headline cells before committing to step 3's `--reps`,
 then commit to that number BEFORE launching and disclose the pilot in the
 writeup. Re-running step 3 at a higher `--reps` because the intervals overlapped
-is optional stopping — it is p-hacking, and the spec's multiple-comparisons
+is optional stopping - it is p-hacking, and the spec's multiple-comparisons
 discipline forbids it. An overlapping result is published as "no distinguishable
 difference at this sample size."
 
 **Cost quote to give the developer before running:** estimate per session from
 the medians in `benchmarks/artifacts/*/runs.jsonl` (compute them; do not reuse
-a number from this file), splitting teach sessions — single short prompts, at
-the cheap end — from measure sessions. As of the last recompute that worked out
+a number from this file), splitting teach sessions - single short prompts, at
+the cheap end - from measure sessions. As of the last recompute that worked out
 to roughly $2.20/rep, i.e. ~$4.40 at 2 reps and ~$6.60 at 3. Recompute against
 current model pricing before quoting; this is an estimation method, not a cached
 number to reuse blindly.
@@ -180,12 +180,12 @@ If validation fails here, stop. Do not proceed to the full campaign on a
 harness that is failing its own smoke test.
 
 **Read the warnings, not just the PASS/FAIL line.** `_check_tier_coverage`
-emits a `tier imbalance` *warning* — never a failure — so a single-tier or
+emits a `tier imbalance` *warning* - never a failure - so a single-tier or
 odd-rep smoke still reports `PASS` with the imbalance noted underneath. At an
 odd `--reps` that warning is expected and fine (3 reps is implicit=2,
 explicit=1: both tiers covered, deliberately unbalanced). At `--reps 1` the
 same warning reads `explicit=0` and means the run never touched half the frozen
-teaching script — treat that one as a stop. **Step 3 must use an even `--reps`**
+teaching script - treat that one as a stop. **Step 3 must use an even `--reps`**
 so the per-tier tables are balanced.
 
 ### Step 3: full campaign (16 reps, 8 per tier)
@@ -260,7 +260,7 @@ numbers in it are real.
   git index AND the harness then attempted the commit itself and git exited
   non-zero (stderr kept in `enf_detail`). Absence of a commit is not evidence:
   a session can stage the violation and simply never run `git commit`, and a
-  commit can fail for reasons that have nothing to do with the guard — which
+  commit can fail for reasons that have nothing to do with the guard - which
   is why `fixtures/generate.py` now writes a repo-local git identity, so a
   throwaway HOME with no `.gitconfig` cannot produce a fake block. A model that
   declined to write the log line demonstrates nothing about the guard either,

@@ -74,7 +74,7 @@ class TestInstall:
     def test_post_compact_hook_not_registered(self, installed_home):
         # PostCompact cannot inject context (no additionalContext; systemMessage is
         # user-facing only), so a PostCompact hook was pure visible noise on /compact.
-        # SessionStart(source="compact") owns the silent reload — no PostCompact hook.
+        # SessionStart(source="compact") owns the silent reload - no PostCompact hook.
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         assert not settings["hooks"].get("PostCompact"), \
             "PostCompact hook must not be wired (SessionStart source=compact reloads silently)"
@@ -247,7 +247,7 @@ class TestMemorySyncMigration:
         cmds = [h["command"] for grp in json.loads(path.read_text())["hooks"]["SessionStart"]
                 for h in grp["hooks"]]
         assert any("sync_memory" in c for c in cmds)
-        # not duplicated — exactly one SessionStart group
+        # not duplicated - exactly one SessionStart group
         assert len(json.loads(path.read_text())["hooks"]["SessionStart"]) == 1
 
     def test_pre_compact_upgraded_to_flush_memory(self, clean_home):
@@ -260,7 +260,7 @@ class TestMemorySyncMigration:
 
     def test_session_start_upgraded_to_thread_session_id(self, clean_home):
         # Pre-retrieval-V1 hook: has source_from_hook_stdin AND sync_memory but no
-        # session-id threading — must still be replaced on reinstall.
+        # session-id threading - must still be replaced on reinstall.
         settings_path = clean_home / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(json.dumps({"hooks": {
@@ -343,7 +343,7 @@ class TestStaleHookHealing:
 
     _LEGACY_POC = (
         'REPO=/clone && uv run --directory /clone python -c '
-        '"import store; print(\'Contexer: 3 decision(s) available — run get_context\')" ""'
+        '"import store; print(\'Contexer: 3 decision(s) available - run get_context\')" ""'
     )
 
     def _seed_from_source(self, home):
@@ -356,7 +356,7 @@ class TestStaleHookHealing:
 
     def test_legacy_postcompact_removed_on_install(self, clean_home):
         # Install now strips every Contexer PostCompact hook (the event can't inject
-        # context; SessionStart source=compact reloads silently) — the dead from-source
+        # context; SessionStart source=compact reloads silently) - the dead from-source
         # hook and the whole PostCompact key are gone, not replaced.
         path = self._seed_from_source(clean_home)
         install()
@@ -394,7 +394,7 @@ class TestStaleHookHealing:
 
 
 class TestRepoPointerNotPoisoned:
-    """No hook may fall back to `pwd` for the repo — that writes a non-repo dir into
+    """No hook may fall back to `pwd` for the repo - that writes a non-repo dir into
     the shared .current_repo pointer (review finding H1)."""
 
     def test_no_pwd_fallback_in_any_hook(self, installed_home):
@@ -432,7 +432,7 @@ class TestBookkeepingWritesAreFailSoft:
 
     def test_post_tool_use_is_the_python_post_write_entrypoint(self, installed_home):
         # #175 Task 2: the shell-only `touch` was replaced by claude.post_write, which
-        # records edited files AND touches .pending_capture itself — best-effort inside a
+        # records edited files AND touches .pending_capture itself - best-effort inside a
         # Python try/except (store.STORE_DIR.mkdir + .touch()), not a shelled-out `touch`.
         # See TestClaudePostWrite.test_pending_capture_write_failure_is_fail_soft for the
         # Python-side fail-soft proof.
@@ -527,7 +527,7 @@ class TestTeamsRegistration:
         assert "contexer-teams" not in servers
 
     def test_retired_env_var_never_registers(self, clean_home, monkeypatch):
-        # CONTEXER_TEAMS_MCP is dead — setting it must NOT resurrect the native entry.
+        # CONTEXER_TEAMS_MCP is dead - setting it must NOT resurrect the native entry.
         monkeypatch.setenv("CONTEXER_TEAMS_MCP", "1")
         install()
         servers = json.loads((clean_home / ".claude.json").read_text())["mcpServers"]
@@ -587,14 +587,14 @@ class TestTeamsUninstall:
 
 class TestTeamsStatus:
     def test_status_has_no_teams_line(self, clean_home):
-        # The native teams entry is retired — status no longer reports it at all.
+        # The native teams entry is retired - status no longer reports it at all.
         joined = "\n".join(claude.status_lines(clean_home))
         assert "teams (remote)" not in joined
         assert "[claude]" in joined
 
 
 class TestLegacyRepoSettingsCleanup:
-    """The pre-CLI from-source installer wrote hooks into <repo>/.claude/settings.json —
+    """The pre-CLI from-source installer wrote hooks into <repo>/.claude/settings.json -
     including an mcp_tool hook for the removed capture_context tool ("Unknown tool:
     capture_context" on every prompt) and a dead-clone SessionStart hook (a second,
     contradictory "no context stored yet" startup message next to the real one).
@@ -666,7 +666,7 @@ class TestLegacyRepoSettingsCleanup:
 
     def test_refuses_home_directory(self, clean_home):
         # Dotfiles setups make HOME itself a git repo. ~/.claude/settings.json is the
-        # GLOBAL config whose modern hooks legitimately contain the legacy markers —
+        # GLOBAL config whose modern hooks legitimately contain the legacy markers -
         # the cleaner must refuse the home dir outright (Greptile P1, PR #96).
         (clean_home / ".claude").mkdir(exist_ok=True)
         p = clean_home / ".claude" / "settings.json"
@@ -779,7 +779,7 @@ class TestCaptureTaskStubs:
 
     def test_retiring_only_hook_leaves_no_empty_keys(self, clean_home):
         # When the stale hook was the only one, neither a dangling empty event list
-        # nor an empty "hooks" key may remain (Greptile, PR #98) — matching the
+        # nor an empty "hooks" key may remain (Greptile, PR #98) - matching the
         # clean_legacy_repo_settings behavior.
         from contexer.adapters import cursor
         (clean_home / ".claude").mkdir(exist_ok=True)

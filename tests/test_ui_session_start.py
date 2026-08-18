@@ -1,4 +1,4 @@
-"""The console URL on the session-start line — the one seam all four adapters share.
+"""The console URL on the session-start line - the one seam all four adapters share.
 
 Two properties matter here and they pull in opposite directions:
 
@@ -19,16 +19,16 @@ from contexer.ui import daemon
 # The exact status lines this build produced before the console existed. Literals, not
 # recomputed from the code under test: a regression guard that derives its own expectation
 # cannot fail.
-NO_CONTEXT = "Contexer: no context stored — setup offer on next prompt"
-RESUME_EMPTY = "Contexer: resumed with no stored context — mining this conversation for decisions"
+NO_CONTEXT = "Contexer: no context stored - setup offer on next prompt"
+RESUME_EMPTY = "Contexer: resumed with no stored context - mining this conversation for decisions"
 POPULATED = ("Contexer: 1 architecture decision will be loaded on demand. 1 decision pending "
-             "review — say 'review pending' or run `contexer review`.")
-RESUME_POPULATED = "Contexer: session resumed — 2 decisions already loaded in conversation"
+             "review - say 'review pending' or run `contexer review`.")
+RESUME_POPULATED = "Contexer: session resumed - 2 decisions already loaded in conversation"
 
 
 @pytest.fixture(autouse=True)
 def ui_paths(tmp_path, monkeypatch):
-    """Console statefile and log inside tmp_path — never the real ~/.contexer."""
+    """Console statefile and log inside tmp_path - never the real ~/.contexer."""
     monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / ".contexer" / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ".contexer" / "ui.log")
 
@@ -144,7 +144,7 @@ class TestAutostartOn:
             f"{NO_CONTEXT} | console http://127.0.0.1:")
 
     def test_a_resumed_session_gets_the_url(self, autostart):
-        """The resume branch returns early, before the team suffix — it must not miss out."""
+        """The resume branch returns early, before the team suffix - it must not miss out."""
         seed(autostart)
         status = _human(autostart, "resume")["status"]
         assert status.startswith(f"{RESUME_POPULATED} | console http://127.0.0.1:")
@@ -166,7 +166,7 @@ class TestAutostartOn:
 # ── the deep link only appears when it will actually resolve ────────────────
 
 class TestDeepLinkResolves:
-    """A `#/store/<slug>` fragment only resolves once a store FILE exists — the slug is
+    """A `#/store/<slug>` fragment only resolves once a store FILE exists - the slug is
     matched against `~/.contexer/*.json`. Printing one before that lands the developer on
     "Could not load this view", which reads as a broken console."""
 
@@ -185,7 +185,7 @@ class TestDeepLinkResolves:
             f"#/store/{store._slug(autostart)}")
 
     def test_a_session_with_no_repo_never_links_to_the_empty_string_slug(self, autostart):
-        """`_slug("")` is sha1 of the empty string — `-da39a3ee`, a slug no store can have."""
+        """`_slug("")` is sha1 of the empty string - `-da39a3ee`, a slug no store can have."""
         payload = store._with_console_url({"status": "Contexer: something"}, "", True)
 
         assert " | console http://127.0.0.1:" in payload["status"]
@@ -257,7 +257,7 @@ class TestEveryAdapterSeesTheSameSeam:
         assert "console" not in out and "127.0.0.1" not in out
 
     def test_a_host_that_cannot_show_the_url_never_starts_a_daemon(self, autostart, spawns):
-        """Not just "the line is dropped" — nothing is STARTED.
+        """Not just "the line is dropped" - nothing is STARTED.
 
         Cursor and Gemini call session_start_payload directly and render `context` only, so a
         URL minted for them is unreachable by construction. Spawning anyway left a listener and

@@ -1,4 +1,4 @@
-"""Tests for staleness anchoring — source_files + anchor_commit, checked at injection."""
+"""Tests for staleness anchoring - source_files + anchor_commit, checked at injection."""
 import os
 import subprocess
 from pathlib import Path
@@ -117,7 +117,7 @@ def test_non_git_repo_fails_soft(tmp_path, monkeypatch):
     store.update_decision(plain, SUMMARY, "s1", "architecture", source_files=["auth.py"])
     entry = _entry(plain)
     assert entry["source_files"] == ["auth.py"]
-    assert entry["anchor_commit"] == ""  # no HEAD to resolve — files still stored
+    assert entry["anchor_commit"] == ""  # no HEAD to resolve - files still stored
     assert " [may be stale" not in store.get_context(plain, query="auth")
 
 
@@ -206,13 +206,13 @@ def test_identical_content_recapture_reanchors_and_clears_note(repo):
     assert stored and returned_id == eid
     entry = _entry(repo)
     assert entry["anchor_commit"] != old_anchor
-    # no revision was created — truly a no-op on content
+    # no revision was created - truly a no-op on content
     assert entry["content"] == store._normalize_content(SUMMARY)
     assert " [may be stale" not in store.get_context(repo, query="auth")
 
 
 def test_gated_correction_defers_reanchor_until_approved(repo):
-    """A significant (architecture, AI-inferred) correction attaches a Suggested Update —
+    """A significant (architecture, AI-inferred) correction attaches a Suggested Update -
     the live entry keeps its OLD content as the standing one until a developer approves
     (#193 renders the proposal beside it, clearly labeled unreviewed), so its anchor must
     keep describing that old content. Only approval re-anchors."""
@@ -229,12 +229,12 @@ def test_gated_correction_defers_reanchor_until_approved(repo):
     assert stored and returned_id == eid
     entry = _entry(repo)
     assert entry.get("proposed_revision", {}).get("content") == store._normalize_content(new_content)
-    # The OLD content is still what's live/rendered, and its anchor — and note — are untouched.
+    # The OLD content is still what's live/rendered, and its anchor - and note - are untouched.
     assert entry["anchor_commit"] == old_anchor
     assert entry["content"] == store._normalize_content(SUMMARY)
     out = store.get_context(repo, query="auth")
     assert " [may be stale" in out
-    # #193: the proposal IS rendered now, but only as the labeled unreviewed-update line —
+    # #193: the proposal IS rendered now, but only as the labeled unreviewed-update line -
     # never as the entry's standing content, which is still the old text.
     update_lines = [ln for ln in out.splitlines() if "Unreviewed update" in ln]
     assert len(update_lines) == 1 and "JWT" in update_lines[0]
@@ -252,7 +252,7 @@ def test_identical_content_new_title_recapture_reanchors_nongated(repo):
     """The common real shape of the recovery loop: the model re-reads the changed file,
     confirms the summary still holds, and re-captures it with the same content but a
     REGENERATED title (the MCP instructions always ask for a title, and it rarely matches
-    byte-for-byte). For a non-gated subtype the title updates in place — the anchor must
+    byte-for-byte). For a non-gated subtype the title updates in place - the anchor must
     still refresh, since the live content IS the re-validated text here."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "convention",
                                    source_files=["auth.py"])
@@ -274,7 +274,7 @@ def test_identical_content_new_title_recapture_reanchors_nongated(repo):
 def test_identical_content_new_title_recapture_reanchors_gated(repo):
     """Same recovery-loop shape as above, but on a gated (architecture, AI-inferred)
     decision: the title change is deferred to a proposal, but the content itself is
-    unchanged and re-validated right now, so the anchor must refresh immediately —
+    unchanged and re-validated right now, so the anchor must refresh immediately -
     not wait for the title proposal to be approved."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
                                    source_files=["auth.py"])
@@ -296,7 +296,7 @@ def test_identical_content_new_title_recapture_reanchors_gated(repo):
 
 def test_session_start_payload_never_shows_staleness_note(repo):
     """session_start_payload is never one of the two render sites _staleness_notes runs
-    at — a changed source file must not surface a note there."""
+    at - a changed source file must not surface a note there."""
     store.update_decision(repo, SUMMARY, "s1", "convention", source_files=["auth.py"])
     _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
     payload = store.session_start_payload(repo)
@@ -316,7 +316,7 @@ def test_legacy_entry_without_fields_round_trips(repo):
 
 def test_approve_already_anchored_entry_refreshes_anchor_commit_and_clears_note(repo):
     """A decision captured with source_files while still pending_approval is already
-    anchored. Approving it later (no source_files param — the param is independent of
+    anchored. Approving it later (no source_files param - the param is independent of
     this) is a human revalidation of the content: anchor_commit refreshes to current
     HEAD, and a stale note picked up in between clears."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "constraint",
@@ -337,7 +337,7 @@ def test_approve_already_anchored_entry_refreshes_anchor_commit_and_clears_note(
 
 def test_approve_with_source_files_param_anchors_and_clears_future_staleness(repo):
     """approve_decision(source_files=...) anchors a not-yet-anchored entry (source_files
-    stored, anchor_commit set to current HEAD), and the anchor takes effect immediately —
+    stored, anchor_commit set to current HEAD), and the anchor takes effect immediately -
     a later change to that file surfaces the staleness note."""
     stored, eid = store.update_decision(repo, "auth flow: login() verifies the token", "s1",
                                         "constraint")
@@ -360,7 +360,7 @@ def test_approve_with_source_files_param_anchors_and_clears_future_staleness(rep
 def test_share_projection_carries_source_files_but_never_anchor_commit(repo):
     """Wire-safety (updated for issue #174 Task 5): approval-time anchoring now
     deliberately projects `source_files` (the anchored files, for the preview/outbox)
-    but `anchor_commit` — a machine-local ref — must still never leak onto the push
+    but `anchor_commit` - a machine-local ref - must still never leak onto the push
     wire shape."""
     stored, eid = store.update_decision(repo, SUMMARY, "s1", "constraint")
     assert stored
@@ -376,7 +376,7 @@ def test_share_projection_carries_source_files_but_never_anchor_commit(repo):
 
 def test_capture_time_absolute_path_canonicalized_to_repo_relative(repo):
     """An absolute-path spelling passed to update_decision's source_files must be
-    canonicalized to the repo-relative POSIX form _anchor_sources stores — a raw
+    canonicalized to the repo-relative POSIX form _anchor_sources stores - a raw
     absolute path would break _staleness_note's `git diff -- <path>` once the repo
     moves, and would never guard-pair against a staged (relative) path."""
     abs_path = str(Path(repo) / "auth.py")
@@ -438,7 +438,7 @@ def test_outside_repo_absolute_path_dropped_not_stored_as_dotdot(repo):
     """An absolute path outside the repo canonicalizes (via os.path.relpath) to a
     "../"-prefixed string, which can never match a repo-relative staged path (guard
     pairing dead) and which git diff rejects/ignores (staleness dead). It must be
-    dropped, not stored — same empty-anchor outcome as an unresolvable path."""
+    dropped, not stored - same empty-anchor outcome as an unresolvable path."""
     outside = str(Path(repo).parent / "outside.py")
     stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
                                         source_files=[outside])
@@ -459,7 +459,7 @@ def test_relative_escape_spelling_dropped_not_stored(repo):
 
 def test_outside_repo_path_dropped_but_in_repo_siblings_still_anchor(repo):
     """When one source_files entry escapes the repo and another is in-repo, only the
-    escaping one is dropped — the in-repo file still anchors normally (mirrors the
+    escaping one is dropped - the in-repo file still anchors normally (mirrors the
     existing "drop unresolvable, keep the rest" behavior)."""
     outside = str(Path(repo).parent / "outside.py")
     stored, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
@@ -473,7 +473,7 @@ def test_outside_repo_path_dropped_but_in_repo_siblings_still_anchor(repo):
 # ── review anchor provenance (interactive review surface) ──────────────────────
 # `contexer review` shows which commit a decision was anchored to, so the developer
 # can see what work was in flight when it was captured. No PR number is stored
-# anywhere — it is read off the anchor commit's own subject, which squash/merge
+# anywhere - it is read off the anchor commit's own subject, which squash/merge
 # commits carry as "(#123)" / "Merge pull request #123".
 
 def test_anchor_note_empty_without_anchor(repo):
@@ -558,7 +558,7 @@ def test_print_wrapped_preserves_paragraph_breaks(capsys):
 # The review loop is human-paced (<=2 git calls per screen, not one long stall), but it is
 # uncapped, and this repo's 2s git timeouts DO fire under load. Two guards: memoise per
 # anchor so a queue captured in one session costs one lookup, and stop spending once a wall
-# -clock budget is gone — saying so, rather than rendering a bare row that reads as "no data"
+# -clock budget is gone - saying so, rather than rendering a bare row that reads as "no data"
 # (the honest-on-exhaustion rule anchors.py already establishes).
 
 def test_review_metadata_memoises_repeated_anchor(repo, monkeypatch):
@@ -604,7 +604,7 @@ def test_review_metadata_without_budget_still_works(repo):
 
 
 def test_fast_git_never_trips_the_budget(repo):
-    """A normal warm repo must render every row for a long queue — the failure mode of a
+    """A normal warm repo must render every row for a long queue - the failure mode of a
     call-count cap (like _STALENESS_MAX_CHECKS) would be hiding accuracy rows when git is fine."""
     from contexer import cli
     store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
@@ -620,12 +620,12 @@ def test_fast_git_never_trips_the_budget(repo):
 def test_review_screen_makes_at_most_two_git_calls(repo, monkeypatch):
     """Decision 9b71289b requires any expansion of the git-in-render exception to be
     re-measured before shipping. Measured on this repo's real store: `git log -1` costs
-    p50 12.3ms / p95 14.7ms — the SAME as the sanctioned `git diff --name-only` (12.4ms) —
+    p50 12.3ms / p95 14.7ms - the SAME as the sanctioned `git diff --name-only` (12.4ms) -
     so a review screen's worst case is ~29ms, imperceptible against a keypress.
 
     Pinned by CALL COUNT rather than wall clock deliberately: git subprocess timing is
     exactly what this repo's fail-soft 2s timeouts exist for, so a latency assertion here
-    would flake under CI load. Count is deterministic and catches the real regressions —
+    would flake under CI load. Count is deterministic and catches the real regressions -
     a third git call per screen, or a broken memo."""
     from contexer import cli
     store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
@@ -654,13 +654,13 @@ def _fake_entry(sha, i, files):
 
 def test_memoised_queue_collapses_the_anchor_lookup(repo, monkeypatch):
     """The anchor subject depends only on the sha, so a queue sharing an anchor_commit must
-    cost exactly ONE `git log` however many decisions it holds — that is what makes the
+    cost exactly ONE `git log` however many decisions it holds - that is what makes the
     uncapped loop safe.
 
     Deliberately uses decisions with DIFFERENT source_files: an earlier version of this test
     reused one identical entry, which passed trivially and would have kept passing even if the
     memo were keyed on the whole entry (caught in review on #219). Staleness is NOT collapsed
-    across file sets, and must not be — it genuinely differs per file, so each distinct file
+    across file sets, and must not be - it genuinely differs per file, so each distinct file
     set is its own `git diff`."""
     from contexer import cli
     store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])
@@ -677,7 +677,7 @@ def test_memoised_queue_collapses_the_anchor_lookup(repo, monkeypatch):
 
 
 def test_memoised_queue_collapses_both_when_anchor_and_files_match(repo, monkeypatch):
-    """The common case — a queue captured in one session over the same files — collapses to
+    """The common case - a queue captured in one session over the same files - collapses to
     a single lookup of each kind."""
     from contexer import cli
     store.update_decision(repo, SUMMARY, "s1", "architecture", source_files=["auth.py"])

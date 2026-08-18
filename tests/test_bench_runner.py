@@ -1,4 +1,4 @@
-"""Runner logic tested against a stub 'claude' binary — no network, no tokens."""
+"""Runner logic tested against a stub 'claude' binary - no network, no tokens."""
 import json
 import os
 import stat
@@ -180,7 +180,7 @@ class TestRunCampaign:
         assert "settings:no claudemd:yes agents:yes" in rows["claudemd_agentsmd"]["result_snippet"]
 
     def test_claudemd_with_condition_gets_both(self, tmp_path, stub_claude_probe):
-        # Condition D: contexer layered on a pre-existing CLAUDE.md — the adoption
+        # Condition D: contexer layered on a pre-existing CLAUDE.md - the adoption
         # question for repos that already maintain one.
         out = _run_stubbed_campaign(
             tmp_path / "d", reps=1, task_ids=["rat-storage"],
@@ -235,7 +235,7 @@ class TestRunCampaign:
         assert isinstance(meta["managed_settings_present"], bool)
 
     def test_failed_session_recorded_as_errored_row(self, tmp_path, stub_claude_fail):
-        # An auth/API failure returns well-formed JSON with is_error — it must land
+        # An auth/API failure returns well-formed JSON with is_error - it must land
         # as an errored row (excluded from medians), never a clean zero-token row.
         out = _run_stubbed_campaign(
             tmp_path / "e", reps=1, task_ids=["rat-storage"],
@@ -268,7 +268,7 @@ class TestRunCampaign:
 
 class TestCheckIsolation:
     def test_check_cmd_runs_in_isolated_env(self, tmp_path, stub_claude, monkeypatch):
-        # success must be judged in the same isolated HOME the session saw — a check
+        # success must be judged in the same isolated HOME the session saw - a check
         # that would only pass against the developer's real HOME must fail (P2).
         import benchmarks.run as run_mod
         real_home = os.environ["HOME"]

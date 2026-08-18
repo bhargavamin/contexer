@@ -3,14 +3,14 @@
 Codex's hook system is JSON and uses the *same schema and event names* as Claude Code
 (SessionStart / PostToolUse / PreCompact / PostCompact / UserPromptSubmit, with the same
 hookSpecificOutput / additionalContext / systemMessage output). So this adapter reaches
-near-full Claude parity and reuses Claude's runtime entrypoints verbatim — the hook command
+near-full Claude parity and reuses Claude's runtime entrypoints verbatim - the hook command
 strings call store.get_*/claude.capture_* directly, exactly as the Claude hooks do.
 
 Two things differ from the Claude adapter:
   - the MCP server is registered in ~/.codex/config.toml (TOML), not JSON;
   - hooks live in a separate ~/.codex/hooks.json (JSON, same shape as Claude's settings.json
     `hooks` block).
-There is no permissions.allow — Codex approves MCP tools interactively (like Cursor).
+There is no permissions.allow - Codex approves MCP tools interactively (like Cursor).
 """
 import shutil
 import sys
@@ -76,7 +76,7 @@ def _remove_contexer_stanza(text: str) -> str:
 
 
 def _read_config_command(home: Path):
-    """The registered contexer MCP command from config.toml, or None. Tolerant — a missing
+    """The registered contexer MCP command from config.toml, or None. Tolerant - a missing
     or unparseable config reads as 'not registered' rather than crashing diagnostics."""
     path = home / ".codex" / "config.toml"
     if not path.exists():
@@ -138,9 +138,9 @@ def install(home: Path) -> list[str]:
         "repo=sys.argv[1]; raw=sys.stdin.read(); "
         # Sanity-checked AND fail-soft (#152): under Codex's managed sandbox the workspace
         # is writable but ~/.contexer may not be, and the old unguarded write raised
-        # PermissionError — aborting SessionStart over a pointer file it did not need.
+        # PermissionError - aborting SessionStart over a pointer file it did not need.
         "store.anchor_repo(repo); "
-        # Refresh team context (Path B seam) before building context — fail-soft, so a sync
+        # Refresh team context (Path B seam) before building context - fail-soft, so a sync
         # hiccup never breaks session start. session_start_payload then renders it (T1).
         "_c.pull_team(repo); "
         # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
@@ -158,7 +158,7 @@ def install(home: Path) -> list[str]:
         "raw=sys.stdin.read(); "
         "print(json.dumps(store.get_post_compact_context(sys.argv[1], store.session_from_hook_stdin(raw))))"
     )
-    # Every ~/.contexer write here is best-effort (#152) — see claude.py's anchor_cmd for
+    # Every ~/.contexer write here is best-effort (#152) - see claude.py's anchor_cmd for
     # why the redirect is wrapped in braces rather than trailing a bare `2>/dev/null`.
     anchor_cmd = (
         "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
@@ -181,7 +181,7 @@ def install(home: Path) -> list[str]:
         "else echo '{}'; fi"
     )
     # Nudge to review decisions pending the developer. Reuses claude.review_nudge (codex-parity):
-    # a Python entrypoint so it is per-repo and verifies the store — no false / cross-repo nudge.
+    # a Python entrypoint so it is per-repo and verifies the store - no false / cross-repo nudge.
     review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                   f'"{python}" -c "from contexer.adapters import claude; import sys; '
                   'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO"')
@@ -192,18 +192,18 @@ def install(home: Path) -> list[str]:
                f'"{python}" -c "from contexer.adapters import claude; import sys; '
                'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
     # Team delta poll (T2): Codex shares Claude's UserPromptSubmit output schema, so
-    # claude.team_poll is reused — non-blocking, fail-soft, injects newly-approved team
+    # claude.team_poll is reused - non-blocking, fail-soft, injects newly-approved team
     # decisions on the next prompt. The third arg tags this consumer "codex" so a Codex and a
     # Claude session on the same repo each get every synced batch once (independent high-water
     # markers) instead of racing for a single per-repo delivery.
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
                 f'"{python}" -c "from contexer.adapters import claude; import sys; '
                 'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
-    # PostToolUse (issue #175 Task 2): reuse claude.post_write VERBATIM — Codex shares
+    # PostToolUse (issue #175 Task 2): reuse claude.post_write VERBATIM - Codex shares
     # Claude's PostToolUse hookSpecificOutput schema, so the same Python entrypoint records
     # edited files into the per-session sidecar and arms .pending_capture. The $REPO prefix
     # is copied character-for-character from claude.py's own post_write_cmd (`|| true`, not
-    # this file's usual `|| pwd` fallback) — verbatim reuse, established by the shelved
+    # this file's usual `|| pwd` fallback) - verbatim reuse, established by the shelved
     # feat/doc-drift branch. See claude.post_write's docstring for the hazard this guards
     # against: a cwd-vs-toplevel mismatch would silently key a different sidecar.
     post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
@@ -211,7 +211,7 @@ def install(home: Path) -> list[str]:
                       'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       '# .pending_capture')
 
-    # MCP server (~/.codex/config.toml) — surgical text edit so the user's plugins,
+    # MCP server (~/.codex/config.toml) - surgical text edit so the user's plugins,
     # marketplaces, projects, other mcp_servers, and secrets stay byte-for-byte intact.
     config_path = home / ".codex" / "config.toml"
     try:
@@ -222,19 +222,19 @@ def install(home: Path) -> list[str]:
         # would strand `--target all` half-installed: the adapters iterated before Codex
         # already wired, the ones after it never reached.
         existing = None
-        log.append("  ! ~/.codex/config.toml is unreadable (not UTF-8?) — left untouched (fix it, then re-run)")
+        log.append("  ! ~/.codex/config.toml is unreadable (not UTF-8?) - left untouched (fix it, then re-run)")
     if existing is not None:
         new_text = _set_contexer_stanza(existing, contexer_bin)
         try:
             tomllib.loads(new_text)
         except tomllib.TOMLDecodeError:
-            log.append("  ! ~/.codex/config.toml is not valid TOML — left untouched (fix it, then re-run)")
+            log.append("  ! ~/.codex/config.toml is not valid TOML - left untouched (fix it, then re-run)")
         else:
             config_path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(config_path, new_text)
             log.append("  ✓ MCP server registered in ~/.codex/config.toml")
 
-    # Hooks (~/.codex/hooks.json) — same JSON schema and event names as Claude Code.
+    # Hooks (~/.codex/hooks.json) - same JSON schema and event names as Claude Code.
     hooks_path = home / ".codex" / "hooks.json"
     cfg = base._load(hooks_path)
     hooks = cfg.setdefault("hooks", {})
@@ -242,8 +242,8 @@ def install(home: Path) -> list[str]:
     ss = hooks.setdefault("SessionStart", [])
     # Migrate: an older SessionStart group predates the team-context pull (T2), predates
     # session-id threading (compact-source working-set rehydration), or predates the
-    # fail-soft repo anchor (#152 — the unguarded `.current_repo` write that aborted the
-    # whole hook under Codex's sandbox) — replace it so the current ss_code is installed.
+    # fail-soft repo anchor (#152 - the unguarded `.current_repo` write that aborted the
+    # whole hook under Codex's sandbox) - replace it so the current ss_code is installed.
     # Mirrors claude.py's SessionStart migration gate.
     if base._in_groups(ss, "get_session_start_context") and not (
             base._in_groups(ss, "pull_team") and base._in_groups(ss, "session_from_hook_stdin")
@@ -266,7 +266,7 @@ def install(home: Path) -> list[str]:
         put = base._filter_groups(put, [".pending_capture"])
         hooks["PostToolUse"] = put
     # Migrate: an installed post_write hook resolving the repo from raw cwd (no $REPO
-    # threading) — mirrors claude.py's migration gate for the same doc-drift hazard.
+    # threading) - mirrors claude.py's migration gate for the same doc-drift hazard.
     if base._in_groups(put, "claude.post_write") and not base._in_groups(put, "show-toplevel"):
         put = base._filter_groups(put, ["claude.post_write"])
         hooks["PostToolUse"] = put
@@ -288,11 +288,11 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(pc, "compaction starting"):
         pc.append({"hooks": [{"type": "command",
             "statusMessage": "Saving decisions before compact...",
-            "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'"}]})
+            "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting - call update_context for any decisions not yet stored\"}'"}]})
 
     poc = hooks.setdefault("PostCompact", [])
     # Migrate: an older PostCompact group predates session-id threading (working-set
-    # rehydration) — replace it so the current post_code (reads session_id from stdin) runs.
+    # rehydration) - replace it so the current post_code (reads session_id from stdin) runs.
     if base._in_groups(poc, "get_post_compact_context") and not base._in_groups(poc, "session_from_hook_stdin"):
         poc = base._filter_groups(poc, ["get_post_compact_context"])
         hooks["PostCompact"] = poc
@@ -307,7 +307,7 @@ def install(home: Path) -> list[str]:
         ups = base._filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
     # Migrate (#152): an anchor hook that writes ~/.contexer unguarded. Same gate as
-    # claude.py — _in_commands because _ANCHOR_GUARD contains a quote.
+    # claude.py - _in_commands because _ANCHOR_GUARD contains a quote.
     if base._in_groups(ups, ".pending_capture") and not base._in_commands(ups, claude._ANCHOR_GUARD):
         ups = base._filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
@@ -338,7 +338,7 @@ def install(home: Path) -> list[str]:
     # "codex-tools"), silently suppressing the migration. Only the tagged call this codebase
     # generates contains 'codex' as a quoted argument.
     # _in_commands, NOT _in_groups: the latter matches a dict repr, which escapes the
-    # quotes to \'codex\' — so this gate never recognized its own output and re-fired on
+    # quotes to \'codex\' - so this gate never recognized its own output and re-fired on
     # every single install, stripping and re-appending the hook (harmless but endless
     # churn: it reordered UserPromptSubmit, so no install was ever idempotent).
     if base._in_groups(ups, "claude.team_poll") and not base._in_commands(ups, "'codex'"):
@@ -353,7 +353,7 @@ def install(home: Path) -> list[str]:
 
     base._save(hooks_path, cfg)
     log.append("  ✓ Hooks registered in ~/.codex/hooks.json")
-    log.append("  ℹ Codex will ask once to approve Contexer's MCP tools — approve to allow.")
+    log.append("  ℹ Codex will ask once to approve Contexer's MCP tools - approve to allow.")
     return log
 
 
@@ -378,8 +378,8 @@ def uninstall(home: Path) -> list[str]:
     try:
         text = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     except (OSError, UnicodeDecodeError):
-        text = None      # must not abort uninstall — the user has to get out of this state
-        log.append("  ! ~/.codex/config.toml is unreadable (not UTF-8?) — left untouched")
+        text = None      # must not abort uninstall - the user has to get out of this state
+        log.append("  ! ~/.codex/config.toml is unreadable (not UTF-8?) - left untouched")
     if text is not None:
         new_text = _remove_contexer_stanza(text)
         if new_text == text:
@@ -388,7 +388,7 @@ def uninstall(home: Path) -> list[str]:
             try:
                 tomllib.loads(new_text)
             except tomllib.TOMLDecodeError:
-                log.append("  ! ~/.codex/config.toml is not valid TOML — left untouched")
+                log.append("  ! ~/.codex/config.toml is not valid TOML - left untouched")
             else:
                 _atomic_write(config_path, new_text)
                 log.append("  ✓ MCP server removed from ~/.codex/config.toml")

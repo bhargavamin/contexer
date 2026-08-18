@@ -28,7 +28,7 @@ def _live_ids(repo: str) -> list[str]:
 
 
 def _snake_file(n_snake: int) -> str:
-    """A Python module of snake_case functions — enough for the miner to measure a
+    """A Python module of snake_case functions - enough for the miner to measure a
     naming convention at the high tier (mirrors test_store.py's helper)."""
     return "\n".join(f"def fn_snake_{i}():\n    pass\n" for i in range(n_snake))
 
@@ -233,7 +233,7 @@ class TestUnreadableSidecar:
 
     def test_capture_deliberately_fails_open(self, tmp_repo):
         """Documented trade-off (see `_is_tombstoned`): failing closed would block EVERY
-        capture in the repo — including decisions that were never deleted — on one corrupt
+        capture in the repo - including decisions that were never deleted - on one corrupt
         file. The condition is surfaced instead of hidden."""
         self._tombstone_then_truncate(tmp_repo)
         stored, _entry_id = store.update_decision(tmp_repo, CACHE_DECISION, "sess-2",
@@ -244,7 +244,7 @@ class TestUnreadableSidecar:
 
 class TestNonObjectTombstone:
     """A sidecar whose `entries` list holds a non-dict item: it parses as JSON, so the list
-    check alone let it through and `_find_match` then called `.get()` on a string — an
+    check alone let it through and `_find_match` then called `.get()` on a string - an
     AttributeError out of the MCP capture tool with the store lock held."""
 
     BROKEN = '{"entries": ["oops"]}'
@@ -475,7 +475,7 @@ class TestRestoreIsIdempotent:
         assert ok
         assert "already" in msg
         assert _live_ids(tmp_repo) == [entry_id], \
-            "restore appended a second copy of a live id — the duplicate is unreachable"
+            "restore appended a second copy of a live id - the duplicate is unreachable"
         assert store.list_deleted(tmp_repo) == [], "the stale tombstone must be dropped"
 
     def test_the_surviving_copy_stays_editable_and_deletable(self, tmp_repo):
@@ -557,7 +557,7 @@ def _memory_dir(tmp_path: Path, text: str = MEMORY_FACT) -> Path:
 
 class TestResurrectionGuard:
     def test_memory_sync_import_does_not_resurrect(self, tmp_repo, tmp_path):
-        # Through memory_sync.import_dir — the real SessionEnd path, not a direct store call.
+        # Through memory_sync.import_dir - the real SessionEnd path, not a direct store call.
         mem = _memory_dir(tmp_path)
         assert memory_sync.import_dir(mem, tmp_repo) == 1
         imported = _live_ids(tmp_repo)
@@ -615,7 +615,7 @@ class TestResurrectionGuard:
 
     def test_update_decision_blocks_a_reworded_restatement(self, tmp_repo):
         # The guard uses _find_match, so it catches the same >70% overlap band the novelty
-        # filter does — not just byte-identical text.
+        # filter does - not just byte-identical text.
         entry_id = _store_one(tmp_repo, CACHE_DECISION)
         store.delete_decision(tmp_repo, entry_id)
         reworded = "Use Redis for hot-read caching because Postgres round-trips dominated the latency"
@@ -719,7 +719,7 @@ class TestLoadDiagnostics:
         diag = store.load_diagnostics(tmp_repo)
         assert diag["ok"] is False
         assert "JSONDecodeError" in diag["error"]
-        # _load still degrades silently — diagnostics is the ONLY thing that tells them apart.
+        # _load still degrades silently - diagnostics is the ONLY thing that tells them apart.
         assert store._load(tmp_repo)["entries"] == []
 
     def test_non_object_store_is_not_ok(self, tmp_repo):
@@ -810,7 +810,7 @@ class TestSlugAddressing:
 
     def test_a_legacy_named_store_keeps_its_slug_across_the_rename(self, tmp_repo):
         # The first `_load` renames `<legacy>.json` to `<legacy>-<hash>.json`, which used to
-        # invalidate the slug the client was already holding — every later poll 404'd.
+        # invalidate the slug the client was already holding - every later poll 404'd.
         store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         legacy = store.STORE_DIR / f"{store._legacy_slug(tmp_repo)}.json"
         legacy.write_text(json.dumps({"repo_path": tmp_repo, "entries": []}), encoding="utf-8")
@@ -849,7 +849,7 @@ class TestPollCost:
 
     def test_list_decisions_files_filter_reads_the_store_once(self, tmp_repo, read_counts):
         # decisions_for_files must be given the already-loaded rows (`decisions=rows`), not
-        # left to reload the store itself — otherwise the files filter would silently double
+        # left to reload the store itself - otherwise the files filter would silently double
         # the poll's file I/O every time a file filter is active.
         _store_one(tmp_repo, CACHE_DECISION, source_files=["cache/redis.py"])
         read_counts.clear()

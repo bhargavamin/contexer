@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contexer installer (from source) — builds the CLI from this clone and wires it into
+# Contexer installer (from source) - builds the CLI from this clone and wires it into
 # your AI assistant(s) via the same code path end users run.
 #
 # Usage:
@@ -9,7 +9,7 @@
 #
 # This delegates all per-tool wiring to `contexer install` (contexer/adapters/*), so a
 # single source of truth supports every target. It (re)builds the `contexer` binary from
-# THIS directory — re-run after editing source to pick up changes.
+# THIS directory - re-run after editing source to pick up changes.
 #
 # Requires: uv (https://docs.astral.sh/uv/getting-started/installation/)
 set -euo pipefail

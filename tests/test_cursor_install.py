@@ -65,7 +65,7 @@ class TestCursorInstall:
         assert sum("cursor.capture_constraint" in c for c in cmds) == 1
 
     def test_does_not_auto_approve_mcp_tools(self, home):
-        # Contexer must not silently pre-approve its own MCP tools — Cursor should still
+        # Contexer must not silently pre-approve its own MCP tools - Cursor should still
         # prompt the user on first use.
         log = cursor.install(home)
         assert not (home / ".cursor" / "permissions.json").exists()

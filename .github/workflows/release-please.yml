@@ -10,7 +10,7 @@ on:
       - "docs/**"
       - "assets/**"
   # Manual recovery path: if Actions was down when a merge landed (push events are
-  # never replayed), trigger from the Actions tab — release-please scans everything
+  # never replayed), trigger from the Actions tab - release-please scans everything
   # since the last release tag, so missed merges are picked up in full.
   workflow_dispatch:
 
@@ -30,7 +30,7 @@ jobs:
       # `contents: write` + `pull-requests: write`, and a moved upstream tag would change
       # what runs with those permissions without a commit here. Same rule as the
       # SHA-pinned setup-node in contexer-check.yml. Bump deliberately (stay on the v4
-      # line — v5 is a major with its own input changes).
+      # line - v5 is a major with its own input changes).
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
         with:

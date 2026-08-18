@@ -1,4 +1,4 @@
-# Contexer A/B Benchmark — model claude-sonnet-5, 183 runs (48 without / 45 claudemd / 45 with / 45 claudemd_with)
+# Contexer A/B Benchmark - model claude-sonnet-5, 183 runs (48 without / 45 claudemd / 45 with / 45 claudemd_with)
 
 | metric | without | claudemd | with | claudemd_with | Δ (with−without) | Δ% (with−without) | Δ (with−claudemd) | Δ% (with−claudemd) | Δ (claudemd_with−claudemd) | Δ% (claudemd_with−claudemd) |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -11,7 +11,7 @@
 | rationale | 1 | 1 | 1 | 1 | 0 | +0.0% | 0 | +0.0% | 0 | +0.0% |
 | success | 0 | 1 | 1 | 1 | 1 | n/a | 0 | +0.0% | 0 | +0.0% |
 
-_Note: rationale 0.0 can mean the information was unavailable to that condition, not model failure — see per-condition design._
+_Note: rationale 0.0 can mean the information was unavailable to that condition, not model failure - see per-condition design._
 
 ## Chain: orders
 
@@ -23,7 +23,7 @@ _Note: rationale 0.0 can mean the information was unavailable to that condition,
 
 ## Independent Validation
 
-**Status: PASS** — 0 failure(s), 15 warning(s)
+**Status: PASS** - 0 failure(s), 15 warning(s)
 
 ### Warnings
 
@@ -36,12 +36,12 @@ _Note: rationale 0.0 can mean the information was unavailable to that condition,
 - cell (chain-3-audit, claudemd) has 7 of 8 rows (short)
 - cell (chain-3-audit, claudemd_with) has 7 of 8 rows (short)
 - cell (chain-3-audit, with) has 7 of 8 rows (short)
-- paired turns (with_vs_claudemd) direction (with-worse) is driven by a single task 'chain-3-audit' — removing it flips/erases the sign
-- paired tool_calls (with_vs_claudemd) direction (with-worse) is driven by a single task 'chain-3-audit' — removing it flips/erases the sign
-- paired duration_ms (with_vs_claudemd) direction (with-worse) is driven by a single task 'chain-2-list' — removing it flips/erases the sign
-- paired turns (claudemd_with_vs_claudemd) direction (claudemd_with-worse) is driven by a single task 'chain-3-audit' — removing it flips/erases the sign
-- paired tool_calls (claudemd_with_vs_claudemd) direction (claudemd_with-worse) is driven by a single task 'chain-3-audit' — removing it flips/erases the sign
-- paired duration_ms (claudemd_with_vs_claudemd) direction (claudemd_with-better) is driven by a single task 'rat-errors' — removing it flips/erases the sign
+- paired turns (with_vs_claudemd) direction (with-worse) is driven by a single task 'chain-3-audit' - removing it flips/erases the sign
+- paired tool_calls (with_vs_claudemd) direction (with-worse) is driven by a single task 'chain-3-audit' - removing it flips/erases the sign
+- paired duration_ms (with_vs_claudemd) direction (with-worse) is driven by a single task 'chain-2-list' - removing it flips/erases the sign
+- paired turns (claudemd_with_vs_claudemd) direction (claudemd_with-worse) is driven by a single task 'chain-3-audit' - removing it flips/erases the sign
+- paired tool_calls (claudemd_with_vs_claudemd) direction (claudemd_with-worse) is driven by a single task 'chain-3-audit' - removing it flips/erases the sign
+- paired duration_ms (claudemd_with_vs_claudemd) direction (claudemd_with-better) is driven by a single task 'rat-errors' - removing it flips/erases the sign
 
 ### Recomputed medians (errored rows excluded, 0 excluded)
 

@@ -16,7 +16,7 @@ def all_adapters() -> list:
 
 
 def get(name: str):
-    return _ADAPTERS[name]  # raises KeyError on unknown — caller maps to a CLI error
+    return _ADAPTERS[name]  # raises KeyError on unknown - caller maps to a CLI error
 
 
 def detect(home: Path | None = None) -> list:

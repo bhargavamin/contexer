@@ -62,7 +62,7 @@ def test_session_start_syncs_memory_and_reads_source(plugin_hooks):
 def test_no_post_compact_hook(plugin_hooks):
     # PostCompact can't inject context (no additionalContext; systemMessage is
     # user-facing only), so wiring it only dumped visible noise on /compact.
-    # SessionStart(source="compact") reloads silently — the plugin wires no PostCompact.
+    # SessionStart(source="compact") reloads silently - the plugin wires no PostCompact.
     assert "PostCompact" not in plugin_hooks
 
 
@@ -84,7 +84,7 @@ def test_capture_hooks_present(plugin_hooks):
 # command text is stale (pre-#152 unguarded forms) or missing an entrypoint entirely
 # (post_write, team_poll, review_nudge). This section drives the REAL claude.install()
 # into an isolated temp home and diffs its generated command/matcher/once against the
-# bundle's, one hook at a time, so drift in ANY of those three fields fails loudly —
+# bundle's, one hook at a time, so drift in ANY of those three fields fails loudly -
 # in both directions: a marker missing from the adapter (test_command_matches_adapter)
 # and an adapter hook / bundle hook missing a marker (the two orphan tests below).
 #
@@ -93,10 +93,10 @@ def test_capture_hooks_present(plugin_hooks):
 #      (durable plugin dir) where the installer uses `"{sys.executable}"` directly.
 #   2. sentinel: every installer-generated command carries a trailing
 #      `# contexer-managed-hook` comment (so `install()`/`uninstall()` can recognize
-#      and migrate their own previously-written hooks on reinstall) — the static
+#      and migrate their own previously-written hooks on reinstall) - the static
 #      bundle never self-migrates, so it carries no sentinel.
 # Both are normalized away below before comparing; anything else that differs is drift.
-# Normalization applies to `command` only — `matcher` and `once` are compared as-is.
+# Normalization applies to `command` only - `matcher` and `once` are compared as-is.
 _SENTINEL_RE = re.compile(r" # contexer-managed-hook.*$")
 
 
@@ -109,19 +109,19 @@ def _normalize_adapter_command(cmd: str, python: str) -> str:
 @pytest.fixture
 def adapter_hooks(tmp_path, monkeypatch):
     """[(event, command, matcher, once), ...] exactly as claude.install() generates
-    today — the source of truth the bundle must mirror. Driven into an isolated temp
+    today - the source of truth the bundle must mirror. Driven into an isolated temp
     home so this never touches the real ~/.claude config.
 
     Isolating the home dir alone is NOT enough: claude.install() also runs
-    clean_legacy_repo_settings against store._git_root(os.getcwd()) — the PROCESS cwd's
-    git root, not the injected home — to clean up a pre-CLI installer's repo-level
+    clean_legacy_repo_settings against store._git_root(os.getcwd()) - the PROCESS cwd's
+    git root, not the injected home - to clean up a pre-CLI installer's repo-level
     hooks. Left unpatched, a test run from a checkout whose <repo>/.claude/settings.json
     still carries legacy Contexer hook markers would get silently rewritten (the same
     class of test-state escaping the ui.log leak fixture above exists to catch, just for
     a different real file). monkeypatch.chdir(tmp_path) contains that structurally: cwd's
     git root becomes tmp_path (untracked, no .claude/settings.json), so
     clean_legacy_repo_settings has nothing of ours to touch. The explicit byte-identical
-    assertion below is belt-and-suspenders — the session's leak-guard fixture
+    assertion below is belt-and-suspenders - the session's leak-guard fixture
     (no_real_store_writes) only watches ~/.contexer, not <repo>/.claude/settings.json."""
     real_repo = store._git_root(os.getcwd())
     real_settings = Path(real_repo) / ".claude" / "settings.json" if real_repo else None
@@ -133,7 +133,7 @@ def adapter_hooks(tmp_path, monkeypatch):
     if real_settings is not None:
         after = real_settings.read_bytes() if real_settings.is_file() else None
         assert after == before, (
-            f"claude.install() must never touch the real {real_settings} — "
+            f"claude.install() must never touch the real {real_settings} - "
             "cwd isolation leaked")
 
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
@@ -148,7 +148,7 @@ def adapter_hooks(tmp_path, monkeypatch):
 
 def _one_adapter_hook(adapter_hooks: list, event: str, marker: str) -> tuple:
     """(command, matcher, once) for the single adapter hook matching (event, marker).
-    Asserts exactly one match — zero means the adapter no longer installs this hook
+    Asserts exactly one match - zero means the adapter no longer installs this hook
     (or the marker is stale), more than one means the marker is ambiguous and must
     be tightened, either way silently comparing against the wrong hook is worse
     than failing loudly here."""
@@ -156,7 +156,7 @@ def _one_adapter_hook(adapter_hooks: list, event: str, marker: str) -> tuple:
                if ev == event and marker in cmd]
     assert len(matches) == 1, (
         f"expected exactly one adapter {event} hook matching {marker!r}, found "
-        f"{len(matches)} — 0 means the adapter no longer installs this hook (update "
+        f"{len(matches)} - 0 means the adapter no longer installs this hook (update "
         "_ADAPTER_HOOK_MARKERS), >1 means the marker is ambiguous (pick a more "
         "specific substring)")
     return matches[0]
@@ -173,7 +173,7 @@ def _one_plugin_hook(plugin_hooks: dict, event: str, marker: str) -> tuple:
     ]
     assert len(matches) == 1, (
         f"expected exactly one plugin {event} hook matching {marker!r}, found "
-        f"{len(matches)} — 0 means the bundle is missing this hook, >1 means the "
+        f"{len(matches)} - 0 means the bundle is missing this hook, >1 means the "
         "marker is ambiguous (pick a more specific substring)")
     return matches[0]
 
@@ -184,7 +184,7 @@ def _one_plugin_hook(plugin_hooks: dict, event: str, marker: str) -> tuple:
 # marker here means the adapter no longer installs it and the bundle should drop it
 # too (see test_bundle_carries_no_hooks_the_adapter_no_longer_installs). An adapter
 # hook matching no marker here means _ADAPTER_HOOK_MARKERS itself is stale (see
-# test_adapter_markers_cover_every_installed_hook) — this list must stay exhaustive
+# test_adapter_markers_cover_every_installed_hook) - this list must stay exhaustive
 # in BOTH directions, or a new adapter hook could ship with no bundle coverage and
 # every check here would stay green.
 _ADAPTER_HOOK_MARKERS = [
@@ -226,7 +226,7 @@ def test_bundle_carries_no_hooks_the_adapter_no_longer_installs(plugin_hooks):
             for h in grp.get("hooks", []):
                 cmd = h.get("command", "")
                 assert any(marker in cmd for marker in known_markers), (
-                    f"{event} hook has no matching adapter marker — "
+                    f"{event} hook has no matching adapter marker - "
                     f"orphaned or needs a new entry in _ADAPTER_HOOK_MARKERS: {cmd[:80]}")
 
 
@@ -234,9 +234,9 @@ def test_adapter_markers_cover_every_installed_hook(adapter_hooks):
     """Mirror of the test above, in the other direction: every hook claude.install()
     generates today must be covered by _ADAPTER_HOOK_MARKERS. Without this, a new
     hook added to install() with no marker row (and no bundle entry) would pass
-    every other check here silently — exactly the class of drift this file exists
+    every other check here silently - exactly the class of drift this file exists
     to catch, just introduced from the adapter side instead of the bundle side."""
     for event, cmd, _matcher, _once in adapter_hooks:
         assert any(ev == event and marker in cmd for ev, marker in _ADAPTER_HOOK_MARKERS), (
-            f"{event} hook has no _ADAPTER_HOOK_MARKERS entry — add a marker row here "
+            f"{event} hook has no _ADAPTER_HOOK_MARKERS entry - add a marker row here "
             f"AND the corresponding hooks/hooks.json bundle entry: {cmd[:80]}")

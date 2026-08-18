@@ -14,7 +14,7 @@ NAME = "gemini"
 _PENDING_CAPTURE = ".gemini_pending_capture"
 _PENDING_RELOAD = ".gemini_pending_reload"
 _REMINDER = (
-    "Contexer: you wrote or edited files last turn — call update_context for: "
+    "Contexer: you wrote or edited files last turn - call update_context for: "
     "(1) any NEW architecture/pattern/constraint/convention decisions; "
     "(2) any EXISTING approach you applied again (the server deduplicates)."
 )
@@ -54,20 +54,20 @@ def _session_marker(raw: str) -> Path | None:
 
 def _anchor(repo: str) -> None:
     # Sanity-checked AND fail-soft (#152): an unwritable ~/.contexer must not cost the
-    # session its stored rules — session_start's blanket except would swallow them.
+    # session its stored rules - session_start's blanket except would swallow them.
     store.anchor_repo(repo)
 
 
 # Flag files are bookkeeping, and session_start/before_agent wrap their whole body in a
 # blanket `except Exception` that degrades to an EMPTY injection. So an unguarded flag
-# write under an unwritable ~/.contexer (#152) does not just skip the flag — it silently
+# write under an unwritable ~/.contexer (#152) does not just skip the flag - it silently
 # costs the prompt its entire context: bootstrap, constraint ack, review nudge, the
 # post-compaction reload, everything. These two helpers keep that failure local.
 
 def _flag_drop(path: Path) -> None:
     """Best-effort consume of a flag file. A flag that cannot be cleared simply re-fires
-    next turn — the same degradation the Claude/Codex shell hooks accept via `rm -f … ||
-    true` — which is strictly better than losing the turn's injection."""
+    next turn - the same degradation the Claude/Codex shell hooks accept via `rm -f … ||
+    true` - which is strictly better than losing the turn's injection."""
     try:
         path.unlink(missing_ok=True)
     except OSError:
@@ -90,7 +90,7 @@ def session_start(repo_path: str, raw: str) -> str:
     Repo resolution is `_hook_cwd_repo`, NOT `_resolve_repo` (Greptile P1 #2, PR #181,
     follow-up to 3fde7aa): this is a hook-invoked process, so `_SESSION_REPO` is always
     empty here and bare `_resolve_repo` would fall through to the shared `.current_repo`
-    pointer on an empty hook-supplied repo — which another session can have pointed at a
+    pointer on an empty hook-supplied repo - which another session can have pointed at a
     DIFFERENT repo between hook events. See `after_write`'s docstring for the full
     rationale; this mirrors it so SessionStart keys the same store `before_agent` and
     `after_write` do."""
@@ -100,7 +100,7 @@ def session_start(repo_path: str, raw: str) -> str:
             return _output("SessionStart", [])
         _anchor(repo)
         # Fix 7: only reset the first-prompt marker on a genuinely new session.
-        # Resume and /clear continue an existing session — preserve the marker so
+        # Resume and /clear continue an existing session - preserve the marker so
         # before_agent does not re-run bootstrap and task capture on the next prompt.
         source = store.source_from_hook_stdin(raw)
         if source not in ("resume", "clear"):
@@ -121,7 +121,7 @@ def before_agent(repo_path: str, raw: str) -> str:
     nudge, context payloads), so this must key the SAME store `after_write` records edits
     into. Before this fix, an empty hook-supplied repo (non-git project) fell through
     `_resolve_repo` to the shared `.current_repo` pointer, which another session can move
-    between hook events — a writer/reader repo-key split identical in shape to the
+    between hook events - a writer/reader repo-key split identical in shape to the
     session-id bug: `after_write` recorded the edit under the cwd-keyed store while capture
     read anchor candidates from the pointer-keyed store, so pending captures in non-git
     Gemini projects got no anchor candidates. `_hook_cwd_repo` is guarded by `_is_sane_repo`,
@@ -137,7 +137,7 @@ def before_agent(repo_path: str, raw: str) -> str:
         contexts: list[str] = []
 
         # Fix 3: check reload FIRST. A full post-compression reload makes the
-        # "you edited files last turn" reminder redundant and misleading — the
+        # "you edited files last turn" reminder redundant and misleading - the
         # write happened before compression, not on the immediately preceding turn.
         # When both flags are present, consume the capture flag silently.
         reload_flag = store.STORE_DIR / _PENDING_RELOAD
@@ -153,7 +153,7 @@ def before_agent(repo_path: str, raw: str) -> str:
             _flag_drop(pending)
             contexts.append(_REMINDER)
 
-        # A decision awaiting the developer's review — independent of the reload/edit reminders
+        # A decision awaiting the developer's review - independent of the reload/edit reminders
         # (a reload re-injects get_context, which EXCLUDES pending decisions, so the nudge must
         # still fire). store.pending_review_nudge is per-repo and verifies the store still has
         # something pending, so an approved-away or cross-repo flag yields nothing.
@@ -193,20 +193,20 @@ def after_write(repo_path: str, raw: str) -> str:
     """AfterTool(write_file|replace): immediately remind the AI to surface and store any
     decision, AND record the edited file into the per-session sidecar (issue #175 Task 2)
     so a later capture call can propose anchor candidates without asking the model to name
-    source_files itself — same signal Claude/Codex's post_write records via PostToolUse.
+    source_files itself - same signal Claude/Codex's post_write records via PostToolUse.
 
     The recording half is wrapped in its own try/except: a missing/garbage tool_input, or
     an unresolvable repo, must never cost the reminder this hook exists to deliver.
 
     Repo resolution is `_hook_cwd_repo`, NOT `_resolve_repo` (Greptile P1, PR #181): this
     is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
-    and `_resolve_repo` would fall through to the shared `.current_repo` pointer — which can
+    and `_resolve_repo` would fall through to the shared `.current_repo` pointer - which can
     name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
     var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
     are first-class stores keyed by absolute path, so silently recording under whatever repo
     the pointer happens to hold (or discarding the edit if it holds nothing sane) starves the
     real project's pending captures of anchor candidates. `_hook_cwd_repo` falls back to this
-    process's own cwd instead — which IS the project directory for a hook — guarded by
+    process's own cwd instead - which IS the project directory for a hook - guarded by
     `_is_sane_repo` so a session opened in the home/config dir still records nothing. Matches
     claude.post_write's identical fallback for the sibling PostToolUse recording path."""
     _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
@@ -225,7 +225,7 @@ def after_write(repo_path: str, raw: str) -> str:
             "hookEventName": "AfterTool",
             "additionalContext": (
                 "Contexer: if this edit involved an architectural, design, or engineering decision "
-                "(a tech choice, a naming change, a constraint, a pattern) — tell the user "
+                "(a tech choice, a naming change, a constraint, a pattern) - tell the user "
                 "what decision was made and call update_context to store it. If unsure whether it "
                 "qualifies, surface it anyway and let the user confirm."
             ),
@@ -360,7 +360,7 @@ def _mcp_and_hooks_ok(home: Path) -> tuple:
         value = hooks.get(event, [])
         return value if isinstance(value, list) else []
 
-    # Fix 4: include PreCompress — it is load-bearing for post-compression context
+    # Fix 4: include PreCompress - it is load-bearing for post-compression context
     # re-injection. A partial install that drops it silently breaks that mechanism.
     hooks_ok = (
         base._in_groups(groups("SessionStart"), "gemini.session_start")

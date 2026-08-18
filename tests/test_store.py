@@ -1,4 +1,4 @@
-"""Tests for core store.py logic — filtering, storage, context output, and bootstrap scan."""
+"""Tests for core store.py logic - filtering, storage, context output, and bootstrap scan."""
 import contextlib
 import json
 import os
@@ -36,14 +36,14 @@ class TestRepoResolution:
         assert store._resolve_repo(tmp_repo) == tmp_repo
 
     def test_explicit_config_dir_never_honored(self, tmp_path, monkeypatch):
-        # A caller passing ~/.claude must NOT resolve to it — falls back to safe sources.
+        # A caller passing ~/.claude must NOT resolve to it - falls back to safe sources.
         monkeypatch.setattr(store, "_SESSION_REPO", "")
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
         assert store._resolve_repo(str(Path.home() / ".claude")) == ""
 
     def test_session_repo_preferred_over_pointer(self, tmp_path, monkeypatch):
         # The clobber scenario: pointer poisoned to ~/.claude, but the server is bound to
-        # its own cwd repo — decisions must resolve to the real project, not the config dir.
+        # its own cwd repo - decisions must resolve to the real project, not the config dir.
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
         store.STORE_DIR.mkdir()
         (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".claude"))
@@ -122,7 +122,7 @@ class TestPassesFilter:
         assert store._passes_filter("decided to use FastMCP over raw server API", []) is True
 
     def test_novel_content_without_signals_passes(self):
-        # novelty is the gate — update_context is only called for significant content
+        # novelty is the gate - update_context is only called for significant content
         assert store._passes_filter("fastmcp handles routing and tool listing automatically", []) is True
 
     def test_duplicate_rejected(self):
@@ -137,7 +137,7 @@ class TestPassesFilter:
     def test_novelty_ignores_task_entries(self):
         # task entries must NOT trigger the duplicate veto for decisions
         tasks = [{"type": "task", "content": "add jwt authentication to the api endpoints"}]
-        assert store._passes_filter("decided to use jwt for authentication — stateless and scalable", tasks) is True
+        assert store._passes_filter("decided to use jwt for authentication - stateless and scalable", tasks) is True
 
 
 # ── update_decision ───────────────────────────────────────────────────────────
@@ -145,14 +145,14 @@ class TestPassesFilter:
 class TestUpdateDecision:
     def test_stores_decision(self, tmp_repo):
         stored, entry_id = store.update_decision(
-            tmp_repo, "decided to use postgres over sqlite — needs concurrent writes", "sess-1"
+            tmp_repo, "decided to use postgres over sqlite - needs concurrent writes", "sess-1"
         )
         assert stored is True
         assert entry_id is not None
 
     def test_filters_duplicate(self, populated_repo):
         stored, _ = store.update_decision(
-            populated_repo, "decided to use JWT instead of sessions — stateless, easier to scale", "sess-2"
+            populated_repo, "decided to use JWT instead of sessions - stateless, easier to scale", "sess-2"
         )
         assert stored is False
 
@@ -226,7 +226,7 @@ class TestGetContext:
         assert "layered" not in result
 
     def test_entry_type_filter_no_match_returns_message(self, populated_repo):
-        # populated_repo entries have no subtype — filter should return no match
+        # populated_repo entries have no subtype - filter should return no match
         result = store.get_context(populated_repo, entry_type="architecture")
         assert "No matching" in result
 
@@ -382,7 +382,7 @@ class TestResolveRepo:
 
 
 class TestResolveRepoProvenance:
-    """`_resolve_repo_verbose` names WHICH signal chose the store. Precedence is unchanged —
+    """`_resolve_repo_verbose` names WHICH signal chose the store. Precedence is unchanged -
     these pin that the verbose form is the plain one plus a label, so a decision landing in
     the wrong store is diagnosable rather than indistinguishable."""
 
@@ -451,7 +451,7 @@ class TestRepoSourceStamp:
     def test_hook_resolution_never_reports_a_deliberate_argument(self, tmp_repo, tmp_path,
                                                                  monkeypatch):
         # A hook ALWAYS supplies a path (its shell's git root, or cwd), so the plain resolver
-        # could only ever say "argument" — the label the audit reads as a deliberate
+        # could only ever say "argument" - the label the audit reads as a deliberate
         # cross-repo write. That would dismiss the exact misroute this exists to surface.
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
@@ -469,7 +469,7 @@ class TestRepoSourceStamp:
         assert store._hook_repo_verbose(str(Path.home() / ".claude")) == (session, "session")
 
     def test_bootstrap_stamps_its_bulk_write(self, tmp_repo, monkeypatch):
-        # The largest bulk write in the system — a misroute here plants the most content in
+        # The largest bulk write in the system - a misroute here plants the most content in
         # the wrong store, so it is the write that most needs its branch recorded.
         monkeypatch.setattr(store, "bootstrap_scan",
                             lambda *a, **k: {"inferred": ["Python 3.12", "uv"], "gaps": []})
@@ -499,7 +499,7 @@ class TestGetSessionStartContext:
         assert "no context stored" in result["systemMessage"].lower()
 
     def test_empty_repo_directive_stops_and_waits(self, tmp_repo):
-        # Bootstrap offer must pause Claude — it waits for yes/full/no before doing anything
+        # Bootstrap offer must pause Claude - it waits for yes/full/no before doing anything
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
@@ -522,7 +522,7 @@ class TestGetSessionStartContext:
         result = store.get_session_start_context(populated_repo)
         assert "on demand" in result["systemMessage"]
         assert "get_context" in result["hookSpecificOutput"]["additionalContext"]
-        # Must NOT contain the decision content — Claude fetches that on demand
+        # Must NOT contain the decision content - Claude fetches that on demand
         assert "JWT" not in result["hookSpecificOutput"]["additionalContext"]
 
     def test_output_is_valid_hook_json(self, populated_repo):
@@ -586,7 +586,7 @@ class TestBootstrapScan:
     # ── gap structure ──────────────────────────────────────────────────────────
 
     def test_gaps_are_dicts_with_required_keys(self, tmp_repo):
-        """`assumption` is optional — a gap no repo signal can pre-answer omits it rather
+        """`assumption` is optional - a gap no repo signal can pre-answer omits it rather
         than shipping an unrelated statement the guide then has to teach the model to
         discard. When present it must be non-empty."""
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -603,7 +603,7 @@ class TestBootstrapScan:
         assert any("what does this repo do" in q.lower() for q in _gap_questions(result))
 
     def test_team_context_asked_when_architecture_signals_present(self, tmp_repo):
-        # Team conventions gap is conditional — only when architecture signals suggest collaboration
+        # Team conventions gap is conditional - only when architecture signals suggest collaboration
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         src = Path(tmp_repo) / "src"
         (src / "api").mkdir(parents=True)
@@ -632,7 +632,7 @@ class TestBootstrapScan:
         assert any("constraint" in q.lower() for q in _gap_questions(result))
 
     def test_purpose_assumption_ignores_readme_prose(self, tmp_repo):
-        """The README's first non-heading line is as often markup as a tagline — on this very
+        """The README's first non-heading line is as often markup as a tagline - on this very
         repo it is '<p align="center">', which shipped as the purpose the developer was asked
         to confirm. Name-derived inference is deterministic and never junk; the model reads the
         README itself (STEP 0 and the purpose-question rule both tell it to)."""
@@ -648,7 +648,7 @@ class TestBootstrapScan:
     def test_goal_gap_carries_no_assumption(self, tmp_repo):
         """The goal gap asks what the USER plans to do here; the repo's inferred purpose says
         nothing about that. It shipped anyway, and GAP_ASK_GUIDE spent a paragraph teaching the
-        model to drop it — delete the field, delete the workaround."""
+        model to drop it - delete the field, delete the workaround."""
         root = Path(tmp_repo)
         root.mkdir(parents=True, exist_ok=True)
         (root / "pyproject.toml").write_text('[project]\nname = "my-api-service"\n', encoding="utf-8")
@@ -712,14 +712,14 @@ class TestBootstrapScan:
         wrote its OWN auto-generated mirror there (36KB on this repo until it was deleted;
         header 'Auto-generated. Do not edit manually'), and an install of that vintage still
         leaves one behind. Enumerating it tells the model to quote Contexer's own stale output
-        back to the developer as evidence to confirm — a decision round-tripping in as if
-        human — so the skip is keyed on the header, not on who wrote the file."""
+        back to the developer as evidence to confirm - a decision round-tripping in as if
+        human - so the skip is keyed on the header, not on who wrote the file."""
         root = Path(tmp_repo)
         root.mkdir(parents=True, exist_ok=True)
         rules = root / ".claude" / "rules"
         rules.mkdir(parents=True)
         (rules / "contexer.md").write_text(
-            "# Contexer — Live Project Context\n# Auto-generated. Do not edit manually.\n",
+            "# Contexer - Live Project Context\n# Auto-generated. Do not edit manually.\n",
             encoding="utf-8")
         (rules / "team.md").write_text("Always squash merge.\n", encoding="utf-8")
         docs = store.bootstrap_scan(tmp_repo, insight="high")["context_docs"]
@@ -728,7 +728,7 @@ class TestBootstrapScan:
 
     def test_a_rule_doc_about_generated_files_is_still_evidence(self, tmp_repo):
         """A human-authored rules file that DISCUSSES generated code says the same words a
-        generated banner does. Matching them anywhere in the header dropped the doc — and a
+        generated banner does. Matching them anywhere in the header dropped the doc - and a
         "never hand-edit the protos" rule is exactly the kind worth confirming. A banner is a
         SHORT line in the first few lines; a rule is a sentence."""
         root = Path(tmp_repo)
@@ -741,14 +741,14 @@ class TestBootstrapScan:
             " manually. Regenerate instead, and never hand-patch the descriptors.\n",
             encoding="utf-8")
         (rules / "gen.md").write_text(
-            "# Contexer — Live Project Context\n# Auto-generated. Do not edit manually.\n",
+            "# Contexer - Live Project Context\n# Auto-generated. Do not edit manually.\n",
             encoding="utf-8")
         docs = store.bootstrap_scan(tmp_repo, insight="high")["context_docs"]
         assert ".claude/rules/protos.md" in docs, "a rule ABOUT generated files is still a rule"
         assert ".claude/rules/gen.md" not in docs, "a generated banner is still excluded"
 
     def test_context_docs_excludes_build_files_and_glob_patterns(self, tmp_repo):
-        """`existing_context_files` is the scan's found-files list — lockfiles, CI dirs, and
+        """`existing_context_files` is the scan's found-files list - lockfiles, CI dirs, and
         literal glob strings like '.eslintrc*' that are not readable paths. The guide sends the
         model to READ what it names, so it gets its own doc-only list."""
         root = Path(tmp_repo)
@@ -830,7 +830,7 @@ class TestBootstrapScan:
     # ── deployment detection ───────────────────────────────────────────────────
 
     def test_detects_dockerfile_suppresses_deployment_gap(self, tmp_repo):
-        # When Dockerfile present, deployment target is known — no need to ask
+        # When Dockerfile present, deployment target is known - no need to ask
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
 
@@ -840,7 +840,7 @@ class TestBootstrapScan:
 
     def test_no_dockerfile_adds_deployment_gap(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        # pyproject.toml marks this as a real code repo — not a simple/docs repo
+        # pyproject.toml marks this as a real code repo - not a simple/docs repo
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
         result = store.bootstrap_scan(tmp_repo, insight="high")
         env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
@@ -1031,7 +1031,7 @@ class TestBootstrapScan:
         assert not any("automated testing" in q.lower() for q in _gap_questions(result))
 
     def test_mined_test_layout_alone_does_not_suppress_tests_gap(self, tmp_repo):
-        # Layout-only evidence (ad-hoc test files) doesn't prove testing is in scope —
+        # Layout-only evidence (ad-hoc test files) doesn't prove testing is in scope -
         # the question must still be asked (Greptile #114).
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
@@ -1067,7 +1067,7 @@ class TestBootstrapScan:
 
     def test_mined_config_facts_do_not_suppress_team_conventions_gap(self, tmp_repo):
         # Config-encoded facts (line length, hook ids) say nothing about branching,
-        # PR flow, or ownership — the team question must survive (Greptile #114).
+        # PR flow, or ownership - the team question must survive (Greptile #114).
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         src = Path(tmp_repo) / "src"
         (src / "api").mkdir(parents=True)
@@ -1098,7 +1098,7 @@ class TestBootstrapScan:
         assert any("automated testing" in q.lower() for q in _gap_questions(with_none))
 
 
-# ── bootstrap_apply (bootstrap redesign — core wiring) ───────────────────────
+# ── bootstrap_apply (bootstrap redesign - core wiring) ───────────────────────
 
 SESSION_ID_BA = "test-ba-session"
 
@@ -1141,7 +1141,7 @@ class TestBootstrapApply:
 
     def test_medium_tier_mined_stored_pending_approval(self, tmp_repo):
         # NOT 'suggested': suggested entries inject at session start and never surface
-        # in review_pending — a 60-89% signal must wait for the developer instead.
+        # in review_pending - a 60-89% signal must wait for the developer instead.
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
         result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
@@ -1316,9 +1316,9 @@ class TestProjectContextOverviewFallback:
     def test_domain_keyword_in_purpose_question_uses_query_not_overview(self, tmp_repo):
         store.update_decision(tmp_repo, "Use PostgreSQL for persistence", SESSION_ID_SS, "architecture")
         result = store.get_context_for_prompt(tmp_repo, "what is the purpose of the postgres schema?")
-        # "postgres" is a domain keyword — should search, never dump the full overview.
+        # "postgres" is a domain keyword - should search, never dump the full overview.
         # (Retrieval V1: BM25 tokenizes exactly, so "postgres" no longer substring-matches
-        # "PostgreSQL"; it routes via the shared `db` topic — a decision hit or a topic
+        # "PostgreSQL"; it routes via the shared `db` topic - a decision hit or a topic
         # pointer, but never the "[Contexer: project context]" overview.)
         if result:
             assert "project context" not in result.lower()
@@ -1427,7 +1427,7 @@ class TestIsPrescriptiveConstraint:
         assert is_c is False
 
     def test_personal_it_always_excluded(self):
-        # "it always worked" is descriptive — not a directive
+        # "it always worked" is descriptive - not a directive
         is_c, _ = store._is_prescriptive_constraint("it always worked before the last deployment")
         assert is_c is False
 
@@ -1506,7 +1506,7 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
 
     def test_ensure_you_with_object_quantifier_not_detected(self):
-        # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they
+        # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN - they
         # carry no recurrence, so they must not satisfy the durability requirement.
         is_c, _ = store._is_prescriptive_constraint("ensure you fix any failing tests")
         assert is_c is False
@@ -1546,7 +1546,7 @@ class TestIsPrescriptiveConstraint:
 
     def test_never_mind_clause_without_punctuation_does_not_swallow_directive(self):
         # Greptile #211 P1: no comma/period boundary between the dismissal and the
-        # directive — a greedy "until punctuation" strip consumed the whole message.
+        # directive - a greedy "until punctuation" strip consumed the whole message.
         is_c, subtype = store._is_prescriptive_constraint(
             "Never mind the perf concerns and always validate input before writing to disk"
         )
@@ -1800,7 +1800,7 @@ class TestCaptureUserConstraint:
         assert entry["session_id"] == "sess-1"
 
     def test_long_prompt_is_rejected_not_stored(self, tmp_repo):
-        # A long pasted blob that merely contains 'always' is not a clean directive —
+        # A long pasted blob that merely contains 'always' is not a clean directive -
         # it must not be stored (previously it was truncated to 600c and kept, which
         # crowded the store with pasted prompts).
         long_prompt = "always " + "x" * 700
@@ -1847,7 +1847,7 @@ class TestAtomicSave:
 
     def test_non_ascii_content_round_trips(self, tmp_repo):
         # Write side pins UTF-8 (ensure_ascii=False emits raw bytes); read side must
-        # pin UTF-8 too — a locale-default read would corrupt this on non-UTF-8 systems.
+        # pin UTF-8 too - a locale-default read would corrupt this on non-UTF-8 systems.
         content = "décision: use café-naming → emoji ✓ 日本語"
         store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
             {"id": "1", "type": "decision", "subtype": "", "content": content,
@@ -1878,7 +1878,7 @@ class TestCorruptionRecovery:
     def test_capture_after_corruption_rewrites_valid_store(self, tmp_repo):
         self._corrupt(store._store_path(tmp_repo))
         ok, _ = store.update_decision(
-            tmp_repo, "decided to use JWT instead of sessions — stateless auth", "sess-1")
+            tmp_repo, "decided to use JWT instead of sessions - stateless auth", "sess-1")
         assert ok
         data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
         assert len(data["entries"]) == 1
@@ -2388,7 +2388,7 @@ class TestSuggestedUpdate:
     _PENDING_BASE = "Use Kafka instead of RabbitMQ for event streaming"
 
     def _pending(self, repo: str) -> str:
-        """A base that lands pending_approval (L3 architecture signal) — what issue #199's
+        """A base that lands pending_approval (L3 architecture signal) - what issue #199's
         replace_id correction lands on."""
         store.update_decision(repo, self._PENDING_BASE, "s1", "architecture")
         entry = next(e for e in store._load(repo)["entries"] if e.get("type") == "decision")
@@ -2525,7 +2525,7 @@ class TestSuggestedUpdate:
 
     def test_correction_on_pending_base_amends_the_draft_in_place(self, tmp_repo):
         # Issue #199: the refusal above used to DROP the correction entirely. It now amends
-        # the unreviewed draft — one draft, one review — instead of failing toward silent loss.
+        # the unreviewed draft - one draft, one review - instead of failing toward silent loss.
         eid = self._pending(tmp_repo)
         ok, rid = store.update_decision(
             tmp_repo, "Use DynamoDB instead of Kafka for event streaming", "s2",
@@ -2540,7 +2540,7 @@ class TestSuggestedUpdate:
 
     def test_amend_applies_subtype_and_anchors_source_files(self, tmp_repo):
         # The amend is the draft's LIVE revision, so it carries the caller's subtype and its
-        # anchor vouches for what renders — the sibling branches do both; this one dropped them.
+        # anchor vouches for what renders - the sibling branches do both; this one dropped them.
         eid = self._pending(tmp_repo)
         ok, rid = store.update_decision(
             tmp_repo, "Never stream events through Kafka without a dead-letter queue", "s2",
@@ -2878,7 +2878,7 @@ class TestApproveDecision:
         result = store.get_context(tmp_repo)
         assert "RabbitMQ" not in result
 
-    # ── ignore on an ALREADY-trusted (approved/suggested) decision — Finding 129 ──────
+    # ── ignore on an ALREADY-trusted (approved/suggested) decision - Finding 129 ──────
 
     def test_ignore_action_retires_an_approved_decision(self, tmp_repo):
         eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
@@ -2952,7 +2952,7 @@ class TestApproveDecision:
         assert entry["status"] == "approved"
 
 
-# ── approve_decision(source_files=...) — anchor at approval time (issue #172 Task 2) ──────
+# ── approve_decision(source_files=...) - anchor at approval time (issue #172 Task 2) ──────
 
 class TestApproveDecisionSourceFiles:
     def _store_pending(self, repo: str, content: str = "We use RabbitMQ instead of Kafka") -> str:
@@ -3035,7 +3035,7 @@ class TestApproveDecisionSourceFiles:
 
     def test_promoted_proposal_with_source_files_anchors_exactly_once(self, tmp_repo, monkeypatch):
         # M7b: when a Suggested Update's own proposal carries stashed source_files,
-        # _promote_proposal already anchors it — _apply_approval's trailing
+        # _promote_proposal already anchors it - _apply_approval's trailing
         # `prop_had_source_files` check must skip its own _anchor_sources call rather
         # than firing a redundant second one for the same approval.
         stored, eid = store.update_decision(tmp_repo, "We use RabbitMQ for the event bus",
@@ -3099,7 +3099,7 @@ class TestGetPendingDecisions:
 
 class TestGetPendingApprovalPrompt:
     def test_returns_formatted_prompt_for_pending_entry(self, tmp_repo):
-        store.update_decision(tmp_repo, "We deploy only to AWS — all other clouds prohibited", "s1",
+        store.update_decision(tmp_repo, "We deploy only to AWS - all other clouds prohibited", "s1",
                               subtype="architecture")
         data = store._load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
@@ -3124,7 +3124,7 @@ class TestGetPendingApprovalPrompt:
         assert store.get_pending_approval_prompt(tmp_repo, "nonexistent") == ""
 
 
-# ── get_context(files=...) — decisions-for-files retrieval (Task 1 of #174) ───
+# ── get_context(files=...) - decisions-for-files retrieval (Task 1 of #174) ───
 # Full-content rendering through the existing get_context machinery, driven by
 # guard_engine.decisions_for_files. Staleness-note-on-a-files-hit needs a real git
 # repo (anchor_commit + git diff), so that one case lives in test_staleness.py
@@ -3271,7 +3271,7 @@ class TestGetContextFiles:
 # The console's per-decision row/detail shape now carries source_files, and the
 # store-detail list endpoint accepts the same files= filter get_context(files=...)
 # already exercises above, scoped to this repo's own store only (no global-store
-# participation — that lives behind the console's separate /api/global view).
+# participation - that lives behind the console's separate /api/global view).
 
 class TestConsoleSourceFiles:
     def test_console_summary_carries_source_files(self, tmp_repo):
@@ -3359,7 +3359,7 @@ class TestConsoleSourceFiles:
 
     def test_files_filter_does_not_pull_in_global_store(self, tmp_repo):
         # list_decisions is the console's per-repo list; a global-store hit on the same
-        # file must not leak into it — that scope stays behind /api/global.
+        # file must not leak into it - that scope stays behind /api/global.
         store.update_global_decision(
             "The contexer.store module owns all read/write logic", "s1", "convention",
             created_by="human")
@@ -3395,7 +3395,7 @@ class TestGetContextStatusTags:
         assert "RabbitMQ" not in result
 
     def test_active_only_excludes_pending(self, tmp_repo):
-        # The _active_only flag is used by session injection — not the MCP tool.
+        # The _active_only flag is used by session injection - not the MCP tool.
         # Pending decisions are excluded from active-only queries.
         store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka", "s1", subtype="architecture")
         result_full = store.get_context(tmp_repo)
@@ -3490,7 +3490,7 @@ class TestDeicticConstraintScope:
         "stop running the flaky test for now",
         # Live misfire 2026-08-17: "all three" anaphorically resolves to items the
         # assistant proposed moments earlier ("want me to take them, along with the
-        # short poll for the race?") — a one-off plan approval, not a standing rule,
+        # short poll for the race?") - a one-off plan approval, not a standing rule,
         # even though it also carries a "don't" clause.
         "yes fix all three, show loading of something but dont show current message "
         "when integration fails.",
@@ -3516,11 +3516,11 @@ class TestDeicticConstraintScope:
         "make it a rule to run tests before pushing",
         "always ensure that migrations are reversible",
         "always use uv for this repo",
-        # Greptile #125 P2: trailing here scopes the rule to the repo — durable.
+        # Greptile #125 P2: trailing here scopes the rule to the repo - durable.
         "always use uv here",
         "never push directly to main here.",
         # "all three"/"both" only reads as anaphoric when nothing after it names its
-        # own referent — these name the referent right in the sentence, so they are
+        # own referent - these name the referent right in the sentence, so they are
         # genuine standing rules, not a pointer back at the conversation.
         "always support both staging and production environments",
         "never run migrations on both primary and replica at once",
@@ -3635,7 +3635,7 @@ class TestDeicticIgnoredTombstoneDoesNotBlock:
 class TestContainmentCapture:
     """Containment-aware routing in capture_user_constraint: a superset restatement of a
     stored rule (high |∩|/min, low |∩|/max) consolidates onto the existing entry instead
-    of accumulating. _overlap_ratio/_find_match are untouched — bootstrap idempotence,
+    of accumulating. _overlap_ratio/_find_match are untouched - bootstrap idempotence,
     memory sync, and team dedup depend on the max-denominator metric as-is."""
 
     # The real user-reported scenario, verbatim (typo kept on purpose).
@@ -3745,7 +3745,7 @@ class TestContainmentCapture:
 
     def test_synonym_phrasings_remain_two_entries(self, tmp_repo):
         # Pinned as the documented limitation: dedup is lexical, so the same rule in
-        # different words stays separate — surfaced via the near-miss ack, merged manually.
+        # different words stays separate - surfaced via the near-miss ack, merged manually.
         eid1, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
         eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
         assert eid1 is not None and eid2 is not None and eid1 != eid2
@@ -3809,7 +3809,7 @@ class TestContainmentCapture:
 
     def test_human_restatement_displaces_lower_trust_proposal(self, tmp_repo):
         # Issue #200: an AI proposal held the single slot and the developer's own restatement
-        # bounced off it — with #193's dual injection the session then rendered the AI's
+        # bounced off it - with #193's dual injection the session then rendered the AI's
         # unreviewed update while the higher-trust human correction was never recorded.
         store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
         eid, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
@@ -3983,7 +3983,7 @@ class TestPendingReviewFlag:
         assert not any(e["id"] == eid for e in store.get_pending_decisions(tmp_repo))
 
     def test_format_pending_review_caps_large_backlog(self, tmp_repo):
-        # #1: a big backlog must not dump every decision — cap like get_context, point overflow
+        # #1: a big backlog must not dump every decision - cap like get_context, point overflow
         # to `contexer review`. Build entries directly to bypass the novelty filter.
         data = store._load(tmp_repo)
         for i in range(30):
@@ -4034,7 +4034,7 @@ class TestShareProjectionSourceFiles:
     """`_share_projection` carries `source_files` locally (scrubbed, empties dropped) so the
     preview and outbox can show it; whether it reaches the actual wire is a separate gate
     owned by `remote._WIRE_SOURCE_FILES` (see tests/test_remote.py). `anchor_commit` never
-    projects — it's a machine-local ref, not something a preview or wire payload should show."""
+    projects - it's a machine-local ref, not something a preview or wire payload should show."""
 
     def test_projection_carries_source_files(self, tmp_repo):
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1",
@@ -4065,7 +4065,7 @@ class TestShareProjectionSourceFiles:
                               source_files=["auth/jwt.py"])
         entry = store._load(tmp_repo)["entries"][0]
         # tmp_repo isn't a real git checkout, so _anchor_sources stamps an empty anchor_commit
-        # (fail-soft) — stamp a real-looking one directly to prove the FIELD never projects,
+        # (fail-soft) - stamp a real-looking one directly to prove the FIELD never projects,
         # independent of whether git anchoring itself succeeded.
         entry["anchor_commit"] = "deadbeefcafe"
         projected = store._share_projection(entry, redact_on=False)
@@ -4237,7 +4237,7 @@ class TestInsightCache:
 
         monkeypatch.setattr(store, "_detect_insight", spying_detect)
         store._cached_insight(git_repo)
-        assert seen.get("called")  # identity changed — cache must not be trusted
+        assert seen.get("called")  # identity changed - cache must not be trusted
 
     def test_changed_head_invalidates_cache(self, git_repo, monkeypatch):
         store._cached_insight(git_repo)  # warm the cache
@@ -4254,7 +4254,7 @@ class TestInsightCache:
 
         monkeypatch.setattr(store, "_detect_insight", spying_detect)
         store._cached_insight(git_repo)
-        assert seen.get("called")  # history moved — cache must not be trusted
+        assert seen.get("called")  # history moved - cache must not be trusted
 
     def test_expired_cache_redetects(self, git_repo, monkeypatch):
         path = store._insight_cache_path(git_repo)
@@ -4263,7 +4263,7 @@ class TestInsightCache:
         path.write_text(json.dumps({"level": "low", "decisive": False, "ts": stale_ts}))
         calls = self._counting_git(monkeypatch)
         store._cached_insight(git_repo)
-        assert calls["n"] > 0  # expired entry — falls through to a fresh _detect_insight
+        assert calls["n"] > 0  # expired entry - falls through to a fresh _detect_insight
         refreshed = json.loads(path.read_text())
         assert refreshed["ts"] > stale_ts
 
@@ -4289,7 +4289,7 @@ class TestInsightCache:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         path = store._insight_cache_path(tmp_repo)
         # The stored key must match what _insight_cache_key returns at read time or
-        # the cache is (rightly) distrusted. Derive it — `git config user.email`
+        # the cache is (rightly) distrusted. Derive it - `git config user.email`
         # falls back to global config even outside a repo, so it isn't simply None.
         email, head = store._insight_cache_key(tmp_repo)
         path.write_text(json.dumps({"level": "high", "decisive": True, "ts": time.time(),
@@ -4305,7 +4305,7 @@ class TestInsightCache:
         assert result["decisive"] is True
 
 
-# ── Retrieval V1 (Part A): topic router — index, BM25, working set, log ────────
+# ── Retrieval V1 (Part A): topic router - index, BM25, working set, log ────────
 
 RV1_SESSION = "rv1-session"
 
@@ -4349,7 +4349,7 @@ class TestDeriveTopics:
         assert store._derive_topics("Using JWT for LOGIN flows") == ["auth"]
 
     def test_session_words_do_not_mean_auth(self):
-        # "session" means agent sessions in this domain — it mis-tagged docs
+        # "session" means agent sessions in this domain - it mis-tagged docs
         # questions as auth when it lived in the auth alias set.
         assert store._derive_topics("SessionStart hooks run each session") == []
 
@@ -4399,8 +4399,8 @@ class TestRetrievalIndex:
 
     def test_pre_187_v1_index_rejected_not_half_served(self, tmp_repo):
         # A v1 index predates source_files/path_artifacts/title per doc (issue #187 fix
-        # round 1). It must be rejected outright — not accepted and half-served against docs
-        # missing the new fields — so the whole per-prompt path falls back to legacy until
+        # round 1). It must be rejected outright - not accepted and half-served against docs
+        # missing the new fields - so the whole per-prompt path falls back to legacy until
         # the repo's next _save rebuilds the index at v2.
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         p = store._index_path(tmp_repo)
@@ -4425,7 +4425,7 @@ class TestRetrievalIndex:
 
 
 def _downgrade_index_to_v1(repo):
-    """Rewrite the on-disk index as a pre-#187 v1 payload — exactly what every already-
+    """Rewrite the on-disk index as a pre-#187 v1 payload - exactly what every already-
     indexed repo had on disk the moment the version was bumped."""
     p = store._index_path(repo)
     payload = json.loads(p.read_text())
@@ -4535,7 +4535,7 @@ class TestIndexSelfHeal:
 
     def test_log_failure_cannot_break_session_start(self, tmp_repo, monkeypatch):
         # The call site is unguarded on the strength of this function's fail-soft promise,
-        # and the SessionStart hook has no try/except of its own — so an exception from the
+        # and the SessionStart hook has no try/except of its own - so an exception from the
         # log write would cost the session its whole context injection.
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         _downgrade_index_to_v1(tmp_repo)
@@ -4582,7 +4582,7 @@ class TestIndexSelfHeal:
 
     def test_session_start_heals_on_resume_and_compact(self, tmp_repo):
         # Both sources return early / take shortened paths, but their LATER prompts still
-        # route through BM25 — so the rebuild must sit ahead of those branches.
+        # route through BM25 - so the rebuild must sit ahead of those branches.
         for source in ("resume", "compact"):
             store.update_decision(tmp_repo, f"Use postgres for the {source} layer",
                                   RV1_SESSION, "architecture")
@@ -4631,7 +4631,7 @@ class TestBM25Router:
     def test_relative_threshold_weak_second_not_injected(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
         # "docker helm ci" hits the deploy doc on 3 terms; "layer" is a lone weak term
-        # shared by other docs — it must not be injected as content alongside the strong hit.
+        # shared by other docs - it must not be injected as content alongside the strong hit.
         result = store.get_context_for_prompt(tmp_repo, "why did we choose docker helm ci for the layer?")
         assert "Docker images" in result
         assert "domain layer" not in result          # weak single-term doc excluded
@@ -4657,14 +4657,14 @@ class TestBM25Router:
 
     def test_rationale_boost_preserves_single_keyword_hit(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
-        # "alembic" hits exactly one doc with a single term — the rationale boost keeps it.
+        # "alembic" hits exactly one doc with a single term - the rationale boost keeps it.
         result = store.get_context_for_prompt(tmp_repo, "why alembic?")
         assert result != ""
         assert "Alembic" in result
 
     def test_weak_topic_overlap_returns_pointer(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
-        # "why the schema design?" — "schema" is a db alias but matches no doc token exactly,
+        # "why the schema design?" - "schema" is a db alias but matches no doc token exactly,
         # so no strong content; the db topic still overlaps stored docs → a pointer.
         result = store.get_context_for_prompt(tmp_repo, "why the schema design here?")
         assert result.startswith("[Contexer] Related stored decisions:")
@@ -4677,7 +4677,7 @@ class TestBM25Router:
 
 
 class TestRenderPromptDecisions:
-    """_render_prompt_decisions feeds the BM25 strong-match auto-injection path — it must
+    """_render_prompt_decisions feeds the BM25 strong-match auto-injection path - it must
     render the SAME two-line shape as get_context (title-bearing bullet line, then a
     `    `-indented content line), not the old title-less single line."""
 
@@ -4705,7 +4705,7 @@ class TestRenderPromptDecisions:
 
     def test_derives_title_when_none_stored_short_content_dedups_to_one_line(self, tmp_repo):
         # No explicit title -> falls back to _derive_title(content), same as get_context.
-        # Content is short (<=100 chars) so the derived title IS the content verbatim —
+        # Content is short (<=100 chars) so the derived title IS the content verbatim -
         # showing it again on an indented line would just repeat it, so there's no 2nd line.
         _, eid = store.update_decision(
             tmp_repo, "Settings load from a TOML file validated at startup", RV1_SESSION,
@@ -4764,7 +4764,7 @@ class TestContextForPromptMeta:
         "why did we choose docker helm ci for the layer?",
     ])
     def test_drift_pin_matches_public_api(self, tmp_repo, prompt):
-        # get_context_for_prompt and get_context_for_prompt_with_meta must never diverge —
+        # get_context_for_prompt and get_context_for_prompt_with_meta must never diverge -
         # both are thin wrappers over the same private implementation.
         _seed_rv1(tmp_repo, RV1_CORPUS)
         assert store.get_context_for_prompt(tmp_repo, prompt) == \
@@ -4882,7 +4882,7 @@ class TestEditedFilesSignal:
         assert store._read_edited_files(tmp_repo) == []
 
     def test_legacy_string_list_sidecar_reads_as_empty(self, tmp_repo):
-        # Pre-fix sidecars held bare path strings with no timestamp — unusable for the
+        # Pre-fix sidecars held bare path strings with no timestamp - unusable for the
         # freshness window, and their session-keyed filenames are swept by the GC anyway.
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
         store._edited_files_path(tmp_repo).write_text('["a.py"]', encoding="utf-8")
@@ -4919,7 +4919,7 @@ class TestAnchorCandidates:
     def test_hook_written_signal_reaches_a_different_server_session(self, tmp_repo):
         """C1 regression, end to end across the process boundary: the WRITER is the hook
         process (host session id, straight from Claude Code's stdin) and the READER is the
-        MCP server process (server.SESSION_ID — a uuid4 minted at server start). The two ids
+        MCP server process (server.SESSION_ID - a uuid4 minted at server start). The two ids
         are different by construction, always; keying the sidecar on either one made this
         feature inert in production while every same-literal-id test passed."""
         from contexer.adapters import claude
@@ -4993,7 +4993,7 @@ class TestAnchorCandidates:
     def test_scan_sourced_pending_entry_attaches_nothing_despite_status(self, tmp_repo, monkeypatch):
         # _classify_level never actually routes created_by="scan" to pending_approval (it's
         # always "auto"), so the status gate alone can never be exercised against a real scan
-        # capture — this forces that otherwise-unreachable case to prove the explicit
+        # capture - this forces that otherwise-unreachable case to prove the explicit
         # scan/bootstrap/memory exclusion is doing real work, not just coasting on the status
         # gate happening to agree with it.
         monkeypatch.setattr(store, "_classify_level",
@@ -5009,7 +5009,7 @@ class TestAnchorCandidates:
 
     def test_bootstrap_sourced_pending_constraint_attaches_nothing(self, tmp_repo):
         # Unlike scan, a bootstrap constraint (or an L3-signal bootstrap architecture
-        # decision) DOES reach pending_approval for real via _classify_level — this is the
+        # decision) DOES reach pending_approval for real via _classify_level - this is the
         # case the review specifically flagged: without the explicit source exclusion, the
         # status gate alone would wrongly let a mined/bootstrap capture earn candidates from
         # a session's edited files it never actually touched.
@@ -5206,8 +5206,8 @@ class TestAnchorCandidates:
         """A single entry accrues all three anchor signals over its lifetime: capture-time
         candidates from the edited-files session, then a Suggested Update correction with
         its own stashed source_files, then an explicit source_files at approval time. The
-        caller-passed source_files must win outright — not merged with either of the
-        other two — pinning today's precedence so a future refactor of the outer
+        caller-passed source_files must win outright - not merged with either of the
+        other two - pinning today's precedence so a future refactor of the outer
         approve_decision override call can't silently regress it."""
         store.record_edited_file(tmp_repo, "candidate.py")
         stored, eid = store.update_decision(
@@ -5216,7 +5216,7 @@ class TestAnchorCandidates:
         assert stored
         # A human capture is born approved (never earns real candidates by the status gate),
         # so hand-seed anchor_candidates directly to exercise the promotion path in isolation
-        # — simulating an entry that already carried leftover candidates from some prior state.
+        # - simulating an entry that already carried leftover candidates from some prior state.
         data = store._load(tmp_repo)
         data["entries"][0]["anchor_candidates"] = ["candidate.py"]
         store._save(tmp_repo, data)
@@ -5238,8 +5238,8 @@ class TestAnchorCandidates:
 
 class TestConstraintCaptureCandidates:
     """`capture_user_constraint`'s deictic path builds pending_approval, created_by="human"
-    entries in the HOOK process. Those become guard-TRUSTED the moment they're approved —
-    the highest-value candidate carriers there are — so they accrue candidates too."""
+    entries in the HOOK process. Those become guard-TRUSTED the moment they're approved -
+    the highest-value candidate carriers there are - so they accrue candidates too."""
 
     DEICTIC = ("I'm not going to accept any performance degradation so ensure you clarify "
                "and ensure this feature is actual improvement")
@@ -5347,7 +5347,7 @@ class TestIndexStatusFilter:
         _, ig = store.update_decision(tmp_repo, "Use postgres for the ledger storage layer",
                                       RV1_SESSION, "architecture")
         _ignore(tmp_repo, ig)
-        # a constraint is born pending_approval — retrievable via get_context (tagged
+        # a constraint is born pending_approval - retrievable via get_context (tagged
         # [pending]), so it MUST be indexed; only ignored is excluded (Greptile #117).
         store.update_decision(tmp_repo, "Never log postgres credentials in plaintext",
                               RV1_SESSION, "constraint")
@@ -5418,29 +5418,29 @@ class TestArtifactRouteGate:
         assert "users" in arts and "api" in arts
 
     def test_artifact_only_prompt_no_global_leak(self, tmp_repo):
-        # An index must exist (a repo decision) so the BM25 path — not legacy — runs.
+        # An index must exist (a repo decision) so the BM25 path - not legacy - runs.
         store.update_decision(tmp_repo, "The cart service owns checkout totals",
                               RV1_SESSION, "architecture", created_by="human")
         store.update_global_decision("Always rename modules using git mv to preserve history",
                                      RV1_SESSION, "convention")
-        # not rationale, not project — only an artifact (utils.py). Legacy was silent here.
+        # not rationale, not project - only an artifact (utils.py). Legacy was silent here.
         assert store.get_context_for_prompt(tmp_repo, "please rename utils.py for me") == ""
 
 
 class TestFileRoute:
-    """#187 — a prompt naming a path/module-shaped file routes through
+    """#187 - a prompt naming a path/module-shaped file routes through
     guard_engine.decisions_for_files deterministically, ahead of BM25, at the prompt seam.
     No get_context(files=...) call required.
 
-    Fix round 1 — tiered by signal strength (the ratified risk-asymmetry principle: a wrong
+    Fix round 1 - tiered by signal strength (the ratified risk-asymmetry principle: a wrong
     STRONG injection plants false context as if human-approved, a wrong pointer costs one
     line): a `source_files` anchor (a human explicitly linked the file) earns full-content
     STRONG treatment; a bare content-artifact mention earns only the WEAK pointer lane."""
 
     def test_anchor_hit_in_task_prompt_injects_full_content(self, tmp_repo):
-        # Task-shaped prompt: no rationale/project word, no question lead — the ONLY signal
+        # Task-shaped prompt: no rationale/project word, no question lead - the ONLY signal
         # is the file path itself. Anchored via source_files (a human governance signal), the
-        # realistic #172/#174 case — STRONG tier, full content.
+        # realistic #172/#174 case - STRONG tier, full content.
         store.update_decision(
             tmp_repo,
             "The commit-time guard's pairing engine lives in contexer/guard_engine.py and "
@@ -5453,18 +5453,18 @@ class TestFileRoute:
         assert "pairing engine" in result
 
     def test_mention_only_hit_is_a_pointer_not_full_content(self, tmp_repo):
-        # No source_files anchor — pairing only via a path-shaped artifact extracted from the
+        # No source_files anchor - pairing only via a path-shaped artifact extracted from the
         # decision's own content (mirrors guard_engine's own _guard_pairs signal). A prose
         # mention is not a governance signal: pointer only, never full content.
         #
-        # "billing.py" (single meaningful subtoken, not a topic alias — unlike "guard_engine.py"
+        # "billing.py" (single meaningful subtoken, not a topic alias - unlike "guard_engine.py"
         # or "config.py") is deliberately chosen: BM25 independently requires >= 2 DISTINCT
         # query-term hits for its OWN strong-content promotion (_STRONG_MIN_HITS), and this
-        # test's whole point is proving the file route's mention tier alone — with NO other
-        # word overlap between prompt and content — stays capped at a pointer. A two-subtoken
+        # test's whole point is proving the file route's mention tier alone - with NO other
+        # word overlap between prompt and content - stays capped at a pointer. A two-subtoken
         # filename (or a topic-alias word) would let BM25's separate, already-shipped
         # artifact-double-weighting mechanism ALSO promote the same decision on its own merits
-        # (see the note above `ranked = _bm25_rank(...)` in _get_context_for_prompt) —
+        # (see the note above `ranked = _bm25_rank(...)` in _get_context_for_prompt) -
         # irrelevant to what this test is pinning.
         store.update_decision(
             tmp_repo,
@@ -5481,7 +5481,7 @@ class TestFileRoute:
 
     def test_mixed_prompt_anchor_full_no_duplicate_mention_pointer(self, tmp_repo):
         # Two files in one prompt: one anchored (STRONG governance signal), one only
-        # mentioned in a DIFFERENT decision's prose (weak signal, single-subtoken filename —
+        # mentioned in a DIFFERENT decision's prose (weak signal, single-subtoken filename -
         # see test_mention_only_hit_is_a_pointer_not_full_content for why). The anchor renders
         # full content; the mention-tier hit is simply dropped from this response rather than
         # tacking on a duplicate pointer line alongside a STRONG render.
@@ -5517,7 +5517,7 @@ class TestFileRoute:
         result = store.get_context_for_prompt(
             tmp_repo, "why does contexer/config.py break the jwt refresh cookie flow?")
         # File-route hit (config.py, anchored -> STRONG) renders BEFORE the BM25-ranked hit
-        # (jwt) — "ahead of BM25 scores", not just present somewhere in a merged/deduped set.
+        # (jwt) - "ahead of BM25 scores", not just present somewhere in a merged/deduped set.
         assert 0 <= result.find("Settings load") < result.find("JWT refresh tokens")
 
     def test_working_set_dedup_applies_to_anchor_hits(self, tmp_repo):
@@ -5530,11 +5530,11 @@ class TestFileRoute:
         assert first.startswith("[Contexer: auto-fetched for this question]")
         second = store.get_context_for_prompt(
             tmp_repo, "fix the pairing bug in guard_engine.py", sid)
-        assert second == ""   # already in the working set — no re-injection, no fallback
+        assert second == ""   # already in the working set - no re-injection, no fallback
 
     def test_mention_pointer_not_working_set_deduped(self, tmp_repo):
         # Mirrors the EXISTING topic-overlap WEAK pointer precedent (never _ws_add'd, see
-        # test_pointer_prompts_stay_weak in test_benchmark.py) — a pointer is cheap and
+        # test_pointer_prompts_stay_weak in test_benchmark.py) - a pointer is cheap and
         # repeatable, unlike a full STRONG content injection, so it is deliberately NOT added
         # to the working set. Only anchor-tier (STRONG) hits get that treatment.
         store.update_decision(
@@ -5556,7 +5556,7 @@ class TestFileRoute:
 
     def test_bare_basename_with_no_matching_decision_stays_silent(self, tmp_repo):
         # "utils.py" IS pathlike (has an extension), but nothing in either store references
-        # it — decisions_for_files finds no signal, so the file route contributes nothing.
+        # it - decisions_for_files finds no signal, so the file route contributes nothing.
         store.update_decision(tmp_repo, "The cart service owns checkout totals",
                               RV1_SESSION, "architecture")
         store.update_global_decision("Always rename modules using git mv to preserve history",
@@ -5566,7 +5566,7 @@ class TestFileRoute:
     def test_global_scope_anchor_hit_renders_full_content(self, tmp_repo):
         # Global-store decisions never carry source_files (docs elsewhere), so a global-scope
         # STRONG hit can only happen via the `decisions=` override path in tests / a future
-        # global anchor feature — exercised here directly to prove _render_prompt_decisions'
+        # global anchor feature - exercised here directly to prove _render_prompt_decisions'
         # global-store fallback still applies when a file-route anchor hit is global-scope.
         store.update_decision(tmp_repo, "The cart service owns checkout totals",
                               RV1_SESSION, "architecture")   # forces a repo index to exist
@@ -5585,7 +5585,7 @@ class TestFileRoute:
 
     def test_global_scope_mention_hit_is_a_pointer(self, tmp_repo):
         # decisions_for_files spans both stores; a global-scope content-artifact mention (no
-        # source_files — global entries never carry one) is mention-tier, so it's a pointer.
+        # source_files - global entries never carry one) is mention-tier, so it's a pointer.
         store.update_decision(tmp_repo, "The cart service owns checkout totals",
                               RV1_SESSION, "architecture")   # forces a repo index to exist
         store.update_global_decision(
@@ -5617,7 +5617,7 @@ class TestFileRoute:
 
     def test_no_index_path_never_calls_file_route(self, tmp_repo, monkeypatch):
         # Fail-soft / unchanged-legacy-path guarantee: with no repo-local decisions there is
-        # no retrieval index, so the legacy per-prompt lookup runs — and must never touch the
+        # no retrieval index, so the legacy per-prompt lookup runs - and must never touch the
         # file route at all, even though a rationale-word prompt clears its own gate.
         from contexer import guard_engine
 
@@ -5648,7 +5648,7 @@ class TestFileRoute:
         def _boom(*a, **k):
             raise RuntimeError("boom")
         monkeypatch.setattr(guard_engine, "decisions_for_files", _boom)
-        index = store._read_retrieval_index(tmp_repo)   # None here — no decisions stored yet
+        index = store._read_retrieval_index(tmp_repo)   # None here - no decisions stored yet
         assert store._prompt_file_hits(
             tmp_repo, "fix contexer/guard_engine.py", set(), index) == ([], [], [])
 
@@ -5674,12 +5674,12 @@ class TestFileRoute:
     @pytest.mark.perf
     def test_index_lookup_meets_latency_budget(self, tmp_repo):
         """Fix round 1's latency contract: measure the file-route lookup on a 500-entry
-        synthetic store (content-artifact-bearing, one in five also source_files-anchored —
+        synthetic store (content-artifact-bearing, one in five also source_files-anchored -
         the same shape `_write_direct`-style perf tests in test_benchmark_extended.py use).
         The index-served fast path must stay comfortably under the ~5ms per-prompt budget the
         live decisions_for_files scan breaches at this scale (measured ~7.7ms p50 / ~8.6ms
         p95 for the live scan vs. ~0.91ms p50 / ~0.93ms p95 for the index-served lookup, ~8x
-        faster — see _index_file_lookup's docstring for the numbers this pins)."""
+        faster - see _index_file_lookup's docstring for the numbers this pins)."""
         data = store._load(tmp_repo)
         for i in range(500):
             data["entries"].append({
@@ -5826,7 +5826,7 @@ class TestStandingTopicMap:
         assert "get_context(query=" in ctx
 
     def test_map_absent_below_20(self, tmp_repo):
-        _seed_rv1(tmp_repo, RV1_CORPUS)  # 10 decisions — below the gate
+        _seed_rv1(tmp_repo, RV1_CORPUS)  # 10 decisions - below the gate
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "Stored decisions by topic:" not in ctx
@@ -5835,7 +5835,7 @@ class TestStandingTopicMap:
         # The map is index-backed and must degrade to silence when the index cannot be
         # read. Patched at the reader rather than by deleting the file: session start now
         # self-heals a missing sidecar (ensure_retrieval_index), so an unlinked file no
-        # longer models an unreadable index — it models one that gets rebuilt.
+        # longer models an unreadable index - it models one that gets rebuilt.
         _seed_rv1(tmp_repo, RV1_CORPUS + RV1_EXTRA)
         monkeypatch.setattr(store, "_read_retrieval_index", lambda repo: None)
         result = store.get_session_start_context(tmp_repo)
@@ -5857,9 +5857,9 @@ class TestCompactRehydration:
         ids = [ids_by_content[c] for c, _ in items]
         assert all(ids)  # sanity: no novelty-filter dedup collapsed any of these
         sid = "sess-compact"
-        # Ignore one of the 10 most-recently-injected ids — it must never be rehydrated
+        # Ignore one of the 10 most-recently-injected ids - it must never be rehydrated
         # even though it's in the working set.
-        ignored_id = ids[13]  # RV1_EXTRA[3] — "...crash telemetry to sentry", within the last 10
+        ignored_id = ids[13]  # RV1_EXTRA[3] - "...crash telemetry to sentry", within the last 10
         store.approve_decision(tmp_repo, ignored_id, "ignore")
         store._ws_add(tmp_repo, sid, ids)  # simulate all 22 injected earlier this session
 
@@ -5868,7 +5868,7 @@ class TestCompactRehydration:
         assert "## Rehydrated working context" in ctx
         section = ctx.split("## Rehydrated working context:")[1]
         assert section.count("\n- [") <= 10
-        assert "sentry" not in section  # ids[13]'s content — excluded (ignored, not active)
+        assert "sentry" not in section  # ids[13]'s content - excluded (ignored, not active)
 
     def test_no_session_id_no_rehydration(self, tmp_repo):
         store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
@@ -5939,7 +5939,7 @@ class TestWorkingSetGC:
         os.utime(stale_ws, (old, old))
         store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
         store.get_session_start_context(tmp_repo, "resume")
-        assert stale_ws.exists()  # resume takes the early-return path — GC never runs
+        assert stale_ws.exists()  # resume takes the early-return path - GC never runs
 
 
 class TestRationaleSessionIdPlumbing:
@@ -6120,7 +6120,7 @@ class TestTitleAndBody:
     def test_authored_title_that_is_a_literal_prefix_keeps_full_body(self):
         # Greptile #221 P1: the prefix-strip is scoped to DERIVED titles (always a clean
         # sentence boundary via _derive_title). An authored title can be an arbitrary
-        # fragment that happens to literally prefix the content — stripping it would cut
+        # fragment that happens to literally prefix the content - stripping it would cut
         # off the body's own leading words instead of removing a genuine duplicate.
         c = "Use Postgres for the queue, since ordering matters."
         e = store._new_decision_entry(c, "s1", "architecture", title="Use Postgres")
@@ -6385,7 +6385,7 @@ class TestTitleDisplay:
 
 
 # ── secret redaction on the EGRESS path only (share projection + preview) ─────
-# Capture is deliberately NOT redacted — the local store stays a faithful record; redaction
+# Capture is deliberately NOT redacted - the local store stays a faithful record; redaction
 # happens only when a decision LEAVES the machine (projection/preview here, wire in remote.py).
 
 _AWS = "AKIAIOSFODNN7EXAMPLE"
@@ -6503,7 +6503,7 @@ class TestShareProjectionTitle:
 class TestShareProjectionTitleRedaction:
     """SECURITY: a title is derived from content, so it can carry the same secrets as
     content/evidence. It must be scrubbed at the projection (here) AND independently at
-    the wire (remote._wire_args, tested in test_remote.py) — the last-mile chokepoint."""
+    the wire (remote._wire_args, tested in test_remote.py) - the last-mile chokepoint."""
 
     def test_authored_title_secret_redacted(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "_redaction_enabled", lambda: True)
@@ -6782,12 +6782,12 @@ class TestCaptureLint:
 class TestCaptureLintSplit:
     """The multi-claim gate: several ALL-CAPS section labels means several independent
     claims sharing one record, which makes the fastest-rotting half mark the durable half
-    stale. Modelled on the real record this was built from — one 4127-char single-line blob
+    stale. Modelled on the real record this was built from - one 4127-char single-line blob
     mixing timeless subsystem understanding with one ticket's implementation detail."""
 
     FILLER = " ".join(["detail"] * 60)
     BLOB = (
-        "PRT-98 — why the org picker never showed, and how sales users now pick orgs. "
+        "PRT-98 - why the org picker never showed, and how sales users now pick orgs. "
         f"WHY THE PAGE IS NORMALLY INVISIBLE: the page is a session task, not routing. {FILLER} "
         f"WHAT PRT-98 ADDS: a shared create dialog plus a post-sign-in fan-out. {FILLER} "
         f"DECIDED SCOPE BOUNDARIES: interactive only, sales only, no purge. {FILLER}"
@@ -6859,7 +6859,7 @@ class TestCaptureLintSplit:
 
     def test_unterminated_fence_still_hides_its_code(self):
         # A truncated ``` block is a routine LLM output shape. A close-fence-only pattern
-        # leaked the whole rest of the capture back to the scanner — here that is 5 labels.
+        # leaked the whole rest of the capture back to the scanner - here that is 5 labels.
         content = ("Run migrations through Alembic so schema and code move together.\n"
                    "```sql\nCREATE TABLE a (id UUID PRIMARY KEY);\n"
                    "WHY THIS: because. WHAT NEXT: nothing. KNOWN GAP: none.\n" + self.FILLER)
@@ -6886,7 +6886,7 @@ class TestCaptureLintSplit:
 
     def test_parenthetical_between_header_and_colon_still_counts(self):
         # Real headers look like this, which is why the ':' may be separated by a
-        # parenthetical — but by nothing else.
+        # parenthetical - but by nothing else.
         content = (f"PRT-98 rollout. KNOWN GAP (pre-existing, untouched): no purge. "
                    f"{self.FILLER} WHAT THIS ADDS: a create dialog. {self.FILLER} "
                    f"DECIDED SCOPE BOUNDARIES: sales only. {self.FILLER}")
@@ -6903,7 +6903,7 @@ class TestCaptureLintSplit:
 
 
 class TestBodyClipping:
-    """_clip_body — the human-review-surface clip (review_pending, contexer review, share
+    """_clip_body - the human-review-surface clip (review_pending, contexer review, share
     lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
     and are untouched by this class."""
 
@@ -7002,7 +7002,7 @@ class TestScanConventionVerify:
 
     def test_no_scan_entries_skips_miner_entirely(self, tmp_repo, monkeypatch):
         # Fast path: a store with no scan-sourced stats entries must never invoke the miner,
-        # even with force=True — this is the session-start latency guarantee.
+        # even with force=True - this is the session-start latency guarantee.
         repo = tmp_repo
         store.update_decision(repo, "Use uv for everything.", "sess1", "convention",
                               created_by="human")
@@ -7039,7 +7039,7 @@ class TestScanConventionVerify:
         # An approved participant plus a pending_approval and an ignored scan entry, all
         # with rules absent from the fresh scan (would-be disappearances). Mining must
         # actually run (the approved entry keeps the fast path from short-circuiting), but
-        # only the approved entry may be touched — pending/ignored entries are never
+        # only the approved entry may be touched - pending/ignored entries are never
         # re-verified, no matter what the fresh scan says about their rule.
         repo = tmp_repo
         self._seed_scan_convention(repo, self.RULE_OLD)
@@ -7095,7 +7095,7 @@ class TestScanConventionVerify:
         assert entry["content"] == self.RULE_NEW            # and content refreshed
 
     def test_reappearance_leaves_ai_sourced_proposal_alone(self, tmp_repo, monkeypatch):
-        # An 'ai'-sourced proposed_revision is an unrelated, developer-reviewable suggestion —
+        # An 'ai'-sourced proposed_revision is an unrelated, developer-reviewable suggestion -
         # a refresh pass must never discard it, only a scan-sourced withdrawal proposal.
         repo = tmp_repo
         self._seed_scan_convention(repo)

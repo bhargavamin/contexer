@@ -1,4 +1,4 @@
-"""tasks.json shape validation — the runner depends on these exact keys."""
+"""tasks.json shape validation - the runner depends on these exact keys."""
 import json
 import subprocess
 import sys
@@ -34,7 +34,7 @@ class TestTasksFile:
 
 class TestChainAuditCheck:
     """chain-3-audit's check must be behavioral (calls create_order, asserts a
-    lowercase string id) — the old 'int(' grep passed in BOTH conditions and
+    lowercase string id) - the old 'int(' grep passed in BOTH conditions and
     discriminated nothing (red-team #6)."""
 
     @staticmethod

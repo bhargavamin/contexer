@@ -1,6 +1,6 @@
 """Profile loader for ~/.contexer/config.toml.
 
-Loader only — this does NOT wire mode/endpoint/token into the live server or
+Loader only - this does NOT wire mode/endpoint/token into the live server or
 store paths (a later ticket does). With no config file (or absent keys) the
 profile is pure-local: mode 'local', endpoint/token None, so existing behavior
 is completely unchanged.
@@ -16,7 +16,7 @@ Mode = Literal["local", "team"]
 
 CONFIG_PATH = Path.home() / ".contexer" / "config.toml"
 
-# Teams endpoint defaults — the single source of truth for every consumer (login,
+# Teams endpoint defaults - the single source of truth for every consumer (login,
 # the opt-in native MCP registration). Code ships ONLY the stable production domain;
 # which stack answers it (dev today, prod later) is decided in DNS, so promoting
 # infrastructure never needs a client release and never strands an old endpoint in
@@ -94,7 +94,7 @@ def redaction_enabled() -> bool:
 
     The single source of this default. store._redaction_enabled and remote._redaction_enabled
     are one-line delegates that exist only as the per-module patch points their tests already
-    target — two independent copies of a security default is exactly the thing that drifts."""
+    target - two independent copies of a security default is exactly the thing that drifts."""
     try:
         return load_profile().redact_secrets
     except Exception:
@@ -103,7 +103,7 @@ def redaction_enabled() -> bool:
 
 def write_team_profile(endpoint: str, path: Path | None = None) -> None:
     """Persist a team profile to config.toml (mode='team' + endpoint), preserving any
-    existing token. Creates the file/dir if absent — so `contexer login` self-configures and
+    existing token. Creates the file/dir if absent - so `contexer login` self-configures and
     the user never hand-edits config.toml."""
     config_path = CONFIG_PATH if path is None else path
     existing = load_profile(config_path)
@@ -117,7 +117,7 @@ def write_team_profile(endpoint: str, path: Path | None = None) -> None:
     lines.extend(_preserved_ui_lines(config_path))  # `contexer login` must not reset [ui]
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    config_path.chmod(0o600)  # may hold a bearer token — owner-only, like .team_auth.json
+    config_path.chmod(0o600)  # may hold a bearer token - owner-only, like .team_auth.json
 
 
 # ── the [ui] table (local console) ───────────────────────────────────────────────
@@ -180,7 +180,7 @@ def write_settings(path: Path | None = None, /, **allowlisted: object) -> None:
 
     Read-modify-write over the resolved Profile + `[ui]` table: a key that is not passed
     keeps its current value, so a save from the console can never drop the teams token.
-    Only SETTABLE_KEYS are accepted; anything else — including `token`/`endpoint`/`mode` —
+    Only SETTABLE_KEYS are accepted; anything else - including `token`/`endpoint`/`mode` -
     raises ConfigError. `path` is positional-only so that splatting an untrusted request
     body cannot redirect the write to an arbitrary file.
 
@@ -197,7 +197,7 @@ def write_settings(path: Path | None = None, /, **allowlisted: object) -> None:
     profile = load_profile(config_path)
     ui = load_ui_settings(config_path)
     caller = "write_settings()"
-    # Validate before touching the file — a rejected value must not leave a half-written
+    # Validate before touching the file - a rejected value must not leave a half-written
     # config, and every value written here has to survive load_profile/load_ui_settings.
     skip_confirm = _bool_value(allowlisted.get("skip_confirm", profile.skip_confirm),
                                "skip_confirm", caller)
@@ -237,7 +237,7 @@ def _preserved_ui_lines(config_path: Path) -> list[str]:
 
     Preserving `[ui]` RIDES ALONG with a credential write, so it must never be able to abort
     one: `contexer login` used to complete the entire browser flow, save the tokens, and then
-    die here on a hand-edited `port = "31500"` — leaving mode/endpoint unwritten and team sync
+    die here on a hand-edited `port = "31500"` - leaving mode/endpoint unwritten and team sync
     off with nothing pointing at why. A table that will not validate is therefore copied
     through VERBATIM rather than dropped or silently "corrected": login is not the place to
     rewrite a value the user typed, and the loaders that actually read `[ui]` still reject it,
@@ -253,7 +253,7 @@ def _raw_ui_lines(config_path: Path) -> list[str]:
     """The file's `[ui]` header and everything after it, unparsed.
 
     TOML binds every key after a table header to that table, so the header to EOF IS the
-    table — and the file has already parsed as TOML (load_profile would have raised first),
+    table - and the file has already parsed as TOML (load_profile would have raised first),
     so copying that tail through cannot produce something unreadable."""
     lines = config_path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
@@ -283,7 +283,7 @@ def _atomic_write_private(path: Path, data: bytes) -> None:
     mkstemp creates the temp file 0600 regardless of umask, so a file that may hold a
     bearer token is never even briefly group/world-readable (write_text + chmod is).
     Duplicates store._atomic_write deliberately: config.py has to stay at the bottom of
-    the import graph — store imports config, so importing store here would cycle."""
+    the import graph - store imports config, so importing store here would cycle."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
@@ -313,7 +313,7 @@ def _int_value(value: object, key: str, where: Path | str, *,
 
 
 def _toml_str(value: str) -> str:
-    """A TOML basic-string literal — escaped, so a `"` or `\\` in a value can't corrupt the file."""
+    """A TOML basic-string literal - escaped, so a `"` or `\\` in a value can't corrupt the file."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 

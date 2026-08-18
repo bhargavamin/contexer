@@ -5,7 +5,7 @@ Run with:
     uv run pytest tests/test_benchmark.py -v -s
 
 Measures:
-  1. Session start context size — tokens injected vs baseline (no Contexer)
+  1. Session start context size - tokens injected vs baseline (no Contexer)
   2. Preloaded vs deferred decision split
   3. Rationale prompt hit/miss rate (get_context_for_prompt)
   4. On-demand get_context timing and hit/miss rate
@@ -41,35 +41,35 @@ DEMO_REPO = "/demo/ecommerce-api"
 SESSION = "bench-session-id"
 
 CONVENTIONS = [
-    "Always use conventional commits format: type(scope): description — types are feat, fix, docs, refactor, chore, test",
-    "Use TypeScript strict mode for all new files — tsconfig.json has strict:true enabled globally",
-    "All API endpoints return JSON with { data, error, meta } envelope structure — never return bare values",
-    "Environment variables must be validated at startup using Zod schema — no direct process.env access in business logic",
-    "Database migrations run automatically on deploy via Prisma migrate deploy — never run migrations manually in production",
+    "Always use conventional commits format: type(scope): description - types are feat, fix, docs, refactor, chore, test",
+    "Use TypeScript strict mode for all new files - tsconfig.json has strict:true enabled globally",
+    "All API endpoints return JSON with { data, error, meta } envelope structure - never return bare values",
+    "Environment variables must be validated at startup using Zod schema - no direct process.env access in business logic",
+    "Database migrations run automatically on deploy via Prisma migrate deploy - never run migrations manually in production",
 ]
 
 CONSTRAINTS = [
-    "Never commit directly to main — all changes require a PR with at least one approval before merging",
-    "No real external API calls in unit tests — use MSW handlers for all HTTP mocking",
-    "Response time SLA: p99 must be under 200ms for all user-facing endpoints — benchmark before merging to main",
-    "PII data must never appear in logs — scrub user emails, phone numbers, and card digits before any log statement",
-    "All database queries must use parameterized statements — no string interpolation in SQL under any circumstances",
+    "Never commit directly to main - all changes require a PR with at least one approval before merging",
+    "No real external API calls in unit tests - use MSW handlers for all HTTP mocking",
+    "Response time SLA: p99 must be under 200ms for all user-facing endpoints - benchmark before merging to main",
+    "PII data must never appear in logs - scrub user emails, phone numbers, and card digits before any log statement",
+    "All database queries must use parameterized statements - no string interpolation in SQL under any circumstances",
 ]
 
 ARCHITECTURE = [
     "Chose PostgreSQL over MongoDB because we need ACID transactions for multi-step order processing and inventory updates",
     "API gateway pattern: all external traffic routes through Kong, internal service communication uses gRPC not REST",
     "Event sourcing for order state: OrderPlaced, OrderShipped, OrderDelivered events stored in EventStore with projections",
-    "Frontend uses Next.js App Router with React Server Components — no client-side data fetching for initial page loads",
+    "Frontend uses Next.js App Router with React Server Components - no client-side data fetching for initial page loads",
     "Authentication uses JWT with 15-minute access tokens and 7-day refresh tokens stored in httpOnly cookies not localStorage",
 ]
 
 PATTERNS = [
-    "Repository pattern for all database access — no raw Prisma calls outside of repository classes in the services layer",
-    "Use Result type for error handling in the service layer instead of throwing exceptions — all services return Result not void",
-    "API route handlers are thin controllers — all business logic lives in service classes, handlers only parse and delegate",
-    "Feature flags controlled via environment variables prefixed FEATURE_ — no hardcoded feature toggles or if/else branching",
-    "Pagination uses cursor-based approach with opaque cursors not offset integers — required for all list endpoints",
+    "Repository pattern for all database access - no raw Prisma calls outside of repository classes in the services layer",
+    "Use Result type for error handling in the service layer instead of throwing exceptions - all services return Result not void",
+    "API route handlers are thin controllers - all business logic lives in service classes, handlers only parse and delegate",
+    "Feature flags controlled via environment variables prefixed FEATURE_ - no hardcoded feature toggles or if/else branching",
+    "Pagination uses cursor-based approach with opaque cursors not offset integers - required for all list endpoints",
 ]
 
 # Rationale prompts that SHOULD hit stored decisions (contains keyword + rationale word)
@@ -86,7 +86,7 @@ HIT_PROMPTS = [
     ("why were migrations automated instead of manual?",           "migrations"),
 ]
 
-# Question-shaped comprehension prompts — no rationale word, but they name rare store
+# Question-shaped comprehension prompts - no rationale word, but they name rare store
 # terms, so the discriminative-term guard lets them through. Pinned separately as well as
 # in HIT_PROMPTS because the hit-rate benchmark only asserts a floor over all prompts:
 # test_question_prompts_inject_strong_content pins these to full content, not a pointer.
@@ -101,25 +101,25 @@ HIT_PROMPTS += QUESTION_HIT_PROMPTS
 # Pointer-expected prompts (Task 4): a bare topic word gives the WEAK lane a topic to
 # overlap on, even though the STRONG lane's discriminative guard still blocks full content.
 # Pinned separately (not in HIT_PROMPTS, which only asserts truthiness) because
-# test_pointer_prompts_stay_weak below pins the exact kind — "pointer", never "strong".
+# test_pointer_prompts_stay_weak below pins the exact kind - "pointer", never "strong".
 POINTER_HIT_PROMPTS = [
-    # "api" (df 4) is a lone common term with 0 discriminative hits — the guard blocks
+    # "api" (df 4) is a lone common term with 0 discriminative hits - the guard blocks
     # STRONG, but "api" is now a member of its own topic's alias set (Task 4), so the WEAK
     # pointer fires instead of total silence.
     ("what about the api?",              "api"),
     # The motivating case: a question naming a bare topic word whose only BM25 match
     # (the JWT/refresh-token decision) is single-term ("auth" isn't literally in that
-    # decision's text, only "authentication" — a different token) — pre-Task-4 this
+    # decision's text, only "authentication" - a different token) - pre-Task-4 this
     # derived no topic at all and stayed silent. Now "auth" is a member of its own alias
     # set, so the WEAK pointer surfaces it instead of nothing.
     ("what is the auth feature doing?",  "auth"),
     # PRE-EXISTING behavior, not new in this task: "overview" already passed the
-    # is_project gate and "docker" was already a `deploy` alias before this branch — any
+    # is_project gate and "docker" was already a `deploy` alias before this branch - any
     # store holding a deploy-tagged decision (the migrations-on-deploy convention below
     # genuinely IS one; `prisma migrate deploy` is a real deploy-pipeline fact) already
     # produced this pointer. The documented limitation is prompt-side (a general-knowledge
     # "Docker networking" question happens to share the `docker` token with the `deploy`
-    # topic), not a false tag — and the payload is a ~15-token "if relevant" pointer, not
+    # topic), not a false tag - and the payload is a ~15-token "if relevant" pointer, not
     # a content injection.
     ("give me an overview of Docker networking", "deploy"),
 ]
@@ -142,19 +142,19 @@ MISS_PROMPTS = [
     # guard keeps these silent (no rare store term matched, no topic overlap).
     "what should I call this variable?",                 # only generic tokens match
     "how do I exit vim?",                                # nothing in the store at all
-    "what time is the standup?",                         # "time" matches the SLA rule — 1 hit, not an answer
-    # Silent ONLY because of the discriminative guard — delete it and this injects. "must"/
+    "what time is the standup?",                         # "time" matches the SLA rule - 1 hit, not an answer
+    # Silent ONLY because of the discriminative guard - delete it and this injects. "must"/
     # "never" are corpus-common (df 4 each) yet co-occur in the PII rule, so the pair clears
     # _STRONG_MIN_HITS. None of its words are topic names, so it stays a pure guard pin even
     # after Task 4 (contrast with "what about the api?", moved to POINTER_HIT_PROMPTS above).
     "what must never happen?",                           # 2 hits, 0 discriminative
     # Task 4 proof: a bare topic word ("api") alone does NOT leak through the gate on a
-    # plain task prompt — no rationale/project/question-lead and no artifact, so the router
+    # plain task prompt - no rationale/project/question-lead and no artifact, so the router
     # never even reaches topic derivation.
     "add rate limiting to the api gateway",
 ]
 
-# Known edge-case false positives — short keywords that substring-match unrelated decisions.
+# Known edge-case false positives - short keywords that substring-match unrelated decisions.
 # e.g. "form" (from "why do clouds form?") matches "format" in the commits convention.
 # These are documented limitations, not bugs.
 KNOWN_FALSE_POSITIVES = [
@@ -223,7 +223,7 @@ class TestSessionStartContext:
         deferred_count = int(deferred_note[0].split()[0]) if deferred_note else 0
 
         print(f"\n{'='*60}")
-        print("BENCHMARK 1 — Session start context")
+        print("BENCHMARK 1 - Session start context")
         print(f"{'='*60}")
         print(f"  Status line:      {msg}")
         print(f"  Preloaded:        {preloaded_count} decisions (convention + constraint + pattern)")
@@ -251,18 +251,18 @@ class TestSessionStartContext:
         result = store.get_session_start_context(DEMO_REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         tokens = _approx_tokens(ctx)
-        # 10 decisions × ~25 words each × 1.3 ≈ 325 tokens — must stay well under 1k
+        # 10 decisions × ~25 words each × 1.3 ≈ 325 tokens - must stay well under 1k
         assert tokens < 1000, f"Session start context too large: {tokens} tokens"
 
     def test_without_contexer_baseline(self, populated_store, monkeypatch_module):
         """Baseline: without Contexer, Claude starts with 0 tokens of project context."""
         print(f"\n{'='*60}")
-        print("BENCHMARK 1b — Baseline without Contexer")
+        print("BENCHMARK 1b - Baseline without Contexer")
         print(f"{'='*60}")
         print("  Preloaded decisions: 0")
         print("  Tokens injected:     0")
-        print("  Result:              Claude starts blind — re-explains conventions each session")
-        # Just a documentation test — always passes
+        print("  Result:              Claude starts blind - re-explains conventions each session")
+        # Just a documentation test - always passes
         assert True
 
 
@@ -274,7 +274,7 @@ class TestRationaleHitRate:
         misses = []
 
         print(f"\n{'='*60}")
-        print("BENCHMARK 2 — Rationale prompt hit/miss rate")
+        print("BENCHMARK 2 - Rationale prompt hit/miss rate")
         print(f"{'='*60}")
         print("\n  HITS (expected to inject context):")
 
@@ -315,7 +315,7 @@ class TestRationaleHitRate:
         print(f"    Avg tokens injected:{avg_hit_tokens:.0f} per hit")
         print("    Tokens on miss:     0 (silent no-op)")
 
-        # Document known false positives separately — short keywords substring-matching
+        # Document known false positives separately - short keywords substring-matching
         # unrelated stored decisions (e.g. "form" → "format").
         unexpected_fps = [(p, r) for p, r in false_positives if p not in KNOWN_FALSE_POSITIVES]
         if false_positives:
@@ -343,7 +343,7 @@ class TestRationaleHitRate:
 
     def test_pointer_prompts_stay_weak(self, populated_store, monkeypatch_module):
         """Task 4: a bare topic word (now a member of its own alias set) feeds ONLY the
-        WEAK pointer lane — the discriminative guard still blocks these from ever reaching
+        WEAK pointer lane - the discriminative guard still blocks these from ever reaching
         STRONG content, so the kind must be "pointer", never "strong" or "" (total silence,
         the pre-Task-4 behavior)."""
         for prompt, expected_topic in POINTER_HIT_PROMPTS:
@@ -353,7 +353,7 @@ class TestRationaleHitRate:
             assert expected_topic in text.lower()
 
     def test_miss_prompts_are_zero_cost(self, populated_store, monkeypatch_module):
-        """Confirm non-rationale prompts add 0 tokens (pure no-op) — except the one
+        """Confirm non-rationale prompts add 0 tokens (pure no-op) - except the one
         documented substring-match false positive. Asserts the exact set of non-silent
         prompts (not just "skip whatever's in KNOWN_FALSE_POSITIVES") so a NEW false
         positive silently added to that list still fails this test until reviewed here too."""
@@ -369,7 +369,7 @@ class TestOnDemandRetrieval:
         misses = []
 
         print(f"\n{'='*60}")
-        print("BENCHMARK 3 — On-demand get_context hits and misses")
+        print("BENCHMARK 3 - On-demand get_context hits and misses")
         print(f"{'='*60}")
 
         for query, expected_hit in ONDEMAND_QUERIES:
@@ -430,7 +430,7 @@ class TestGlobalStoreFallback:
     def global_store(self, populated_store, monkeypatch_module):
         # Add a global convention and constraint
         store.update_global_decision(
-            "All teams must use semantic versioning for package releases — major.minor.patch format required",
+            "All teams must use semantic versioning for package releases - major.minor.patch format required",
             SESSION, "convention"
         )
         store.update_global_decision(
@@ -446,7 +446,7 @@ class TestGlobalStoreFallback:
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         print(f"\n{'='*60}")
-        print("BENCHMARK 4 — Global store fallback")
+        print("BENCHMARK 4 - Global store fallback")
         print(f"{'='*60}")
         print(f"  Prompt:   \"{prompt}\"")
         print("  Keyword not in repo → falls back to global store")
@@ -458,7 +458,7 @@ class TestGlobalStoreFallback:
         assert "global" in result.lower(), "Result should be labeled as from global context"
 
     def test_repo_takes_priority_over_global(self, populated_store, monkeypatch_module):
-        # "postgresql" exists in repo — should return repo result, not global
+        # "postgresql" exists in repo - should return repo result, not global
         prompt = "why did we choose postgresql for our database?"
         result = store.get_context_for_prompt(DEMO_REPO, prompt)
         print("\n  Priority test: repo match beats global fallback")
@@ -473,7 +473,7 @@ class TestGlobalStoreFallback:
 
 class TestNoveltyFilter:
     def test_duplicate_blocking_rate(self, populated_store, monkeypatch_module):
-        # Try to re-add all 20 decisions — all should be blocked
+        # Try to re-add all 20 decisions - all should be blocked
         blocked = 0
         for content in CONVENTIONS + CONSTRAINTS + ARCHITECTURE + PATTERNS:
             stored, _ = store.update_decision(DEMO_REPO, content, SESSION)
@@ -481,7 +481,7 @@ class TestNoveltyFilter:
                 blocked += 1
 
         print(f"\n{'='*60}")
-        print("BENCHMARK 5 — Novelty filter effectiveness")
+        print("BENCHMARK 5 - Novelty filter effectiveness")
         print(f"{'='*60}")
         print("  Duplicate decisions attempted: 20")
         print(f"  Blocked by novelty filter:     {blocked}/20 ({100*blocked//20}%)")
@@ -490,10 +490,10 @@ class TestNoveltyFilter:
         assert blocked == 20, f"Expected all 20 duplicates blocked, only {blocked} were"
 
     def test_near_duplicate_blocking(self, populated_store, monkeypatch_module):
-        # Near-duplicate of: "Never commit directly to main — all changes require a PR with
+        # Near-duplicate of: "Never commit directly to main - all changes require a PR with
         # at least one approval before merging"
-        # Only "PR" → "pull request" changed — 17/19 token overlap = 89% > 70% threshold
-        near_dup = "Never commit directly to main — all changes require a pull request with at least one approval before merging"
+        # Only "PR" → "pull request" changed - 17/19 token overlap = 89% > 70% threshold
+        near_dup = "Never commit directly to main - all changes require a pull request with at least one approval before merging"
         stored, _ = store.update_decision(DEMO_REPO, near_dup, SESSION)
         print("\n  Near-duplicate test:")
         print(f"    Input:   \"{near_dup[:75]}\"")
@@ -503,18 +503,18 @@ class TestNoveltyFilter:
 
     def test_tokenisation_edge_case(self, populated_store, monkeypatch_module):
         # Documents a known limitation: comma-attached tokens ("feat," ≠ "feat") reduce
-        # measured overlap for list-style decisions. The filter is conservative — it only
+        # measured overlap for list-style decisions. The filter is conservative - it only
         # blocks when overlap IS high, so this causes false negatives, not false positives.
         edge_case = "Always use conventional commits format type scope description types are feat fix docs refactor chore test"
         stored, _ = store.update_decision(DEMO_REPO, edge_case, SESSION)
         print("\n  Tokenisation edge case (comma stripping):")
-        print("    Original: 'feat, fix, docs, refactor, chore, test' — commas attached = separate tokens")
-        print("    Rewrite:  'feat fix docs refactor chore test' — same words, no commas")
-        print(f"    Result:   {'STORED (false negative — commas reduced measured overlap)' if stored else 'BLOCKED ✓'}")
+        print("    Original: 'feat, fix, docs, refactor, chore, test' - commas attached = separate tokens")
+        print("    Rewrite:  'feat fix docs refactor chore test' - same words, no commas")
+        print(f"    Result:   {'STORED (false negative - commas reduced measured overlap)' if stored else 'BLOCKED ✓'}")
         print("    Note:     This is a known filter limitation, not data corruption.")
 
     def test_genuinely_new_decision_passes(self, populated_store, monkeypatch_module):
-        genuinely_new = "All background jobs use Bull queue with Redis — no direct setTimeout or setInterval for async work"
+        genuinely_new = "All background jobs use Bull queue with Redis - no direct setTimeout or setInterval for async work"
         stored, eid = store.update_decision(DEMO_REPO, genuinely_new, SESSION)
         print("\n  Genuinely new decision test:")
         print(f"    Input:   \"{genuinely_new[:70]}\"")
@@ -530,65 +530,65 @@ LARGE_REPO = "/demo/platform-monorepo"
 LARGE_SESSION = "bench-large-session"
 
 LARGE_CONVENTIONS = [
-    "Always use conventional commits format: type(scope): description — types are feat, fix, docs, refactor, chore, test",
-    "Use TypeScript strict mode for all packages — tsconfig.json has strict:true, no exceptions per package",
-    "All REST endpoints return JSON with { data, error, meta } envelope structure — never return bare values",
-    "Environment variables validated at startup with Zod — no raw process.env access outside the config module",
-    "Database migrations run automatically on deploy via Prisma migrate deploy — never run manually in production",
-    "All packages use pnpm workspaces — no npm or yarn commands anywhere in the monorepo",
-    "Branch naming: feat/TICKET-description, fix/TICKET-description, chore/description — tickets required for feat and fix",
-    "PR titles must follow conventional commit format — enforced by GitHub Actions title check on every PR",
-    "All public functions and classes must have JSDoc with @param and @returns — enforced by ESLint rule",
+    "Always use conventional commits format: type(scope): description - types are feat, fix, docs, refactor, chore, test",
+    "Use TypeScript strict mode for all packages - tsconfig.json has strict:true, no exceptions per package",
+    "All REST endpoints return JSON with { data, error, meta } envelope structure - never return bare values",
+    "Environment variables validated at startup with Zod - no raw process.env access outside the config module",
+    "Database migrations run automatically on deploy via Prisma migrate deploy - never run manually in production",
+    "All packages use pnpm workspaces - no npm or yarn commands anywhere in the monorepo",
+    "Branch naming: feat/TICKET-description, fix/TICKET-description, chore/description - tickets required for feat and fix",
+    "PR titles must follow conventional commit format - enforced by GitHub Actions title check on every PR",
+    "All public functions and classes must have JSDoc with @param and @returns - enforced by ESLint rule",
     "Log levels: error for unhandled exceptions, warn for expected failures, info for business events, debug for dev only",
-    "All new services must expose /health and /metrics endpoints — required for Kubernetes liveness and Prometheus scraping",
-    "Date handling uses date-fns not moment.js — moment is deprecated and must not be added to any package",
-    "All user-facing strings go through i18n — no hardcoded English text in component JSX or API responses",
+    "All new services must expose /health and /metrics endpoints - required for Kubernetes liveness and Prometheus scraping",
+    "Date handling uses date-fns not moment.js - moment is deprecated and must not be added to any package",
+    "All user-facing strings go through i18n - no hardcoded English text in component JSX or API responses",
 ]
 
 LARGE_CONSTRAINTS = [
-    "Never commit directly to main — all changes require a PR with at least one senior approval before merging",
-    "No real external API calls in unit tests — MSW handlers required for all HTTP, fetch, and axios mocking",
-    "p99 latency must stay under 200ms for all user-facing endpoints — Datadog SLO alert triggers on breach",
-    "PII data must never appear in logs — strip emails, phone numbers, card digits before any log statement",
-    "All SQL queries must use parameterized statements — no string interpolation in any database call",
-    "Packages must not import across service boundaries — only shared packages in packages/shared are allowed cross-imports",
-    "No synchronous file system calls in request handlers — all fs operations must be async to avoid blocking the event loop",
-    "Third-party dependencies must be approved in the security channel before being added — no unreviewed packages in prod",
-    "Maximum bundle size for client packages: 250kb gzipped — webpack-bundle-analyzer check runs on every PR",
-    "All secrets must live in AWS Secrets Manager — no secrets in .env files committed to the repo, ever",
-    "Database connection pools capped at 20 per service — exceeding this caused the March outage, do not raise without DBA sign-off",
-    "API rate limiting: 1000 req/min per authenticated user, 100 req/min unauthenticated — enforced at Kong gateway level",
+    "Never commit directly to main - all changes require a PR with at least one senior approval before merging",
+    "No real external API calls in unit tests - MSW handlers required for all HTTP, fetch, and axios mocking",
+    "p99 latency must stay under 200ms for all user-facing endpoints - Datadog SLO alert triggers on breach",
+    "PII data must never appear in logs - strip emails, phone numbers, card digits before any log statement",
+    "All SQL queries must use parameterized statements - no string interpolation in any database call",
+    "Packages must not import across service boundaries - only shared packages in packages/shared are allowed cross-imports",
+    "No synchronous file system calls in request handlers - all fs operations must be async to avoid blocking the event loop",
+    "Third-party dependencies must be approved in the security channel before being added - no unreviewed packages in prod",
+    "Maximum bundle size for client packages: 250kb gzipped - webpack-bundle-analyzer check runs on every PR",
+    "All secrets must live in AWS Secrets Manager - no secrets in .env files committed to the repo, ever",
+    "Database connection pools capped at 20 per service - exceeding this caused the March outage, do not raise without DBA sign-off",
+    "API rate limiting: 1000 req/min per authenticated user, 100 req/min unauthenticated - enforced at Kong gateway level",
 ]
 
 LARGE_ARCHITECTURE = [
     "Chose PostgreSQL over MongoDB because we need ACID transactions for multi-step order processing and inventory updates",
     "API gateway pattern: all external traffic routes through Kong, internal service communication uses gRPC not REST",
     "Event sourcing for order state: OrderPlaced, OrderShipped, OrderDelivered events stored in EventStore with read-model projections",
-    "Frontend uses Next.js App Router with React Server Components — no client-side data fetching for initial page loads",
+    "Frontend uses Next.js App Router with React Server Components - no client-side data fetching for initial page loads",
     "Authentication uses JWT with 15-minute access tokens and 7-day refresh tokens stored in httpOnly cookies not localStorage",
-    "Monorepo managed by Turborepo with remote caching on Vercel — build times went from 18min to 3min after migration",
-    "Message queue is SQS not Kafka — Kafka was evaluated but operational overhead too high for current team size",
-    "Search powered by OpenSearch not Elasticsearch — moved for cost: managed OpenSearch is 40% cheaper at our volume",
-    "Payment processing uses Stripe exclusively — Braintree was sunset, Adyen was evaluated but integration cost too high",
-    "CDN is Cloudfront with S3 origin for static assets — media uploads go direct to S3 presigned URLs, not through the API",
-    "WebSocket connections handled by a dedicated presence service — colocating with the main API caused memory pressure",
-    "Feature flag system is custom-built on Redis — LaunchDarkly was evaluated but $8k/mo cost was not justified at current scale",
+    "Monorepo managed by Turborepo with remote caching on Vercel - build times went from 18min to 3min after migration",
+    "Message queue is SQS not Kafka - Kafka was evaluated but operational overhead too high for current team size",
+    "Search powered by OpenSearch not Elasticsearch - moved for cost: managed OpenSearch is 40% cheaper at our volume",
+    "Payment processing uses Stripe exclusively - Braintree was sunset, Adyen was evaluated but integration cost too high",
+    "CDN is Cloudfront with S3 origin for static assets - media uploads go direct to S3 presigned URLs, not through the API",
+    "WebSocket connections handled by a dedicated presence service - colocating with the main API caused memory pressure",
+    "Feature flag system is custom-built on Redis - LaunchDarkly was evaluated but $8k/mo cost was not justified at current scale",
     "Caching strategy: Redis L1 cache per service with 5min TTL, PostgreSQL materialized views as L2 for heavy aggregations",
 ]
 
 LARGE_PATTERNS = [
-    "Repository pattern for all database access — no raw Prisma calls outside of repository classes in the services layer",
-    "Result type for error handling in service layer — services return Result<T, AppError> not void, never throw",
-    "API route handlers are thin controllers — all business logic lives in service classes, handlers only parse and delegate",
-    "Feature flags via FEATURE_ env vars — no hardcoded feature toggles or if/else branching in business logic",
-    "Cursor-based pagination for all list endpoints — offset pagination is banned after the performance incident in Q3",
-    "Saga pattern for distributed transactions — each multi-service operation has a compensating transaction rollback path",
+    "Repository pattern for all database access - no raw Prisma calls outside of repository classes in the services layer",
+    "Result type for error handling in service layer - services return Result<T, AppError> not void, never throw",
+    "API route handlers are thin controllers - all business logic lives in service classes, handlers only parse and delegate",
+    "Feature flags via FEATURE_ env vars - no hardcoded feature toggles or if/else branching in business logic",
+    "Cursor-based pagination for all list endpoints - offset pagination is banned after the performance incident in Q3",
+    "Saga pattern for distributed transactions - each multi-service operation has a compensating transaction rollback path",
     "CQRS split at the service level: command handlers write to primary DB, query handlers read from read replicas",
-    "All external HTTP calls wrapped in circuit breaker using opossum — prevents cascade failures across services",
-    "Background jobs always idempotent — jobs can be retried safely, idempotency key stored in Redis with 24h TTL",
-    "Optimistic locking with version columns for concurrent writes — avoids deadlocks on high-contention inventory rows",
-    "API versioning via URL prefix /v1/, /v2/ — header-based versioning was tried and rejected for cache complexity",
-    "Dependency injection via tsyringe — no global singletons, all services registered in the DI container at bootstrap",
+    "All external HTTP calls wrapped in circuit breaker using opossum - prevents cascade failures across services",
+    "Background jobs always idempotent - jobs can be retried safely, idempotency key stored in Redis with 24h TTL",
+    "Optimistic locking with version columns for concurrent writes - avoids deadlocks on high-contention inventory rows",
+    "API versioning via URL prefix /v1/, /v2/ - header-based versioning was tried and rejected for cache complexity",
+    "Dependency injection via tsyringe - no global singletons, all services registered in the DI container at bootstrap",
 ]
 
 # Large-scale hit prompts covering the extended decision set
@@ -634,7 +634,7 @@ def large_store(tmp_path_factory, monkeypatch_module):
 
 
 class TestLargeScaleBenchmark:
-    """50-decision benchmark — compare against 20-decision results."""
+    """50-decision benchmark - compare against 20-decision results."""
 
     def test_session_start_scale(self, large_store, monkeypatch_module):
         result = store.get_session_start_context(LARGE_REPO)
@@ -666,7 +666,7 @@ class TestLargeScaleBenchmark:
         print(f"    {'Tokens per preloaded rule':<28} {BASELINE_TOKENS//BASELINE_PRE:>14} {tokens//preloaded_count:>14}")
         print(f"\n  Status line: {msg}")
 
-        # With confidence lifecycle: constraints (Level 3) require approval — they start
+        # With confidence lifecycle: constraints (Level 3) require approval - they start
         # as pending_approval, not pre-loaded. Patterns with L3 signals are also pending.
         # Pre-loaded count = conventions + clean patterns (those without L3 signals).
         assert preloaded_count >= 13, f"Expected at least 13 pre-loaded (conventions), got {preloaded_count}"
@@ -766,7 +766,7 @@ class TestLargeScaleBenchmark:
         print(f"    Unfiltered overview: shows {len(unfiltered_lines)} of 50 total (cap=10)")
         print(f"    'showing N of M' note present: {'yes' if 'showing' in unfiltered else 'no'}")
         print(f"    Filtered (convention): shows {len(filtered_lines)} of 13 (cap=25)")
-        print(f"    Cap active on filtered: {'yes — showing 13 of 13 (under cap)' if len(filtered_lines) == 13 else f'capped at {len(filtered_lines)}'}")
+        print(f"    Cap active on filtered: {'yes - showing 13 of 13 (under cap)' if len(filtered_lines) == 13 else f'capped at {len(filtered_lines)}'}")
 
         assert len(unfiltered_lines) == 10, f"Unfiltered cap not enforced: {len(unfiltered_lines)}"
         assert "showing" in unfiltered, "Truncation note missing from unfiltered overview"
@@ -798,18 +798,18 @@ class TestSummaryReport:
         )
 
         print(f"\n{'='*60}")
-        print("SUMMARY — Contexer effectiveness report")
+        print("SUMMARY - Contexer effectiveness report")
         print(f"{'='*60}")
         print("\n  Demo project: 20 decisions (5 each: convention, constraint, architecture, pattern)")
         print()
         print("  Session start overhead:")
-        print("    Without Contexer: 0 tokens — Claude starts blind")
-        print(f"    With Contexer:    ~{session_tokens} tokens — 10 rules preloaded, 10 deferred")
+        print("    Without Contexer: 0 tokens - Claude starts blind")
+        print(f"    With Contexer:    ~{session_tokens} tokens - 10 rules preloaded, 10 deferred")
         print(f"    Cost:             ~{session_tokens} tokens once at session open")
-        print("    Benefit:          conventions + constraints always active — no re-explaining")
+        print("    Benefit:          conventions + constraints always active - no re-explaining")
         print()
         print("  On-demand retrieval (architecture/pattern):")
-        print("    Only fetched when relevant — 0 token cost on unrelated tasks")
+        print("    Only fetched when relevant - 0 token cost on unrelated tasks")
         print("    Typical retrieval: <1ms (in-process JSON read + substring filter)")
         print()
         print("  Rationale auto-injection:")
@@ -819,6 +819,6 @@ class TestSummaryReport:
         print()
         print("  Novelty filter:")
         print("    Blocks duplicate/near-duplicate decisions before storage")
-        print("    Keeps store clean — no manual curation needed")
+        print("    Keeps store clean - no manual curation needed")
         print(f"{'='*60}")
         assert True  # summary always passes

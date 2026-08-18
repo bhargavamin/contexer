@@ -156,7 +156,7 @@ def test_three_conditions_medians_and_all_pairs(tmp_path):
 
 
 def test_claudemd_with_pair_recomputed(tmp_path):
-    # condition D (claudemd_with) is paired against claudemd — the adoption
+    # condition D (claudemd_with) is paired against claudemd - the adoption
     # question: contexer's marginal value on an already-documented repo.
     rows = [
         _row(task_id="A", condition="claudemd", tokens_in=200, tokens_out=0),

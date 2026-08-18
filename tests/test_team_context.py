@@ -117,7 +117,7 @@ def test_sync_drops_row_with_mismatched_repo(team_env, monkeypatch):
 
 
 def test_sync_keeps_row_with_no_repo_tag(team_env, monkeypatch):
-    # A legitimate row can carry repo=None — must not be rejected as a mismatch.
+    # A legitimate row can carry repo=None - must not be rejected as a mismatch.
     rd = RemoteDecision(id="t1", type="architecture", title=None, content="no repo tag",
                         rationale=None, repo=None, agent=None, scope="team")
     ctx = RemoteContext(decisions=[rd], deleted=[], cursor="c1")
@@ -193,7 +193,7 @@ def test_an_auth_rejection_is_recorded_as_auth_not_a_generic_degradation(team_en
     """`remote` classifies the failure, but `with_local_fallback` returns only its default, so
     the class was discarded and every degradation landed as "degraded". A token the server has
     REVOKED still looks unexpired locally, so with the type thrown away nothing downstream could
-    tell an auth failure from an outage — which is how one reads as the other and sends the
+    tell an auth failure from an outage - which is how one reads as the other and sends the
     developer off to check their network."""
     _fake_rs(monkeypatch, exc=RemoteAuthError("401"))
     team_context.pull(team_env, profile=TEAM_PROFILE)
@@ -349,7 +349,7 @@ def test_poll_interval_backoff_doubles_and_caps():
         {"last_sync": {"consecutive_failures": 1}}) == team_context._POLL_MIN_INTERVAL * 2
     assert team_context._poll_interval(
         {"last_sync": {"consecutive_failures": 2}}) == team_context._POLL_MIN_INTERVAL * 4
-    # Enough failures to blow past the ceiling — must clamp, never grow unbounded.
+    # Enough failures to blow past the ceiling - must clamp, never grow unbounded.
     assert team_context._poll_interval(
         {"last_sync": {"consecutive_failures": 20}}) == team_context._POLL_MAX_INTERVAL
 
@@ -672,7 +672,7 @@ def test_render_records_rows_and_chars(tmp_repo):
 
 
 def test_render_not_written_when_cache_file_absent(tmp_repo, monkeypatch):
-    # No cache file exists at all — format_team_section returns "" (no rows) and must
+    # No cache file exists at all - format_team_section returns "" (no rows) and must
     # never create one from the render path.
     assert team_context.format_team_section(tmp_repo) == ""
     assert not team_context._cache_path(tmp_repo).exists()
@@ -703,7 +703,7 @@ def test_record_render_preserves_concurrent_refresher_write(tmp_repo, monkeypatc
     # A background refresher (poll_nonblocking, a separate process) can complete and write
     # fresh decisions/cursor/last_ok_at/consecutive_failures in the gap before _record_render
     # does its own save. _record_render must re-read the cache fresh right before saving and
-    # touch ONLY last_render — never spread the stale snapshot format_team_section rendered
+    # touch ONLY last_render - never spread the stale snapshot format_team_section rendered
     # from back over that fresher on-disk write.
     stale = {"repo_key": "k", "cursor": "c0", "decisions": [
         {"id": "t1", "type": "architecture", "content": "stale rule", "rationale": None,
@@ -764,7 +764,7 @@ def test_get_context_unchanged_when_no_team_cache(tmp_repo):
 
 
 def test_get_context_fresh_clone_shows_team_only(tmp_repo):
-    # No local entries, but team cache present — the "fresh clone, no bootstrap" path.
+    # No local entries, but team cache present - the "fresh clone, no bootstrap" path.
     team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": [
         {"id": "t1", "type": "architecture", "content": "Team rule X", "rationale": None,
          "repo": None, "agent": None, "scope": "team"}]})
@@ -799,7 +799,7 @@ def test_cli_pull_no_repo_errors(monkeypatch):
 
 def test_cli_pull_names_a_dead_session_instead_of_reporting_zero(monkeypatch, capsys):
     """"Pulled 0 team decision(s)." is the same sentence for "nothing new upstream" and "your
-    session died three days ago" — the ambiguity that let an expired login sit unnoticed while
+    session died three days ago" - the ambiguity that let an expired login sit unnoticed while
     every sync failed. auth_state is a local read, so naming the cause costs nothing."""
     from contexer import auth, cli
     monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
@@ -1006,7 +1006,7 @@ def test_session_start_payload_status_suffix_reads_one_cache_snapshot(tmp_repo, 
 
 
 def test_session_start_payload_fresh_clone_shows_team(tmp_repo):
-    # No local decisions, but a team cache exists — a fresh clone should still see team.
+    # No local decisions, but a team cache exists - a fresh clone should still see team.
     # Non-architecture type: architecture is deferred at SessionStart (see below).
     _seed_team(tmp_repo, "Team rule survives fresh clone", rtype="constraint")
     ctx = store.session_start_payload(tmp_repo)["context"]
@@ -1025,7 +1025,7 @@ def test_get_session_start_context_envelope_includes_team(tmp_repo):
 def test_session_start_payload_resume_with_decisions_suppresses_team(tmp_repo):
     # Resume + local decisions: local context is deliberately "" (decisions already in the
     # reloaded conversation, alongside the team block injected at the original start). Team
-    # must NOT be re-appended here — that would duplicate it; deltas surface via the poll.
+    # must NOT be re-appended here - that would duplicate it; deltas surface via the poll.
     store.update_decision(tmp_repo, "local decision present on resume", "s1", subtype="constraint")
     _seed_team(tmp_repo, "Team rule should not double on resume")
     payload = store.session_start_payload(tmp_repo, source="resume")
@@ -1035,7 +1035,7 @@ def test_session_start_payload_resume_with_decisions_suppresses_team(tmp_repo):
 
 def test_session_start_payload_resume_fresh_clone_shows_team(tmp_repo):
     # Resume with NO local decisions (fresh clone): local mining context is non-empty, so
-    # team still surfaces — the resume-suppression only applies to the empty-context path.
+    # team still surfaces - the resume-suppression only applies to the empty-context path.
     # Non-architecture type: architecture is deferred at SessionStart (see below).
     _seed_team(tmp_repo, "Team rule on fresh resume", rtype="constraint")
     ctx = store.session_start_payload(tmp_repo, source="resume")["context"]

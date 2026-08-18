@@ -1,4 +1,4 @@
-"""Deterministic scorers for the A/B benchmark. No LLM judge — a violation is a
+"""Deterministic scorers for the A/B benchmark. No LLM judge - a violation is a
 measurable contradiction of a high-tier mined convention in the changed code."""
 import ast
 import json
@@ -10,7 +10,7 @@ from benchmarks.memory_home import memory_files
 from contexer import store as _store
 
 _SNAKE = re.compile(r"^_?[a-z][a-z0-9_]*$")
-# True dunders only (__init__), matching the miner's exclusion — a generated
+# True dunders only (__init__), matching the miner's exclusion - a generated
 # __BadName is part of the mined snake_case population and must be scored.
 _DUNDER = re.compile(r"^__.*__$")
 
@@ -42,7 +42,7 @@ def rationale_score(answer: str, gold: list) -> float:
 
 def changed_files(repo: str, base: str = "HEAD") -> dict[str, str]:
     """Files changed since `base` (a ref or sha) plus untracked files. Callers that
-    can observe the repo's pre-session HEAD should pass it — diffing against a live
+    can observe the repo's pre-session HEAD should pass it - diffing against a live
     HEAD misses edits the session committed before finishing."""
     root = Path(repo)
     tracked = subprocess.run(["git", "-C", repo, "diff", "--name-only", base],

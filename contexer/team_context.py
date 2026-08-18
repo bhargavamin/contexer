@@ -24,17 +24,17 @@ from contexer.repo_key import canonical_repo_key
 # Max team rows rendered into a single get_context (mirrors the local filtered display).
 _TEAM_DISPLAY = 25
 
-# Min seconds between mid-session delta polls (C7) — keeps UserPromptSubmit cheap. This is
+# Min seconds between mid-session delta polls (C7) - keeps UserPromptSubmit cheap. This is
 # the healthy-cloud cadence; consecutive sync failures back this off exponentially (see
 # _poll_interval), up to _POLL_MAX_INTERVAL, so a down cloud isn't hammered every prompt.
 _POLL_MIN_INTERVAL = 15
 
-# Ceiling for the backoff interval (15 min) — a down cloud never gets polled less often
+# Ceiling for the backoff interval (15 min) - a down cloud never gets polled less often
 # than this, but also never floods a prompting session with retries forever.
 _POLL_MAX_INTERVAL = 900
 
 # Cap the in-cache sync log (last N batches). A consumer further behind than this misses the
-# proactive "just approved" banner for old batches only — those rows are still in the cache
+# proactive "just approved" banner for old batches only - those rows are still in the cache
 # (get_context / SessionStart render them), so this is a UX degradation, never data loss.
 _SYNC_LOG_CAP = 50
 
@@ -146,7 +146,7 @@ def _sync(repo_path: str, profile: config.Profile,
                          "error": failure.get("kind", "degraded"),
                          "consecutive_failures": _consecutive_failures(cache) + 1},
         })
-        return None  # degraded — leave the existing cache in place
+        return None  # degraded - leave the existing cache in place
 
     by_id: dict[str, dict] = {d["id"]: d for d in cache.get("decisions", [])}
     new_rows: list[dict] = []
@@ -240,14 +240,14 @@ def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]
 
     Throttled to at most once per `_poll_interval` (base `_POLL_MIN_INTERVAL`, backed off
     exponentially on consecutive sync failures - see `_poll_interval`) so it never adds
-    perceptible latency to a prompt. `[]` when throttled, not in team mode, or degraded —
+    perceptible latency to a prompt. `[]` when throttled, not in team mode, or degraded -
     never raises."""
     profile = profile or config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
-        return []  # not configured — no work, no cache file for a local repo
+        return []  # not configured - no work, no cache file for a local repo
     cache = _load_cache(repo_path)
     if time.time() - cache.get("last_poll_at", 0) < _poll_interval(cache):
-        return []  # throttled — skip the network round-trip
+        return []  # throttled - skip the network round-trip
     result = _sync(repo_path, profile)
     # Stamp the poll time regardless of outcome (don't hammer a down cloud every prompt).
     stamped = _load_cache(repo_path)
@@ -335,9 +335,9 @@ def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
 
 def _drop_legacy_pending(repo_path: str) -> None:
     """Remove a parked-pending file left by an older Contexer (delivery is now the per-consumer
-    sync log). Called on every poll (every prompt), so once the legacy file is gone — the
-    common case — an existence check up front avoids an unlink()-then-catch syscall on every
-    single prompt. Still best-effort — a file that vanishes between the check and the unlink
+    sync log). Called on every poll (every prompt), so once the legacy file is gone - the
+    common case - an existence check up front avoids an unlink()-then-catch syscall on every
+    single prompt. Still best-effort - a file that vanishes between the check and the unlink
     is silently ignored."""
     path = store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json"
     if path.exists():
@@ -355,8 +355,8 @@ def _refresh_worker(repo_path: str) -> None:
 
 
 def _spawn_refresh(repo_path: str) -> None:
-    """Start a detached background refresher — the hook process never waits on it."""
-    # argv is fixed and points at our own interpreter and module — no shell, and no part of
+    """Start a detached background refresher - the hook process never waits on it."""
+    # argv is fixed and points at our own interpreter and module - no shell, and no part of
     # it is caller- or user-supplied except repo_path, which arrives as its own argv element.
     subprocess.Popen(
         [sys.executable, "-m", "contexer.team_context", repo_path],
@@ -371,16 +371,16 @@ def poll_nonblocking(repo_path: str, consumer: str = "claude", *,
 
     Returns the team rows synced since THIS consumer last polled (read from the per-repo sync
     log via the consumer's own high-water marker, so a Claude and a Codex session on the same
-    repo each receive every batch once) and — at most once per `_poll_interval` (base
+    repo each receive every batch once) and - at most once per `_poll_interval` (base
     _POLL_MIN_INTERVAL, backed off exponentially on consecutive sync failures up to
-    _POLL_MAX_INTERVAL) — spawns a detached refresher whose results surface on the NEXT
+    _POLL_MAX_INTERVAL) - spawns a detached refresher whose results surface on the NEXT
     prompt. The prompt only ever pays a cache read plus a non-blocking process spawn, so a
     slow-but-healthy cloud (or the full transport timeout) can never stall the user, and a
     down cloud stops being re-spawned every 15s forever. `consumer` defaults to "claude" so
     the original installed Claude hook string keeps working unchanged."""
     profile = profile or config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
-        return []  # not configured — no work, no cache file for a local repo
+        return []  # not configured - no work, no cache file for a local repo
     _drop_legacy_pending(repo_path)  # one-time cleanup of a pre-sync-log parked file
     cache = _load_cache(repo_path)
     new = _collect_unseen(repo_path, cache, consumer)
@@ -411,7 +411,7 @@ _SESSION_START_TIMEOUT = 3.0
 
 def refresh(repo_path: str) -> tuple[int, int]:
     """SessionStart pull for ANY adapter. Resolves the repo, refreshes the team cache,
-    and NEVER raises — a sync hiccup (offline, bad token, anything) must not break session
+    and NEVER raises - a sync hiccup (offline, bad token, anything) must not break session
     start. Returns (upserted, removed); (0, 0) on no-op / not-team / degraded / error.
 
     Uses a short transport timeout (see `_SESSION_START_TIMEOUT`) so a slow-but-reachable
@@ -527,7 +527,7 @@ def _format_staleness(age_seconds: float) -> str:
 
 def _record_render(repo_path: str, cache: dict, *, rows: int, chars: int) -> None:
     """Best-effort render-size telemetry (measure-don't-guess input for future display-cap
-    tuning) — never raises, since this runs inline inside every hook that injects context.
+    tuning) - never raises, since this runs inline inside every hook that injects context.
     Only touches a cache file that already exists: a pure-local repo (no team cache) must
     never grow one just because get_context ran through format_team_section.
 
@@ -559,7 +559,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
     `defer_architecture` (keyword-only, default False): when True AND no explicit `entry_type`
     was requested, architecture-typed rows are pulled out of the render set (before the
     `_TEAM_DISPLAY` cap is applied) and replaced with a single deferred-count line pointing at
-    `get_context(entry_type="architecture")` — mirroring the local store's SessionStart
+    `get_context(entry_type="architecture")` - mirroring the local store's SessionStart
     deferral of architecture decisions to a count-only pointer. An explicit `entry_type`
     always bypasses deferral: naming a type is a targeted JIT fetch, not a bulk render, so it
     must return full content regardless of `defer_architecture`.
@@ -588,7 +588,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
     `_local_decisions` yields [] and every row renders unmodified - this never raises.
 
     The header is tagged '(synced N hours/days ago - may be stale)' when the cache's
-    `last_ok_at` is older than `_STALE_AFTER` — this is the signal for a quietly-dead
+    `last_ok_at` is older than `_STALE_AFTER` - this is the signal for a quietly-dead
     refresher (rows keep rendering with no indication sync stopped working). A cache with
     no `last_ok_at` at all (old-format cache, pre-dating this field) is treated as unknown
     freshness and left untagged, to avoid false alarms right after an upgrade.
@@ -623,7 +623,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
         # A row that would collapse to the cheap one-line "ratifies local decision <id>"
         # pointer (>= 0.7 overlap) is already as light as the deferred-count line itself,
         # so deferring it would only throw away the more specific ratification signal for
-        # no token savings — only defer architecture rows that would otherwise render in
+        # no token savings - only defer architecture rows that would otherwise render in
         # full (i.e. don't already collapse).
         keep, deferred_rows = [], []
         for r in rows:
