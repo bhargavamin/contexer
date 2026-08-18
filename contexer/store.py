@@ -274,7 +274,7 @@ def _legacy_slug(repo_path: str) -> str:
     # Pre-injective scheme: kept literal `_`/`-`, so `/a/my.repo`, `/a/my_repo`, and
     # `/a/my repo` all collapsed to the same file. Retained only to migrate old stores.
     # Canonicalizes identically to _slug — otherwise the pre-hash migration compare in
-    # _store_path and the console's _resolve_store reverse mapping go inconsistent.
+    # _store_path and console_api._resolve_store's reverse mapping go inconsistent.
     return _legacy_raw_slug(_canonical_store_key(repo_path))
 
 
@@ -421,12 +421,12 @@ def _global_path() -> Path:
 def _read_global() -> tuple[dict, str | None]:
     """(global store data, parse error) from ONE read of `_global.json`.
 
-    The same degrade-but-report split `_read_store` and `_read_deleted` carry: the data is an
-    empty store when the file cannot be parsed, and `error` is the ONLY thing that tells "no
-    global rules" from "the global file is unreadable". A missing file is a genuinely empty
-    store, so it reports no error. Every WRITER must check it — this file holds one machine's
-    entire cross-repo rule set, and appending to a degraded empty store would replace all of
-    it with the one rule just added."""
+    The same degrade-but-report split `console_api._read_store` and `_read_deleted` carry: the
+    data is an empty store when the file cannot be parsed, and `error` is the ONLY thing that
+    tells "no global rules" from "the global file is unreadable". A missing file is a genuinely
+    empty store, so it reports no error. Every WRITER must check it — this file holds one
+    machine's entire cross-repo rule set, and appending to a degraded empty store would replace
+    all of it with the one rule just added."""
     path = _global_path()
     empty = {"repo_path": GLOBAL_SLUG, "entries": []}
     try:
@@ -3097,49 +3097,6 @@ def load_diagnostics(repo_path: str) -> dict:
     return {"ok": True, "error": None}
 
 
-def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:
-    """(store data, parse error, mtime) from ONE read of this repo's store file.
-
-    The console's poll path wants all three, and `load_diagnostics` + `_load` + `_file_mtime`
-    parsed the same file TWICE and stat'd it again — every 10 seconds, over a store that is
-    routinely a few hundred KB. Data degrades to an empty store exactly like `_load` (revision
-    migration included, so the console projections still see the normalized shape) and `error`
-    is what keeps "unreadable" distinct from "empty". A missing file is a genuinely empty store,
-    so it reports no error."""
-    path = _store_path(repo_path)
-    empty = {"repo_path": repo_path, "entries": []}
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return empty, None, None
-    except (OSError, UnicodeDecodeError) as exc:
-        return empty, f"{type(exc).__name__}: {exc}", _file_mtime(path)
-    mtime = _file_mtime(path)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return empty, f"{type(exc).__name__}: {exc}", mtime
-    problem = _entries_error(data.get("entries") if isinstance(data, dict) else None)
-    if problem:
-        return empty, f"not a store object ({problem})", mtime
-    _migrate_entries(data)
-    return data, None, mtime
-
-
-# ── Local-console read projections (contexer/ui/api.py is the only caller) ──────
-# The console must never open a store file itself — same one-write-path rule the MCP
-# surface follows — so every shape it renders is assembled here, in the module that owns
-# the entry schema. Everything below is a PURE READ except `delete_global_rule`: no lock,
-# no network, and no `_load` side effects beyond the ones `_load` already has.
-
-_CONSOLE_RECENT = 10          # rows in the dashboard's RECENT timeline
-
-# Reported for a store file that names no usable repo path — either it does not parse (so no
-# path could be read out of it) or the path it claims is one `_is_sane_repo` rejects. The
-# console renders it as "store unreadable", never as "no decisions".
-_NO_REPO_PATH = "store file names no usable repo_path"
-
-
 def _is_repo_store_file(path: Path) -> bool:
     """Whether a `STORE_DIR/*.json` file is one repo's decision store.
 
@@ -3159,492 +3116,11 @@ def _store_files() -> list[Path]:
         return []
 
 
-def _inspect_store_file(path: Path) -> tuple[str, dict | None, str | None]:
-    """(repo_path, parsed store or None, error or None) for one store file.
-
-    Deliberately NOT `_load`, which degrades a corrupt store to an empty one — the console
-    has to tell "unreadable" from "empty". `repo_path` is resolved even when `entries` is
-    malformed, so such a store still reports its own error under its own name. It is NOT
-    recoverable when the JSON itself will not parse: the repo path lives inside the file and
-    the slug is a hash of it, so an unparseable file resolves with `repo_path` "" and
-    addressing it is `_resolve_store`'s job, not this function's. A `repo_path` the file claims
-    but `_is_sane_repo` rejects reads as absent: a poisoned store file must not redirect a
-    console read."""
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
-        return "", None, f"{type(exc).__name__}: {exc}"
-    if not isinstance(raw, dict):
-        return "", None, "not a store object (no 'entries' list)"
-    claimed = str(raw.get("repo_path") or "")
-    repo_path = claimed if _is_sane_repo(claimed) else ""
-    problem = _entries_error(raw.get("entries"))
-    if problem:
-        return repo_path, None, f"not a store object ({problem})"
-    return repo_path, raw, None
-
-
 def _file_mtime(path: Path) -> float | None:
     try:
         return path.stat().st_mtime
     except OSError:
         return None
-
-
-def _repo_name(repo_path: str) -> str:
-    return os.path.basename(repo_path.rstrip(os.path.sep))
-
-
-def _console_factors(entry: dict) -> list[str]:
-    rev = _current_revision(entry) or {}
-    return list(rev.get("evidence") or entry.get("confidence_factors") or [])
-
-
-def _console_summary(entry: dict) -> dict:
-    """The console's shared per-decision row shape. Internal fields (revision ids, session
-    ids, the raw revisions list) stay server-side; a caller that needs them asks for the
-    detail projection instead.
-
-    `source_files` is the anchored-files list verbatim (Task 4 of #174) — schema-additive,
-    so every existing caller (dashboard, list, detail, tombstones) picks it up for free. No
-    staleness flag here on purpose: `_staleness_note` costs a `git diff` subprocess per
-    entry, and this projection backs the console's 10-second poll of `list_decisions` /
-    `dashboard_summary` — adding a git call per row there would multiply into a poll-time
-    subprocess storm. Staleness stays confined to its two existing render sites
-    (`get_context`, `_render_prompt_decisions`), both budget-capped and neither on a UI poll."""
-    content = _current_content(entry)
-    rev = _current_revision(entry) or {}
-    return {
-        "id": entry.get("id", ""),
-        "title": entry.get("title") or _derive_title(content),
-        "content": content,
-        "subtype": entry.get("subtype", ""),
-        "status": _entry_status(entry),
-        "created_by": entry.get("created_by", "ai"),
-        "timestamp": entry.get("timestamp"),
-        "updated_at": entry.get("updated_at") or entry.get("timestamp"),
-        "revision": rev.get("version_number", entry.get("revision", 1)),
-        "occurrence_count": entry.get("occurrence_count", 1),
-        "confidence": rev.get("confidence_score", entry.get("confidence", 0)),
-        "has_proposal": bool(entry.get("proposed_revision")),
-        "source_files": list(entry.get("source_files") or []),
-    }
-
-
-def _console_proposed(prop: dict) -> dict:
-    """A pending `proposed_revision` as the console renders the "after" side of a diff."""
-    return {
-        "content": prop.get("content", ""),
-        "title": prop.get("title", ""),
-        "subtype": prop.get("subtype", ""),
-        "source": prop.get("source", ""),
-        "created_at": prop.get("created_at"),
-        "confidence": prop.get("confidence"),
-        "confidence_factors": list(prop.get("confidence_factors") or []),
-    }
-
-
-def _console_proposal(entry: dict) -> dict:
-    """A decision carrying a Suggested Update, as a before/after review card."""
-    rev = _current_revision(entry) or {}
-    version = rev.get("version_number", entry.get("revision", 1))
-    return {
-        "id": entry.get("id", ""),
-        "title": entry.get("title") or _derive_title(_current_content(entry)),
-        "subtype": entry.get("subtype", ""),
-        "status": _entry_status(entry),
-        "revision": version,
-        "current": {"content": _current_content(entry), "title": rev.get("title", ""),
-                    "version_number": version},
-        "proposed": _console_proposed(entry.get("proposed_revision") or {}),
-    }
-
-
-def _console_share_state(decision_id: str) -> dict:
-    """Whether one decision has already been pushed, and to where.
-
-    Cosmetic, exactly like the `contexer share` picker's "✓ shared" hint it reads from, so
-    any failure reads as "not shared" rather than surfacing an error."""
-    try:
-        from contexer import config, share
-        endpoint = config.load_profile().endpoint
-        shared_at = share.shared_map(endpoint).get(decision_id)
-        queued = any(e.get("decision_id") == decision_id for e in share._load_outbox())
-        return {"shared": shared_at is not None, "shared_at": shared_at,
-                "endpoint": endpoint, "queued": queued}
-    except Exception:
-        return {"shared": False, "shared_at": None, "endpoint": None, "queued": False}
-
-
-def list_stores() -> list[dict]:
-    """One row per repo store in STORE_DIR, for the console's repo switcher.
-
-    Deliberately cheap — counts only, no global read and no team-cache read: the console
-    polls this every 10 seconds, and each of those would add a file read per tick.
-    `pending` is "awaiting the developer" in the same sense as `get_pending_decisions`
-    (a pending_approval decision OR a live one carrying a Suggested Update), counted from
-    the store read already done here rather than a second load. `ok: false` marks a file
-    that could not be parsed — a caller must render that as "unreadable", never "empty"."""
-    current = _current_repo_path()
-    rows = []
-    for path in _store_files():
-        repo_path, data, error = _inspect_store_file(path)
-        decisions = [e for e in (data or {}).get("entries", []) if e.get("type") == "decision"]
-        rows.append({
-            "slug": path.stem,
-            "repo_path": repo_path,
-            "name": _repo_name(repo_path) or path.stem,
-            "decisions": len(decisions),
-            "pending": sum(1 for e in decisions if _entry_status(e) == "pending_approval"
-                           or e.get("proposed_revision")),
-            "tombstoned": len(_load_deleted(repo_path)["entries"]) if repo_path else 0,
-            "mtime": _file_mtime(path),
-            "is_current": bool(repo_path) and repo_path == current,
-            "ok": error is None,
-            "error": error,
-        })
-    return rows
-
-
-def _resolve_store(slug: str) -> tuple[Path, str, str | None] | None:
-    """(file, repo_path, parse error) for the store a console slug names, or None for a slug
-    that names no store file at all.
-
-    THE security boundary for the console: a repo path is never accepted from a request, so no
-    crafted URL can make the daemon read or write an arbitrary filesystem location.
-
-    Three spellings resolve to the same store — the file's own name, `_slug(repo_path)`, and
-    `_legacy_slug(repo_path)`. The last one is what keeps a slug STABLE across the pre-hash
-    rename: `_store_path` renames `someorg_somerepo.json` to `someorg_somerepo-8539fba8.json`
-    on the first `_load`, so without it a client's slug stopped resolving the moment anything
-    opened that store. Exact spellings are matched before the legacy one, which is not
-    injective (`/a/my.repo` and `/a/my_repo` share it) and must never shadow a canonical
-    address. The file-name hit short-circuits the directory scan: it is the common case and
-    costs one read instead of one per store in STORE_DIR.
-
-    An unparseable file resolves with `repo_path` "" and a non-None error — "known slug,
-    unreadable", which a caller must keep distinct from None ("unknown slug")."""
-    if not slug or "/" in slug or "\\" in slug or "\0" in slug:
-        return None
-    direct = STORE_DIR / f"{slug}.json"
-    if _is_repo_store_file(direct) and direct.exists():
-        repo_path, _data, error = _inspect_store_file(direct)
-        return direct, repo_path, error
-    legacy_hit = None
-    for path in _store_files():
-        repo_path, _data, error = _inspect_store_file(path)
-        if not repo_path:
-            continue
-        if slug == _slug(repo_path):
-            return path, repo_path, error
-        if legacy_hit is None and slug == _legacy_slug(repo_path):
-            legacy_hit = (path, repo_path, error)
-    return legacy_hit
-
-
-def resolve_store_slug(slug: str) -> str | None:
-    """The repo path a console slug names, or None when the slug names no store OR names one
-    whose repo path cannot be recovered. `resolve_store` is the richer answer that tells those
-    two Nones apart."""
-    resolved = _resolve_store(slug)
-    return (resolved[1] or None) if resolved is not None else None
-
-
-def resolve_store(slug: str) -> dict | None:
-    """What a console slug names: {"slug", "repo_path", "ok", "error"} — or None when it names
-    no store file in STORE_DIR.
-
-    `repo_path` is "" when it could not be recovered: the file will not parse (the path lives
-    inside it and the slug is a hash), or the path it claims is one `_is_sane_repo` rejects.
-    That is still a KNOWN slug, so it resolves rather than 404ing, and `store_summary` is the
-    ready-made degraded payload for it. `ok` is False whenever the file did not parse cleanly,
-    including the case where `repo_path` IS usable (a store object with a malformed `entries`)
-    — there the repo-path reads still work and report the error themselves."""
-    resolved = _resolve_store(slug)
-    if resolved is None:
-        return None
-    _path, repo_path, error = resolved
-    return {
-        "slug": slug,
-        "repo_path": repo_path,
-        "ok": bool(repo_path) and error is None,
-        "error": error or (None if repo_path else _NO_REPO_PATH),
-    }
-
-
-def store_summary(slug: str) -> dict | None:
-    """`dashboard_summary` addressed BY SLUG, with a degraded payload for a store whose file
-    cannot be read. None ONLY when the slug names no store file.
-
-    The console deep-links by slug, and an unreadable store has no repo path to hand
-    `dashboard_summary` — but it is still addressable, so it must render as "store unreadable",
-    never as "no decisions" and never as a 404. The degraded payload therefore carries the SAME
-    key set with zeroed repo counts and `ok: false`, so a caller branches on `ok` alone."""
-    resolved = _resolve_store(slug)
-    if resolved is None:
-        return None
-    path, repo_path, error = resolved
-    if repo_path:
-        return {"slug": slug, **dashboard_summary(repo_path)}
-    message = error or _NO_REPO_PATH
-    return {
-        "slug": slug,
-        "repo_path": "",
-        "name": slug,
-        "is_current": False,
-        "ok": False,
-        "error": message,
-        "mtime": _file_mtime(path),
-        "counts": {"decisions": 0, "pending": 0, "proposed_updates": 0,
-                   "global": len(get_global_decisions()), "team": 0, "tombstoned": 0},
-        "subtype_mix": [],
-        "status_mix": [],
-        "recent": [],
-        "pending": [],
-        "proposals": [],
-        # Unknown rather than empty: the sidecar is named after the repo path this file was
-        # supposed to carry, so with no repo path there is nothing to read it from.
-        "tombstones": {"ok": False, "error": message, "count": 0},
-        "staleness": {"last_ok_at": None, "age_seconds": None, "stale": False},
-        "health": {"ok": False, "error": message},
-    }
-
-
-def dashboard_summary(repo_path: str) -> dict:
-    """Everything the console's dashboard and review views render for one repo.
-
-    `counts.pending` is pending_approval decisions ONLY and `counts.proposed_updates` the
-    ones carrying a Suggested Update, so a caller can add them for a "needs you" total
-    without double-counting. `ok`/`error` describe the LIVE store; `tombstones.ok`/`.error`
-    describe the sidecar separately, because a corrupt sidecar must not read as "nothing
-    deleted". One read of each file — the console polls this every 10 seconds."""
-    data, error, mtime = _read_store(repo_path)
-    health = {"ok": error is None, "error": error}
-    decisions = [e for e in data.get("entries", []) if e.get("type") == "decision"]
-    pending = [e for e in decisions if _entry_status(e) == "pending_approval"]
-    proposals = [e for e in decisions if e.get("proposed_revision")]
-    team = team_snapshot(repo_path)
-    graveyard, tomb_error = _read_deleted(repo_path)
-    tombstoned = graveyard.get("entries", [])
-
-    by_subtype: dict[str, int] = {}
-    by_status: dict[str, int] = {}
-    for entry in decisions:
-        by_subtype[entry.get("subtype") or ""] = by_subtype.get(entry.get("subtype") or "", 0) + 1
-        status = _entry_status(entry)
-        by_status[status] = by_status.get(status, 0) + 1
-    recent = sorted(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp") or "",
-                    reverse=True)[:_CONSOLE_RECENT]
-
-    return {
-        "repo_path": repo_path,
-        "name": _repo_name(repo_path),
-        "is_current": repo_path == _current_repo_path(),
-        "ok": health["ok"],
-        "error": health["error"],
-        "mtime": mtime,
-        "counts": {
-            "decisions": len(decisions),
-            "pending": len(pending),
-            "proposed_updates": len(proposals),
-            "global": len(get_global_decisions()),
-            "team": len(team["decisions"]),
-            "tombstoned": len(tombstoned),
-        },
-        "tombstones": {"ok": tomb_error is None, "error": tomb_error,
-                       "count": len(tombstoned)},
-        "subtype_mix": [{"subtype": k, "count": v}
-                        for k, v in sorted(by_subtype.items(), key=lambda kv: (-kv[1], kv[0]))],
-        "status_mix": [{"status": k, "count": v}
-                       for k, v in sorted(by_status.items(), key=lambda kv: (-kv[1], kv[0]))],
-        "recent": [_console_summary(e) for e in recent],
-        "pending": [{**_console_summary(e), "confidence_factors": _console_factors(e)}
-                    for e in pending],
-        "proposals": [_console_proposal(e) for e in proposals],
-        "staleness": team["staleness"],
-        "health": health,
-    }
-
-
-def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",
-                   files: list[str] | None = None, limit: int = 0, offset: int = 0) -> dict:
-    """A filtered, paged page of decisions, newest change first.
-
-    `total` is the count BEFORE paging so a caller can render "N matching". `limit <= 0`
-    means no cap. Carries the same `ok`/`error` pair as the dashboard: a corrupt store
-    returns an empty page with `ok: false`, never a silently empty list. One read of the
-    store file — this is on the console's 10-second poll.
-
-    `files`: same read-surface semantics as `get_context(files=...)` — decisions that GOVERN
-    the given files (`guard_engine.decisions_for_files`: source_files anchor or a path-like
-    content artifact), no trust filter, `ignored` excluded. Scoped to THIS store only (the
-    console's file filter lives on the per-repo decisions list, not the global one), so the
-    already-loaded `rows` are passed as an override rather than letting the engine reload the
-    store AND pull in the global store's entries too. A file that matches nothing yields an
-    empty list, never an error — same as a query with no hits."""
-    data, error, _mtime = _read_store(repo_path)
-    health = {"ok": error is None, "error": error}
-    rows = [e for e in data.get("entries", []) if e.get("type") == "decision"]
-    if files:
-        # Local import — see get_context's identical comment: a module-level `from contexer
-        # import guard_engine` here would recreate the store <-> guard_engine load-order cycle
-        # guard_engine.py's own docstring describes.
-        from contexer import guard_engine
-        hit_ids = {h["decision_id"]
-                  for h in guard_engine.decisions_for_files(repo_path, files, decisions=rows)}
-        rows = [e for e in rows if e.get("id") in hit_ids]
-    if subtype:
-        rows = [e for e in rows if e.get("subtype") == subtype]
-    if status:
-        rows = [e for e in rows if _entry_status(e) == status]
-    if query:
-        pat = _query_pattern(query)
-        rows = [e for e in rows if _matches_query(pat, e)]
-    rows.sort(key=lambda e: e.get("updated_at") or e.get("timestamp") or "", reverse=True)
-    start = max(offset, 0)
-    window = rows[start:] if limit <= 0 else rows[start:start + limit]
-    return {
-        "total": len(rows),
-        "limit": limit,
-        "offset": start,
-        "ok": health["ok"],
-        "error": health["error"],
-        "decisions": [_console_summary(e) for e in window],
-    }
-
-
-def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
-    """One decision in full — revision timeline, confidence evidence, share state — or None.
-
-    `entry_id` accepts a full UUID or the 8-char prefix, like every other id-taking store
-    function. `confidence` widens from the summary's bare score to {score, factors} here.
-    `rationale` is not a local store field today (the share wire hardcodes None); it is
-    projected as whatever the entry carries, so a row imported with one still shows it."""
-    entries = [e for e in _load(repo_path).get("entries", []) if e.get("type") == "decision"]
-    entry = _entry_by_id(entries, entry_id)
-    if entry is None:
-        return None
-    rev = _current_revision(entry) or {}
-    current_revision_id = rev.get("revision_id")
-    proposal = entry.get("proposed_revision")
-    return {
-        **_console_summary(entry),
-        "session_count": len(_session_set(entry)),
-        "memory_key": entry.get("memory_key"),
-        "approved_at": entry.get("approved_at"),
-        "approved_by": entry.get("approved_by"),
-        "rationale": entry.get("rationale"),
-        "confidence": {"score": rev.get("confidence_score", entry.get("confidence", 0)),
-                       "factors": _console_factors(entry)},
-        "revisions": [{
-            "version_number": r.get("version_number"),
-            "content": r.get("content", ""),
-            "title": r.get("title", ""),
-            "source": r.get("source", ""),
-            "created_at": r.get("created_at"),
-            "approved_at": r.get("approved_at"),
-            "confidence_score": r.get("confidence_score"),
-            "is_current": r.get("revision_id") == current_revision_id,
-        } for r in entry.get("revisions") or []],
-        "proposed_revision": _console_proposed(proposal) if proposal else None,
-        "share": _console_share_state(entry.get("id", "")),
-    }
-
-
-def list_tombstones(repo_path: str) -> dict:
-    """The console's Deleted view: {"ok", "error", "tombstones"} — tombstoned decisions
-    projected newest deletion first.
-
-    Carries the same `ok`/`error` pair as `dashboard_summary` and `list_decisions`, for exactly
-    the reason those do: every other read of the sidecar degrades a corrupt file to an empty
-    list, so without this the view renders "nothing deleted" over a file that actually still
-    holds tombstones it could not parse. One read."""
-    data, error = _read_deleted(repo_path)
-    rows = [{**_console_summary(e), "deleted_at": e.get("deleted_at"),
-             "deleted_by": e.get("deleted_by", "ui")}
-            for e in data.get("entries", [])]
-    rows.sort(key=lambda r: r["deleted_at"] or "", reverse=True)
-    return {"ok": error is None, "error": error, "tombstones": rows}
-
-
-def list_global_rules() -> dict:
-    """The console's Global view: {"ok", "error", "rules"} — global rules projected for
-    display. Global entries are born approved and carry no proposals, so the row is narrower
-    than a repo decision's.
-
-    Carries the same `ok`/`error` pair as `list_tombstones`, and for a sharper version of the
-    same reason: the session-facing read degrades an unparseable `_global.json` to no rules, so
-    without this the view renders "No global rules" over a file that still holds them — next to
-    an Add button whose write path is the one thing that would replace them. One read."""
-    data, error = _read_global()
-    rows = []
-    for entry in data["entries"]:
-        if entry.get("type") != "decision":
-            continue
-        summary = _console_summary(entry)
-        rows.append({k: summary[k] for k in (
-            "id", "title", "content", "subtype", "created_by", "timestamp", "updated_at",
-            "revision", "confidence")})
-    return {"ok": error is None, "error": error, "rules": rows}
-
-
-def delete_global_rule(entry_id: str) -> tuple[bool, str]:
-    """Remove a global rule outright. Returns (ok, message).
-
-    No tombstone, unlike `delete_decision`: nothing writes INTO the global store from a
-    repo scan, `CLAUDE.md`, or the miner, so there is no resurrection path for a sidecar
-    to guard against — it would only add a file that never gets consulted.
-
-    Refuses on an unreadable file for the same reason `delete_decision` does: the degraded read
-    is an empty store, so saving it back would discard every rule the file still holds."""
-    with _store_lock(GLOBAL_SLUG):
-        data, error = _read_global()
-        if error is not None:
-            return False, (f"Cannot delete {entry_id!r}: {_global_path().name} is unreadable "
-                           f"({error}), and overwriting it would discard every global rule "
-                           "already in it. Move that file aside, then retry.")
-        entry = _entry_by_id(data["entries"], entry_id)
-        if entry is None:
-            return False, f"Global rule {entry_id!r} not found."
-        data["entries"] = [e for e in data["entries"] if e is not entry]
-        _save_global(data)
-        return True, f"Deleted global rule {entry['id'][:8]}."
-
-
-def team_snapshot(repo_path: str) -> dict:
-    """The cached team context for one repo: rows, last-sync outcome, and staleness.
-
-    Pure cache read — never the network, so the console's poll costs one file read; a
-    caller that wants fresh rows calls `team_context.refresh`. Function-level import for
-    the same reason as `_team_section` (team_context imports store, so a module-level
-    import here would cycle). Fail-soft on config: a malformed config.toml must cost the
-    console its mode line, not the whole view."""
-    from contexer import config, team_context
-    try:
-        profile = config.load_profile()
-        mode, endpoint = profile.mode, profile.endpoint
-    except Exception:
-        mode, endpoint = "local", None
-    cache = team_context._load_cache(repo_path) if repo_path else team_context._empty_cache()
-    rows = [{k: r.get(k) for k in team_context._ROW_FIELDS} for r in cache.get("decisions", [])]
-    last_ok_at = cache.get("last_ok_at")
-    age = time.time() - last_ok_at if isinstance(last_ok_at, (int, float)) else None
-    last_sync = cache.get("last_sync") if isinstance(cache.get("last_sync"), dict) else {}
-    return {
-        "repo_key": cache.get("repo_key"),
-        "mode": mode,
-        "enabled": mode == "team" and bool(endpoint),
-        "counts": {"decisions": len(rows)},
-        "staleness": {"last_ok_at": last_ok_at, "age_seconds": age,
-                      "stale": age is not None and age >= team_context._STALE_AFTER},
-        "last_sync": {"at": last_sync.get("at"), "ok": last_sync.get("ok"),
-                      "duration_ms": last_sync.get("duration_ms"),
-                      "consecutive_failures": last_sync.get("consecutive_failures", 0),
-                      "upserted": last_sync.get("upserted"),
-                      "removed": last_sync.get("removed"),
-                      "error": last_sync.get("error")},
-        "decisions": rows,
-    }
 
 
 # Overlap-report thresholds. Pairwise is deliberately looser than the 0.7 novelty
@@ -7370,6 +6846,22 @@ _GUARD_EXPORTS = frozenset({
 # need it (store.py's own _matches_query branch and cli.py's review branch both
 # do exactly that), so re-exporting them here would buy nothing.
 _CONFLICT_EXPORTS = frozenset({"record_conflict_memo"})
+# Same mechanism again for `console_api.py`'s public reads. Unlike the conflicts case, these
+# ARE re-exported wholesale, for two reasons. (1) `store` is this package's published surface,
+# and `store.list_decisions` / `store.dashboard_summary` / the rest were reachable there before
+# the extraction; dropping them would be a silent API break for anything outside this repo.
+# (2) It keeps the facade COVERED: the test suite reaches these as `store.<name>` (test_store,
+# test_store_delete, test_global, test_ui_api, test_ui_session_start), so the re-export is
+# exercised rather than being an untested compatibility promise. Production
+# consumers still import the owner directly, per the rule above: `ui/api.py` calls
+# `console_api.<name>`, which is what keeps that module's one-consumer boundary visible (and
+# checkable: `overlap_report` was pulled back out of console_api.py precisely because its only
+# caller is `contexer review`, not the console).
+_CONSOLE_EXPORTS = frozenset({
+    "list_stores", "resolve_store_slug", "resolve_store", "store_summary", "dashboard_summary",
+    "list_decisions", "get_decision_detail", "list_tombstones", "list_global_rules",
+    "delete_global_rule", "team_snapshot",
+})
 
 
 def __getattr__(name):
@@ -7379,14 +6871,17 @@ def __getattr__(name):
     if name in _CONFLICT_EXPORTS:
         from contexer import conflicts
         return getattr(conflicts, name)
+    if name in _CONSOLE_EXPORTS:
+        from contexer import console_api
+        return getattr(console_api, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
     # Paired with the __getattr__ above (PEP 562): without this, dir(store) omits every
-    # lazily-resolved entrypoint — the five guard ones and record_conflict_memo — since
-    # they are never assigned into the module namespace. Mirror BOTH export sets, i.e.
-    # exactly what __getattr__ resolves: listing only one left record_conflict_memo
-    # answerable by getattr but absent from dir(), a split that no longer matches the
-    # facade the moment either set changes.
-    return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS])
+    # lazily-resolved entrypoint (the five guard ones, record_conflict_memo, and the
+    # console reads), since they are never assigned into the module namespace. Mirror
+    # ALL export sets, i.e. exactly what __getattr__ resolves: listing only some left a
+    # name answerable by getattr but absent from dir(), a split that no longer matches
+    # the facade the moment any set changes.
+    return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS, *_CONSOLE_EXPORTS])
