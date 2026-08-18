@@ -41,7 +41,7 @@ jobs:
       # No --cov-fail-under here - the floor lives in pyproject addopts so the
       # convention miner can see it (see the comment there before moving it).
       - name: Run tests with coverage
-        run: uv run pytest tests/ -m "not slow and not perf" -v --tb=short
+        run: uv run pytest tests/ -m "not slow and not perf" --cov-fail-under=85 -v --tb=short
 
   # Split out so the 45s harness runs ONCE, not once per Python version - not to
   # defer it. Deliberately unconditional: an `if: github.event_name != 'pull_request'`
