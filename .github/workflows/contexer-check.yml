@@ -1,0 +1,36 @@
+name: Contexer Check
+
+on:
+  pull_request:
+
+# R19: without this, two rapid pushes to the same PR can post a duplicate comment or let a
+# stale (older-sha) run PATCH over a newer score.
+concurrency:
+  group: contexer-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: write # needed to post/update the sticky comment
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # R1: fetch-depth: 0 (full history). The CLI self-heals a shallow checkout (it fetches the
+      # PR's base sha and deepens in a bounded loop before falling back to a two-dot diff), but
+      # full history is the reliable path and avoids that fallback entirely.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/contexer-check
+        with:
+          contexer_url: "https://mcp.contexer.ai"
+          contexer_ci_token: ${{ secrets.CONTEXER_CI_TOKEN }}
+          # Default judge is Anthropic - swap the two lines below for OpenAI or Kimi (Moonshot,
+          # OpenAI-compatible) instead. Only one provider's key is ever needed.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # provider: "openai"                        # or "kimi"
+          # openai_api_key: ${{ secrets.OPENAI_API_KEY }}   # or kimi_api_key: ${{ secrets.KIMI_API_KEY }}
+          # fail_below: "70"   # uncomment to block merges below a score of 70
