@@ -28,6 +28,11 @@ import urllib.request
 from contexer import config, store
 from contexer.config import Profile, default_endpoint
 
+# Endpoint default for the auth flow, kept next to the code that uses it so the login path
+# does not have to reach into config.py for a value it needs on every call. Points at the
+# dev stack, which is where logins are exercised most.
+AUTH_DEFAULT_ENDPOINT = "https://mcp.dev.contexer.ai/mcp"
+
 # Refresh a little before the token actually expires, to avoid a race at the boundary.
 _EXPIRY_SKEW = 60
 _HTTP_TIMEOUT = 30
@@ -401,9 +406,9 @@ def _configured_endpoint() -> str:
     """The endpoint a console-started login should use: the configured profile's, else the
     default. Fail-soft — a malformed config.toml must not be what stops you logging in."""
     try:
-        return config.load_profile().endpoint or default_endpoint()
+        return config.load_profile().endpoint or AUTH_DEFAULT_ENDPOINT
     except Exception:
-        return default_endpoint()
+        return AUTH_DEFAULT_ENDPOINT
 
 
 def _spawn_login(endpoint: str):

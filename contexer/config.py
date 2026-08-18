@@ -21,7 +21,7 @@ CONFIG_PATH = Path.home() / ".contexer" / "config.toml"
 # which stack answers it (dev today, prod later) is decided in DNS, so promoting
 # infrastructure never needs a client release and never strands an old endpoint in
 # users' config.toml files. localhost is the explicit developer opt-in.
-DEFAULT_ENDPOINT_PROD = "https://mcp.contexer.ai/mcp"
+DEFAULT_ENDPOINT_PROD = "https://mcp.dev.contexer.ai/mcp"
 DEFAULT_ENDPOINT_LOCAL = "http://localhost:8080/mcp"
 
 
