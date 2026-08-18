@@ -2,16 +2,17 @@
 
 `server.py` owns transport: binding, the auth guard, headers, static files, the watchdog.
 Everything here turns an already-authenticated request into a status code plus a JSON-able
-payload, by calling PUBLIC functions in `contexer.store` / `config` / `share` /
-`team_context`. It never opens, parses or writes a store file: when the shape the console
-needs does not exist yet, the fix is a new public read in `store.py`, not a file read here.
+payload, by calling PUBLIC functions in `contexer.console_api` / `store` / `config` /
+`share` / `team_context`. It never opens, parses or writes a store file: when the shape the
+console needs does not exist yet, the fix is a new public read in `console_api.py`, the module
+that owns every projection this file renders, not a file read here.
 
 Field names are the console's contract (`assets/console.js` codes against them), so a rename
 here silently blanks a pane there.
 """
 from urllib.parse import unquote
 
-from contexer import auth, config, share, store, team_context
+from contexer import auth, config, console_api, share, store, team_context
 from contexer.ui import daemon
 
 # Mirrored in console.js as maxlength attributes; enforced here because the browser is not
@@ -79,7 +80,7 @@ def dispatch(method: str, path: str, query: dict, body: object) -> tuple[int, ob
 
 def _route(method: str, parts: list[str], query: dict, body: object) -> tuple[int, object]:
     if parts == ["stores"] and method == "GET":
-        return 200, store.list_stores()
+        return 200, console_api.list_stores()
 
     if parts == ["config"]:
         if method == "GET":
@@ -101,12 +102,12 @@ def _route(method: str, parts: list[str], query: dict, body: object) -> tuple[in
             # The store's dict verbatim, same rule as `<slug>/deleted`: its `ok`/`error` pair is
             # the ONLY thing that tells "no global rules" from "the global file is unreadable",
             # and re-wrapping it in a bare {"rules": ...} threw that signal away.
-            return 200, store.list_global_rules()
+            return 200, console_api.list_global_rules()
         if method == "POST":
             return _add_global(body)
 
     if len(parts) == 2 and parts[0] == "global" and method == "DELETE":
-        ok, message = store.delete_global_rule(parts[1])
+        ok, message = console_api.delete_global_rule(parts[1])
         if not ok:
             raise ApiError(404, message)
         return 200, {"message": message}
@@ -126,7 +127,7 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
         # Addressed BY SLUG, not by repo path: a store file that will not parse has no repo
         # path to summarize, yet it is still a known address and must reach the console's
         # "store unreadable" view instead of a 404 the console renders as a generic error.
-        summary = store.store_summary(slug)
+        summary = console_api.store_summary(slug)
         if summary is None:
             raise ApiError(404, "no such store")
         return 200, summary
@@ -137,10 +138,10 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
         # The store's dict verbatim: its `ok`/`error` pair is the ONLY thing that tells
         # "nothing deleted" from "the tombstone sidecar is unreadable", and re-wrapping it
         # in a bare {"tombstones": ...} threw that signal away.
-        return 200, store.list_tombstones(repo_path)
+        return 200, console_api.list_tombstones(repo_path)
 
     if rest == ["decisions"] and method == "GET":
-        return 200, store.list_decisions(
+        return 200, console_api.list_decisions(
             repo_path,
             query=_str_param(query, "q")[:MAX_QUERY],
             subtype=_str_param(query, "subtype"),
@@ -149,7 +150,7 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
             # _list_param flattens either into one list, so the console's single filter input
             # can just comma-join and a `curl` caller can repeat the param instead.
             files=_list_param(query, "file", MAX_FILES, MAX_FILE_LEN) or None,
-            # Absent/0 means MAX_LIMIT, not "no cap": store.list_decisions reads `limit <= 0`
+            # Absent/0 means MAX_LIMIT, not "no cap": console_api.list_decisions reads `limit <= 0`
             # as unbounded, so forwarding the bare 0 let a `limit`-less URL serialize every
             # row after all — the exact thing MAX_LIMIT is here to prevent.
             limit=_int_param(query, "limit", MAX_LIMIT) or MAX_LIMIT,
@@ -172,7 +173,7 @@ def _decision_route(method: str, repo_path: str, entry_id: str, rest: list[str],
                     body: object) -> tuple[int, object]:
     if not rest:
         if method == "GET":
-            detail = store.get_decision_detail(repo_path, entry_id)
+            detail = console_api.get_decision_detail(repo_path, entry_id)
             if detail is None:
                 raise ApiError(404, "no such decision")
             return 200, detail
@@ -256,14 +257,14 @@ def _pull(repo_path: str) -> tuple[int, object]:
     profile = config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
         return 200, {"error": "Not connected to a team — run `contexer login` first."}
-    before = store.team_snapshot(repo_path)["last_sync"]
+    before = console_api.team_snapshot(repo_path)["last_sync"]
     try:
         # The already-loaded profile, so the mode check above, the sync, and the message below
         # all describe ONE reading of config.toml.
         upserted, removed = team_context.pull(repo_path, profile=profile)
     except Exception as exc:
         return 200, {"error": f"Pull failed — {exc}"}
-    after = store.team_snapshot(repo_path)["last_sync"]
+    after = console_api.team_snapshot(repo_path)["last_sync"]
     if after != before and after.get("ok") is False:
         failures = after.get("consecutive_failures") or 0
         streak = f" {failures} consecutive failures." if failures > 1 else ""
@@ -423,7 +424,7 @@ def _config() -> dict:
         "version": daemon.current_version(),
         "store_dir": str(store.STORE_DIR),
         "config_path": str(config.CONFIG_PATH),
-        "stores": len(store.list_stores()),
+        "stores": len(console_api.list_stores()),
     }
 
 
@@ -439,7 +440,7 @@ def _write_config(body: object) -> tuple[int, object]:
 
 def _team(slug: str) -> dict:
     repo_path = _repo(slug)
-    snapshot = store.team_snapshot(repo_path)
+    snapshot = console_api.team_snapshot(repo_path)
     markers = _share_markers()
     shareable = []
     for row in store.get_shareable_all(repo_path):
@@ -467,7 +468,7 @@ def _repo(slug: str) -> str:
     usable repo path is a 409 instead: it stays addressable (`GET /api/store/<slug>` renders
     it as "store unreadable"), but there is no file to read decisions, tombstones or team rows
     out of, and guessing a path from the slug is precisely what must not happen."""
-    resolved = store.resolve_store(slug)
+    resolved = console_api.resolve_store(slug)
     if resolved is None:
         raise ApiError(404, "no such store")
     if not resolved["repo_path"]:
@@ -482,7 +483,7 @@ def _finish(repo_path: str, entry_id: str, ok: bool, message: str) -> tuple[int,
     one store load."""
     if ok:
         return 200, {"message": message}
-    if store.get_decision_detail(repo_path, entry_id) is None:
+    if console_api.get_decision_detail(repo_path, entry_id) is None:
         raise ApiError(404, message)
     raise ApiError(400, message)
 
@@ -506,7 +507,7 @@ def _finish_restore(repo_path: str, entry_id: str, ok: bool,
 def _tombstone_exists(repo_path: str, entry_id: str) -> bool:
     """Whether a tombstone the caller's id addresses is still in the sidecar. Accepts a full
     id or the 8-char prefix, the same id vocabulary the store resolves."""
-    for row in store.list_tombstones(repo_path)["tombstones"]:
+    for row in console_api.list_tombstones(repo_path)["tombstones"]:
         if str(row.get("id") or "").startswith(entry_id):
             return True
     return False
