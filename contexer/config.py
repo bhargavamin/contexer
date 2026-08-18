@@ -16,11 +16,10 @@ Mode = Literal["local", "team"]
 
 CONFIG_PATH = Path.home() / ".contexer" / "config.toml"
 
-# Teams endpoint defaults — the single source of truth for every consumer (login,
-# the opt-in native MCP registration). Code ships ONLY the stable production domain;
-# which stack answers it (dev today, prod later) is decided in DNS, so promoting
-# infrastructure never needs a client release and never strands an old endpoint in
-# users' config.toml files. localhost is the explicit developer opt-in.
+# Teams endpoint defaults. Pointed at the dev stack so logins exercise the environment
+# we actually deploy to first; flip to the prod host at release time. Consumers that need
+# an endpoint on every call may keep their own copy rather than importing from here.
+# localhost is the explicit developer opt-in.
 DEFAULT_ENDPOINT_PROD = "https://mcp.dev.contexer.ai/mcp"
 DEFAULT_ENDPOINT_LOCAL = "http://localhost:8080/mcp"
 
