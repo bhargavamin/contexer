@@ -134,10 +134,10 @@ def _read_outbox() -> tuple[list[dict], str | None]:
     unreadable file would leave the previous account's entries on disk for the post-login drain
     to find once the transient cleared - which is precisely the egress it exists to prevent."""
     path = _outbox_path()
-    if not path.exists():
-        return [], None
     try:
         raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [], None
     except (OSError, UnicodeDecodeError) as exc:
         return [], f"{type(exc).__name__}: {exc}"
     try:
@@ -206,11 +206,11 @@ def _discard_outbox_unlocked() -> tuple[int, int]:
     Deliberately NOT called from `logout`: nothing drains without credentials, so `login` is the
     only chokepoint an entry can egress through, and clearing at logout as well would discard
     queues that were never in danger."""
-    path = _outbox_path()
     entries, error = _read_outbox()
-    if error is None and not entries and not path.exists():
+    if error is None and not entries:
         return 0, 0            # genuinely nothing queued - the overwhelmingly common case
     queued = len(entries)      # 0 when unreadable; the message under-reports, the gate does not
+    path = _outbox_path()
     try:
         path.unlink()
     except OSError:
@@ -220,9 +220,9 @@ def _discard_outbox_unlocked() -> tuple[int, int]:
             _save_outbox([])
         except Exception:
             pass
-    if not path.exists():
-        return queued, 0
     after, after_error = _read_outbox()
+    if after_error is None and not after:
+        return queued, 0
     if after_error is not None:
         return 0, -1           # still there and unreadable: unknown count, known danger
     return queued - len(after), len(after)

@@ -1109,6 +1109,26 @@ def test_discard_outbox_reports_zero_when_empty(creds_env):
     assert share.discard_outbox() == (0, 0)
 
 
+def test_discard_outbox_does_not_trust_false_missing_stat(creds_env, monkeypatch):
+    """Safety gates must read the file, not ask exists(): stat can fail/report absent while
+    the queued previous-account payload is still readable and drainable."""
+    from contexer import share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    path = share._outbox_path()
+    real_exists = Path.exists
+
+    def false_missing(self):
+        if self == path:
+            return False
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", false_missing)
+    assert share.discard_outbox() == (1, 0)
+    with pytest.raises(FileNotFoundError):
+        path.read_text(encoding="utf-8")
+
+
 def _unlink_fails(monkeypatch):
     """Make Path.unlink raise a non-FileNotFoundError OSError, leaving the file in place."""
     real = Path.unlink
