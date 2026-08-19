@@ -90,6 +90,34 @@ def _save_outbox(entries: list[dict]) -> None:
     store._atomic_write(_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
 
 
+def discard_outbox() -> int:
+    """Drop every queued share; return how many were discarded. Fail-soft.
+
+    Called by `auth.login` when a new account signs in (issue #232). A queued entry carries no
+    account identity - `_payload` stores the decision, its repo key and provenance, and nothing
+    about who was signed in when it was queued - so after a switch the drain that `login` itself
+    triggers (`cli._post_login_sync` -> `team_context.refresh`, which drains) would push the
+    PREVIOUS account's queued decisions up as the NEW account's rows. That is an outward,
+    hard-to-undo write into the wrong team's context.
+
+    Discarding loses share intent, which is real: a same-account re-login drops whatever was
+    waiting. It is still the right side of the trade, and the asymmetry is the same one
+    `forget_shared_markers` documents - a discarded queue is visible (login SAYS how many went)
+    and recoverable by re-running `contexer share`, while an upload into the wrong account is
+    silent and cannot be taken back. Sizing the loss is also why this returns a count rather
+    than a bool.
+
+    Deliberately NOT called from `logout`: nothing drains without credentials, so `login` is the
+    only chokepoint an entry can egress through, and clearing at logout as well would discard
+    queues that were never in danger."""
+    queued = len(_load_outbox())
+    try:
+        _outbox_path().unlink()
+    except OSError:   # includes FileNotFoundError - nothing queued
+        return 0
+    return queued
+
+
 def _enqueue(payload: dict) -> None:
     """Queue a failed push. Dedupes by decision_id (re-sharing the same decision while
     offline replaces the queued entry - fresh content wins) and caps at _OUTBOX_CAP,

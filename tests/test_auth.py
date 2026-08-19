@@ -1075,3 +1075,34 @@ def test_clear_caches_is_fail_soft_on_an_undeletable_file(creds_env, monkeypatch
     monkeypatch.setattr(Path, "unlink", lambda self, **kw: (_ for _ in ()).throw(OSError("busy")))
     assert team_context.clear_caches() == 0
     assert auth._forget_account_caches() == 0
+
+
+def test_login_discards_the_previous_accounts_queued_shares(creds_env, monkeypatch, capsys):
+    """The outbox carries no account identity, and `cli._post_login_sync` drains it seconds
+    after login with the credentials just stored - so a surviving queue would push account A's
+    decisions up as account B's rows."""
+    from contexer import share
+    _seed_team_caches(creds_env)
+    share._enqueue({"decision_id": "queued-1", "type": "constraint", "content": "old account's",
+                    "repo": "github.com/a/b", "queued_at": 0, "attempts": 0})
+    _stub_oauth(monkeypatch)
+    auth.login(endpoint="http://localhost:8080/mcp")
+    assert share._load_outbox() == []
+    out = capsys.readouterr().out
+    assert "Discarded 1 share(s)" in out          # visible, not a silent drop
+    assert "contexer share" in out                # and recoverable
+
+
+def test_logout_leaves_the_outbox_alone(creds_env):
+    """Nothing drains without credentials, so logout discards no queue that was ever at risk."""
+    from contexer import share
+    _seed_team_caches(creds_env)
+    share._enqueue({"decision_id": "queued-1", "type": "constraint", "content": "still mine",
+                    "repo": "github.com/a/b", "queued_at": 0, "attempts": 0})
+    auth.logout()
+    assert [e["decision_id"] for e in share._load_outbox()] == ["queued-1"]
+
+
+def test_discard_outbox_reports_zero_when_empty(creds_env):
+    from contexer import share
+    assert share.discard_outbox() == 0

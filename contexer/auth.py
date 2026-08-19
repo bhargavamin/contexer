@@ -681,10 +681,14 @@ def login(endpoint: str | None = None) -> None:
     # sync off with nothing on screen pointing at why.
     config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
     dropped = _forget_account_caches()
+    queued = _discard_queued_shares()
     print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
     if dropped:
         print(f"Cleared {dropped} cached team file(s) from the previous session - "
               "they re-populate from your account at the next session start.")
+    if queued:
+        print(f"Discarded {queued} share(s) still queued from the previous session - "
+              "re-run `contexer share` to queue them again under this account.")
 
 
 def _forget_account_caches() -> int:
@@ -704,6 +708,23 @@ def _forget_account_caches() -> int:
     from contexer import share, team_context
     try:
         return team_context.clear_caches() + int(share.forget_shared_markers())
+    except Exception:
+        return 0
+
+
+def _discard_queued_shares() -> int:
+    """Drop the durable share outbox on LOGIN; return how many entries went. Fail-soft.
+
+    Separate from `_forget_account_caches` because the two run at different moments and for
+    opposite reasons. The caches are INBOUND display state and are cleared at login and logout
+    alike. The outbox is OUTBOUND intent carrying no account identity, and login is the only
+    moment it is in danger: `cli._post_login_sync` drains it seconds later using the credentials
+    that were just stored, so the previous account's queued decisions would land in the new
+    account's context. Nothing drains without credentials, so logout leaves it alone rather than
+    discarding a queue that was never at risk."""
+    from contexer import share
+    try:
+        return share.discard_outbox()
     except Exception:
         return 0
 
