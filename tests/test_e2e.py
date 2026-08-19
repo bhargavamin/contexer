@@ -21,8 +21,13 @@ from contexer import cli
 
 @pytest.fixture
 def tmp_home(tmp_path, monkeypatch):
-    """Redirects Path.home() to a temp dir so install() never touches real settings."""
+    """Redirects Path.home() AND the process cwd to a temp dir so install() never touches real
+    settings. The cwd half is not optional: install()/uninstall() run clean_legacy_repo_settings
+    against store._git_root(os.getcwd()), which the injected HOME does not reach, so HOME alone
+    leaves this checkout's own .claude/settings.json exposed (issue #185). tmp_path is untracked.
+    Tests needing a specific cwd (legacy_user, non_git_project) chdir again themselves."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     (tmp_path / ".claude").mkdir()
     return tmp_path
 

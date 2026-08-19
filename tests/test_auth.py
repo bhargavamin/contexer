@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -908,7 +909,8 @@ def test_cli_login_triggers_post_login_sync(monkeypatch):
     # After a successful login, status must not be stale — login kicks a team pull.
     from contexer import cli
     called = {}
-    monkeypatch.setattr(auth, "login", lambda endpoint=None: None)
+    # True = "safe to sync": login cleared the previous session's queued shares (#232).
+    monkeypatch.setattr(auth, "login", lambda endpoint=None: True)
     monkeypatch.setattr(cli, "_post_login_sync", lambda: called.setdefault("ran", True))
     cli.login_cmd([])
     assert called.get("ran") is True
@@ -1018,3 +1020,344 @@ def test_the_output_cap_keeps_the_lines_the_failure_message_reads(creds_env, log
 
     assert message.endswith("second to last the real error")
     assert "noise 0" not in message
+
+
+# ── account switch invalidates caches (issue #232) ──────────────────────────────────
+# Nothing on disk records WHICH account a cache belongs to, and `_sync` is a delta that never
+# learns the previous account's rows should go - so login/logout, the only moments a switch is
+# definitely known, must discard rather than try to detect.
+
+def _seed_team_caches(creds_env):
+    """The three cache shapes an account switch strands, plus the creds file it must not eat."""
+    from contexer import share, team_context
+    store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    team_context._save_cache("/repo/a", {"repo_key": "k", "cursor": "c",
+                                         "decisions": [{"id": "old-1"}], "seq": 40})
+    team_context._write_seen("/repo/a", "claude", 40)
+    share._append_shared([{"endpoint": "https://mcp.contexer.ai/mcp", "id": "old-1", "at": "t"}])
+    auth._save_creds({"issuer": "x", "access_token": "a"})
+
+
+def test_logout_clears_team_caches(creds_env):
+    from contexer import share, team_context
+    _seed_team_caches(creds_env)
+    assert auth.logout() is True
+    assert team_context._load_cache("/repo/a")["decisions"] == []
+    assert team_context._read_seen("/repo/a", "claude") is None
+    assert share.shared_map("https://mcp.contexer.ai/mcp") == {}
+
+
+def test_login_clears_the_previous_accounts_caches(creds_env, monkeypatch, capsys):
+    from contexer import share, team_context
+    _seed_team_caches(creds_env)
+    _stub_oauth(monkeypatch)
+    auth.login(endpoint="http://localhost:8080/mcp")
+    assert team_context._load_cache("/repo/a")["decisions"] == []
+    assert share.shared_map("https://mcp.contexer.ai/mcp") == {}
+    assert "Cleared" in capsys.readouterr().out
+    # The creds this very login just wrote live in the same `.team_*` namespace and must survive.
+    assert auth._load_creds()["access_token"] == "AT"
+
+
+def test_seen_marker_never_outlives_its_cache(creds_env):
+    """The marker holds a high-water `seq` into the CACHE's own sync log, whose counter restarts
+    with the cache. Left at 40 beside a rebuilt log it would suppress every batch until the new
+    log passed 40 - so the pairing, not just the cache, is what has to be cleared."""
+    from contexer import team_context
+    _seed_team_caches(creds_env)
+    team_context.clear_caches()
+    assert not team_context._seen_path("/repo/a", "claude").exists()
+
+
+def test_clear_caches_is_fail_soft_on_an_undeletable_file(creds_env, monkeypatch):
+    """Login has already succeeded by the time this runs; hygiene must never raise into it."""
+    from contexer import team_context
+    _seed_team_caches(creds_env)
+    monkeypatch.setattr(Path, "unlink", lambda self, **kw: (_ for _ in ()).throw(OSError("busy")))
+    assert team_context.clear_caches() == 0
+    assert auth._forget_account_caches() == 0
+
+
+def test_login_discards_the_previous_accounts_queued_shares(creds_env, monkeypatch, capsys):
+    """The outbox carries no account identity, and `cli._post_login_sync` drains it seconds
+    after login with the credentials just stored - so a surviving queue would push account A's
+    decisions up as account B's rows."""
+    from contexer import share
+    _seed_team_caches(creds_env)
+    share._enqueue({"decision_id": "queued-1", "type": "constraint", "content": "old account's",
+                    "repo": "github.com/a/b", "queued_at": 0, "attempts": 0})
+    _stub_oauth(monkeypatch)
+    auth.login(endpoint="http://localhost:8080/mcp")
+    assert share._load_outbox() == []
+    out = capsys.readouterr().out
+    assert "Discarded 1 share(s)" in out          # visible, not a silent drop
+    assert "contexer share" in out                # and recoverable
+
+
+def test_logout_leaves_the_outbox_alone(creds_env):
+    """Nothing drains without credentials, so logout discards no queue that was ever at risk."""
+    from contexer import share
+    _seed_team_caches(creds_env)
+    share._enqueue({"decision_id": "queued-1", "type": "constraint", "content": "still mine",
+                    "repo": "github.com/a/b", "queued_at": 0, "attempts": 0})
+    auth.logout()
+    assert [e["decision_id"] for e in share._load_outbox()] == ["queued-1"]
+
+
+def test_discard_outbox_reports_zero_when_empty(creds_env):
+    from contexer import share
+    assert share.discard_outbox() == (0, 0)
+
+
+def test_discard_outbox_does_not_trust_false_missing_stat(creds_env, monkeypatch):
+    """Safety gates must read the file, not ask exists(): stat can fail/report absent while
+    the queued previous-account payload is still readable and drainable."""
+    from contexer import share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    path = share._outbox_path()
+    real_exists = Path.exists
+
+    def false_missing(self):
+        if self == path:
+            return False
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", false_missing)
+    assert share.discard_outbox() == (1, 0)
+    with pytest.raises(FileNotFoundError):
+        path.read_text(encoding="utf-8")
+
+
+def _unlink_fails(monkeypatch):
+    """Make Path.unlink raise a non-FileNotFoundError OSError, leaving the file in place."""
+    real = Path.unlink
+    def fake(self, **kw):
+        if self.name == ".outbox.json":
+            raise OSError("read-only file system")
+        return real(self, **kw)
+    monkeypatch.setattr(Path, "unlink", fake)
+
+
+def test_discard_outbox_falls_back_to_truncating(creds_env, monkeypatch):
+    """unlink and the atomic write are different syscall paths; a file that resists one can
+    still yield to the other, and an emptied outbox is as safe as an absent one."""
+    from contexer import share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _unlink_fails(monkeypatch)
+    assert share.discard_outbox() == (1, 0)
+    assert share._load_outbox() == []
+
+
+def test_discard_outbox_reports_entries_it_could_not_clear(creds_env, monkeypatch):
+    """Both removal paths failing must NOT read as 'the queue is clear' - that swallowed error
+    is precisely the hole this pair exists to close."""
+    from contexer import share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    discarded, remaining = share.discard_outbox()
+    assert (discarded, remaining) == (0, 1)
+    assert len(share._load_outbox()) == 1          # still there, and we said so
+
+
+def test_login_skips_the_post_login_drain_when_the_outbox_survives(creds_env, monkeypatch, capsys):
+    """The drain is what would egress them, so an uncleared queue must block it."""
+    from contexer import cli, share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    _stub_oauth(monkeypatch)
+    synced = {"n": 0}
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: synced.__setitem__("n", synced["n"] + 1))
+    cli.login_cmd([])
+    assert synced["n"] == 0                        # no drain ran
+    err = capsys.readouterr().err
+    assert "could not clear 1 queued share(s)" in err
+    assert ".outbox.json" in err                   # names the file the user must delete
+
+
+def test_login_syncs_normally_when_the_outbox_cleared(creds_env, monkeypatch):
+    from contexer import cli, share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _stub_oauth(monkeypatch)
+    synced = {"n": 0}
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: synced.__setitem__("n", synced["n"] + 1))
+    cli.login_cmd([])
+    assert synced["n"] == 1
+    assert share._load_outbox() == []
+
+
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_login_serializes_with_concurrent_outbox_enqueue(creds_env, monkeypatch):
+    """A share that started before login must not enqueue old-account payload after cleanup."""
+    from contexer import share
+    _stub_oauth(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    result = {}
+
+    def old_account_enqueue():
+        with share.outbox_lock():
+            entered.set()
+            release.wait(5)
+            share._enqueue_unlocked({"decision_id": "old-account", "type": "constraint",
+                                     "content": "old", "repo": "r", "queued_at": 0,
+                                     "attempts": 0})
+
+    writer = threading.Thread(target=old_account_enqueue)
+    writer.start()
+    assert entered.wait(5)
+
+    login = threading.Thread(
+        target=lambda: result.setdefault("safe", auth.login(endpoint="http://localhost:8080/mcp")))
+    login.start()
+    time.sleep(0.05)  # give the broken implementation time to run cleanup before the enqueue
+    release.set()
+    writer.join(5)
+    login.join(5)
+
+    assert result["safe"] is True
+    assert share._load_outbox() == []
+
+
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_login_does_not_replace_creds_while_outbox_drain_is_active(creds_env, monkeypatch):
+    """New credentials must not exist while an old-account drain can still read the queue."""
+    from contexer import share
+    _stub_oauth(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    saved = threading.Event()
+    real_save_creds = auth._save_creds
+
+    def tracking_save(creds):
+        saved.set()
+        real_save_creds(creds)
+
+    monkeypatch.setattr(auth, "_save_creds", tracking_save)
+
+    def old_account_drain():
+        with share.outbox_lock():
+            entered.set()
+            release.wait(5)
+
+    drain = threading.Thread(target=old_account_drain)
+    drain.start()
+    assert entered.wait(5)
+
+    login = threading.Thread(target=lambda: auth.login(endpoint="http://localhost:8080/mcp"))
+    login.start()
+    time.sleep(0.05)
+    assert not saved.is_set()
+    release.set()
+    drain.join(5)
+    login.join(5)
+    assert saved.is_set()
+
+
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_login_wins_over_overlapping_old_account_refresh(creds_env, monkeypatch):
+    """An old-account refresh that started first must not overwrite a completed new login."""
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "old-client",
+                      "token_endpoint": "http://localhost:8080/token",
+                      "access_token": "OLD", "refresh_token": "OLD-RT",
+                      "expires_at": time.time() - 10})
+    entered_refresh = threading.Event()
+    release_refresh = threading.Event()
+    refresh_result = {}
+
+    def old_refresh(*_args):
+        entered_refresh.set()
+        assert release_refresh.wait(5)
+        return {"access_token": "OLD-REFRESHED", "refresh_token": "OLD-RT2",
+                "expires_in": 3600}
+
+    monkeypatch.setattr(auth, "_refresh", old_refresh)
+    refresher = threading.Thread(target=lambda:
+                                 refresh_result.setdefault("token", auth.refresh_now(TEAM)))
+    refresher.start()
+    assert entered_refresh.wait(5)
+
+    _stub_oauth(monkeypatch)
+    login_result = {}
+    login = threading.Thread(
+        target=lambda: login_result.setdefault(
+            "safe", auth.login(endpoint="http://localhost:8080/mcp")))
+    login.start()
+    time.sleep(0.05)  # broken login writes new creds here while refresh still owns .team_auth
+    release_refresh.set()
+    refresher.join(5)
+    login.join(5)
+
+    assert refresh_result["token"] == "OLD-REFRESHED"
+    assert login_result["safe"] is True
+    creds = auth._load_creds()
+    assert creds["access_token"] == "AT"
+    assert creds["refresh_token"] == "RT"
+    assert creds["client_id"] == "cid-9"
+
+
+def test_discard_queued_shares_reports_unknown_as_unsafe(creds_env, monkeypatch):
+    """A blown-up discard must not report 0 remaining, which would read as 'clear' and let the
+    drain run. -1 is falsy-negative on purpose: the caller tests truthiness."""
+    from contexer import share
+    monkeypatch.setattr(share, "discard_outbox", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert auth._discard_queued_shares() == (0, -1)
+
+
+def _corrupt_outbox(creds_env):
+    """An outbox file that EXISTS but cannot be parsed - the fail-soft read calls it empty."""
+    from contexer import share
+    path = share._outbox_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text("{not json at all")
+    return path
+
+
+def test_unreadable_outbox_is_not_treated_as_clear(creds_env):
+    """The fail-soft read answers 'no queued shares' for a file that merely failed to PARSE.
+    Gating on that would skip removal AND report clear, leaving the entries for the post-login
+    drain to find once the transient cleared. Existence, not parseability, is the danger."""
+    from contexer import share
+    path = _corrupt_outbox(creds_env)
+    assert share._load_outbox() == []          # the fail-soft view says "empty"...
+    assert share._read_outbox()[1] is not None  # ...but the honest read says "unreadable"
+    discarded, remaining = share.discard_outbox()
+    assert remaining == 0 and not path.exists()  # removed anyway, and reported safe only then
+
+
+def test_unreadable_outbox_that_survives_removal_is_reported_unsafe(creds_env, monkeypatch):
+    """Still there and still unreadable: the count is unknown, the danger is not."""
+    from contexer import share
+    _corrupt_outbox(creds_env)
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    assert share.discard_outbox() == (0, -1)
+
+
+def test_login_skips_the_drain_for_an_unreadable_outbox(creds_env, monkeypatch, capsys):
+    from contexer import cli, share
+    _corrupt_outbox(creds_env)
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    _stub_oauth(monkeypatch)
+    synced = {"n": 0}
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: synced.__setitem__("n", synced["n"] + 1))
+    cli.login_cmd([])
+    assert synced["n"] == 0
+    assert "could not clear some queued share(s)" in capsys.readouterr().err
+
+
+def test_read_outbox_separates_missing_from_corrupt(creds_env):
+    from contexer import share
+    assert share._read_outbox() == ([], None)          # missing is genuinely empty, no error
+    _corrupt_outbox(creds_env)
+    entries, error = share._read_outbox()
+    assert entries == [] and "JSONDecodeError" in error
+    share._save_outbox([{"decision_id": "q1"}])
+    assert share._read_outbox() == ([{"decision_id": "q1"}], None)

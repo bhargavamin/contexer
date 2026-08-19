@@ -637,8 +637,12 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
     return result["code"]
 
 
-def login(endpoint: str | None = None) -> None:
+def login(endpoint: str | None = None) -> bool:
     """Run the interactive browser OAuth flow, persist tokens, and self-configure config.toml.
+
+    Returns True when it is SAFE to sync afterwards, False when a queued share from the previous
+    session could not be cleared (see `_discard_queued_shares`) - the caller must then skip the
+    post-login sync, since its drain would push those entries up as this account's rows.
 
     `endpoint` defaults to default_endpoint() (prod, or localhost under CONTEXER_ENV=local).
     On success this writes mode='team' + endpoint to config.toml, so the user never hand-edits
@@ -664,29 +668,105 @@ def login(endpoint: str | None = None) -> None:
     tok = _exchange_code(meta["token_endpoint"], client_id, code, verifier, redirect_uri)
     if not tok.get("access_token"):
         raise RuntimeError("token endpoint returned no access_token — login failed.")
-    _save_creds({
-        "issuer": issuer,
-        "client_id": client_id,
-        "token_endpoint": meta["token_endpoint"],
-        "access_token": tok.get("access_token"),
-        "refresh_token": tok.get("refresh_token"),
-        "expires_at": time.time() + tok.get("expires_in", 3600),
-        "scope": tok.get("scope", ""),
-    })
-    # Creds first, config second, deliberately: the authorization code behind these tokens is
-    # single-use, so a failure while writing config.toml must not throw away a session that
-    # already exists — config.toml is hand-fixable, a spent code is not. That ordering is only
-    # safe because write_team_profile can no longer fail on the CONTENT of the old file; it
-    # used to abort here on an invalid `[ui]` value, after the creds were saved, leaving team
-    # sync off with nothing on screen pointing at why.
-    config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
+    from contexer import share
+    with share.outbox_lock():
+        with store._store_lock(".team_auth"):
+            _save_creds({
+                "issuer": issuer,
+                "client_id": client_id,
+                "token_endpoint": meta["token_endpoint"],
+                "access_token": tok.get("access_token"),
+                "refresh_token": tok.get("refresh_token"),
+                "expires_at": time.time() + tok.get("expires_in", 3600),
+                "scope": tok.get("scope", ""),
+            })
+            try:
+                # Creds first, config second, deliberately: the authorization code behind these tokens
+                # is single-use, so a failure while writing config.toml must not throw away a session
+                # that already exists — config.toml is hand-fixable, a spent code is not. The outbox
+                # lock makes that ordering safe against a concurrent share/drain: no account-less
+                # queued row can be created or uploaded between the credential swap and the discard.
+                config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
+            finally:
+                dropped = _forget_account_caches()
+                queued, stranded = _discard_queued_shares(locked=True)
     print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
+    if dropped:
+        print(f"Cleared {dropped} cached team file(s) from the previous session - "
+              "they re-populate from your account at the next session start.")
+    if queued:
+        print(f"Discarded {queued} share(s) still queued from the previous session - "
+              "re-run `contexer share` to queue them again under this account.")
+    if stranded:
+        # The one cleanup failure that is not cosmetic: these entries carry no account identity,
+        # so the next drain would push them up as THIS account's rows. Say it on stderr, name the
+        # file, and return False so the caller skips the post-login sync that would drain them.
+        # A negative count means the discard itself blew up and the queue's state is unknown -
+        # say "some" rather than printing "-1 queued share(s)".
+        count = str(stranded) if stranded > 0 else "some"
+        print(f"WARNING: could not clear {count} queued share(s) at "
+              f"{store.STORE_DIR / '.outbox.json'} - they were queued before this login and "
+              "would be pushed to this account by the next sync. Team sync was skipped for "
+              "safety; delete that file, then run `contexer pull`.", file=sys.stderr)
+    return not stranded
+
+
+def _forget_account_caches() -> int:
+    """Discard every cache that belonged to whoever was logged in before; return the file count.
+
+    Login (and logout) is the one moment an account change is definitely known, and until now it
+    was also the one moment nothing was cleaned up (issue #232). Nothing on disk records WHICH
+    account a cache belongs to - the token is opaque, not a JWT - so this cannot detect a switch
+    and re-key; it discards unconditionally. That costs a same-account re-login one full re-pull
+    and some `✓ shared` ticks, both of which repopulate, which is the cheaper side of the trade
+    against a previous account's rows being injected into sessions as current team context
+    forever (`_sync` is a delta and never learns they should go).
+
+    Imported inside the function: `share`/`team_context` both reach `remote`, which reaches back
+    here for token resolution, so a module-level import would close a cycle. Fail-soft - this is
+    hygiene, and a login that has already succeeded must not fail on it."""
+    from contexer import share, team_context
+    try:
+        return team_context.clear_caches() + int(share.forget_shared_markers())
+    except Exception:
+        return 0
+
+
+def _discard_queued_shares(*, locked: bool = False) -> tuple[int, int]:
+    """Drop the durable share outbox on LOGIN; return (discarded, still_queued). Fail-soft.
+
+    Separate from `_forget_account_caches` because the two run at different moments and for
+    opposite reasons. The caches are INBOUND display state and are cleared at login and logout
+    alike. The outbox is OUTBOUND intent carrying no account identity, and login is the only
+    moment it is in danger: `cli._post_login_sync` drains it seconds later using the credentials
+    that were just stored, so the previous account's queued decisions would land in the new
+    account's context. Nothing drains without credentials, so logout leaves it alone rather than
+    discarding a queue that was never at risk.
+
+    Fail-soft, but NOT fail-open: an unexpected failure reports `still_queued = -1` rather than
+    the 0 that would read as "the queue is clear". The caller only tests it for truthiness, so a
+    negative reads as unsafe and skips the drain - which is the correct default when the state of
+    an outbound queue is unknown. Reporting 0 here would restore exactly the swallowed-error hole
+    this pair was rewritten to close."""
+    from contexer import share
+    try:
+        if locked:
+            return share._discard_outbox_unlocked()
+        return share.discard_outbox()
+    except Exception:
+        return 0, -1
 
 
 def logout() -> bool:
-    """Delete stored credentials. Returns True if any were present."""
+    """Delete stored credentials AND the caches they populated. Returns True if credentials
+    were present.
+
+    Clearing here as well as at login is what makes the invariant hold in both directions:
+    cached team rows belong to a login session, so they must not outlive one. Logging out and
+    back in to the SAME account just pays for one re-pull."""
     path = _creds_path()
-    if path.exists():
+    present = path.exists()
+    if present:
         path.unlink()
-        return True
-    return False
+    _forget_account_caches()
+    return present

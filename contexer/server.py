@@ -256,7 +256,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
         return "Skipped — repo path not detected."
     from contexer import config as _config
 
-    profile = _config.load_profile()  # loaded once, reused by the preview and the push
+    profile = _config.load_profile()  # preview state only; the push reloads under the outbox lock
     from contexer.remote import RemoteStore
 
     # Safe-by-default: a personal-cloud push is OUTWARD (the decision leaves the machine and may
@@ -285,7 +285,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     # backed, so a false trip is harmless — the decision is saved and the outbox retries it.
     try:
         return await asyncio.wait_for(
-            _share.share_ids_async(resolved, ids, profile=profile),
+            _share.share_ids_async(resolved, ids),
             timeout=_SHARE_TIMEOUT,
         )
     except TimeoutError:

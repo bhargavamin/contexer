@@ -3329,6 +3329,28 @@ def get_shareable_all(repo_path: str, redact_on: bool | None = None) -> list[dic
     return [_share_projection(e, redact_on) for e in decisions]
 
 
+def get_shareable_global(redact_on: bool | None = None) -> list[dict]:
+    """Every non-ignored GLOBAL rule as a push wire projection, oldest first (issue #239).
+
+    The global store is the one thing `_shareable_entries` cannot reach: it filters
+    `_load(repo_path)`, while `_global.json` is written and read exclusively through
+    `_save_global`/`_read_global`, so no `repo_path` a caller can pass selects it. That left
+    the rules which apply to EVERY repo as the only ones with no path to the cloud.
+
+    Same projection, same ignore rule and same oldest-first order as `get_shareable_all` -
+    only the source list differs, so redaction, title derivation and the outbox shape are
+    identical. `get_global_decisions` does not filter by status (its session-start readers
+    want everything), so the `ignored` exclusion is applied here, matching
+    `_shareable_entries`. The caller pushes these with `repo=None`, which `remote._wire_args`
+    omits, landing them as the server's unbound (`repo IS NULL`) rows - which is exactly what
+    a cross-repo rule is."""
+    if redact_on is None:
+        redact_on = _redaction_enabled()
+    decisions = sorted((e for e in get_global_decisions() if _entry_status(e) != "ignored"),
+                       key=lambda e: e.get("timestamp", ""))
+    return [_share_projection(e, redact_on) for e in decisions]
+
+
 # A personal-cloud push is OUTWARD — the single source of this caution, shared by the MCP
 # preview (format_share_preview) and the CLI previews (cli._pick_shareable/_confirm_share) so
 # the wording can't drift between the surfaces. Egress IS scrubbed by `redact` first, but the

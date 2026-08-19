@@ -143,6 +143,35 @@ def no_real_store_writes():
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def no_real_repo_settings_writes():
+    """Fail the run if a test rewrote this checkout's own `.claude/settings.json`.
+
+    `claude.install()`/`uninstall()` run `clean_legacy_repo_settings` against
+    `store._git_root(os.getcwd())` - the PROCESS cwd's git root, not the injected HOME - so
+    injecting HOME alone does NOT contain an installer-driving test. Run from a checkout whose
+    `.claude/settings.json` carries legacy Contexer hook markers, such a test silently rewrites
+    the developer's real file.
+
+    Individual fixtures contain this structurally (`monkeypatch.chdir` into a temp dir, whose
+    git root has no `.claude/settings.json` of ours). This is the backstop for the NEXT
+    installer-driving test that forgets: it costs nothing, needs no ordering against other
+    fixtures, and names the remedy. Same shape and reasoning as `no_real_store_writes` above,
+    which watches `~/.contexer` and cannot see this file (issue #185).
+
+    Keyed off `__file__`, not `os.getcwd()` - this is the one settings file that is definitely
+    at risk, and a test that chdirs cannot move the target out from under the assertion."""
+    real = Path(__file__).resolve().parent.parent / ".claude" / "settings.json"
+    before = real.read_bytes() if real.is_file() else None
+    yield
+    after = real.read_bytes() if real.is_file() else None
+    assert after == before, (
+        f"tests rewrote the real {real}. An installer-driving test must pin the process cwd "
+        "(monkeypatch.chdir into a temp dir) as well as HOME - clean_legacy_repo_settings "
+        "resolves its target from os.getcwd(), not from the injected home."
+    )
+
+
 class FakeTeamsServer:
     """In-memory stand-in for the Teams MCP server (E2E integration tests).
 
