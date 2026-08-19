@@ -1221,7 +1221,7 @@ def test_cli_share_all_with_id_rejected(monkeypatch, capsys):
     monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
     with pytest.raises(SystemExit):
         cli.share_cmd(["--all", "abc123"])
-    assert "either" in capsys.readouterr().err.lower()
+    assert "exactly one" in capsys.readouterr().err.lower()
 
 
 def test_cli_share_no_repo_exits(monkeypatch):
@@ -1714,3 +1714,133 @@ def test_shared_log_append_is_excluded_during_compaction(tmp_path, monkeypatch):
     markers = share.shared_map(ep)
     assert "fresh" in markers                                 # survived the rewrite
     assert {f"old{i}" for i in range(11)} <= set(markers)      # and nothing pre-existing lost
+
+
+# ── share --global (issue #239) ──────────────────────────────────────────────────
+# Global rules live in _global.json, which no repo_path can select, so every repo-scoped
+# share path is structurally blind to them. These pin the one thing that makes them
+# reachable: selection from the global store, and `repo=None` on the wire so the server
+# stores an unbound row rather than binding a cross-repo rule to one arbitrary repo.
+
+def _add_globals(*contents: str) -> list[str]:
+    return [store.update_global_decision(c, "s1", "convention")[1] for c in contents]
+
+
+def test_share_global_nothing_to_share(tmp_repo):
+    assert "no global rules" in share.share_global(profile=TEAM).lower()
+
+
+def test_share_global_local_mode_message(tmp_repo, monkeypatch):
+    _add_globals("always use conventional commits here")
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
+    assert "team mode" in share.share_global(profile=config.Profile()).lower()
+
+
+def test_share_global_pushes_every_rule_unbound(tmp_repo, monkeypatch):
+    ids = _add_globals("always use conventional commits here",
+                       "never use an em dash in prose")
+    fake = _fake(monkeypatch, ret="srv-9")
+    msg = share.share_global(profile=TEAM)
+    assert "2" in msg
+    assert len(fake.batches) == 1                                   # one batched call
+    assert [c["decision_id"] for c in fake.batches[0]] == ids       # oldest first
+    # The whole point: no repo binding. _wire_args omits `repo` when it is None, which is
+    # what makes the server row unbound (repo IS NULL) and therefore global.
+    assert all(c["repo"] is None for c in fake.batches[0])
+    assert share._load_outbox() == []
+
+
+def test_share_global_does_not_call_git(tmp_repo, monkeypatch):
+    """No repo means no origin to derive a key from. A stray _git call here would be the
+    bug the repo-scoped paths have: binding a cross-repo rule to whatever repo cwd is in."""
+    _add_globals("always use conventional commits here")
+    monkeypatch.setattr(store, "_git", lambda *a, **k: pytest.fail("share_global must not shell out to git"))
+    _fake(monkeypatch, ret="srv-1")
+    share.share_global(profile=TEAM)
+
+
+def test_share_global_excludes_ignored(tmp_repo, monkeypatch):
+    keep, drop = _add_globals("always use conventional commits here",
+                              "never use an em dash in prose")
+    data = store._load_global()
+    next(e for e in data["entries"] if e["id"] == drop)["status"] = "ignored"
+    store._save_global(data)
+    fake = _fake(monkeypatch, ret="srv-1")
+    share.share_global(profile=TEAM)
+    assert [c["decision_id"] for c in fake.batches[0]] == [keep]
+
+
+def test_share_global_carries_title_and_redaction(tmp_repo, monkeypatch):
+    """Reuses _share_projection, so title derivation and egress redaction come for free -
+    pinned here because a hand-rolled global projection would silently lose both."""
+    store.update_global_decision("never hardcode AKIAIOSFODNN7EXAMPLE in any repo", "s1",
+                                 "constraint", title="No hardcoded keys")
+    fake = _fake(monkeypatch, ret="srv-1")
+    share.share_global(profile=TEAM)
+    sent = fake.batches[0][0]
+    assert sent["title"] == "No hardcoded keys"
+    assert "AKIAIOSFODNN7EXAMPLE" not in sent["content"]
+
+
+def test_share_global_failure_queues_with_no_repo(tmp_repo, monkeypatch):
+    """A queued global keeps repo=None through the outbox, so a later drain still pushes
+    it unbound rather than re-deriving a repo from wherever the drain happens to run."""
+    _add_globals("always use conventional commits here")
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+    msg = share.share_global(profile=TEAM)
+    assert "queued" in msg.lower()
+    queued = share._load_outbox()
+    assert len(queued) == 1 and queued[0]["repo"] is None
+
+
+def test_cli_share_global_flag(monkeypatch, capsys, tmp_repo):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: None)   # NOT in a git repo
+    monkeypatch.setattr(share, "share_global", lambda **kw: "pushed the globals")
+    cli.share_cmd(["--global", "--yes"])
+    assert "pushed the globals" in capsys.readouterr().out
+
+
+def test_cli_share_global_needs_no_repo(monkeypatch, capsys, tmp_repo):
+    """The repo check is skipped for --global: global rules belong to no repo, so exiting
+    on 'no git repo detected' would be a gate with nothing behind it."""
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: None)
+    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(share, "share_global", lambda **kw: "ok")
+    cli.share_cmd(["--global", "--yes"])          # must not SystemExit
+    assert "ok" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [["--global", "--all"], ["--global", "abc12345"]])
+def test_cli_share_global_is_exclusive(monkeypatch, capsys, argv):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    with pytest.raises(SystemExit):
+        cli.share_cmd(argv + ["--yes"])
+    assert "exactly one" in capsys.readouterr().err
+
+
+def test_cli_share_global_previews_and_cancels_on_no(monkeypatch, capsys, tmp_repo):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: None)
+    monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
+    store.update_global_decision("never use an em dash in prose", "s1", "convention")
+    pushed = {"n": 0}
+    monkeypatch.setattr(share, "share_global", lambda **k: pushed.__setitem__("n", pushed["n"] + 1))
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    cli.share_cmd(["--global"])
+    out = capsys.readouterr().out
+    assert "em dash" in out and "GLOBAL" in out and "Cancelled" in out
+    assert pushed["n"] == 0
+
+
+def test_cli_share_all_points_at_the_global_flag(monkeypatch, capsys, tmp_repo):
+    """`--all` is repo-scoped by construction, so it must not let 'all' read as all."""
+    from contexer import cli
+    store.update_global_decision("never use an em dash in prose", "s1", "convention")
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(share, "share_all", lambda repo, **kw: "shared all of them")
+    cli.share_cmd(["--all", "--yes"])
+    out = capsys.readouterr().out
+    assert "1 global rule(s) were not included" in out and "--global" in out

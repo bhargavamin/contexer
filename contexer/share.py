@@ -126,6 +126,25 @@ def _shared_path():
     return store.STORE_DIR / ".shared.jsonl"
 
 
+def forget_shared_markers() -> bool:
+    """Delete the `✓ shared` marker log; True if one was there. Fail-soft.
+
+    Called when the logged-in account changes (issue #232). The log is namespaced by ENDPOINT
+    alone, and two accounts normally sit behind the same endpoint, so markers written under one
+    read as "already shared" under the other. Namespacing by account instead is the real fix and
+    needs an account identity that does not exist on disk yet; until then the marker is dropped.
+
+    Dropping rather than keeping is the right direction because the two errors are not
+    symmetric: a false "already shared" invites a developer to skip a decision the new account
+    genuinely does not have, while a missing marker only costs a re-push, which is idempotent on
+    `decisionId`. `share --all` ignores this file entirely either way."""
+    try:
+        _shared_path().unlink()
+        return True
+    except OSError:   # includes FileNotFoundError - nothing to forget
+        return False
+
+
 def _load_shared() -> dict:
     """Fold the append-only log into {endpoint: {decision_id: iso8601}}. A missing file, a
     corrupt file, or an unparseable line is skipped - never raises."""
@@ -560,6 +579,35 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
     return _push_batch(remote, decs, key, profile.endpoint)
+
+
+def share_global(*, profile: Profile | None = None) -> str:
+    """Push every global rule (`~/.contexer/_global.json`) to your team cloud context (#239).
+
+    Global rules apply to every repo, so they go up with `repo=None`: `remote._wire_args` omits
+    the field entirely, and the server stores an unbound row (`repo IS NULL`) that serves the
+    team's repos plus globals. That is also why this cannot be a flag on `share_all` - that path
+    derives its key from `canonical_repo_key(git remote get-url origin)`, and there is no repo
+    here to derive one from; passing a fake path to reach the global store would bind these rows
+    to one arbitrary repo.
+
+    Same local-first contract as `share_all`: never raises for cloud problems, stops at the
+    first failed chunk and queues it plus everything after it, so no share intent is lost.
+    Idempotent on `decisionId`, so re-running upserts rather than duplicating - which is also
+    how an edited global rule already in the cloud gets corrected."""
+    profile = profile or load_profile()
+    try:
+        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+    except Exception:
+        pass
+    decs = store.get_shareable_global()
+    if not decs:
+        return "Nothing to share: no global rules."
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return ("Not in team mode. Set mode='team' + endpoint + token in "
+                "~/.contexer/config.toml to share.")
+    return _push_batch(remote, decs, None, profile.endpoint)
 
 
 def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:

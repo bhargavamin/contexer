@@ -29,7 +29,8 @@ Commands:
                 also surfaces possibly-overlapping rules for manual consolidation.
   ui            Local web console over the stored decisions: ui [--open] [--stop]
                 [--status] [--port N] [--foreground] [--reset-token].
-  share         Push local decisions to your team cloud context: share [id | --all] (default: latest).
+  share         Push local decisions to your team cloud context: share [id | --all | --global]
+                (default: latest). --global pushes the cross-repo rules in _global.json.
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook — see below).
@@ -755,10 +756,12 @@ def pull(rest: list | None = None) -> None:
 
 
 def share_cmd(rest: list | None = None) -> None:
-    """`contexer share [id | --all]`: push local decision(s) up to your team cloud context.
+    """`contexer share [id | --all | --global]`: push local decision(s) up to your team cloud.
 
     Local-first: prints a clear message when not in team mode / offline (never crashes).
-    Must be run inside a git repository."""
+    Must be run inside a git repository, EXCEPT for `--global`: global rules
+    (`~/.contexer/_global.json`) belong to no repo and push unbound (issue #239), so requiring
+    one there would be a check with nothing behind it."""
     import os
 
     from contexer import config, share, store
@@ -766,18 +769,30 @@ def share_cmd(rest: list | None = None) -> None:
     rest = rest or []
     yes = "--yes" in rest or "-y" in rest
     share_all = "--all" in rest
-    ids = [a for a in rest if a not in ("--all", "--yes", "-y")]
-    if share_all and ids:
-        print("Pass either an id or --all, not both.", file=sys.stderr)
+    globals_ = "--global" in rest
+    ids = [a for a in rest if a not in ("--all", "--global", "--yes", "-y")]
+    if sum((share_all, globals_, bool(ids))) > 1:
+        print("Pass exactly one of: an id, --all, or --global.", file=sys.stderr)
         sys.exit(1)
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
-    if not repo:
+    repo = "" if globals_ else (store._git_root(os.getcwd()) or store._resolve_repo(""))
+    if not repo and not globals_:
         print("No git repo detected - run `contexer share` inside a repository.", file=sys.stderr)
         sys.exit(1)
 
     # Confirm-before-push (outward action). --yes or config skip_confirm bypasses the prompts.
     profile = config.load_profile()  # loaded once, reused by the push below
     bypass = yes or profile.skip_confirm
+
+    if globals_:
+        if not bypass:
+            decision = _confirm_share_global()
+            if decision is None:   # nothing to share - _confirm_share_global already said so
+                return
+            if not decision:
+                print("Cancelled - nothing was pushed.")
+                return
+        print(share.share_global(profile=profile))
+        return
 
     # No id and no --all: don't guess ('most recent') — show a numbered picker so the developer
     # sees the options and multi-selects. Selecting IS the confirm, so we push directly.
@@ -806,6 +821,12 @@ def share_cmd(rest: list | None = None) -> None:
 
     if share_all:
         print(share.share_all(repo, profile=profile))
+        # --all is repo-scoped by construction (its key comes from this repo's git origin), so
+        # global rules are NOT swept up by it. Say so rather than letting "all" read as all.
+        n_global = len(store.get_shareable_global())
+        if n_global:
+            print(f"\n{n_global} global rule(s) were not included - "
+                  "they apply to every repo. Push them with `contexer share --global`.")
     else:
         print(share.share(repo, ids[0] if ids else "", profile=profile))
 
@@ -938,36 +959,23 @@ def _confirm_unapproved(projs: list) -> bool:
         return False
 
 
-def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
-    """Preview what a personal-cloud push would send and ask to proceed. Returns True to push,
-    False if the developer declined, None if there is nothing to share (message already printed).
-    Pure local read — no network happens until the caller actually calls share()."""
+def _preview_and_ask(items: list, header: str) -> bool:
+    """Render a push preview (first 10 items, then a count of the rest) and ask to proceed.
+
+    Shared by every confirm-before-push scope - one decision, --all, and --global - so the
+    preview, the secrets hint and the unreviewed-decision warning cannot drift between them.
+    Pure local read; no network happens until the caller actually pushes."""
     from contexer import store
 
-    if share_all:
-        items = store.get_shareable_all(repo)
-        if not items:
-            print("Nothing to share.")
-            return None
-        print(f"\nAbout to push {len(items)} decision(s) to your PERSONAL cloud. "
-              f"{store._SHARE_SECRETS_HINT}:\n")
-        for it in items[:10]:
-            print(store._share_item_block(it))
-        if len(items) > 10:
-            print(f"  …and {len(items) - 10} more")
-        selection = items
-    else:
-        proj = store.get_shareable(repo, ids[0] if ids else "")
-        if proj is None:
-            print("Nothing to share — no matching decision found.")
-            return None
-        print(f"\nAbout to push to your PERSONAL cloud. {store._SHARE_SECRETS_HINT}:\n")
-        print(store._share_item_block(proj))
-        selection = [proj]
+    print(f"\n{header} {store._SHARE_SECRETS_HINT}:\n")
+    for it in items[:10]:
+        print(store._share_item_block(it))
+    if len(items) > 10:
+        print(f"  …and {len(items) - 10} more")
     # Surfaced INLINE here rather than as a second prompt: this path already gates on the
     # y/N below, so one deliberate confirmation is enough (the picker path, which has no
     # such gate, asks separately via _confirm_unapproved).
-    warning = _pending_review_warning(selection)
+    warning = _pending_review_warning(items)
     if warning:
         print()
         for line in warning:
@@ -977,6 +985,43 @@ def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
     except (EOFError, KeyboardInterrupt):
         print()
         return False
+
+
+def _confirm_share(repo: str, share_all: bool, ids: list) -> bool | None:
+    """Preview what a personal-cloud push would send and ask to proceed. Returns True to push,
+    False if the developer declined, None if there is nothing to share (message already
+    printed)."""
+    from contexer import store
+
+    if share_all:
+        items = store.get_shareable_all(repo)
+        if not items:
+            print("Nothing to share.")
+            return None
+        header = f"About to push {len(items)} decision(s) to your PERSONAL cloud."
+    else:
+        proj = store.get_shareable(repo, ids[0] if ids else "")
+        if proj is None:
+            print("Nothing to share - no matching decision found.")
+            return None
+        items = [proj]
+        header = "About to push to your PERSONAL cloud."
+    return _preview_and_ask(items, header)
+
+
+def _confirm_share_global() -> bool | None:
+    """`_confirm_share` for `share --global` (issue #239). Same contract and same preview;
+    the header names the scope, because these rules apply to every repo the developer works
+    in and go up unbound rather than attached to the current one."""
+    from contexer import store
+
+    items = store.get_shareable_global()
+    if not items:
+        print("Nothing to share: no global rules.")
+        return None
+    return _preview_and_ask(
+        items, f"About to push {len(items)} GLOBAL rule(s) - they apply to every repo - "
+               "to your PERSONAL cloud.")
 
 
 def login_cmd(rest: list | None = None) -> None:

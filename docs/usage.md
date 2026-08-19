@@ -65,7 +65,8 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer ui --status\|--stop\|--port N\|--foreground\|--reset-token` | Report on, stop, re-port, run in the foreground, or re-credential the console |
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
-| `contexer share --all [--yes]` | Push every non-ignored decision (previews the list and confirms first) |
+| `contexer share --all [--yes]` | Push every non-ignored decision in this repo (previews the list and confirms first). Global rules are *not* included - use `--global` |
+| `contexer share --global [--yes]` | Push your global rules (`~/.contexer/_global.json`) - the ones that apply to every repo. They go up unbound to any repo, so this is the one `share` that works outside a git repository |
 | `contexer guard [path…] [--explain]` | Check staged files against approved decisions at commit time — see [commit-time guard](#commit-time-guard) |
 | `contexer guard anchors [--list]` | One-time setup linking existing decisions to the files they're about — see [commit-time guard](#commit-time-guard) |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
@@ -159,7 +160,12 @@ contexer install     # local setup
 contexer login       # opens your browser to sign in; enables personal cloud and team sync
 ```
 
-`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you. After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up (`contexer share --all` pushes every non-ignored decision, oldest first). `contexer logout` disconnects.
+`contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you.
+After that your agent automatically pulls the team's approved decisions into every session, and `contexer share [id]` pushes a local decision up (`contexer share --all` pushes every non-ignored decision in the repo, oldest first; `contexer share --global` pushes your cross-repo rules).
+`contexer logout` disconnects.
+
+Logging in or out clears the locally cached team pulls and `✓ shared` markers, so switching accounts never leaves the previous account's decisions being injected into your sessions.
+They repopulate from the account you are signed in as at the next session start.
 
 Pointing at a self-hosted or local Teams server (for development): set `CONTEXER_ENV=local` before `contexer login`, or pass `contexer login --endpoint <url>`.
 
