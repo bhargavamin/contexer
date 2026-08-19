@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -1018,3 +1019,59 @@ def test_the_output_cap_keeps_the_lines_the_failure_message_reads(creds_env, log
 
     assert message.endswith("second to last the real error")
     assert "noise 0" not in message
+
+
+# ── account switch invalidates caches (issue #232) ──────────────────────────────────
+# Nothing on disk records WHICH account a cache belongs to, and `_sync` is a delta that never
+# learns the previous account's rows should go - so login/logout, the only moments a switch is
+# definitely known, must discard rather than try to detect.
+
+def _seed_team_caches(creds_env):
+    """The three cache shapes an account switch strands, plus the creds file it must not eat."""
+    from contexer import share, team_context
+    store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    team_context._save_cache("/repo/a", {"repo_key": "k", "cursor": "c",
+                                         "decisions": [{"id": "old-1"}], "seq": 40})
+    team_context._write_seen("/repo/a", "claude", 40)
+    share._append_shared([{"endpoint": "https://mcp.contexer.ai/mcp", "id": "old-1", "at": "t"}])
+    auth._save_creds({"issuer": "x", "access_token": "a"})
+
+
+def test_logout_clears_team_caches(creds_env):
+    from contexer import share, team_context
+    _seed_team_caches(creds_env)
+    assert auth.logout() is True
+    assert team_context._load_cache("/repo/a")["decisions"] == []
+    assert team_context._read_seen("/repo/a", "claude") is None
+    assert share.shared_map("https://mcp.contexer.ai/mcp") == {}
+
+
+def test_login_clears_the_previous_accounts_caches(creds_env, monkeypatch, capsys):
+    from contexer import share, team_context
+    _seed_team_caches(creds_env)
+    _stub_oauth(monkeypatch)
+    auth.login(endpoint="http://localhost:8080/mcp")
+    assert team_context._load_cache("/repo/a")["decisions"] == []
+    assert share.shared_map("https://mcp.contexer.ai/mcp") == {}
+    assert "Cleared" in capsys.readouterr().out
+    # The creds this very login just wrote live in the same `.team_*` namespace and must survive.
+    assert auth._load_creds()["access_token"] == "AT"
+
+
+def test_seen_marker_never_outlives_its_cache(creds_env):
+    """The marker holds a high-water `seq` into the CACHE's own sync log, whose counter restarts
+    with the cache. Left at 40 beside a rebuilt log it would suppress every batch until the new
+    log passed 40 - so the pairing, not just the cache, is what has to be cleared."""
+    from contexer import team_context
+    _seed_team_caches(creds_env)
+    team_context.clear_caches()
+    assert not team_context._seen_path("/repo/a", "claude").exists()
+
+
+def test_clear_caches_is_fail_soft_on_an_undeletable_file(creds_env, monkeypatch):
+    """Login has already succeeded by the time this runs; hygiene must never raise into it."""
+    from contexer import team_context
+    _seed_team_caches(creds_env)
+    monkeypatch.setattr(Path, "unlink", lambda self, **kw: (_ for _ in ()).throw(OSError("busy")))
+    assert team_context.clear_caches() == 0
+    assert auth._forget_account_caches() == 0

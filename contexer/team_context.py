@@ -71,6 +71,51 @@ def _save_cache(repo_path: str, data: dict) -> None:
     store._atomic_write(_cache_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
 
 
+# The credentials file lives in the same `.team_*` namespace as the caches but is NOT one:
+# `clear_caches` runs from `auth.login`, which has just written it.
+_CREDS_FILE = ".team_auth.json"
+
+
+def clear_caches() -> int:
+    """Drop every cached team pull on this machine; return how many files were removed.
+
+    Called when the logged-in account changes (issue #232). Nothing on disk records WHICH
+    Teams account a cache belongs to - the pull cache holds only `repo_key`/`cursor`/rows, and
+    the access token is opaque rather than a JWT - so there is no identity to compare against
+    and no way to re-key. Discarding is what is actually available.
+
+    Discarding is also load-bearing rather than tidy: `_sync` is a cursor-based DELTA. It
+    upserts what the server returns and removes only what the server explicitly reports as
+    deleted, and a different account never reports the previous account's rows as deleted
+    because it never had them. So without this they persist indefinitely and keep rendering at
+    session start as current team context. Resetting the cursor alone would not do it - a full
+    re-pull still only ADDS.
+
+    The per-consumer delta-poll markers (`.team_seen_<slug>_<consumer>.json`) go with them, and
+    that pairing is not optional: they hold a high-water `seq` into the CACHE's own sync log,
+    whose counter restarts at 0 with the cache. A marker left at 40 beside a rebuilt log would
+    silently suppress every batch until the new log passed 40. `_read_seen` self-heals a
+    MISSING marker (caught-up, injects nothing that once), which is exactly the right landing
+    state here - SessionStart renders the fresh backlog.
+
+    Fail-soft per file: a cache that will not delete is left behind rather than raising into a
+    login that has already succeeded."""
+    try:
+        paths = sorted(store.STORE_DIR.glob(".team_*.json"))
+    except OSError:
+        return 0
+    removed = 0
+    for path in paths:
+        if path.name == _CREDS_FILE:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def _row_to_dict(rd: RemoteDecision) -> dict:
     return {
         "id": rd.id,

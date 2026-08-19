@@ -680,13 +680,44 @@ def login(endpoint: str | None = None) -> None:
     # used to abort here on an invalid `[ui]` value, after the creds were saved, leaving team
     # sync off with nothing on screen pointing at why.
     config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
+    dropped = _forget_account_caches()
     print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
+    if dropped:
+        print(f"Cleared {dropped} cached team file(s) from the previous session - "
+              "they re-populate from your account at the next session start.")
+
+
+def _forget_account_caches() -> int:
+    """Discard every cache that belonged to whoever was logged in before; return the file count.
+
+    Login (and logout) is the one moment an account change is definitely known, and until now it
+    was also the one moment nothing was cleaned up (issue #232). Nothing on disk records WHICH
+    account a cache belongs to - the token is opaque, not a JWT - so this cannot detect a switch
+    and re-key; it discards unconditionally. That costs a same-account re-login one full re-pull
+    and some `✓ shared` ticks, both of which repopulate, which is the cheaper side of the trade
+    against a previous account's rows being injected into sessions as current team context
+    forever (`_sync` is a delta and never learns they should go).
+
+    Imported inside the function: `share`/`team_context` both reach `remote`, which reaches back
+    here for token resolution, so a module-level import would close a cycle. Fail-soft - this is
+    hygiene, and a login that has already succeeded must not fail on it."""
+    from contexer import share, team_context
+    try:
+        return team_context.clear_caches() + int(share.forget_shared_markers())
+    except Exception:
+        return 0
 
 
 def logout() -> bool:
-    """Delete stored credentials. Returns True if any were present."""
+    """Delete stored credentials AND the caches they populated. Returns True if credentials
+    were present.
+
+    Clearing here as well as at login is what makes the invariant hold in both directions:
+    cached team rows belong to a login session, so they must not outlive one. Logging out and
+    back in to the SAME account just pays for one re-pull."""
     path = _creds_path()
-    if path.exists():
+    present = path.exists()
+    if present:
         path.unlink()
-        return True
-    return False
+    _forget_account_caches()
+    return present
