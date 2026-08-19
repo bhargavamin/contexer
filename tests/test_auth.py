@@ -1178,3 +1178,56 @@ def test_discard_queued_shares_reports_unknown_as_unsafe(creds_env, monkeypatch)
     from contexer import share
     monkeypatch.setattr(share, "discard_outbox", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     assert auth._discard_queued_shares() == (0, -1)
+
+
+def _corrupt_outbox(creds_env):
+    """An outbox file that EXISTS but cannot be parsed - the fail-soft read calls it empty."""
+    from contexer import share
+    path = share._outbox_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text("{not json at all")
+    return path
+
+
+def test_unreadable_outbox_is_not_treated_as_clear(creds_env):
+    """The fail-soft read answers 'no queued shares' for a file that merely failed to PARSE.
+    Gating on that would skip removal AND report clear, leaving the entries for the post-login
+    drain to find once the transient cleared. Existence, not parseability, is the danger."""
+    from contexer import share
+    path = _corrupt_outbox(creds_env)
+    assert share._load_outbox() == []          # the fail-soft view says "empty"...
+    assert share._read_outbox()[1] is not None  # ...but the honest read says "unreadable"
+    discarded, remaining = share.discard_outbox()
+    assert remaining == 0 and not path.exists()  # removed anyway, and reported safe only then
+
+
+def test_unreadable_outbox_that_survives_removal_is_reported_unsafe(creds_env, monkeypatch):
+    """Still there and still unreadable: the count is unknown, the danger is not."""
+    from contexer import share
+    _corrupt_outbox(creds_env)
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    assert share.discard_outbox() == (0, -1)
+
+
+def test_login_skips_the_drain_for_an_unreadable_outbox(creds_env, monkeypatch, capsys):
+    from contexer import cli, share
+    _corrupt_outbox(creds_env)
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    _stub_oauth(monkeypatch)
+    synced = {"n": 0}
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: synced.__setitem__("n", synced["n"] + 1))
+    cli.login_cmd([])
+    assert synced["n"] == 0
+    assert "could not clear some queued share(s)" in capsys.readouterr().err
+
+
+def test_read_outbox_separates_missing_from_corrupt(creds_env):
+    from contexer import share
+    assert share._read_outbox() == ([], None)          # missing is genuinely empty, no error
+    _corrupt_outbox(creds_env)
+    entries, error = share._read_outbox()
+    assert entries == [] and "JSONDecodeError" in error
+    share._save_outbox([{"decision_id": "q1"}])
+    assert share._read_outbox() == ([{"decision_id": "q1"}], None)

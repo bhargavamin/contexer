@@ -72,17 +72,35 @@ def _outbox_path():
     return store.STORE_DIR / ".outbox.json"
 
 
-def _load_outbox() -> list[dict]:
-    """Read the outbox; a missing or corrupt file reads as empty, never raises."""
+def _read_outbox() -> tuple[list[dict], str | None]:
+    """(queued entries, read error) from ONE read of the outbox.
+
+    The degrade-but-report split `store._read_global` carries, for the same reason: `_load_outbox`
+    answers "no queued shares" for a missing file AND for one that exists but cannot be parsed,
+    and `error` is the ONLY thing that tells those apart. Every RENDER path wants the fail-soft
+    view. A SAFETY gate does not: `discard_outbox` reporting "the queue is clear" off an
+    unreadable file would leave the previous account's entries on disk for the post-login drain
+    to find once the transient cleared - which is precisely the egress it exists to prevent."""
     path = _outbox_path()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            data = None
-        if isinstance(data, list):
-            return data
-    return []
+    if not path.exists():
+        return [], None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    if not isinstance(data, list):
+        return [], f"not an outbox list (got {type(data).__name__})"
+    return data, None
+
+
+def _load_outbox() -> list[dict]:
+    """Read the outbox; a missing or corrupt file reads as empty, never raises. The read every
+    drain/enqueue path wants. A caller that must tell empty from unreadable uses `_read_outbox`."""
+    return _read_outbox()[0]
 
 
 def _save_outbox(entries: list[dict]) -> None:
@@ -119,25 +137,37 @@ def discard_outbox() -> tuple[int, int]:
     A non-zero `still_queued` means the caller MUST NOT let a drain run this session
     (`auth.login` warns and skips the post-login sync). Both attempts failing usually means the
     store dir itself is unwritable, which nothing here can repair - the honest move is to say so
-    and stop, not to proceed as though the queue were clear.
+    and stop, not to proceed as though the queue were clear. `-1` is that same verdict when the
+    file is there but unreadable: the count is unknown, the danger is not.
+
+    Every decision here reads `_read_outbox`, never `_load_outbox`. The fail-soft view answers
+    "no queued shares" for a file that merely failed to PARSE, so gating on it would skip the
+    removal AND report the queue clear, leaving the entries for the post-login drain to find
+    once the transient cleared. Existence, not parseability, is what makes a queue dangerous.
 
     Deliberately NOT called from `logout`: nothing drains without credentials, so `login` is the
     only chokepoint an entry can egress through, and clearing at logout as well would discard
     queues that were never in danger."""
-    queued = len(_load_outbox())
-    if queued == 0:
-        return 0, 0
+    path = _outbox_path()
+    entries, error = _read_outbox()
+    if error is None and not entries and not path.exists():
+        return 0, 0            # genuinely nothing queued - the overwhelmingly common case
+    queued = len(entries)      # 0 when unreadable; the message under-reports, the gate does not
     try:
-        _outbox_path().unlink()
+        path.unlink()
     except OSError:
-        # Second attempt via a different syscall path (temp file + os.replace). An emptied
-        # outbox is as safe as an absent one - `_load_outbox` reads both as no queued shares.
+        # Second attempt down a different syscall path (temp file + os.replace). An emptied
+        # outbox is as safe as an absent one - both read back as no queued shares.
         try:
             _save_outbox([])
         except Exception:
             pass
-    remaining = len(_load_outbox())
-    return queued - remaining, remaining
+    if not path.exists():
+        return queued, 0
+    after, after_error = _read_outbox()
+    if after_error is not None:
+        return 0, -1           # still there and unreadable: unknown count, known danger
+    return queued - len(after), len(after)
 
 
 def _enqueue(payload: dict) -> None:
