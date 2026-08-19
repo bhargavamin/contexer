@@ -45,21 +45,32 @@ from contexer import store           # module object, not `from`-imports: see do
 # the budget on its own.
 _GUARD_MAX_FILE_BYTES = 1_000_000
 
-# Aggregate scanned bytes per run, the cost guard the per-file cap was previously being
-# asked to double as. Without it, N files each just under the per-file cap still add up
-# to a wall-clock overrun, and an overrun FAILS OPEN by discarding everything (see above)
-# rather than reporting what it managed to check. This budget stops scanning first and
-# names the files it did not reach, so a big commit degrades to a partial-but-honest
-# report instead of a silent total one. 4MB is ~620ms of worst-case secret scanning,
-# leaving the wall-clock budget as headroom for Tier-1 pairing rather than as the thing
-# that actually fires.
-_GUARD_MAX_SCAN_BYTES = 4_000_000
+# Seconds of _GUARD_TIME_BUDGET held back from Tier-2 scanning. Scanning stops at
+# `deadline - _GUARD_SCAN_RESERVE` and NAMES the selected files it did not reach, which
+# is the whole point: the hard deadline fails open by discarding every violation gathered
+# so far (see guard_staged), so a run that is going to run out of time must bail out
+# early enough to return what it found instead of tripping that.
+#
+# This replaced a fixed 4MB aggregate byte cap, which was the same idea measured against
+# the wrong resource. Bytes are only a PROXY for cost, and the proxy's exchange rate
+# depends on the armed rule mix (one cheap regex versus 14 secret patterns differ by
+# ~57x), so a byte number safe for the worst mix throws away most of the budget for every
+# other one: 4MB is ~620ms of worst-case scanning against a 2000ms deadline, so files
+# between ~4MB and ~12.9MB of staged selected text stopped being scanned even though
+# there was ample time for them (found by review on PR #241). Spending the real resource
+# directly has no exchange rate to get wrong and adapts to the actual rule mix.
+#
+# The reserve must exceed the cost of the single largest file that can still be started
+# just before the cut-off, which is what _GUARD_MAX_FILE_BYTES bounds: 1MB of worst-case
+# secret scanning is ~155ms, so 500ms leaves ~3x margin plus room for Tier-1 pairing.
+# The two constants are therefore related, not independent guesses.
+_GUARD_SCAN_RESERVE = 0.5
 
 # Why a staged file was not scanned, as a stable token. `binary` is deliberately NOT
 # reported to the developer: a regex over binary content is meaningless, so skipping a
 # PNG is the correct outcome rather than a gap worth a line on every commit that stages
 # one. The rest each mean a file that COULD have been checked was not: `too-large` and
-# `unreadable` come from `_staged_content`, `budget` from _GUARD_MAX_SCAN_BYTES above.
+# `unreadable` come from `_staged_content`, `budget` from _GUARD_SCAN_RESERVE above.
 _GUARD_UNCHECKED_REPORTED = ("too-large", "unreadable", "budget")
 
 
@@ -909,19 +920,22 @@ def _guard_violations(repo: str, staged: list[str],
     scoped to `src/**/*.py` does not make an unscannable `data/dump.json` look like
     missed coverage.
 
-    _GUARD_MAX_SCAN_BYTES bounds the total content scanned per run, and its exhaustion
-    is reported through the same list (reason `budget`) rather than being left to the
-    wall-clock deadline. That ordering is deliberate: the deadline fails OPEN by
-    discarding every violation gathered so far, so reaching it costs the report even for
-    the small files that scanned cleanly, whereas stopping on bytes keeps those
-    violations and names only what it did not reach."""
+Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reach are
+    reported through the same list (reason `budget`) rather than being left to the hard
+    deadline. That ordering is deliberate: the deadline fails OPEN by discarding every
+    violation gathered so far, so reaching it costs the report even for the files that
+    scanned cleanly, whereas stopping early keeps those violations and names only what
+    was missed. The first selected file always scans, so a run always makes progress."""
     rules = (_armed_rules(store._load(repo).get("entries") or [])
              + _armed_rules(store._load_global().get("entries") or []))
     if not rules:
         return [], [], False
     violations: list[dict] = []
     unchecked: list[dict] = []
-    scanned = 0
+    # Stop scanning with _GUARD_SCAN_RESERVE left, so the run returns normally (violations
+    # kept, gaps named) rather than tripping the hard deadline, which discards everything.
+    soft_deadline = deadline - _GUARD_SCAN_RESERVE
+    checked_any = False
 
     def _note(relpath: str, reason: str) -> None:
         if reason in _GUARD_UNCHECKED_REPORTED:
@@ -933,17 +947,20 @@ def _guard_violations(repo: str, staged: list[str],
         # Scope is decided ONCE, here, before the file is read or charged to the budget,
         # and the rest of the loop trusts it. Applicability used to be settled inside
         # `_rule_violations` instead, which meant a file no rule selects was still
-        # `git show`n and still added to `scanned` before being scanned against nothing.
+        # `git show`n and still charged to the budget before being scanned against nothing.
         # That is a security bug, not just waste: arm one rule `--paths "src/*.py"`, stage
         # a few MB of `data/*.json` next to one `src/app.py` holding a secret, and the
-        # out-of-scope bulk exhausts _GUARD_MAX_SCAN_BYTES first, so the one file the rule
+        # out-of-scope bulk exhausts the scan budget first, so the one file the rule
         # covers is skipped with a non-blocking notice and its violation ships. Deciding
         # once also keeps this and the `unchecked` gate from being two rules that can
         # drift, which is why `_note` no longer re-tests it.
         selectors = [r for r in rules if _rule_selects(r, relpath)]
         if not selectors:
             continue
-        if scanned >= _GUARD_MAX_SCAN_BYTES:
+        # `checked_any` guarantees forward progress: if the process arrived here already
+        # past the soft cut-off (a slow store load, a loaded machine), the first selected
+        # file is still scanned rather than the run reporting a gap for everything.
+        if checked_any and time.time() > soft_deadline:
             _note(relpath, "budget")
             continue
         content, reason, _fingerprint = _staged_content(repo, relpath)
@@ -952,7 +969,7 @@ def _guard_violations(repo: str, staged: list[str],
             continue
         if not content:
             continue
-        scanned += len(content)
+        checked_any = True
         for rule in selectors:
             if time.time() > deadline:
                 return [], [], True

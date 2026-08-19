@@ -2303,7 +2303,9 @@ class TestUncheckedIsReported:
         too, and reports only "internal error"."""
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
-        monkeypatch.setattr(guard_engine, "_GUARD_MAX_SCAN_BYTES", 10)
+        # A reserve larger than the whole time budget puts the soft cut-off in the past,
+        # so everything after the first selected file is out of time.
+        monkeypatch.setattr(guard_engine, "_GUARD_SCAN_RESERVE", 10_000)
         _write(repo, "a.py", "# TODO one\n")
         _write(repo, "b.py", "# TODO two\n")
         _git(repo, "add", "a.py", "b.py")
@@ -2324,9 +2326,9 @@ class TestUncheckedIsReported:
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
                                 paths="src/*.py")
-        monkeypatch.setattr(guard_engine, "_GUARD_MAX_SCAN_BYTES", 10)
+        monkeypatch.setattr(guard_engine, "_GUARD_SCAN_RESERVE", 10_000)
         # `data.json` sorts before `src/app.py`, so it is seen first and would have eaten
-        # the whole budget under the old accounting.
+        # the budget under the old accounting, leaving the covered file unscanned.
         _write(repo, "data.json", "x" * 64)
         _write(repo, "src/app.py", "# TODO fix this\n")
         _git(repo, "add", "data.json", "src/app.py")
@@ -2356,6 +2358,44 @@ class TestUncheckedIsReported:
         guard_engine._guard_violations(str(repo), ["data.json", "src/app.py"],
                                         deadline=time.time() + 30)
         assert seen == ["src/app.py"]
+
+    def test_several_MB_of_selected_text_is_still_fully_scanned(self, repo):
+        """Regression for the coverage band a fixed 4MB byte budget silently gave up. The
+        cut-off is now the real resource (time), so 4.5MB of selected text, well past the
+        old byte cap and nowhere near the 2s deadline, is scanned to the last file."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        for i in range(5):
+            _write(repo, f"f{i}.py", "x" * 900_000)
+        # The violation is in the LAST file, so only a run that got all the way there
+        # can find it.
+        _write(repo, "f9_last.py", "# TODO fix this\n")
+        _git(repo, "add", "-A")
+
+        result = guard_engine.guard_staged(str(repo))
+        assert [v["path"] for v in result["violations"]] == ["f9_last.py"]
+        assert "unchecked" not in result
+
+    def test_running_out_of_time_does_not_block_the_commit(self, repo, monkeypatch):
+        """Deliberate policy, pinned so it stays a choice rather than an accident: a
+        selected file the guard ran out of time for is REPORTED, not blocked on. Blocking
+        would contradict the ratified "the run path never blocks a commit on its own
+        failure" invariant, since running out of budget is the guard's own limitation and
+        not a rule violation. The trade-off is real and belongs in the open: a violation
+        in a file that went unscanned is not caught, which is why the file is named."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        monkeypatch.setattr(guard_engine, "_GUARD_SCAN_RESERVE", 10_000)
+        _write(repo, "a_clean.py", "nothing here\n")
+        _write(repo, "z_dirty.py", "# TODO fix this\n")
+        _git(repo, "add", "a_clean.py", "z_dirty.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        assert result["violations"] == []
+        assert result["unchecked"] == [{"file": "z_dirty.py", "reason": "budget"}]
+        # No error flag: this is a reported gap, not a guard malfunction, so the CLI keeps
+        # the violations it did find rather than degrading to "internal error".
+        assert "error" not in result
 
     def test_a_readable_file_alongside_an_over_cap_one_still_blocks(self, repo, monkeypatch):
         self._armed(repo)
