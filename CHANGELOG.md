@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.38.0](https://github.com/bhargavamin/contexer/compare/v0.37.0...v0.38.0) (2026-08-19)
+
+
+### Features
+
+* **share:** push global rules to Teams with `contexer share --global` ([#239](https://github.com/bhargavamin/contexer/issues/239)) ([aa4601f](https://github.com/bhargavamin/contexer/commit/aa4601f1f0e904f2f75cb39563aec0c7dbbbf355))
+
+
+### Bug Fixes
+
+* **auth:** clear team caches on login and logout ([#232](https://github.com/bhargavamin/contexer/issues/232)) ([6b8c2af](https://github.com/bhargavamin/contexer/commit/6b8c2af42715df6de711503d7e22ab38343a2210))
+* **auth:** discard the queued share outbox on login ([#232](https://github.com/bhargavamin/contexer/issues/232)) ([72b1bae](https://github.com/bhargavamin/contexer/commit/72b1baeadfd55b77a0406631795534789c118793))
+* **auth:** do not let a failed outbox discard read as a cleared queue ([#232](https://github.com/bhargavamin/contexer/issues/232)) ([2fa9ec7](https://github.com/bhargavamin/contexer/commit/2fa9ec73235d1b2926b466279cd735900e86f35c))
+* **auth:** serialize account-switch outbox cleanup ([6e67376](https://github.com/bhargavamin/contexer/commit/6e67376bcbed9133f926c290afc3578ff697aa42))
+* **auth:** serialize login with token refresh ([b1aeb49](https://github.com/bhargavamin/contexer/commit/b1aeb49dc22e28abc75d11c1832147cfdfec76ca))
+* **cli:** prefer guard hash over numeric index ([73a388e](https://github.com/bhargavamin/contexer/commit/73a388e8584782def1ddc3ae6078e82fd6e3db4f))
+* **share:** gate the outbox discard on an honest read, not the fail-soft one ([#232](https://github.com/bhargavamin/contexer/issues/232)) ([9dc746f](https://github.com/bhargavamin/contexer/commit/9dc746fcbbea188660022ad671d6bd4a318439c9))
+* **share:** serialize overlapping async outbox users ([e85e7aa](https://github.com/bhargavamin/contexer/commit/e85e7aab629ce246d052d9924590e1d26f8f6ec3))
+* **share:** treat outbox stat failures as unsafe ([a711f3b](https://github.com/bhargavamin/contexer/commit/a711f3b9a74971d6b649da7100c9f25b6d294faa))
+
+
+### Documentation
+
+* **console:** document console_api.py and why overlap_report stayed ([c39e67d](https://github.com/bhargavamin/contexer/commit/c39e67dc991def8d002e2e1aa0fb9e6bdd5cbbb0))
+* scope the adapters one-module rule to new tool targets ([#232](https://github.com/bhargavamin/contexer/issues/232), [#239](https://github.com/bhargavamin/contexer/issues/239)) ([11bc139](https://github.com/bhargavamin/contexer/commit/11bc139a95855fbab96bfd4d59907d3f312ba02f))
+
 ## [0.37.0](https://github.com/bhargavamin/contexer/compare/v0.36.1...v0.37.0) (2026-08-17)
 
 
