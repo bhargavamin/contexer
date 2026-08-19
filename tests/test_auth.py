@@ -1260,6 +1260,48 @@ def test_login_does_not_replace_creds_while_outbox_drain_is_active(creds_env, mo
     assert saved.is_set()
 
 
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_login_wins_over_overlapping_old_account_refresh(creds_env, monkeypatch):
+    """An old-account refresh that started first must not overwrite a completed new login."""
+    auth._save_creds({"issuer": "http://localhost:8080", "client_id": "old-client",
+                      "token_endpoint": "http://localhost:8080/token",
+                      "access_token": "OLD", "refresh_token": "OLD-RT",
+                      "expires_at": time.time() - 10})
+    entered_refresh = threading.Event()
+    release_refresh = threading.Event()
+    refresh_result = {}
+
+    def old_refresh(*_args):
+        entered_refresh.set()
+        assert release_refresh.wait(5)
+        return {"access_token": "OLD-REFRESHED", "refresh_token": "OLD-RT2",
+                "expires_in": 3600}
+
+    monkeypatch.setattr(auth, "_refresh", old_refresh)
+    refresher = threading.Thread(target=lambda:
+                                 refresh_result.setdefault("token", auth.refresh_now(TEAM)))
+    refresher.start()
+    assert entered_refresh.wait(5)
+
+    _stub_oauth(monkeypatch)
+    login_result = {}
+    login = threading.Thread(
+        target=lambda: login_result.setdefault(
+            "safe", auth.login(endpoint="http://localhost:8080/mcp")))
+    login.start()
+    time.sleep(0.05)  # broken login writes new creds here while refresh still owns .team_auth
+    release_refresh.set()
+    refresher.join(5)
+    login.join(5)
+
+    assert refresh_result["token"] == "OLD-REFRESHED"
+    assert login_result["safe"] is True
+    creds = auth._load_creds()
+    assert creds["access_token"] == "AT"
+    assert creds["refresh_token"] == "RT"
+    assert creds["client_id"] == "cid-9"
+
+
 def test_discard_queued_shares_reports_unknown_as_unsafe(creds_env, monkeypatch):
     """A blown-up discard must not report 0 remaining, which would read as 'clear' and let the
     drain run. -1 is falsy-negative on purpose: the caller tests truthiness."""

@@ -670,25 +670,26 @@ def login(endpoint: str | None = None) -> bool:
         raise RuntimeError("token endpoint returned no access_token — login failed.")
     from contexer import share
     with share.outbox_lock():
-        _save_creds({
-            "issuer": issuer,
-            "client_id": client_id,
-            "token_endpoint": meta["token_endpoint"],
-            "access_token": tok.get("access_token"),
-            "refresh_token": tok.get("refresh_token"),
-            "expires_at": time.time() + tok.get("expires_in", 3600),
-            "scope": tok.get("scope", ""),
-        })
-        try:
-            # Creds first, config second, deliberately: the authorization code behind these tokens
-            # is single-use, so a failure while writing config.toml must not throw away a session
-            # that already exists — config.toml is hand-fixable, a spent code is not. The outbox
-            # lock makes that ordering safe against a concurrent share/drain: no account-less
-            # queued row can be created or uploaded between the credential swap and the discard.
-            config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
-        finally:
-            dropped = _forget_account_caches()
-            queued, stranded = _discard_queued_shares(locked=True)
+        with store._store_lock(".team_auth"):
+            _save_creds({
+                "issuer": issuer,
+                "client_id": client_id,
+                "token_endpoint": meta["token_endpoint"],
+                "access_token": tok.get("access_token"),
+                "refresh_token": tok.get("refresh_token"),
+                "expires_at": time.time() + tok.get("expires_in", 3600),
+                "scope": tok.get("scope", ""),
+            })
+            try:
+                # Creds first, config second, deliberately: the authorization code behind these tokens
+                # is single-use, so a failure while writing config.toml must not throw away a session
+                # that already exists — config.toml is hand-fixable, a spent code is not. The outbox
+                # lock makes that ordering safe against a concurrent share/drain: no account-less
+                # queued row can be created or uploaded between the credential swap and the discard.
+                config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
+            finally:
+                dropped = _forget_account_caches()
+                queued, stranded = _discard_queued_shares(locked=True)
     print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
     if dropped:
         print(f"Cleared {dropped} cached team file(s) from the previous session - "
