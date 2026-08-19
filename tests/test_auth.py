@@ -1172,6 +1172,74 @@ def test_login_syncs_normally_when_the_outbox_cleared(creds_env, monkeypatch):
     assert share._load_outbox() == []
 
 
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_login_serializes_with_concurrent_outbox_enqueue(creds_env, monkeypatch):
+    """A share that started before login must not enqueue old-account payload after cleanup."""
+    from contexer import share
+    _stub_oauth(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    result = {}
+
+    def old_account_enqueue():
+        with share.outbox_lock():
+            entered.set()
+            release.wait(5)
+            share._enqueue_unlocked({"decision_id": "old-account", "type": "constraint",
+                                     "content": "old", "repo": "r", "queued_at": 0,
+                                     "attempts": 0})
+
+    writer = threading.Thread(target=old_account_enqueue)
+    writer.start()
+    assert entered.wait(5)
+
+    login = threading.Thread(
+        target=lambda: result.setdefault("safe", auth.login(endpoint="http://localhost:8080/mcp")))
+    login.start()
+    time.sleep(0.05)  # give the broken implementation time to run cleanup before the enqueue
+    release.set()
+    writer.join(5)
+    login.join(5)
+
+    assert result["safe"] is True
+    assert share._load_outbox() == []
+
+
+@pytest.mark.skipif(store.fcntl is None, reason="advisory locks unavailable on this platform")
+def test_login_does_not_replace_creds_while_outbox_drain_is_active(creds_env, monkeypatch):
+    """New credentials must not exist while an old-account drain can still read the queue."""
+    from contexer import share
+    _stub_oauth(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    saved = threading.Event()
+    real_save_creds = auth._save_creds
+
+    def tracking_save(creds):
+        saved.set()
+        real_save_creds(creds)
+
+    monkeypatch.setattr(auth, "_save_creds", tracking_save)
+
+    def old_account_drain():
+        with share.outbox_lock():
+            entered.set()
+            release.wait(5)
+
+    drain = threading.Thread(target=old_account_drain)
+    drain.start()
+    assert entered.wait(5)
+
+    login = threading.Thread(target=lambda: auth.login(endpoint="http://localhost:8080/mcp"))
+    login.start()
+    time.sleep(0.05)
+    assert not saved.is_set()
+    release.set()
+    drain.join(5)
+    login.join(5)
+    assert saved.is_set()
+
+
 def test_discard_queued_shares_reports_unknown_as_unsafe(creds_env, monkeypatch):
     """A blown-up discard must not report 0 remaining, which would read as 'clear' and let the
     drain run. -1 is falsy-negative on purpose: the caller tests truthiness."""

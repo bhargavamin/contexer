@@ -24,7 +24,10 @@ share` picker's `✓ shared` hint) - see `_mark_shared`/`shared_map`.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -37,6 +40,9 @@ from contexer.repo_key import canonical_repo_key
 # never dropped for age or attempt count in v1 - retrying is always safe. This count is the
 # only bound, so a long-offline stretch can't grow ~/.contexer/.outbox.json without limit.
 _OUTBOX_CAP = 50
+_OUTBOX_LOCK_SLUG = ".outbox"
+_OUTBOX_LOCAL_LOCK = threading.RLock()
+_OUTBOX_LOCK_STATE = threading.local()
 
 # Max decisions per push_decisions batch. MUST stay <= contexer-teams' PUSH_DECISIONS_MAX (50):
 # the server rejects a larger array, so bulk shares / drains chunk into calls of this size. One
@@ -70,6 +76,26 @@ def _outbox_path():
     # Computed at call time (not module import time) so tests that monkeypatch
     # store.STORE_DIR see the redirected path, like every other store-adjacent file.
     return store.STORE_DIR / ".outbox.json"
+
+
+@contextlib.contextmanager
+def outbox_lock():
+    """Serialize an account transition against outbox writers and drains."""
+    depth = getattr(_OUTBOX_LOCK_STATE, "depth", 0)
+    if depth:
+        _OUTBOX_LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _OUTBOX_LOCK_STATE.depth -= 1
+        return
+    with _OUTBOX_LOCAL_LOCK:
+        with store._store_lock(_OUTBOX_LOCK_SLUG):
+            _OUTBOX_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _OUTBOX_LOCK_STATE.depth = 0
 
 
 def _read_outbox() -> tuple[list[dict], str | None]:
@@ -109,6 +135,12 @@ def _save_outbox(entries: list[dict]) -> None:
 
 
 def discard_outbox() -> tuple[int, int]:
+    """Locked wrapper for dropping every queued share."""
+    with outbox_lock():
+        return _discard_outbox_unlocked()
+
+
+def _discard_outbox_unlocked() -> tuple[int, int]:
     """Drop every queued share; return (discarded, still_queued).
 
     Called by `auth.login` when a new account signs in (issue #232). A queued entry carries no
@@ -171,6 +203,12 @@ def discard_outbox() -> tuple[int, int]:
 
 
 def _enqueue(payload: dict) -> None:
+    """Locked wrapper for queueing one failed push."""
+    with outbox_lock():
+        _enqueue_unlocked(payload)
+
+
+def _enqueue_unlocked(payload: dict) -> None:
     """Queue a failed push. Dedupes by decision_id (re-sharing the same decision while
     offline replaces the queued entry - fresh content wins) and caps at _OUTBOX_CAP,
     dropping the oldest entries beyond that."""
@@ -330,16 +368,13 @@ def shared_map(endpoint: str | None) -> dict[str, str]:
 
 def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
     """Re-read the outbox immediately before the final save and fold in anything that
-    only exists on disk. Lock-free (this file's existing convention - no file locking
-    added here): a concurrent `_enqueue` between our initial `_load_outbox()` at the top
-    of `drain_outbox` and this point writes straight to disk, so that payload is invisible
-    to our in-memory `entries` and would otherwise be silently overwritten by this drain's
-    final save. Re-reading here and keeping any entry we neither sent nor already carry in
-    `tail` shrinks the loss window from "the whole drain" down to the handful of lines
-    between this re-read and the write that follows it - effectively zero, not perfect
-    serialization, which is the deliberate tradeoff for staying lock-free. Disk-only
-    entries are appended after `tail` since they were enqueued after this drain started,
-    so FIFO order is preserved."""
+    only exists on disk. The normal POSIX path serializes outbox writers with `outbox_lock`,
+    so this is mostly the non-POSIX fallback: when advisory locking is unavailable, a
+    concurrent `_enqueue` between our initial `_load_outbox()` at the top of `drain_outbox`
+    and this point writes straight to disk, so that payload is invisible to our in-memory
+    `entries` and would otherwise be silently overwritten by this drain's final save.
+    Disk-only entries are appended after `tail` since they were enqueued after this drain
+    started, so FIFO order is preserved."""
     disk_entries = _load_outbox()
     tail_ids = {e.get("decision_id") for e in tail}
     extra = [d for d in disk_entries
@@ -565,6 +600,12 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str
 
 
 def drain_outbox(profile: Profile | None = None) -> int:
+    """Locked wrapper for retrying queued pushes."""
+    with outbox_lock():
+        return _drain_outbox_unlocked(profile)
+
+
+def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
     """Retry every queued push, FIFO, and return how many succeeded.
 
     No-op (0) when the outbox is empty or team sync isn't configured. Stops at the FIRST
@@ -597,6 +638,12 @@ def drain_outbox(profile: Profile | None = None) -> int:
 
 
 async def adrain_outbox(profile: Profile | None = None) -> int:
+    """Locked wrapper for retrying queued pushes from async callers."""
+    with outbox_lock():
+        return await _adrain_outbox_unlocked(profile)
+
+
+async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
     """Async twin of :func:`drain_outbox` (awaits apush_decision so a wedged retry is
     cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics — the only
     difference is the awaited push; every other line is the shared local outbox logic."""
@@ -640,6 +687,11 @@ def _payload(dec: dict, key) -> dict:
 
 
 def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
+    with outbox_lock():
+        return _share_all_unlocked(repo_path, profile=profile)
+
+
+def _share_all_unlocked(repo_path: str, *, profile: Profile | None = None) -> str:
     """Push every non-ignored local decision to your team cloud context, oldest first.
 
     Same local-first contract as share(): never raises for cloud problems. Stops at the
@@ -647,7 +699,7 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
     failed decision plus everything after it in the outbox, so no share intent is lost."""
     profile = profile or load_profile()
     try:
-        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+        _drain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass
     decs = store.get_shareable_all(repo_path)
@@ -662,6 +714,11 @@ def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
 
 
 def share_global(*, profile: Profile | None = None) -> str:
+    with outbox_lock():
+        return _share_global_unlocked(profile=profile)
+
+
+def _share_global_unlocked(*, profile: Profile | None = None) -> str:
     """Push every global rule (`~/.contexer/_global.json`) to your team cloud context (#239).
 
     Global rules apply to every repo, so they go up with `repo=None`: `remote._wire_args` omits
@@ -677,7 +734,7 @@ def share_global(*, profile: Profile | None = None) -> str:
     how an edited global rule already in the cloud gets corrected."""
     profile = profile or load_profile()
     try:
-        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+        _drain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass
     decs = store.get_shareable_global()
@@ -691,6 +748,12 @@ def share_global(*, profile: Profile | None = None) -> str:
 
 
 def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:
+    with outbox_lock():
+        return _share_unlocked(repo_path, decision_id, profile=profile)
+
+
+def _share_unlocked(repo_path: str, decision_id: str = "", *,
+                    profile: Profile | None = None) -> str:
     """Push one local decision to your team cloud context; return a human-readable status.
 
     Local-first: never raises for cloud problems — returns a message and leaves the local
@@ -698,7 +761,7 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
     to share the most recent. `profile` defaults to load_profile()."""
     profile = profile or load_profile()
     try:
-        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+        _drain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass  # a broken drain (e.g. disk error saving the outbox) must not block this share
     dec = store.get_shareable(repo_path, decision_id)
@@ -716,6 +779,12 @@ def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = No
 
 
 def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
+    with outbox_lock():
+        return _share_ids_unlocked(repo_path, decision_ids, profile=profile)
+
+
+def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
+                        profile: Profile | None = None) -> str:
     """Share a selection of decisions (a multi-pick) in ONE batched call, returning a combined
     status. An empty list shares the most recent (delegates to share('')). Outbox + local-first
     guarantees are preserved (a failed chunk is queued); unknown/typo'd ids are REPORTED, not
@@ -724,7 +793,7 @@ def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = N
     if not decision_ids:
         return share(repo_path, "", profile=profile)
     try:
-        drain_outbox(profile)  # queued shares go out first, so ordering is preserved
+        _drain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass
     projs, missing = _resolve_ids(repo_path, decision_ids)
@@ -746,11 +815,17 @@ def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = N
 
 async def share_async(repo_path: str, decision_id: str = "", *,
                       profile: Profile | None = None) -> str:
+    with outbox_lock():
+        return await _share_async_unlocked(repo_path, decision_id, profile=profile)
+
+
+async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
+                                profile: Profile | None = None) -> str:
     """Async twin of :func:`share`. Same local-first contract: never raises for cloud
     problems, leaves the local decision untouched, queues on failure."""
     profile = profile or load_profile()
     try:
-        await adrain_outbox(profile)  # queued shares go out first, so ordering is preserved
+        await _adrain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass  # a broken drain (e.g. disk error) must not block this share
     dec = store.get_shareable(repo_path, decision_id)
@@ -761,21 +836,31 @@ async def share_async(repo_path: str, decision_id: str = "", *,
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    server_id = await awith_local_fallback(
-        lambda: remote.apush_decision(**_dec_push_kwargs(dec, key)),
-        default=None, action="share decision")
+    try:
+        server_id = await awith_local_fallback(
+            lambda: remote.apush_decision(**_dec_push_kwargs(dec, key)),
+            default=None, action="share decision")
+    except asyncio.CancelledError:
+        _enqueue_unlocked(_payload(dec, key))
+        raise
     return _finish_share(dec, key, server_id, profile.endpoint)
 
 
 async def share_ids_async(repo_path: str, decision_ids: list, *,
                           profile: Profile | None = None) -> str:
+    with outbox_lock():
+        return await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
+
+
+async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
+                                    profile: Profile | None = None) -> str:
     """Async twin of :func:`share_ids`: one batched (awaited) push per _BATCH_SIZE, unknown ids
     reported, capacity-skipped rows re-queued. An empty list shares the most recent."""
     profile = profile or load_profile()
     if not decision_ids:
         return await share_async(repo_path, "", profile=profile)
     try:
-        await adrain_outbox(profile)  # queued shares go out first, so ordering is preserved
+        await _adrain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass
     projs, missing = _resolve_ids(repo_path, decision_ids)
@@ -786,7 +871,13 @@ async def share_ids_async(repo_path: str, decision_ids: list, *,
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
     key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    return _prepend_unknown(await _apush_batch(remote, projs, key, profile.endpoint), missing)
+    try:
+        status = await _apush_batch(remote, projs, key, profile.endpoint)
+    except asyncio.CancelledError:
+        for dec in projs:
+            _enqueue_unlocked(_payload(dec, key))
+        raise
+    return _prepend_unknown(status, missing)
 
 
 def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
@@ -799,12 +890,13 @@ def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
     server-side, so queuing a decision that may already have been sent is safe. An empty list
     queues the most recent shareable (matching `share_async('')`). Missing ids are skipped.
     Returns the count queued."""
-    ids = decision_ids or [""]  # "" -> most recent, matching share_async("")
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    queued = 0
-    for did in ids:
-        dec = store.get_shareable(repo_path, did)
-        if dec is not None:
-            _enqueue(_payload(dec, key))
-            queued += 1
-    return queued
+    with outbox_lock():
+        ids = decision_ids or [""]  # "" -> most recent, matching share_async("")
+        key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+        queued = 0
+        for did in ids:
+            dec = store.get_shareable(repo_path, did)
+            if dec is not None:
+                _enqueue_unlocked(_payload(dec, key))
+                queued += 1
+        return queued

@@ -780,7 +780,9 @@ def share_cmd(rest: list | None = None) -> None:
         sys.exit(1)
 
     # Confirm-before-push (outward action). --yes or config skip_confirm bypasses the prompts.
-    profile = config.load_profile()  # loaded once, reused by the push below
+    # Actual push paths reload the profile under share.py's outbox lock so account switches cannot
+    # interleave between this preview decision and the outbound write.
+    profile = config.load_profile()
     bypass = yes or profile.skip_confirm
 
     if globals_:
@@ -791,7 +793,7 @@ def share_cmd(rest: list | None = None) -> None:
             if not decision:
                 print("Cancelled - nothing was pushed.")
                 return
-        print(share.share_global(profile=profile))
+        print(share.share_global())
         return
 
     # No id and no --all: don't guess ('most recent') — show a numbered picker so the developer
@@ -808,7 +810,7 @@ def share_cmd(rest: list | None = None) -> None:
         if not _confirm_unapproved(selection):
             print("Cancelled — nothing was pushed.")
             return
-        print(share.share_ids(repo, picked, profile=profile))
+        print(share.share_ids(repo, picked))
         return
 
     if not bypass:
@@ -820,7 +822,7 @@ def share_cmd(rest: list | None = None) -> None:
             return
 
     if share_all:
-        print(share.share_all(repo, profile=profile))
+        print(share.share_all(repo))
         # --all is repo-scoped by construction (its key comes from this repo's git origin), so
         # global rules are NOT swept up by it. Say so rather than letting "all" read as all.
         n_global = len(store.get_shareable_global())
@@ -828,7 +830,7 @@ def share_cmd(rest: list | None = None) -> None:
             print(f"\n{n_global} global rule(s) were not included - "
                   "they apply to every repo. Push them with `contexer share --global`.")
     else:
-        print(share.share(repo, ids[0] if ids else "", profile=profile))
+        print(share.share(repo, ids[0] if ids else ""))
 
 
 def _parse_selection(raw: str, loaded: int) -> tuple[list[int], list[str]]:
