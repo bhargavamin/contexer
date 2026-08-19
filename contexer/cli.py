@@ -1040,7 +1040,7 @@ def login_cmd(rest: list | None = None) -> None:
             sys.exit(1)
         endpoint = rest[i + 1]
     try:
-        auth.login(endpoint=endpoint)
+        safe_to_sync = auth.login(endpoint=endpoint)
     except (ValueError, RuntimeError, config.ConfigError) as e:
         # ValueError: bad --endpoint; RuntimeError: OAuth flow failure (state mismatch,
         # no code, no token); ConfigError: an unusable ~/.contexer/config.toml reached the
@@ -1049,7 +1049,12 @@ def login_cmd(rest: list | None = None) -> None:
         # All three are user-actionable — print cleanly, no traceback.
         print(f"contexer login: {e}", file=sys.stderr)
         sys.exit(1)
-    _post_login_sync()  # refresh team sync so `contexer status` isn't stale after login
+    # Skipped only when login could not clear the previous session's queued shares (#232):
+    # _post_login_sync DRAINS the outbox, so running it would push those account-less entries
+    # up as this account's rows - the exact write the discard exists to prevent. Login itself
+    # already warned and named the file; a stale `last sync` line is the cheap side of this.
+    if safe_to_sync:
+        _post_login_sync()  # refresh team sync so `contexer status` isn't stale after login
 
 
 def _post_login_sync() -> None:

@@ -909,7 +909,8 @@ def test_cli_login_triggers_post_login_sync(monkeypatch):
     # After a successful login, status must not be stale — login kicks a team pull.
     from contexer import cli
     called = {}
-    monkeypatch.setattr(auth, "login", lambda endpoint=None: None)
+    # True = "safe to sync": login cleared the previous session's queued shares (#232).
+    monkeypatch.setattr(auth, "login", lambda endpoint=None: True)
     monkeypatch.setattr(cli, "_post_login_sync", lambda: called.setdefault("ran", True))
     cli.login_cmd([])
     assert called.get("ran") is True
@@ -1105,4 +1106,75 @@ def test_logout_leaves_the_outbox_alone(creds_env):
 
 def test_discard_outbox_reports_zero_when_empty(creds_env):
     from contexer import share
-    assert share.discard_outbox() == 0
+    assert share.discard_outbox() == (0, 0)
+
+
+def _unlink_fails(monkeypatch):
+    """Make Path.unlink raise a non-FileNotFoundError OSError, leaving the file in place."""
+    real = Path.unlink
+    def fake(self, **kw):
+        if self.name == ".outbox.json":
+            raise OSError("read-only file system")
+        return real(self, **kw)
+    monkeypatch.setattr(Path, "unlink", fake)
+
+
+def test_discard_outbox_falls_back_to_truncating(creds_env, monkeypatch):
+    """unlink and the atomic write are different syscall paths; a file that resists one can
+    still yield to the other, and an emptied outbox is as safe as an absent one."""
+    from contexer import share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _unlink_fails(monkeypatch)
+    assert share.discard_outbox() == (1, 0)
+    assert share._load_outbox() == []
+
+
+def test_discard_outbox_reports_entries_it_could_not_clear(creds_env, monkeypatch):
+    """Both removal paths failing must NOT read as 'the queue is clear' - that swallowed error
+    is precisely the hole this pair exists to close."""
+    from contexer import share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    discarded, remaining = share.discard_outbox()
+    assert (discarded, remaining) == (0, 1)
+    assert len(share._load_outbox()) == 1          # still there, and we said so
+
+
+def test_login_skips_the_post_login_drain_when_the_outbox_survives(creds_env, monkeypatch, capsys):
+    """The drain is what would egress them, so an uncleared queue must block it."""
+    from contexer import cli, share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _unlink_fails(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda e: (_ for _ in ()).throw(OSError("nope")))
+    _stub_oauth(monkeypatch)
+    synced = {"n": 0}
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: synced.__setitem__("n", synced["n"] + 1))
+    cli.login_cmd([])
+    assert synced["n"] == 0                        # no drain ran
+    err = capsys.readouterr().err
+    assert "could not clear 1 queued share(s)" in err
+    assert ".outbox.json" in err                   # names the file the user must delete
+
+
+def test_login_syncs_normally_when_the_outbox_cleared(creds_env, monkeypatch):
+    from contexer import cli, share
+    share._enqueue({"decision_id": "q1", "type": "constraint", "content": "x",
+                    "repo": "r", "queued_at": 0, "attempts": 0})
+    _stub_oauth(monkeypatch)
+    synced = {"n": 0}
+    monkeypatch.setattr(cli, "_post_login_sync", lambda: synced.__setitem__("n", synced["n"] + 1))
+    cli.login_cmd([])
+    assert synced["n"] == 1
+    assert share._load_outbox() == []
+
+
+def test_discard_queued_shares_reports_unknown_as_unsafe(creds_env, monkeypatch):
+    """A blown-up discard must not report 0 remaining, which would read as 'clear' and let the
+    drain run. -1 is falsy-negative on purpose: the caller tests truthiness."""
+    from contexer import share
+    monkeypatch.setattr(share, "discard_outbox", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert auth._discard_queued_shares() == (0, -1)

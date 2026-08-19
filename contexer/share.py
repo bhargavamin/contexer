@@ -90,8 +90,8 @@ def _save_outbox(entries: list[dict]) -> None:
     store._atomic_write(_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
 
 
-def discard_outbox() -> int:
-    """Drop every queued share; return how many were discarded. Fail-soft.
+def discard_outbox() -> tuple[int, int]:
+    """Drop every queued share; return (discarded, still_queued).
 
     Called by `auth.login` when a new account signs in (issue #232). A queued entry carries no
     account identity - `_payload` stores the decision, its repo key and provenance, and nothing
@@ -104,18 +104,40 @@ def discard_outbox() -> int:
     waiting. It is still the right side of the trade, and the asymmetry is the same one
     `forget_shared_markers` documents - a discarded queue is visible (login SAYS how many went)
     and recoverable by re-running `contexer share`, while an upload into the wrong account is
-    silent and cannot be taken back. Sizing the loss is also why this returns a count rather
-    than a bool.
+    silent and cannot be taken back. Sizing the loss is why the discarded count is returned
+    rather than a bool.
+
+    `still_queued` is the second half, and it is NOT decoration: this is the one cleanup in the
+    family whose failure is not benign. A stranded pull cache renders a stale row; a stranded
+    OUTBOX egresses to the wrong account, which is exactly what this function exists to stop -
+    so silently swallowing an unlink error (as the first cut did) left the hole it was closing
+    wide open, and the caller must be able to tell. Removal is therefore attempted twice, by
+    different syscalls: `unlink`, then a truncate to `[]` through the module's normal atomic
+    writer, since a file that resists one can still yield to the other. The queue is re-read
+    afterwards rather than inferred, so the count reported is measured, not assumed.
+
+    A non-zero `still_queued` means the caller MUST NOT let a drain run this session
+    (`auth.login` warns and skips the post-login sync). Both attempts failing usually means the
+    store dir itself is unwritable, which nothing here can repair - the honest move is to say so
+    and stop, not to proceed as though the queue were clear.
 
     Deliberately NOT called from `logout`: nothing drains without credentials, so `login` is the
     only chokepoint an entry can egress through, and clearing at logout as well would discard
     queues that were never in danger."""
     queued = len(_load_outbox())
+    if queued == 0:
+        return 0, 0
     try:
         _outbox_path().unlink()
-    except OSError:   # includes FileNotFoundError - nothing queued
-        return 0
-    return queued
+    except OSError:
+        # Second attempt via a different syscall path (temp file + os.replace). An emptied
+        # outbox is as safe as an absent one - `_load_outbox` reads both as no queued shares.
+        try:
+            _save_outbox([])
+        except Exception:
+            pass
+    remaining = len(_load_outbox())
+    return queued - remaining, remaining
 
 
 def _enqueue(payload: dict) -> None:

@@ -637,8 +637,12 @@ def _await_code(auth_url: str, port: int, expected_state: str) -> str:  # pragma
     return result["code"]
 
 
-def login(endpoint: str | None = None) -> None:
+def login(endpoint: str | None = None) -> bool:
     """Run the interactive browser OAuth flow, persist tokens, and self-configure config.toml.
+
+    Returns True when it is SAFE to sync afterwards, False when a queued share from the previous
+    session could not be cleared (see `_discard_queued_shares`) - the caller must then skip the
+    post-login sync, since its drain would push those entries up as this account's rows.
 
     `endpoint` defaults to default_endpoint() (prod, or localhost under CONTEXER_ENV=local).
     On success this writes mode='team' + endpoint to config.toml, so the user never hand-edits
@@ -681,7 +685,7 @@ def login(endpoint: str | None = None) -> None:
     # sync off with nothing on screen pointing at why.
     config.write_team_profile(endpoint)  # self-configure: user never hand-edits config.toml
     dropped = _forget_account_caches()
-    queued = _discard_queued_shares()
+    queued, stranded = _discard_queued_shares()
     print("Logged in to Contexer Teams - team sync enabled. `contexer pull` / `contexer share` now use your account.")
     if dropped:
         print(f"Cleared {dropped} cached team file(s) from the previous session - "
@@ -689,6 +693,18 @@ def login(endpoint: str | None = None) -> None:
     if queued:
         print(f"Discarded {queued} share(s) still queued from the previous session - "
               "re-run `contexer share` to queue them again under this account.")
+    if stranded:
+        # The one cleanup failure that is not cosmetic: these entries carry no account identity,
+        # so the next drain would push them up as THIS account's rows. Say it on stderr, name the
+        # file, and return False so the caller skips the post-login sync that would drain them.
+        # A negative count means the discard itself blew up and the queue's state is unknown -
+        # say "some" rather than printing "-1 queued share(s)".
+        count = str(stranded) if stranded > 0 else "some"
+        print(f"WARNING: could not clear {count} queued share(s) at "
+              f"{store.STORE_DIR / '.outbox.json'} - they were queued before this login and "
+              "would be pushed to this account by the next sync. Team sync was skipped for "
+              "safety; delete that file, then run `contexer pull`.", file=sys.stderr)
+    return not stranded
 
 
 def _forget_account_caches() -> int:
@@ -712,8 +728,8 @@ def _forget_account_caches() -> int:
         return 0
 
 
-def _discard_queued_shares() -> int:
-    """Drop the durable share outbox on LOGIN; return how many entries went. Fail-soft.
+def _discard_queued_shares() -> tuple[int, int]:
+    """Drop the durable share outbox on LOGIN; return (discarded, still_queued). Fail-soft.
 
     Separate from `_forget_account_caches` because the two run at different moments and for
     opposite reasons. The caches are INBOUND display state and are cleared at login and logout
@@ -721,12 +737,18 @@ def _discard_queued_shares() -> int:
     moment it is in danger: `cli._post_login_sync` drains it seconds later using the credentials
     that were just stored, so the previous account's queued decisions would land in the new
     account's context. Nothing drains without credentials, so logout leaves it alone rather than
-    discarding a queue that was never at risk."""
+    discarding a queue that was never at risk.
+
+    Fail-soft, but NOT fail-open: an unexpected failure reports `still_queued = -1` rather than
+    the 0 that would read as "the queue is clear". The caller only tests it for truthiness, so a
+    negative reads as unsafe and skips the drain - which is the correct default when the state of
+    an outbound queue is unknown. Reporting 0 here would restore exactly the swallowed-error hole
+    this pair was rewritten to close."""
     from contexer import share
     try:
         return share.discard_outbox()
     except Exception:
-        return 0
+        return 0, -1
 
 
 def logout() -> bool:
