@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import threading
 import time
+import weakref
 from datetime import datetime, timezone
 
 from contexer import store
@@ -41,8 +43,10 @@ from contexer.repo_key import canonical_repo_key
 # only bound, so a long-offline stretch can't grow ~/.contexer/.outbox.json without limit.
 _OUTBOX_CAP = 50
 _OUTBOX_LOCK_SLUG = ".outbox"
-_OUTBOX_LOCAL_LOCK = threading.RLock()
-_OUTBOX_LOCK_STATE = threading.local()
+_OUTBOX_LOCAL_LOCK = threading.Lock()
+_OUTBOX_LOCK_DEPTH = contextvars.ContextVar("contexer_outbox_lock_depth", default=0)
+_OUTBOX_ASYNC_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_OUTBOX_ASYNC_LOCKS_GUARD = threading.Lock()
 
 # Max decisions per push_decisions batch. MUST stay <= contexer-teams' PUSH_DECISIONS_MAX (50):
 # the server rejects a larger array, so bulk shares / drains chunk into calls of this size. One
@@ -81,21 +85,43 @@ def _outbox_path():
 @contextlib.contextmanager
 def outbox_lock():
     """Serialize an account transition against outbox writers and drains."""
-    depth = getattr(_OUTBOX_LOCK_STATE, "depth", 0)
+    depth = _OUTBOX_LOCK_DEPTH.get()
     if depth:
-        _OUTBOX_LOCK_STATE.depth = depth + 1
+        token = _OUTBOX_LOCK_DEPTH.set(depth + 1)
         try:
             yield
         finally:
-            _OUTBOX_LOCK_STATE.depth -= 1
+            _OUTBOX_LOCK_DEPTH.reset(token)
         return
     with _OUTBOX_LOCAL_LOCK:
         with store._store_lock(_OUTBOX_LOCK_SLUG):
-            _OUTBOX_LOCK_STATE.depth = 1
+            token = _OUTBOX_LOCK_DEPTH.set(1)
             try:
                 yield
             finally:
-                _OUTBOX_LOCK_STATE.depth = 0
+                _OUTBOX_LOCK_DEPTH.reset(token)
+
+
+def _async_outbox_loop_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    with _OUTBOX_ASYNC_LOCKS_GUARD:
+        lock = _OUTBOX_ASYNC_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _OUTBOX_ASYNC_LOCKS[loop] = lock
+        return lock
+
+
+@contextlib.asynccontextmanager
+async def async_outbox_lock():
+    """Async task-safe wrapper for the same outbox critical section."""
+    if _OUTBOX_LOCK_DEPTH.get():
+        with outbox_lock():
+            yield
+        return
+    async with _async_outbox_loop_lock():
+        with outbox_lock():
+            yield
 
 
 def _read_outbox() -> tuple[list[dict], str | None]:
@@ -639,7 +665,7 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
 
 async def adrain_outbox(profile: Profile | None = None) -> int:
     """Locked wrapper for retrying queued pushes from async callers."""
-    with outbox_lock():
+    async with async_outbox_lock():
         return await _adrain_outbox_unlocked(profile)
 
 
@@ -815,7 +841,7 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
 
 async def share_async(repo_path: str, decision_id: str = "", *,
                       profile: Profile | None = None) -> str:
-    with outbox_lock():
+    async with async_outbox_lock():
         return await _share_async_unlocked(repo_path, decision_id, profile=profile)
 
 
@@ -848,7 +874,7 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
 
 async def share_ids_async(repo_path: str, decision_ids: list, *,
                           profile: Profile | None = None) -> str:
-    with outbox_lock():
+    async with async_outbox_lock():
         return await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
 
 

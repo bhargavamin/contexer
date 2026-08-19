@@ -1373,6 +1373,41 @@ def test_share_async_degraded_enqueues(tmp_repo, monkeypatch, capsys):
     assert "unreachable" in capsys.readouterr().err.lower()
 
 
+def test_share_async_serializes_overlapping_tasks(tmp_repo, monkeypatch):
+    store.update_decision(tmp_repo, "decision shared from overlapping tasks", "s1",
+                          subtype="architecture")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    calls = []
+
+    async def scenario():
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        class BlockingAsyncRemote:
+            async def apush_decision(self, **kw):
+                calls.append(kw)
+                if len(calls) == 1:
+                    first_entered.set()
+                    await release_first.wait()
+                return f"srv-{len(calls)}"
+
+            async def apush_decisions(self, kwargs_list):
+                return [f"srv-{i}" for i in range(len(kwargs_list))], []
+
+        monkeypatch.setattr(
+            share.RemoteStore, "from_profile", staticmethod(lambda p: BlockingAsyncRemote()))
+        first = asyncio.create_task(share.share_async(tmp_repo, profile=TEAM))
+        await asyncio.wait_for(first_entered.wait(), timeout=1)
+        second = asyncio.create_task(share.share_async(tmp_repo, profile=TEAM))
+        await asyncio.sleep(0.05)
+        assert len(calls) == 1
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
+
+    asyncio.run(scenario())
+    assert len(calls) == 2
+
+
 def test_adrain_outbox_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
                     "repo": "r", "rationale": None, "confidence": 80,
