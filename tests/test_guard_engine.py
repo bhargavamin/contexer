@@ -2315,6 +2315,48 @@ class TestUncheckedIsReported:
         assert result["unchecked"] == [{"file": "b.py", "reason": "budget"}]
         assert "error" not in result
 
+    def test_files_no_rule_selects_do_not_consume_the_scan_budget(self, repo, monkeypatch):
+        """Security: a path-scoped rule plus a pile of out-of-scope staged files must not
+        starve the file the rule DOES cover. Charging the budget for a file that is then
+        scanned against nothing let unrelated bulk (a data dump, a lockfile) push the one
+        selected file past the budget, where it was skipped with only a non-blocking
+        notice and its violation shipped."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
+                                paths="src/*.py")
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_SCAN_BYTES", 10)
+        # `data.json` sorts before `src/app.py`, so it is seen first and would have eaten
+        # the whole budget under the old accounting.
+        _write(repo, "data.json", "x" * 64)
+        _write(repo, "src/app.py", "# TODO fix this\n")
+        _git(repo, "add", "data.json", "src/app.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        assert [v["path"] for v in result["violations"]] == ["src/app.py"]
+        assert "unchecked" not in result
+
+    def test_a_file_no_rule_selects_is_never_read(self, repo, monkeypatch):
+        """The same rule, as an efficiency property: `git show` is not spent on a file no
+        armed rule would be run against."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
+                                paths="src/*.py")
+        _write(repo, "data.json", "{}\n")
+        _write(repo, "src/app.py", "clean\n")
+        _git(repo, "add", "data.json", "src/app.py")
+
+        seen = []
+        real = guard_engine._staged_content
+
+        def spy(repo_arg, path, *a, **k):
+            seen.append(path)
+            return real(repo_arg, path, *a, **k)
+        monkeypatch.setattr(guard_engine, "_staged_content", spy)
+
+        guard_engine._guard_violations(str(repo), ["data.json", "src/app.py"],
+                                        deadline=time.time() + 30)
+        assert seen == ["src/app.py"]
+
     def test_a_readable_file_alongside_an_over_cap_one_still_blocks(self, repo, monkeypatch):
         self._armed(repo)
         monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)

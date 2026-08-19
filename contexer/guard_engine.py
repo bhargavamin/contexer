@@ -924,12 +924,25 @@ def _guard_violations(repo: str, staged: list[str],
     scanned = 0
 
     def _note(relpath: str, reason: str) -> None:
-        if reason in _GUARD_UNCHECKED_REPORTED and any(_rule_selects(r, relpath) for r in rules):
+        if reason in _GUARD_UNCHECKED_REPORTED:
             unchecked.append({"file": relpath, "reason": reason})
 
     for relpath in staged:
         if time.time() > deadline:
             return [], [], True
+        # Scope is decided ONCE, here, before the file is read or charged to the budget,
+        # and the rest of the loop trusts it. Applicability used to be settled inside
+        # `_rule_violations` instead, which meant a file no rule selects was still
+        # `git show`n and still added to `scanned` before being scanned against nothing.
+        # That is a security bug, not just waste: arm one rule `--paths "src/*.py"`, stage
+        # a few MB of `data/*.json` next to one `src/app.py` holding a secret, and the
+        # out-of-scope bulk exhausts _GUARD_MAX_SCAN_BYTES first, so the one file the rule
+        # covers is skipped with a non-blocking notice and its violation ships. Deciding
+        # once also keeps this and the `unchecked` gate from being two rules that can
+        # drift, which is why `_note` no longer re-tests it.
+        selectors = [r for r in rules if _rule_selects(r, relpath)]
+        if not selectors:
+            continue
         if scanned >= _GUARD_MAX_SCAN_BYTES:
             _note(relpath, "budget")
             continue
@@ -940,7 +953,7 @@ def _guard_violations(repo: str, staged: list[str],
         if not content:
             continue
         scanned += len(content)
-        for rule in rules:
+        for rule in selectors:
             if time.time() > deadline:
                 return [], [], True
             violations.extend(_rule_violations([rule], relpath, content))
