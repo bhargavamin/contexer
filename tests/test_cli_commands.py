@@ -921,6 +921,72 @@ class TestGuardDispatchAndExitCodes:
         assert capsys.readouterr().err.strip() == \
             "contexer guard: internal error, skipping checks"
 
+    def test_unchecked_files_are_named_on_stderr_and_exit_stays_0(
+            self, guard_repo, monkeypatch, capsys):
+        """A staged file no armed rule could be read is a gap in the report, so it goes
+        to stderr and never changes the exit code. Silence here is what let an over-cap
+        file pass as a clean guard run."""
+        from contexer import guard_engine
+        monkeypatch.setattr(guard_engine, "guard_staged", lambda *a, **k: {
+            "advisories": [], "violations": [],
+            "unchecked": [{"file": "contexer/store.py", "reason": "too-large"}]})
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        err = capsys.readouterr().err.strip()
+        assert err == ("contexer guard: 1 staged file(s) not checked by armed rules: "
+                       "contexer/store.py (too-large)")
+
+    def test_unchecked_listing_is_capped_with_a_remainder_count(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import guard_engine
+        rows = [{"file": f"f{i}.py", "reason": "too-large"} for i in range(7)]
+        monkeypatch.setattr(guard_engine, "guard_staged", lambda *a, **k: {
+            "advisories": [], "violations": [], "unchecked": rows})
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 0
+        err = capsys.readouterr().err.strip()
+        assert err.startswith("contexer guard: 7 staged file(s) not checked")
+        assert "+2 more" in err and "f4.py (too-large)" in err and "f5.py" not in err
+
+    def test_unchecked_does_not_suppress_a_blocking_violation(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import guard_engine
+        monkeypatch.setattr(guard_engine, "guard_staged", lambda *a, **k: {
+            "advisories": [],
+            "violations": [{"path": "a.py", "line": 1, "decision_id": "d" * 32,
+                            "title": "No TODOs", "message": ""}],
+            "unchecked": [{"file": "big.py", "reason": "too-large"}]})
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        # The notice is additive: a real violation still blocks the commit.
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert "not checked by armed rules" in err
+        assert "violates decision" in out
+
+    def test_a_raising_unchecked_notice_never_swallows_a_violation(
+            self, guard_repo, monkeypatch, capsys):
+        """_guard_run's outer handler degrades to exit 0, so an exception while rendering
+        a purely informational notice would otherwise pass a commit that a Tier-2 rule
+        blocks. The notice is guarded on its own for exactly that reason."""
+        from contexer import cli as cli_mod
+        from contexer import guard_engine
+
+        def boom(_unchecked):
+            raise RuntimeError("malformed row")
+        monkeypatch.setattr(cli_mod, "_print_guard_unchecked", boom)
+        monkeypatch.setattr(guard_engine, "guard_staged", lambda *a, **k: {
+            "advisories": [],
+            "violations": [{"path": "a.py", "line": 1, "decision_id": "d" * 32,
+                            "title": "No TODOs", "message": ""}],
+            "unchecked": [{"file": "big.py", "reason": "too-large"}]})
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "guard")
+        assert exc.value.code == 1, "the blocking path must survive an advisory failure"
+        assert "violates decision" in capsys.readouterr().out
+
     def test_explain_shows_rejected_with_reason(self, guard_repo, monkeypatch, capsys):
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"],
                created_by="ai", status="suggested")

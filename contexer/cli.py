@@ -1223,7 +1223,12 @@ def _safe_print(text: str = "", **kwargs) -> None:
     try:
         print(text, **kwargs)
     except UnicodeEncodeError:
-        enc = sys.stdout.encoding or "utf-8"
+        # The encoding of the stream actually being written to, not stdout's: callers
+        # pass `file=sys.stderr` (the guard's unchecked notice), and the two streams can
+        # carry different encodings, in which case re-encoding via stdout's could raise
+        # a second time inside the handler for the first.
+        stream = kwargs.get("file") or sys.stdout
+        enc = getattr(stream, "encoding", None) or "utf-8"
         print(text.encode(enc, "backslashreplace").decode(enc, "replace"), **kwargs)
 
 
@@ -1254,6 +1259,25 @@ def _print_guard_violations(violations: list) -> None:
     _safe_print()
     _safe_print("To bypass this commit: CONTEXER_GUARD=0 git commit …")
     _safe_print("To remove the rule: contexer guard disarm <id>")
+
+
+_GUARD_UNCHECKED_SHOWN = 5   # names listed before "+N more", mirroring the advisory cap
+
+
+def _print_guard_unchecked(unchecked: list) -> None:
+    """Staged files no armed rule could be run against, on stderr, never affecting the
+    exit code. A check that did not happen must not read as a check that found nothing:
+    the engine used to skip an over-cap or unreadable file with no trace at all, so a
+    commit carrying a secret inside `contexer/store.py` passed as clean. Same
+    honest-on-exhaustion rule as `_budgeted`'s "(git is slow ...)" row and
+    `anchors._BudgetExceeded`. Capped like the advisory block, since the interesting
+    part is that a gap exists, not the full list."""
+    shown = unchecked[:_GUARD_UNCHECKED_SHOWN]
+    names = ", ".join(f"{u.get('file')} ({u.get('reason')})" for u in shown)
+    if len(unchecked) > len(shown):
+        names += f", +{len(unchecked) - len(shown)} more"
+    _safe_print(f"contexer guard: {len(unchecked)} staged file(s) not checked by armed "
+                f"rules: {names}", file=sys.stderr)
 
 
 def _print_guard_explain(candidates: list) -> None:
@@ -1320,6 +1344,18 @@ def _guard_run(rest: list) -> None:
 
         advisories = result.get("advisories") or []
         violations = result.get("violations") or []
+        # Printed first, since a run that reports nothing else is exactly when the
+        # developer most needs to know a file went unscanned. Guarded on its OWN,
+        # though: this function's outer handler degrades to exit 0, so without this an
+        # exception while rendering an informational notice (a malformed row, an
+        # encoding the fallback still cannot write) would swallow the blocking violation
+        # printed below it and pass the commit. A purely advisory line must never sit on
+        # the critical path of the one output that changes the exit code.
+        try:
+            if result.get("unchecked"):
+                _print_guard_unchecked(result["unchecked"])
+        except Exception:
+            pass
         if advisories:
             _print_guard_advisories(advisories, result.get("total_advisories"))
         if violations:
