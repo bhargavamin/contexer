@@ -948,6 +948,20 @@ class TestGuardDismiss:
         assert "Dismissed" in capsys.readouterr().out
         assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
 
+    def test_all_digit_hash_form_acts_as_hash_not_index(self, guard_repo, monkeypatch, capsys):
+        from contexer import store, guard_engine
+        _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
+        _ggit(guard_repo, "add", "auth/jwt.py")
+        monkeypatch.setattr(guard_engine, "_guard_hash", lambda *_a: "39721694653")
+        h = store.guard_candidates(str(guard_repo))[0]["hash"]
+
+        monkeypatch.setattr("builtins.input",
+                             lambda *_a: pytest.fail("hash form must not prompt"))
+        _run_main(monkeypatch, "guard", "--dismiss", h)
+        assert "Dismissed" in capsys.readouterr().out
+        assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
+
     def test_dismiss_uses_same_resolved_repo_as_candidates_lookup(
             self, guard_repo, monkeypatch, capsys):
         """Regression: dismiss_guard, unlike arm_guard/disarm_guard, does not call

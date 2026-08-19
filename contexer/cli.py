@@ -1357,7 +1357,10 @@ def _guard_dismiss(rest: list) -> None:
     # pair found under one repo against a completely different sidecar file.
     repo = _cli_repo()
 
-    if arg.isdigit():
+    candidates = guard_engine.guard_candidates(repo, paths, explain=True)
+    cand = next((c for c in candidates if c.get("hash") == arg), None)
+
+    if cand is None and arg.isdigit():
         candidates = guard_engine.guard_candidates(repo, paths, explain=False)
         idx = int(arg)
         if idx < 1 or idx > len(candidates):
@@ -1374,13 +1377,10 @@ def _guard_dismiss(rest: list) -> None:
         if reply not in ("y", "yes"):
             print("Cancelled.")
             return
-    else:
-        candidates = guard_engine.guard_candidates(repo, paths, explain=True)
-        cand = next((c for c in candidates if c.get("hash") == arg), None)
-        if cand is None:
-            print(f"contexer guard --dismiss: hash {arg!r} not found among "
-                  f"current candidates", file=sys.stderr)
-            sys.exit(1)
+    elif cand is None:
+        print(f"contexer guard --dismiss: hash {arg!r} not found among "
+              f"current candidates", file=sys.stderr)
+        sys.exit(1)
 
     guard_engine.dismiss_guard(repo, cand["decision_id"], cand["file"])
     print(f"Dismissed [{cand['decision_id'][:8]}] for {cand['file']}.")
