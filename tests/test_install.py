@@ -18,7 +18,13 @@ def isolated_config(tmp_path, monkeypatch):
 
 @pytest.fixture
 def clean_home(tmp_path, monkeypatch):
+    """An isolated home AND an isolated cwd. Both are required: install()/uninstall() run
+    clean_legacy_repo_settings against store._git_root(os.getcwd()), which the injected HOME
+    does not reach, so without the chdir these tests rewrite this checkout's own
+    .claude/settings.json (issue #185). tmp_path is untracked, so its git root carries nothing
+    of ours. Tests needing a specific cwd chdir again themselves."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
