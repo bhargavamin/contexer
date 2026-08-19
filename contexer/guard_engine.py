@@ -28,7 +28,39 @@ from contexer import store           # module object, not `from`-imports: see do
 # Task 1 of the commit-time guard feature (later tasks hash staged content against
 # stored decisions). All fail-soft: any git failure -> empty result, never raise.
 
-_GUARD_MAX_FILE_BYTES = 200_000
+# Above this, a staged file is not scanned at all. Raised from 200_000, which silently
+# disqualified this repo's own two largest tracked files (contexer/store.py at 376KB and
+# tests/test_store.py at 390KB, the two most-edited files here), so an armed Tier-2 rule
+# could not see a secret committed inside either.
+#
+# 1MB, not more, and the number comes from the EXPENSIVE rule type rather than the cheap
+# one. A `regex` rule compiles one pattern; a `secret` rule runs all 14 of
+# redact.HIGH_CONFIDENCE_PATTERNS over the whole content, which measures ~155ms per MB
+# (57ms for store.py's 374KB, 306ms at 2MB) against _GUARD_TIME_BUDGET's 2000ms. So the
+# per-file cost is ~57x a four-regex probe over the same bytes, and a 2MB cap would let
+# SEVEN staged files exhaust the whole budget. That matters because a budget overrun is
+# not a per-file skip: it discards every violation gathered so far, including the ones
+# found in the small readable files, and reports only "internal error". 1MB clears this
+# repo's worst file with 2.5x headroom while keeping one pathological file well short of
+# the budget on its own.
+_GUARD_MAX_FILE_BYTES = 1_000_000
+
+# Aggregate scanned bytes per run, the cost guard the per-file cap was previously being
+# asked to double as. Without it, N files each just under the per-file cap still add up
+# to a wall-clock overrun, and an overrun FAILS OPEN by discarding everything (see above)
+# rather than reporting what it managed to check. This budget stops scanning first and
+# names the files it did not reach, so a big commit degrades to a partial-but-honest
+# report instead of a silent total one. 4MB is ~620ms of worst-case secret scanning,
+# leaving the wall-clock budget as headroom for Tier-1 pairing rather than as the thing
+# that actually fires.
+_GUARD_MAX_SCAN_BYTES = 4_000_000
+
+# Why a staged file was not scanned, as a stable token. `binary` is deliberately NOT
+# reported to the developer: a regex over binary content is meaningless, so skipping a
+# PNG is the correct outcome rather than a gap worth a line on every commit that stages
+# one. The rest each mean a file that COULD have been checked was not: `too-large` and
+# `unreadable` come from `_staged_content`, `budget` from _GUARD_MAX_SCAN_BYTES above.
+_GUARD_UNCHECKED_REPORTED = ("too-large", "unreadable", "budget")
 
 
 def _staged_files(repo: str) -> list[str]:
@@ -42,8 +74,8 @@ def _staged_files(repo: str) -> list[str]:
     choice: without it git C-QUOTES any path holding a non-ASCII byte, a quote,
     or a backslash — `"caf\\303\\251/m\\303\\263dulo.py"` — and that quoted
     spelling survives canonicalization intact, only to make the later
-    `git show :<path>` fail. _staged_content then returns "" and every armed
-    Tier-2 rule silently skips the file, so a secret in it ships. `-z` turns
+    `git show :<path>` fail. _staged_content then reports `unreadable` and every
+    armed Tier-2 rule skips the file, so a secret in it ships. `-z` turns
     quoting off entirely. That means reading raw bytes (the same subprocess
     shape _staged_content already uses) and decoding each path AFTER the split,
     since the separator is a byte.
@@ -52,9 +84,9 @@ def _staged_files(repo: str) -> list[str]:
     byte sequence that isn't valid UTF-8 (rare, but real — a stray Latin-1 export,
     a broken merge tool) would otherwise collapse to U+FFFD, an information-losing
     spelling that can no longer round-trip back to the real path. `git show
-    :<path>` on that mangled spelling then fails, and _staged_content's "" return
-    makes every armed regex/secret rule silently skip the file — the exact
-    silent-bypass class this whole module exists to close. surrogateescape keeps
+    :<path>` on that mangled spelling then fails, and _staged_content's `unreadable`
+    report makes every armed regex/secret rule skip the file — the exact bypass
+    class this whole module exists to close. surrogateescape keeps
     each unmappable byte recoverable (as a lone surrogate codepoint), so
     _staged_content can re-encode the SAME bytes back out via os.fsencode and the
     lookup succeeds."""
@@ -71,15 +103,41 @@ def _staged_files(repo: str) -> list[str]:
     return [p.decode("utf-8", errors="surrogateescape") for p in out.stdout.split(b"\0") if p]
 
 
-def _staged_content(repo: str, path: str) -> str:
+def _staged_content(repo: str, path: str) -> tuple[str, str | None, str | None]:
     """Staged (index) content of `path` via `git show :<path>` — deliberately NOT
     the working-tree version, since the guard must judge what's about to be
-    committed. `""` when: git fails, the content exceeds _GUARD_MAX_FILE_BYTES, or
-    a null byte appears in the first 1024 bytes (binary skip — a regex over binary
-    content can false-match encoded bytes). Reads raw bytes directly rather than
-    through the text-mode `_git` helper, because the binary/size checks need the
-    untouched byte stream; only decodes utf-8 (errors="replace") once those checks
-    pass. Fail-soft: any failure returns "", never raises.
+    committed. Returns `(text, reason, fingerprint)`.
+
+    `reason` is None when the text is the real staged content, else the token saying
+    why there is none — `unreadable` (git failed), `too-large` (over
+    _GUARD_MAX_FILE_BYTES), or `binary` (a null byte in the first 1024 bytes, since a
+    regex over binary content can false-match encoded bytes).
+
+    `fingerprint` is the raw bytes' sha1 and is present whenever git READ the file, so
+    it is None only for `unreadable`. The distinction is the whole point: "I could not
+    scan this" and "I do not know what this is" are different, and only the second one
+    should stop the throttle from working. An over-cap or binary file still has a known,
+    comparable identity, so its Tier-1 pair still throttles normally instead of
+    re-advising on every commit.
+
+    Reads raw bytes directly rather than through the text-mode `_git` helper, because
+    the binary/size checks need the untouched byte stream; only decodes utf-8
+    (errors="replace") once those checks pass. Fail-soft: any failure returns
+    `("", "unreadable", None)`, never raises.
+
+    The `reason` half is not decoration. This used to return a bare `""` for all
+    three failures AND for a genuinely empty staged file, so every caller read
+    "I could not read this" as "there is nothing here" — the same unreadable-vs-empty
+    collapse `store.load_diagnostics`, `store._read_store`, `store._read_global` and
+    `store._inspect_store_file` all exist to prevent, and it cost two real things.
+    Tier-2's `_guard_violations` skipped the file with no trace, so an armed rule
+    silently passed a file it never saw (this module's own docstring above already
+    names that outcome for the C-quoting cause, which `-z` fixed; the size cause was
+    not fixed). And Tier-1's throttle hashed the `""`, freezing the pair on the
+    empty-string sha1 so it could never re-advise however much the file changed.
+    Both callers now branch on `reason` instead of on emptiness. `(value, error)` is
+    the shape the four store readers named above already use, so this adds no new
+    vocabulary.
 
     `path` may carry surrogate-escaped bytes from _staged_files's
     surrogateescape decode (an invalid-UTF-8 filename). A plain f-string arg
@@ -96,15 +154,16 @@ def _staged_content(repo: str, path: str) -> str:
             capture_output=True, timeout=store._GIT_FAST_TIMEOUT,
         )
     except Exception:
-        return ""
+        return "", "unreadable", None
     if out.returncode != 0:
-        return ""
+        return "", "unreadable", None
     data = out.stdout
+    fingerprint = _guard_content_hash(data)
     if len(data) > _GUARD_MAX_FILE_BYTES:
-        return ""
+        return "", "too-large", fingerprint
     if b"\x00" in data[:1024]:
-        return ""
-    return data.decode("utf-8", errors="replace")
+        return "", "binary", fingerprint
+    return data.decode("utf-8", errors="replace"), None, fingerprint
 
 
 def _merge_in_progress(repo: str) -> bool:
@@ -254,12 +313,23 @@ def _guard_hash(decision_id: str, relpath: str) -> str:
         f"{decision_id}\n{relpath}".encode("utf-8", "surrogateescape")).hexdigest()[:12]
 
 
-def _guard_content_hash(text: str) -> str:
+def _guard_content_hash(data: bytes) -> str:
     """Full sha1 hex digest of staged file content — the throttle key's value.
     Deliberately untruncated (unlike _guard_hash): this hashes arbitrary file
     content, not a short identity string, so the full digest is cheap insurance
-    against collision."""
-    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    against collision.
+
+    Takes the RAW staged bytes, not decoded text, so a fingerprint exists for every
+    file git could read — including one the scanner then declines (over the size cap,
+    or binary). Those are not unknown content: git handed the bytes over and only
+    scannability was in question, so they can and must still answer the throttle's
+    "has this changed since we last advised". Hashing decoded text instead left them
+    with no fingerprint at all, which made them un-throttleable and un-stampable, so
+    the pair re-advised on every single commit forever. For a valid-UTF-8 file this
+    produces the IDENTICAL digest to the previous `text.encode("utf-8", "replace")`
+    form, so on-disk throttle stamps carry over untouched; only a file whose bytes are
+    not valid UTF-8 (where the decode was lossy) gets one benign re-advise."""
+    return hashlib.sha1(data).hexdigest()
 
 
 def _guard_dismissed_path(repo_path: str) -> Path:
@@ -501,11 +571,18 @@ def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | N
         return pairs
     dismissed = _dismissed_guard(repo_path)
     advised = _guard_advised(repo_path)
-    content_hashes: dict[str, str] = {}
+    content_hashes: dict[str, str | None] = {}
 
-    def _content_hash_for(relpath: str) -> str:
+    def _content_hash_for(relpath: str) -> str | None:
+        """The staged blob's fingerprint, or None when git could not read the file at
+        all. None is NOT interchangeable with the hash of "": the throttle's whole
+        question is "has this file changed since we last advised on it", and an
+        unreadable file cannot answer it. Hashing the old `""` return answered "no,
+        unchanged" for every unreadable file forever, which froze the pair. Note this
+        is the fingerprint, not a hash of the scanned text, so a file that was read but
+        declined as too-large or binary still answers normally and still throttles."""
         if relpath not in content_hashes:
-            content_hashes[relpath] = _guard_content_hash(_staged_content(repo_path, relpath))
+            content_hashes[relpath] = _staged_content(repo_path, relpath)[2]
         return content_hashes[relpath]
 
     out: list[dict] = []
@@ -517,7 +594,12 @@ def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | N
             out.append({**p, "reason": "rejected: dismissed", "emitted": False})
             continue
         stamped = advised.get(p["hash"])
-        if stamped is not None and stamped == _content_hash_for(p["file"]):
+        # Short-circuit order is load-bearing (see the docstring's "only for a pair the
+        # throttle actually has a stamp for"): no stamp means no `git show` at all.
+        # An unreadable file (hash None) is deliberately NOT throttled — unproven
+        # sameness must surface, not suppress.
+        current = _content_hash_for(p["file"]) if stamped is not None else None
+        if stamped is not None and current is not None and stamped == current:
             out.append({**p, "reason": "rejected: throttled (content unchanged)",
                         "emitted": False})
             continue
@@ -746,6 +828,19 @@ def _armed_rules(entries: list[dict]) -> list[dict]:
     return [e for e in entries if e.get("guard_check") and store._entry_status(e) == "approved"]
 
 
+def _rule_selects(rule: dict, path: str) -> bool:
+    """Whether one armed rule's `paths` glob applies to `path` (no glob = every file).
+
+    Extracted so the ONE definition serves both callers rather than each keeping its own
+    copy: `_rule_violations` uses it to decide what to scan, and `_guard_violations` uses
+    it to decide whether an unscannable file is worth REPORTING as unchecked. Without it
+    there, a rule armed `--paths "src/**/*.py"` made a staged 4MB `data/dump.json` print
+    a "not checked by armed rules" line on every commit, naming a gap that does not exist
+    because no armed rule would ever have been run against that file."""
+    paths_glob = (rule.get("guard_check") or {}).get("paths") or ""
+    return not paths_glob or fnmatch.fnmatch(path, paths_glob)
+
+
 def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
     """Evaluate every entry in `rules` (as returned by _armed_rules) against one
     staged file's content. `path` must already be _guard_relpath's canonical
@@ -764,8 +859,7 @@ def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
     out: list[dict] = []
     for rule in rules:
         gc = rule.get("guard_check") or {}
-        paths_glob = gc.get("paths") or ""
-        if paths_glob and not fnmatch.fnmatch(path, paths_glob):
+        if not _rule_selects(rule, path):
             continue
         decision_id = rule.get("id", "")
         title = rule.get("title") or store._derive_title(store._current_content(rule))
@@ -791,32 +885,66 @@ def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
     return out
 
 
-def _guard_violations(repo: str, staged: list[str], deadline: float) -> tuple[list[dict], bool]:
+def _guard_violations(repo: str, staged: list[str],
+                      deadline: float) -> tuple[list[dict], list[dict], bool]:
     """Run every armed rule (repo + global stores) against every staged file,
     checked against `deadline` (an absolute time.time() value) between files AND
     between rules — Python's `re` has no per-call timeout, so this is the only
     budget enforcement possible; a single catastrophically backtracking regex
     can still overrun mid-match, which is the documented, deliberate residual
     risk (fail OPEN when that happens, never partial-block). Returns
-    (violations, budget_exceeded); on overrun the caller discards whatever
-    violations were gathered so far — an overrun run reports nothing, not a
-    partial scan, so a commit is never blocked on an incomplete evaluation."""
+    (violations, unchecked, budget_exceeded); on overrun the caller discards
+    whatever violations were gathered so far — an overrun run reports nothing, not a
+    partial scan, so a commit is never blocked on an incomplete evaluation.
+
+    `unchecked` is the honesty half: one `{"file", "reason"}` row per staged file an
+    armed rule could not be run against, so a skip is REPORTED rather than passing as
+    a clean result. Same principle as `anchors._BudgetExceeded` and `cli._budgeted`'s
+    "(git is slow, checks skipped this run)" row: a check that did not happen must not
+    read as a check that found nothing. Three disciplines keep it signal rather than
+    nagging. Only reasons in _GUARD_UNCHECKED_REPORTED qualify, so a staged PNG stays
+    silent. It is empty when no rule is armed, which is accurate rather than a gap:
+    nothing needed checking, so nothing went unchecked. And a file is reported only when
+    some armed rule's `paths` glob actually SELECTS it (`_rule_selects`), so a rule
+    scoped to `src/**/*.py` does not make an unscannable `data/dump.json` look like
+    missed coverage.
+
+    _GUARD_MAX_SCAN_BYTES bounds the total content scanned per run, and its exhaustion
+    is reported through the same list (reason `budget`) rather than being left to the
+    wall-clock deadline. That ordering is deliberate: the deadline fails OPEN by
+    discarding every violation gathered so far, so reaching it costs the report even for
+    the small files that scanned cleanly, whereas stopping on bytes keeps those
+    violations and names only what it did not reach."""
     rules = (_armed_rules(store._load(repo).get("entries") or [])
              + _armed_rules(store._load_global().get("entries") or []))
     if not rules:
-        return [], False
+        return [], [], False
     violations: list[dict] = []
+    unchecked: list[dict] = []
+    scanned = 0
+
+    def _note(relpath: str, reason: str) -> None:
+        if reason in _GUARD_UNCHECKED_REPORTED and any(_rule_selects(r, relpath) for r in rules):
+            unchecked.append({"file": relpath, "reason": reason})
+
     for relpath in staged:
         if time.time() > deadline:
-            return [], True
-        content = _staged_content(repo, relpath)
+            return [], [], True
+        if scanned >= _GUARD_MAX_SCAN_BYTES:
+            _note(relpath, "budget")
+            continue
+        content, reason, _fingerprint = _staged_content(repo, relpath)
+        if reason is not None:
+            _note(relpath, reason)
+            continue
         if not content:
             continue
+        scanned += len(content)
         for rule in rules:
             if time.time() > deadline:
-                return [], True
+                return [], [], True
             violations.extend(_rule_violations([rule], relpath, content))
-    return violations, False
+    return violations, unchecked, False
 
 
 def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
@@ -842,7 +970,13 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     only when capping actually happened) -> best-effort stamp the throttle for
     exactly the advisories that surfaced (a pair pushed past the cap is NOT
     stamped, so it's free to surface next run once something ahead of it
-    clears)."""
+    clears).
+
+    "unchecked" carries the staged files an armed rule could not be run against
+    (see _guard_violations), and like "total_advisories" the key is present only
+    when there is something to report, so a clean run's dict shape is unchanged.
+    It never affects the exit code: a file the guard could not read is a gap in
+    the report, not a violation to block on."""
     try:
         if os.environ.get("CONTEXER_GUARD") == "0":
             return {"advisories": [], "violations": [], "skipped": "env"}
@@ -852,23 +986,38 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
         if not staged:
             return {"advisories": [], "violations": []}
 
-        violations, budget_exceeded = _guard_violations(repo, staged, deadline)
+        violations, unchecked, budget_exceeded = _guard_violations(repo, staged, deadline)
         if budget_exceeded:
             return {"advisories": [], "violations": [], "error": True}
 
         if _merge_in_progress(repo):
-            return {"advisories": [], "violations": violations, "skipped": "merge"}
+            result: dict = {"advisories": [], "violations": violations, "skipped": "merge"}
+            if unchecked:
+                result["unchecked"] = unchecked
+            return result
 
         evaluated = _guard_evaluate(repo, staged, deadline=deadline)
         surfaced = [p for p in evaluated if p["emitted"]]
         capped = surfaced[:_GUARD_MAX_ADVISORIES]
-        result: dict = {"advisories": capped, "violations": violations}
+        result = {"advisories": capped, "violations": violations}
+        if unchecked:
+            result["unchecked"] = unchecked
         if len(surfaced) > len(capped):
             result["total_advisories"] = len(surfaced)
         if capped:
-            stamps = {p["hash"]: _guard_content_hash(_staged_content(repo, p["file"]))
-                      for p in capped}
-            _guard_stamp_advised(repo, stamps)
+            # Keyed on the fingerprint, so a file that was read but declined as
+            # too-large or binary IS stamped and throttles like any other. Only a file
+            # git could not read at all is left unstamped: the stamp asserts "we advised
+            # on exactly this content", and there is no content to say that about.
+            # Stamping the empty-string hash there is what froze such a pair permanently,
+            # since every later unreadable read matched it.
+            stamps = {}
+            for p in capped:
+                fingerprint = _staged_content(repo, p["file"])[2]
+                if fingerprint is not None:
+                    stamps[p["hash"]] = fingerprint
+            if stamps:
+                _guard_stamp_advised(repo, stamps)
         return result
     except Exception:
         return {"advisories": [], "violations": [], "error": True}
