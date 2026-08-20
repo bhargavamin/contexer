@@ -2032,9 +2032,11 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
             origin = existing.get("team_reconciliation") or {}
             return bool(origin.get("team_head") == team_head and team_head)
         last = entry.get("last_team_reconciliation")
-        if (isinstance(last, dict) and team_head and last.get("team_head") == team_head
-                and _current_content(entry) == _normalize_content(content)):
-            return True
+        if isinstance(last, dict) and team_head and last.get("team_head") == team_head:
+            if last.get("outcome") == "dismissed":
+                return True
+            if _current_content(entry) == _normalize_content(content):
+                return True
         now = datetime.now(timezone.utc).isoformat()
         proposal = _build_proposal(
             entry, content, entry.get("subtype", ""), f"team:{team_id}", now,
@@ -2682,6 +2684,12 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
             return True, "Skipped - the suggested update is kept for later review.", False
         if action in ("dismiss", "ignore"):
             rev = entry.get("revision", 1)
+            prop = entry.get("proposed_revision") or {}
+            origin = prop.get("team_reconciliation")
+            if isinstance(origin, dict):
+                entry["last_team_reconciliation"] = {
+                    **origin, "outcome": "dismissed",
+                    "at": datetime.now(timezone.utc).isoformat()}
             entry.pop("proposed_revision", None)
             entry.pop("conflict_memo", None)  # the pair it resolved no longer exists
             return True, f"Dismissed - kept current revision {rev}.", True
