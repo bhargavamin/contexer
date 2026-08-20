@@ -1097,6 +1097,19 @@ def _unsupported_capability_error(exc: RemoteStoreError) -> bool:
         "unknown tool", "tool not found", "method not found", "-32601", "get_capabilities failed"))
 
 
+def _resolve_reconciliation_team(remote: RemoteStore, requested: str) -> RemoteTeam | str:
+    try:
+        teams = remote.list_teams()
+    except RemoteStoreError as exc:
+        if requested and _unsupported_capability_error(exc):
+            return RemoteTeam(requested, requested, "member")
+        if _unsupported_capability_error(exc):
+            return ("This team server does not support team discovery. "
+                    "Run reconcile again with `--team TEAM_ID`.")
+        return "Could not list shared teams (see the warning above); nothing was submitted."
+    return _select_team(teams, requested)
+
+
 def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
                            profile: Profile | None = None) -> ReconciliationPlan | str:
     """Resolve a target and fetch the authoritative preview without changing remote state."""
@@ -1114,20 +1127,9 @@ def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
         capabilities = remote.get_capabilities()
     except RemoteStoreError as exc:
         if _unsupported_capability_error(exc):
-            try:
-                teams = remote.list_teams()
-            except RemoteStoreError as team_exc:
-                if team and _unsupported_capability_error(team_exc):
-                    target = RemoteTeam(team, team, "member")
-                elif _unsupported_capability_error(team_exc):
-                    return ("This team server does not support team discovery. "
-                            "Run reconcile again with `--team TEAM_ID`.")
-                else:
-                    return "Could not list shared teams (see the warning above); nothing was submitted."
-            else:
-                target = _select_team(teams, team)
-                if isinstance(target, str):
-                    return target
+            target = _resolve_reconciliation_team(remote, team)
+            if isinstance(target, str):
+                return target
             return ReconciliationPlan(
                 dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
         return f"Could not discover reconciliation capabilities: {exc}. Nothing was submitted."
@@ -1135,11 +1137,7 @@ def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
     protocol = capabilities.decision_reconciliation
     atomic = bool(protocol and protocol.version >= 1
                   and protocol.atomic_submit and protocol.preview)
-    try:
-        teams = remote.list_teams()
-    except RemoteStoreError:
-        return "Could not list shared teams (see the warning above); nothing was submitted."
-    target = _select_team(teams, team)
+    target = _resolve_reconciliation_team(remote, team)
     if isinstance(target, str):
         return target
     if not atomic:

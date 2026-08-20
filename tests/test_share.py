@@ -420,6 +420,39 @@ def test_reconcile_falls_back_with_explicit_team_when_discovery_is_missing(
     assert "candidate-1" in out
 
 
+def test_reconcile_falls_back_with_explicit_team_when_capabilities_are_generic(
+        tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "support generic capability servers", "s1",
+                                   subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+
+    class Fake:
+        def __init__(self):
+            self.events = []
+
+        def get_capabilities(self):
+            return remote.ServerCapabilities(None)
+
+        def list_teams(self):
+            raise remote.RemoteStoreError("Unknown tool: list_teams")
+
+        def push_decision(self, **kwargs):
+            self.events.append(("push", kwargs["decision_id"]))
+            return "personal-1"
+
+        def submit_decision_to_team(self, decision_id, team_id):
+            self.events.append(("submit", decision_id, team_id))
+            return remote.TeamShareResult(
+                "submitted", "update", "candidate-1",
+                remote.RemoteTeam(team_id, team_id, "member"))
+
+    fake = Fake()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    out = share.reconcile(tmp_repo, did, team="team-legacy", profile=TEAM)
+    assert fake.events == [("push", did), ("submit", did, "team-legacy")]
+    assert "candidate-1" in out
+
+
 def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monkeypatch):
     operation = {
         "operation": "submit_team_decision", "idempotency_key": "idem-stable",
