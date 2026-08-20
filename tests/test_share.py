@@ -289,8 +289,9 @@ def test_cli_reconcile_confirms_and_routes_team(monkeypatch, capsys):
 
 
 def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, monkeypatch):
-    _, did = store.update_decision(tmp_repo, "keep atomic retries identical", "s1",
-                                   subtype="constraint")
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    _, did = store.update_decision(
+        tmp_repo, f"keep atomic retries identical with {secret}", "s1", subtype="constraint")
     monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
 
     class Fake:
@@ -318,6 +319,8 @@ def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, m
     assert queued[0]["expected_team_head"] == "th-1"
     assert queued[0]["idempotency_key"]
     assert queued[0]["stage"] == "confirmed"
+    assert secret not in queued[0]["payload"]["content"]
+    assert "[REDACTED:aws_key]" in queued[0]["payload"]["content"]
 
 
 def test_heads_changed_is_not_blindly_queued(tmp_repo, monkeypatch):

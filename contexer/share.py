@@ -45,6 +45,7 @@ from contexer.remote import (
     RemoteTeam,
     RemoteUnavailableError,
     TeamSubmissionResult,
+    _reconciliation_wire_body,
     awith_local_fallback,
     with_local_fallback,
 )
@@ -70,6 +71,7 @@ class ReconciliationPlan:
     preview: DecisionReconciliationPreview | None
     atomic: bool
     idempotency_key: str
+    redact_on: bool | None = None
 
 # Max decisions per push_decisions batch. MUST stay <= contexer-teams' PUSH_DECISIONS_MAX (50):
 # the server rejects a larger array, so bulk shares / drains chunk into calls of this size. One
@@ -1066,10 +1068,19 @@ def _select_team(teams: list[RemoteTeam], requested: str) -> RemoteTeam | str:
     return f"Choose a team with `--team NAME_OR_ID`. Available: {available}."
 
 
-def _atomic_decision_kwargs(dec: dict, key: str | None) -> dict:
-    kwargs = _dec_push_kwargs(dec, key)
-    kwargs.pop("decision_id", None)
-    return kwargs
+def _atomic_decision_kwargs(dec: dict, key: str | None, *,
+                            redact_on: bool | None = None) -> dict:
+    """Nested reconciliation payload, serialized before preview/submission/outbox persistence.
+
+    This deliberately uses the remote wire serializer up front, not just inside RemoteStore, so a
+    confirmed `.reconcile-outbox.json` entry stores the same redacted/bounded decision body the
+    user previewed and the server will receive.
+    """
+    return _reconciliation_wire_body(
+        type=dec["type"], content=dec["content"], repo=key,
+        confidence=dec["confidence"], evidence=dec["evidence"],
+        source=_wire_source(dec["source"]), title=dec.get("title"),
+        source_files=dec.get("source_files"), redact_on=redact_on)
 
 
 def _unsupported_capability_error(exc: RemoteStoreError) -> bool:
@@ -1102,21 +1113,25 @@ def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
         capabilities = remote.get_capabilities()
     except RemoteStoreError as exc:
         if _unsupported_capability_error(exc):
-            return ReconciliationPlan(dec, key, target, remote, None, False, str(uuid.uuid4()))
+            return ReconciliationPlan(
+                dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
         return f"Could not discover reconciliation capabilities: {exc}. Nothing was submitted."
     protocol = capabilities.decision_reconciliation
     atomic = bool(protocol and protocol.version >= 1
                   and protocol.atomic_submit and protocol.preview)
     if not atomic:
-        return ReconciliationPlan(dec, key, target, remote, None, False, str(uuid.uuid4()))
+        return ReconciliationPlan(
+            dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
     if not dec.get("revision_id"):
         return "This decision has no stable local revision id; nothing was submitted."
     try:
         preview = remote.preview_decision_reconciliation(
-            dec["id"], target.id, **_atomic_decision_kwargs(dec, key))
+            dec["id"], target.id, **_atomic_decision_kwargs(
+                dec, key, redact_on=profile.redact_secrets))
     except RemoteStoreError as exc:
         return f"Could not preview reconciliation: {exc}. Nothing was submitted."
-    return ReconciliationPlan(dec, key, target, remote, preview, True, str(uuid.uuid4()))
+    return ReconciliationPlan(
+        dec, key, target, remote, preview, True, str(uuid.uuid4()), profile.redact_secrets)
 
 
 def format_reconciliation_preview(plan: ReconciliationPlan) -> str:
@@ -1147,7 +1162,8 @@ def _reconciliation_operation(plan: ReconciliationPlan) -> dict:
         "team_name": plan.target.name,
         "expected_personal_head": plan.preview.personal_head,
         "expected_team_head": plan.preview.team_head,
-        "payload": _atomic_decision_kwargs(plan.decision, plan.repo_key),
+        "payload": _atomic_decision_kwargs(
+            plan.decision, plan.repo_key, redact_on=plan.redact_on),
         "queued_at": time.time(),
         "attempts": 0,
         "stage": "confirmed",
