@@ -65,7 +65,7 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer ui --status\|--stop\|--port N\|--foreground\|--reset-token` | Report on, stop, re-port, run in the foreground, or re-credential the console |
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
-| `contexer reconcile <id> [--team NAME_OR_ID] [--yes]` | Preview a corrected local decision against the server's current personal/team heads, then atomically sync and submit it for lead review. A sole shared team is selected automatically; ambiguous memberships require `--team` |
+| `contexer reconcile <id> [--team NAME_OR_ID] [--yes]` | Preview a corrected local decision against the server's current personal/team heads, then atomically sync and submit it for lead review; a sole shared team is selected automatically, while ambiguous memberships require `--team` |
 | `contexer share --all [--yes]` | Push every non-ignored decision in this repo (previews the list and confirms first). Global rules are *not* included - use `--global` |
 | `contexer share --global [--yes]` | Push your global rules (`~/.contexer/_global.json`) - the ones that apply to every repo. They go up unbound to any repo, so this is the one `share` that works outside a git repository |
 | `contexer guard [path…] [--explain]` | Check staged files against approved decisions at commit time — see [commit-time guard](#commit-time-guard) |
@@ -163,20 +163,16 @@ contexer login       # opens your browser to sign in; enables personal cloud and
 
 `contexer login` signs you in via the browser (OAuth), stores the credential, and configures the team endpoint for you.
 After that your agent automatically pulls the team's approved decisions into every session.
-`contexer share [id]` syncs a local decision to personal cloud (`contexer share --all` pushes every
-non-ignored decision in the repo, oldest first; `contexer share --global` pushes your cross-repo
-rules). To put corrected wording in front of a team lead, run
-`contexer reconcile <id> [--team NAME_OR_ID]`. Contexer fetches the server-authoritative diff
-before confirmation, then atomically syncs the personal revision and creates the lead-reviewed
-candidate. Confirmed submissions interrupted by an outage retry automatically with the same
-idempotency key; changed server heads stop for a fresh preview instead of being blindly retried.
-The currently approved team version remains active until the lead approves the candidate. Older
-Teams servers fall back to the compatible personal-sync-then-share flow.
+`contexer share [id]` syncs a local decision to personal cloud (`contexer share --all` pushes every non-ignored decision in the repo, oldest first; `contexer share --global` pushes your cross-repo rules).
+To put corrected wording in front of a team lead, run `contexer reconcile <id> [--team NAME_OR_ID]`.
+Contexer fetches the server-authoritative diff before confirmation, then atomically syncs the personal revision and creates the lead-reviewed candidate.
+Confirmed submissions interrupted by an outage retry automatically with the same idempotency key; changed server heads stop for a fresh preview instead of being blindly retried.
+The currently approved team version remains active until the lead approves the candidate.
+Older Teams servers fall back to the compatible personal-sync-then-share flow.
 
 When a future enriched team pull reports that a lead changed your linked decision in the web app,
-Contexer stores that wording as a local Suggested Update for review; it never overwrites your
-standing local revision. A later `in_sync` pull clears only that team-created proposal and records
-the reconciliation outcome.
+Contexer stores that wording as a local Suggested Update for review; it never overwrites your standing local revision.
+A later `in_sync` pull clears only that team-created proposal and records the reconciliation outcome.
 `contexer logout` disconnects.
 
 Logging in or out clears the locally cached team pulls and `✓ shared` markers, so switching accounts never leaves the previous account's decisions being injected into your sessions.
