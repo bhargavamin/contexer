@@ -2033,7 +2033,7 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
             return bool(origin.get("team_head") == team_head and team_head)
         last = entry.get("last_team_reconciliation")
         if isinstance(last, dict) and team_head and last.get("team_head") == team_head:
-            if last.get("outcome") == "dismissed":
+            if last.get("outcome") in {"approved", "dismissed"}:
                 return True
             if _current_content(entry) == _normalize_content(content):
                 return True
