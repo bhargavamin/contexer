@@ -31,6 +31,8 @@ Commands:
                 [--status] [--port N] [--foreground] [--reset-token].
   share         Push local decisions to your team cloud context: share [id | --all | --global]
                 (default: latest). --global pushes the cross-repo rules in _global.json.
+  reconcile     Submit a corrected local decision for team review:
+                reconcile <id> [--team NAME_OR_ID] [--yes].
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook — see below).
@@ -831,6 +833,57 @@ def share_cmd(rest: list | None = None) -> None:
                   "they apply to every repo. Push them with `contexer share --global`.")
     else:
         print(share.share(repo, ids[0] if ids else ""))
+
+
+def reconcile_cmd(rest: list | None = None) -> None:
+    """`contexer reconcile <id> [--team NAME_OR_ID]`: sync locally-corrected wording and
+    submit it as a lead-reviewed team candidate. A sole shared team is selected automatically."""
+    from contexer import config, share, store
+
+    rest = rest or []
+    yes = False
+    team = ""
+    ids = []
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg in ("--yes", "-y"):
+            yes = True
+        elif arg == "--team":
+            if i + 1 >= len(rest):
+                print("contexer reconcile: --team requires a name or id", file=sys.stderr)
+                sys.exit(1)
+            team = rest[i + 1]
+            i += 1
+        elif arg.startswith("-"):
+            print(f"contexer reconcile: unknown option {arg}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            ids.append(arg)
+        i += 1
+    if len(ids) != 1:
+        print("Usage: contexer reconcile <id> [--team NAME_OR_ID] [--yes]", file=sys.stderr)
+        sys.exit(1)
+
+    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    if not repo:
+        print("No git repo detected - run `contexer reconcile` inside a repository.", file=sys.stderr)
+        sys.exit(1)
+    profile = config.load_profile()
+    prepared = share.prepare_reconciliation(repo, ids[0], team, profile=profile)
+    if isinstance(prepared, str):
+        print(prepared)
+        return
+    print(share.format_reconciliation_preview(prepared))
+    if not (yes or profile.skip_confirm):
+        try:
+            answer = input("Submit for lead review? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Cancelled - nothing was submitted.")
+            return
+    print(share.submit_reconciliation(prepared, profile=profile))
 
 
 def _parse_selection(raw: str, loaded: int) -> tuple[list[int], list[str]]:
@@ -2009,6 +2062,8 @@ def main() -> None:
         _run_guarded(lambda: pull(rest))
     elif cmd == "share":
         _run_guarded(lambda: share_cmd(rest))
+    elif cmd == "reconcile":
+        _run_guarded(lambda: reconcile_cmd(rest))
     elif cmd == "login":
         _run_guarded(lambda: login_cmd(rest))
     elif cmd == "logout":

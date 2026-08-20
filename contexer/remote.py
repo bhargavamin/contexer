@@ -154,6 +154,22 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     return args
 
 
+def _reconciliation_wire_body(*, type: str, content: str, repo: str | None = None,
+                              rationale: str | None = None, agent: str | None = None,
+                              confidence: int | None = None,
+                              evidence: list[str] | None = None,
+                              source: str | None = None, title: str | None = None,
+                              source_files: list[str] | None = None,
+                              redact_on: bool | None = None) -> dict:
+    """Nested decision body for preview/atomic-submit, through the exact same last-mile
+    redaction and source-file bounds as personal push. The only shape difference is that the
+    stable decision id belongs at the tool top level, never inside `decision`/`proposed`."""
+    return _wire_args(
+        type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+        confidence=confidence, evidence=evidence, source=source, title=title,
+        source_files=source_files, redact_on=redact_on)
+
+
 class RemoteStoreError(Exception):
     """Base for any RemoteStore failure. Callers catch this to degrade to local-only."""
 
@@ -189,6 +205,10 @@ class RemoteDecision:
     repo: str | None
     agent: str | None
     scope: str
+    local_decision_id: str | None = None
+    team_id: str | None = None
+    team_name: str | None = None
+    reconciliation: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +218,69 @@ class RemoteContext:
     decisions: list[RemoteDecision]
     deleted: list[str]
     cursor: str | None
+
+
+@dataclass(frozen=True)
+class RemoteTeam:
+    """One shared-team target returned by the Teams MCP server."""
+
+    id: str
+    name: str
+    role: str
+
+
+@dataclass(frozen=True)
+class TeamShareResult:
+    """Structured outcome of submitting a synced decision for team review."""
+
+    status: str
+    kind: str
+    candidate_id: str
+    team: RemoteTeam
+
+
+@dataclass(frozen=True)
+class DecisionReconciliationCapabilities:
+    version: int
+    atomic_submit: bool
+    preview: bool
+    three_way_merge: bool
+
+
+@dataclass(frozen=True)
+class ServerCapabilities:
+    decision_reconciliation: DecisionReconciliationCapabilities | None
+
+
+@dataclass(frozen=True)
+class ReconciliationField:
+    field: str
+    before: str | list[str] | None
+    after: str | list[str] | None
+
+
+@dataclass(frozen=True)
+class DecisionReconciliationPreview:
+    personal_head: str | None
+    team_head: str | None
+    pending_candidate_id: str | None
+    state: str
+    operation: str
+    fields: list[ReconciliationField]
+    available_actions: list[str]
+    team: RemoteTeam
+
+
+@dataclass(frozen=True)
+class TeamSubmissionResult:
+    status: str
+    kind: str
+    personal_head: str | None
+    team_head: str | None
+    candidate_id: str | None
+    revision_id: str
+    replayed: bool
+    team: RemoteTeam
 
 
 class RemoteStore:
@@ -312,6 +395,11 @@ class RemoteStore:
                 repo=row.get("repo"),
                 agent=row.get("agent"),
                 scope=row.get("scope", ""),
+                local_decision_id=row.get("localDecisionId"),
+                team_id=row.get("teamId"),
+                team_name=row.get("teamName"),
+                reconciliation=(dict(row["reconciliation"])
+                                if isinstance(row.get("reconciliation"), dict) else None),
             )
             for row in rows
         ]
@@ -319,6 +407,123 @@ class RemoteStore:
             decisions=decisions,
             deleted=list(structured.get("deleted") or []),
             cursor=structured.get("cursor"),
+        )
+
+    async def alist_teams(self) -> list[RemoteTeam]:
+        """Return shared teams available as explicit submission targets."""
+        result = await self._ainvoke("list_teams", {})
+        structured = getattr(result, "structuredContent", None) or {}
+        return [
+            RemoteTeam(id=str(row.get("id", "")), name=str(row.get("name", "")),
+                       role=str(row.get("role", "member")))
+            for row in (structured.get("teams") or [])
+            if row.get("id")
+        ]
+
+    async def aget_capabilities(self) -> ServerCapabilities:
+        """Discover optional server protocols before creating durable operations."""
+        result = await self._ainvoke("get_capabilities", {})
+        structured = getattr(result, "structuredContent", None) or {}
+        raw = (structured.get("capabilities") or {}).get("decisionReconciliation")
+        if not isinstance(raw, dict):
+            return ServerCapabilities(decision_reconciliation=None)
+        try:
+            version = int(raw.get("version", 0))
+        except (TypeError, ValueError):
+            version = 0
+        return ServerCapabilities(decision_reconciliation=DecisionReconciliationCapabilities(
+            version=version,
+            atomic_submit=raw.get("atomicSubmit") is True,
+            preview=raw.get("preview") is True,
+            three_way_merge=raw.get("threeWayMerge") is True,
+        ))
+
+    async def apreview_decision_reconciliation(
+            self, decision_id: str, team_id: str, *, type: str, content: str,
+            repo: str | None = None, rationale: str | None = None,
+            agent: str | None = None, confidence: int | None = None,
+            evidence: list[str] | None = None, source: str | None = None,
+            title: str | None = None,
+            source_files: list[str] | None = None) -> DecisionReconciliationPreview:
+        proposed = _reconciliation_wire_body(
+            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+            confidence=confidence, evidence=evidence, source=source, title=title,
+            source_files=source_files, redact_on=self._redact_on())
+        result = await self._ainvoke("preview_decision_reconciliation", {
+            "decisionId": decision_id, "teamId": team_id, "proposed": proposed})
+        structured = getattr(result, "structuredContent", None) or {}
+        team = structured.get("team") or {}
+        fields = [ReconciliationField(
+            field=str(row.get("field", "")), before=row.get("before"), after=row.get("after"))
+            for row in (structured.get("fields") or []) if isinstance(row, dict)]
+        return DecisionReconciliationPreview(
+            personal_head=structured.get("personalHead"),
+            team_head=structured.get("teamHead"),
+            pending_candidate_id=structured.get("pendingCandidateId"),
+            state=str(structured.get("state", "")),
+            operation=str(structured.get("operation", "")),
+            fields=fields,
+            available_actions=[str(v) for v in (structured.get("availableActions") or [])],
+            team=RemoteTeam(id=str(team.get("id", team_id)),
+                            name=str(team.get("name", team_id)),
+                            role=str(team.get("role", "member"))),
+        )
+
+    async def asubmit_team_decision(
+            self, decision_id: str, revision_id: str, team_id: str, *,
+            expected_personal_head: str | None, expected_team_head: str | None,
+            idempotency_key: str, type: str, content: str,
+            repo: str | None = None, rationale: str | None = None,
+            agent: str | None = None, confidence: int | None = None,
+            evidence: list[str] | None = None, source: str | None = None,
+            title: str | None = None, source_files: list[str] | None = None,
+            include_evidence: bool | None = None) -> TeamSubmissionResult:
+        decision = _reconciliation_wire_body(
+            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+            confidence=confidence, evidence=evidence, source=source, title=title,
+            source_files=source_files, redact_on=self._redact_on())
+        args = {
+            "decisionId": decision_id,
+            "revisionId": revision_id,
+            "teamId": team_id,
+            "expectedPersonalHead": expected_personal_head,
+            "expectedTeamHead": expected_team_head,
+            "idempotencyKey": idempotency_key,
+            "decision": decision,
+        }
+        if include_evidence is not None:
+            args["includeEvidence"] = include_evidence
+        result = await self._ainvoke("submit_team_decision", args)
+        structured = getattr(result, "structuredContent", None) or {}
+        team = structured.get("team") or {}
+        return TeamSubmissionResult(
+            status=str(structured.get("status", "")),
+            kind=str(structured.get("kind", "")),
+            personal_head=structured.get("personalHead"),
+            team_head=structured.get("teamHead"),
+            candidate_id=structured.get("candidateId"),
+            revision_id=str(structured.get("revisionId", revision_id)),
+            replayed=structured.get("replayed") is True,
+            team=RemoteTeam(id=str(team.get("id", team_id)),
+                            name=str(team.get("name", team_id)),
+                            role=str(team.get("role", "member"))),
+        )
+
+    async def asubmit_decision_to_team(self, decision_id: str, team_id: str,
+                                       *, include_evidence: bool | None = None) -> TeamShareResult:
+        """Submit an already-synced personal decision to a team for lead review."""
+        args = {"decisionId": decision_id, "teamId": team_id}
+        if include_evidence is not None:
+            args["includeEvidence"] = include_evidence
+        result = await self._ainvoke("share_decision", args)
+        structured = getattr(result, "structuredContent", None) or {}
+        team = structured.get("team") or {}
+        return TeamShareResult(
+            status=str(structured.get("status", "")),
+            kind=str(structured.get("kind", "")),
+            candidate_id=str(structured.get("candidateId", "")),
+            team=RemoteTeam(id=str(team.get("id", team_id)), name=str(team.get("name", team_id)),
+                            role=str(team.get("role", "member"))),
         )
 
     def push_decision(self, *, type: str, content: str, repo: str | None,
@@ -354,6 +559,30 @@ class RemoteStore:
         Raises RemoteStoreError on failure. Off-loop callers only."""
         return self._run_with_reactive_refresh(
             lambda: asyncio.run(self.aget_context(repo=repo, updated_since=updated_since)))
+
+    def list_teams(self) -> list[RemoteTeam]:
+        """Synchronous team discovery for CLI callers."""
+        return self._run_with_reactive_refresh(lambda: asyncio.run(self.alist_teams()))
+
+    def get_capabilities(self) -> ServerCapabilities:
+        return self._run_with_reactive_refresh(lambda: asyncio.run(self.aget_capabilities()))
+
+    def preview_decision_reconciliation(self, decision_id: str, team_id: str,
+                                        **decision) -> DecisionReconciliationPreview:
+        return self._run_with_reactive_refresh(lambda: asyncio.run(
+            self.apreview_decision_reconciliation(decision_id, team_id, **decision)))
+
+    def submit_team_decision(self, decision_id: str, revision_id: str, team_id: str,
+                             **kwargs) -> TeamSubmissionResult:
+        return self._run_with_reactive_refresh(lambda: asyncio.run(
+            self.asubmit_team_decision(decision_id, revision_id, team_id, **kwargs)))
+
+    def submit_decision_to_team(self, decision_id: str, team_id: str,
+                                *, include_evidence: bool | None = None) -> TeamShareResult:
+        """Synchronous team-candidate submission for CLI callers."""
+        return self._run_with_reactive_refresh(lambda: asyncio.run(
+            self.asubmit_decision_to_team(decision_id, team_id,
+                                          include_evidence=include_evidence)))
 
     def _run_with_reactive_refresh(self, run: "Callable[[], T]") -> T:
         """Run an off-loop op, and on a transport 401/403 do exactly ONE token refresh + retry.

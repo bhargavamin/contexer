@@ -30,12 +30,25 @@ import contextvars
 import json
 import threading
 import time
+import uuid
 import weakref
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from contexer import store
 from contexer.config import Profile, load_profile
-from contexer.remote import RemoteStore, awith_local_fallback, with_local_fallback
+from contexer.remote import (
+    DecisionReconciliationPreview,
+    RemoteAuthError,
+    RemoteStore,
+    RemoteStoreError,
+    RemoteTeam,
+    RemoteUnavailableError,
+    TeamSubmissionResult,
+    _reconciliation_wire_body,
+    awith_local_fallback,
+    with_local_fallback,
+)
 from contexer.repo_key import canonical_repo_key
 
 # Outbox cap: push_decision is idempotent on decision_id server-side, so a queued entry is
@@ -47,6 +60,18 @@ _OUTBOX_LOCAL_LOCK = threading.Lock()
 _OUTBOX_LOCK_DEPTH = contextvars.ContextVar("contexer_outbox_lock_depth", default=0)
 _OUTBOX_ASYNC_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _OUTBOX_ASYNC_LOCKS_GUARD = threading.Lock()
+
+
+@dataclass
+class ReconciliationPlan:
+    decision: dict
+    repo_key: str | None
+    target: RemoteTeam
+    remote: RemoteStore
+    preview: DecisionReconciliationPreview | None
+    atomic: bool
+    idempotency_key: str
+    redact_on: bool | None = None
 
 # Max decisions per push_decisions batch. MUST stay <= contexer-teams' PUSH_DECISIONS_MAX (50):
 # the server rejects a larger array, so bulk shares / drains chunk into calls of this size. One
@@ -80,6 +105,53 @@ def _outbox_path():
     # Computed at call time (not module import time) so tests that monkeypatch
     # store.STORE_DIR see the redirected path, like every other store-adjacent file.
     return store.STORE_DIR / ".outbox.json"
+
+
+def _reconcile_outbox_path():
+    return store.STORE_DIR / ".reconcile-outbox.json"
+
+
+def _read_reconcile_outbox() -> tuple[list[dict], str | None]:
+    path = _reconcile_outbox_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [], None
+    except (OSError, UnicodeDecodeError) as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    if not isinstance(data, list):
+        return [], f"not a reconciliation outbox list (got {type(data).__name__})"
+    return data, None
+
+
+def _load_reconcile_outbox() -> list[dict]:
+    return _read_reconcile_outbox()[0]
+
+
+def _save_reconcile_outbox(entries: list[dict]) -> None:
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store._atomic_write(
+        _reconcile_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
+
+
+def _enqueue_reconciliation(operation: dict) -> None:
+    """Persist one CONFIRMED atomic operation. Dedupe by local decision+team: a later explicit
+    reconciliation supersedes an older queued intent, while its idempotency key stays stable for
+    every automatic retry of this exact row."""
+    with outbox_lock():
+        key = (operation.get("decision_id"), operation.get("team_id"))
+        loaded, error = _read_reconcile_outbox()
+        if error is not None:
+            raise RuntimeError(f"cannot read reconciliation retry queue: {error}")
+        entries = [e for e in loaded if (e.get("decision_id"), e.get("team_id")) != key]
+        if len(entries) == len(loaded) and len(entries) >= _OUTBOX_CAP:
+            raise RuntimeError("reconciliation retry queue is full")
+        entries.append(operation)
+        _save_reconcile_outbox(entries)
 
 
 @contextlib.contextmanager
@@ -163,7 +235,32 @@ def _save_outbox(entries: list[dict]) -> None:
 def discard_outbox() -> tuple[int, int]:
     """Locked wrapper for dropping every queued share."""
     with outbox_lock():
-        return _discard_outbox_unlocked()
+        discarded, remaining = _discard_outbox_unlocked()
+        r_discarded, r_remaining = _discard_reconcile_outbox_unlocked()
+        if remaining < 0 or r_remaining < 0:
+            return discarded + r_discarded, -1
+        return discarded + r_discarded, remaining + r_remaining
+
+
+def _discard_reconcile_outbox_unlocked() -> tuple[int, int]:
+    """Clear confirmed team writes on account switch with the same fail-closed contract."""
+    entries, error = _read_reconcile_outbox()
+    if error is None and not entries:
+        return 0, 0
+    queued = len(entries)
+    try:
+        _reconcile_outbox_path().unlink()
+    except OSError:
+        try:
+            _save_reconcile_outbox([])
+        except Exception:
+            pass
+    after, after_error = _read_reconcile_outbox()
+    if after_error is None and not after:
+        return queued, 0
+    if after_error is not None:
+        return 0, -1
+    return queued - len(after), len(after)
 
 
 def _discard_outbox_unlocked() -> tuple[int, int]:
@@ -628,7 +725,9 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str
 def drain_outbox(profile: Profile | None = None) -> int:
     """Locked wrapper for retrying queued pushes."""
     with outbox_lock():
-        return _drain_outbox_unlocked(profile)
+        profile = profile or load_profile()
+        return (_drain_outbox_unlocked(profile)
+                + _drain_reconciliation_outbox_unlocked(profile))
 
 
 def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
@@ -663,10 +762,77 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
     return sent
 
 
+def _drain_reconciliation_outbox_unlocked(profile: Profile) -> int:
+    """Retry confirmed atomic writes verbatim; stale heads become attention, never retries."""
+    entries, error = _read_reconcile_outbox()
+    if error is not None:
+        return 0
+    if not entries:
+        return 0
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return 0
+    try:
+        protocol = remote.get_capabilities().decision_reconciliation
+    except RemoteStoreError as exc:
+        if _unsupported_capability_error(exc):
+            for entry in entries:
+                if entry.get("stage") != "attention":
+                    entry.update(stage="attention", reason="unsupported_protocol")
+            _save_reconcile_outbox(entries)
+        return 0
+    if not protocol or protocol.version < 1 or not protocol.atomic_submit:
+        for entry in entries:
+            if entry.get("stage") != "attention":
+                entry.update(stage="attention", reason="unsupported_protocol")
+        _save_reconcile_outbox(entries)
+        return 0
+
+    kept: list[dict] = []
+    sent = 0
+    for index, entry in enumerate(entries):
+        if entry.get("stage") == "attention":
+            kept.append(entry)
+            continue
+        try:
+            result = _call_atomic_submission(remote, entry)
+        except RemoteStoreError as exc:
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            if not isinstance(exc, (RemoteUnavailableError, RemoteAuthError)) and not (
+                    "rate" in str(exc).casefold() and "limit" in str(exc).casefold()):
+                entry.update(stage="attention", reason=str(exc))
+                kept.append(entry)
+                continue
+            kept.extend([entry, *entries[index + 1:]])
+            _save_reconcile_outbox(kept)
+            return sent
+        if result.status in {"heads_changed", "needs_rebase"}:
+            entry.update(stage="attention", reason=result.status,
+                         observed_personal_head=result.personal_head,
+                         observed_team_head=result.team_head)
+            kept.append(entry)
+            continue
+        if result.status == "rate_limited":
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            kept.extend([entry, *entries[index + 1:]])
+            _save_reconcile_outbox(kept)
+            return sent
+        if result.status not in {"submitted", "unchanged", "already_pending"}:
+            entry.update(stage="attention", reason=result.status or "unknown_result")
+            kept.append(entry)
+            continue
+        _mark_shared([entry.get("decision_id")], profile.endpoint)
+        sent += 1
+    _save_reconcile_outbox(kept)
+    return sent
+
+
 async def adrain_outbox(profile: Profile | None = None) -> int:
     """Locked wrapper for retrying queued pushes from async callers."""
     async with async_outbox_lock():
-        return await _adrain_outbox_unlocked(profile)
+        profile = profile or load_profile()
+        sent = await _adrain_outbox_unlocked(profile)
+        return sent + await _adrain_reconciliation_outbox_unlocked(profile)
 
 
 async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
@@ -694,6 +860,76 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
             return sent
         sent += _drain_mark(chunk, res, sent_ids, profile.endpoint)
     _save_outbox(_reconcile_with_disk([], sent_ids))
+    return sent
+
+
+async def _adrain_reconciliation_outbox_unlocked(profile: Profile) -> int:
+    """Async-native twin of the confirmed-operation drain."""
+    entries, error = _read_reconcile_outbox()
+    if error is not None:
+        return 0
+    if not entries:
+        return 0
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return 0
+    try:
+        protocol = (await remote.aget_capabilities()).decision_reconciliation
+    except RemoteStoreError as exc:
+        if _unsupported_capability_error(exc):
+            for entry in entries:
+                if entry.get("stage") != "attention":
+                    entry.update(stage="attention", reason="unsupported_protocol")
+            _save_reconcile_outbox(entries)
+        return 0
+    if not protocol or protocol.version < 1 or not protocol.atomic_submit:
+        for entry in entries:
+            if entry.get("stage") != "attention":
+                entry.update(stage="attention", reason="unsupported_protocol")
+        _save_reconcile_outbox(entries)
+        return 0
+
+    kept: list[dict] = []
+    sent = 0
+    for index, entry in enumerate(entries):
+        if entry.get("stage") == "attention":
+            kept.append(entry)
+            continue
+        try:
+            result = await remote.asubmit_team_decision(
+                entry["decision_id"], entry["revision_id"], entry["team_id"],
+                expected_personal_head=entry.get("expected_personal_head"),
+                expected_team_head=entry.get("expected_team_head"),
+                idempotency_key=entry["idempotency_key"],
+                **(entry.get("payload") or entry.get("decision") or {}))
+        except RemoteStoreError as exc:
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            if not isinstance(exc, (RemoteUnavailableError, RemoteAuthError)) and not (
+                    "rate" in str(exc).casefold() and "limit" in str(exc).casefold()):
+                entry.update(stage="attention", reason=str(exc))
+                kept.append(entry)
+                continue
+            kept.extend([entry, *entries[index + 1:]])
+            _save_reconcile_outbox(kept)
+            return sent
+        if result.status in {"heads_changed", "needs_rebase"}:
+            entry.update(stage="attention", reason=result.status,
+                         observed_personal_head=result.personal_head,
+                         observed_team_head=result.team_head)
+            kept.append(entry)
+            continue
+        if result.status == "rate_limited":
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            kept.extend([entry, *entries[index + 1:]])
+            _save_reconcile_outbox(kept)
+            return sent
+        if result.status not in {"submitted", "unchanged", "already_pending"}:
+            entry.update(stage="attention", reason=result.status or "unknown_result")
+            kept.append(entry)
+            continue
+        _mark_shared([entry.get("decision_id")], profile.endpoint)
+        sent += 1
+    _save_reconcile_outbox(kept)
     return sent
 
 
@@ -807,6 +1043,249 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
 def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
     with outbox_lock():
         return _share_ids_unlocked(repo_path, decision_ids, profile=profile)
+
+
+def reconcile(repo_path: str, decision_id: str, team: str = "", *,
+              profile: Profile | None = None) -> str:
+    """Prepare and submit one reconciliation without an interactive confirmation.
+
+    The CLI calls :func:`prepare_reconciliation` itself so it can show the authoritative server
+    preview before asking. This convenience entry point remains useful to API callers and tests.
+    """
+    prepared = prepare_reconciliation(repo_path, decision_id, team, profile=profile)
+    if isinstance(prepared, str):
+        return prepared
+    return submit_reconciliation(prepared, profile=profile)
+
+
+def _select_team(teams: list[RemoteTeam], requested: str) -> RemoteTeam | str:
+    if not teams:
+        return "You do not belong to any shared teams."
+    if requested:
+        matches = ([t for t in teams if t.id == requested]
+                   or [t for t in teams if t.name.casefold() == requested.casefold()])
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return f"Team name {requested!r} is ambiguous; pass its id instead."
+        available = ", ".join(f"{t.name} ({t.id})" for t in teams)
+        return f"No shared team matches {requested!r}. Available: {available}."
+    if len(teams) == 1:
+        return teams[0]
+    available = ", ".join(f"{t.name} ({t.id})" for t in teams)
+    return f"Choose a team with `--team NAME_OR_ID`. Available: {available}."
+
+
+def _atomic_decision_kwargs(dec: dict, key: str | None, *,
+                            redact_on: bool | None = None) -> dict:
+    """Nested reconciliation payload, serialized before preview/submission/outbox persistence.
+
+    This deliberately uses the remote wire serializer up front, not just inside RemoteStore, so a
+    confirmed `.reconcile-outbox.json` entry stores the same redacted/bounded decision body the
+    user previewed and the server will receive.
+    """
+    return _reconciliation_wire_body(
+        type=dec["type"], content=dec["content"], repo=key,
+        confidence=dec["confidence"], evidence=dec["evidence"],
+        source=_wire_source(dec["source"]), title=dec.get("title"),
+        source_files=dec.get("source_files"), redact_on=redact_on)
+
+
+def _unsupported_capability_error(exc: RemoteStoreError) -> bool:
+    message = str(exc).casefold()
+    return any(marker in message for marker in (
+        "unknown tool", "tool not found", "method not found", "-32601", "get_capabilities failed"))
+
+
+def _resolve_reconciliation_team(remote: RemoteStore, requested: str) -> RemoteTeam | str:
+    try:
+        teams = remote.list_teams()
+    except RemoteStoreError as exc:
+        if requested and _unsupported_capability_error(exc):
+            return RemoteTeam(requested, requested, "member")
+        if _unsupported_capability_error(exc):
+            return ("This team server does not support team discovery. "
+                    "Run reconcile again with `--team TEAM_ID`.")
+        return "Could not list shared teams (see the warning above); nothing was submitted."
+    return _select_team(teams, requested)
+
+
+def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
+                           profile: Profile | None = None) -> ReconciliationPlan | str:
+    """Resolve a target and fetch the authoritative preview without changing remote state."""
+    profile = profile or load_profile()
+    dec = store.get_shareable(repo_path, decision_id, redact_on=profile.redact_secrets)
+    if dec is None:
+        return "Nothing to reconcile: no matching local decision."
+    remote = RemoteStore.from_profile(profile)
+    if remote is None:
+        return ("Not in team mode. Run `contexer login` to connect this machine before "
+                "submitting a team update.")
+
+    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    try:
+        capabilities = remote.get_capabilities()
+    except RemoteStoreError as exc:
+        if _unsupported_capability_error(exc):
+            target = _resolve_reconciliation_team(remote, team)
+            if isinstance(target, str):
+                return target
+            return ReconciliationPlan(
+                dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
+        return f"Could not discover reconciliation capabilities: {exc}. Nothing was submitted."
+
+    protocol = capabilities.decision_reconciliation
+    atomic = bool(protocol and protocol.version >= 1
+                  and protocol.atomic_submit and protocol.preview)
+    target = _resolve_reconciliation_team(remote, team)
+    if isinstance(target, str):
+        return target
+    if not atomic:
+        return ReconciliationPlan(
+            dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
+    if not dec.get("revision_id"):
+        return "This decision has no stable local revision id; nothing was submitted."
+    try:
+        preview = remote.preview_decision_reconciliation(
+            dec["id"], target.id, **_atomic_decision_kwargs(
+                dec, key, redact_on=profile.redact_secrets))
+    except RemoteStoreError as exc:
+        return f"Could not preview reconciliation: {exc}. Nothing was submitted."
+    return ReconciliationPlan(
+        dec, key, target, remote, preview, True, str(uuid.uuid4()), profile.redact_secrets)
+
+
+def format_reconciliation_preview(plan: ReconciliationPlan) -> str:
+    if not plan.atomic or plan.preview is None:
+        return (f"Target: {plan.target.name}\nCompatibility mode: this server does not support "
+                "atomic preview and submission. Personal sync will happen before team review.")
+    preview = plan.preview
+    lines = [f"Target: {preview.team.name}",
+             f"Server preview: {preview.operation or 'submit'} ({preview.state or 'ready'})"]
+    for field in preview.fields:
+        before = json.dumps(field.before, ensure_ascii=False)
+        after = json.dumps(field.after, ensure_ascii=False)
+        lines.append(f"  {field.field}: {before} -> {after}")
+    if preview.pending_candidate_id:
+        lines.append(f"Pending candidate: {preview.pending_candidate_id}")
+    lines.append("The currently approved team version remains active until a lead approves this.")
+    return "\n".join(lines)
+
+
+def _reconciliation_operation(plan: ReconciliationPlan) -> dict:
+    assert plan.preview is not None
+    return {
+        "operation": "submit_team_decision",
+        "idempotency_key": plan.idempotency_key,
+        "decision_id": plan.decision["id"],
+        "revision_id": plan.decision["revision_id"],
+        "team_id": plan.target.id,
+        "team_name": plan.target.name,
+        "expected_personal_head": plan.preview.personal_head,
+        "expected_team_head": plan.preview.team_head,
+        "payload": _atomic_decision_kwargs(
+            plan.decision, plan.repo_key, redact_on=plan.redact_on),
+        "queued_at": time.time(),
+        "attempts": 0,
+        "stage": "confirmed",
+    }
+
+
+def _call_atomic_submission(remote: RemoteStore, operation: dict) -> TeamSubmissionResult:
+    payload = operation.get("payload") or operation.get("decision") or {}
+    return remote.submit_team_decision(
+        operation["decision_id"], operation["revision_id"], operation["team_id"],
+        expected_personal_head=operation.get("expected_personal_head"),
+        expected_team_head=operation.get("expected_team_head"),
+        idempotency_key=operation["idempotency_key"], **payload)
+
+
+def _submission_status(result: TeamSubmissionResult, team_name: str) -> str:
+    if result.status == "heads_changed":
+        return ("The personal or team decision changed after the preview. Nothing was submitted; "
+                "run reconcile again to review the new heads.")
+    if result.status == "needs_rebase":
+        return ("The team decision moved ahead and this update needs review. Nothing was "
+                "submitted; pull and run reconcile again.")
+    if result.status == "unchanged":
+        return f"{team_name} already has this decision; no candidate was needed."
+    if result.status == "already_pending":
+        return (f"This exact update is already pending lead review in {team_name}"
+                f"{f' as {result.candidate_id}' if result.candidate_id else ''}.")
+    if result.status == "quota_exceeded":
+        return ("The team service is at capacity. Nothing was submitted or queued; free capacity "
+                "and run reconcile again for a fresh preview.")
+    if result.status in {"not_member", "not_authored_by_caller", "invalid_team",
+                         "trial_expired", "unsupported_protocol"}:
+        return (f"The service refused the reconciliation ({result.status}). Nothing was submitted "
+                "or queued.")
+    if result.status != "submitted":
+        return (f"The service returned an unknown reconciliation result ({result.status or 'empty'}). "
+                "Nothing was treated as submitted or queued.")
+    noun = "update" if result.kind == "update" else "decision"
+    replay = " (confirmed from an idempotent retry)" if result.replayed else ""
+    return (f"Submitted {noun}{f' {result.candidate_id}' if result.candidate_id else ''} to "
+            f"{team_name} for lead review{replay}. The currently approved team version remains "
+            "active until it is approved.")
+
+
+def submit_reconciliation(plan: ReconciliationPlan, *, profile: Profile | None = None) -> str:
+    """Submit a previously previewed plan. Only confirmed atomic operations may be queued."""
+    profile = profile or load_profile()
+    dec, target = plan.decision, plan.target
+    if plan.atomic:
+        operation = _reconciliation_operation(plan)
+        try:
+            result = _call_atomic_submission(plan.remote, operation)
+        except (RemoteUnavailableError, RemoteAuthError) as exc:
+            try:
+                _enqueue_reconciliation(operation)
+            except Exception:
+                return (f"Could not reach the team service ({exc}), and the confirmed operation "
+                        "could not be written to the retry queue. Nothing was submitted; rerun "
+                        "reconcile when the service is available.")
+            return (f"Could not reach the team service ({exc}); the confirmed submission is "
+                    "queued with the same idempotency key for automatic retry.")
+        except RemoteStoreError as exc:
+            if "rate" in str(exc).casefold() and "limit" in str(exc).casefold():
+                try:
+                    _enqueue_reconciliation(operation)
+                except Exception:
+                    return ("The service rate limit was reached, and the confirmed operation "
+                            "could not be written to the retry queue. Rerun reconcile later.")
+                return "The service rate limit was reached; the confirmed submission is queued."
+            return f"The service refused the submission: {exc}. Nothing was queued."
+        if result.status == "rate_limited":
+            try:
+                _enqueue_reconciliation(operation)
+            except Exception:
+                return ("The service rate limit was reached, and the confirmed operation could "
+                        "not be written to the retry queue. Rerun reconcile later.")
+            return "The service rate limit was reached; the confirmed submission is queued."
+        if result.status in {"submitted", "unchanged", "already_pending"}:
+            _mark_shared([dec.get("id")], profile.endpoint)
+        return _submission_status(result, target.name)
+
+    # Old-server compatibility path: preserve the Phase-1 two-step contract, but never put an
+    # unsupported atomic operation into the durable reconciliation queue.
+    server_id = with_local_fallback(
+        lambda: plan.remote.push_decision(**_dec_push_kwargs(dec, plan.repo_key)),
+        default=None, action="sync decision before team submission")
+    if server_id is None:
+        return _finish_share(dec, plan.repo_key, None, profile.endpoint)
+
+    submitted = with_local_fallback(
+        lambda: plan.remote.submit_decision_to_team(dec["id"], target.id),
+        default=None, action="submit decision for team review")
+    if submitted is None:
+        _mark_shared([dec.get("id")], profile.endpoint)
+        return (f"Synced the decision to personal cloud, but could not submit it to {target.name} "
+                "for review. Run the same reconcile command again; the personal sync is idempotent.")
+
+    _mark_shared([dec.get("id")], profile.endpoint)
+    noun = "update" if submitted.kind == "update" else "decision"
+    return (f"Submitted {noun} {submitted.candidate_id} to {submitted.team.name} for lead review. "
+            "The currently approved team version remains active until it is approved.")
 
 
 def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
