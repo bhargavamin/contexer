@@ -39,7 +39,8 @@ _POLL_MAX_INTERVAL = 900
 _SYNC_LOG_CAP = 50
 
 # Fields persisted per cached team decision (the get_context wire projection).
-_ROW_FIELDS = ("id", "type", "title", "content", "rationale", "repo", "agent", "scope")
+_ROW_FIELDS = ("id", "type", "title", "content", "rationale", "repo", "agent", "scope",
+               "local_decision_id", "team_id", "team_name", "reconciliation")
 
 # How stale last_ok_at must be before format_team_section tags the header as possibly
 # stale (the "quietly dead refresher" failure mode: rows keep rendering with no signal).
@@ -126,7 +127,31 @@ def _row_to_dict(rd: RemoteDecision) -> dict:
         "repo": rd.repo,
         "agent": rd.agent,
         "scope": rd.scope,
+        "local_decision_id": rd.local_decision_id,
+        "team_id": rd.team_id,
+        "team_name": rd.team_name,
+        "reconciliation": rd.reconciliation,
     }
+
+
+def _apply_reconciliation_metadata(repo_path: str, row: dict) -> None:
+    """Turn author-scoped team-ahead metadata into local review state, fail-soft."""
+    local_id = row.get("local_decision_id")
+    rec = row.get("reconciliation")
+    if not local_id or not isinstance(rec, dict):
+        return
+    state = rec.get("state")
+    try:
+        if state == "team_ahead":
+            store.attach_team_reconciliation_proposal(
+                repo_path, local_id, content=row.get("content", ""),
+                title=row.get("title") or "", team_id=row.get("team_id") or "",
+                team_name=row.get("team_name") or "", team_head=rec.get("teamHead") or "")
+        elif state == "in_sync":
+            store.clear_team_reconciliation_proposal(
+                repo_path, local_id, team_head=rec.get("teamHead") or "")
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 def _sync(repo_path: str, profile: config.Profile,
@@ -210,6 +235,7 @@ def _sync(repo_path: str, profile: config.Profile,
                 removed.append(rd.id)
             continue
         row = _row_to_dict(rd)
+        _apply_reconciliation_metadata(repo_path, row)
         if by_id.get(rd.id) == row:
             # Unchanged re-send: the live server's updatedSince filter is INCLUSIVE, so
             # rows stamped exactly at the cursor come back on every delta fetch. Treating

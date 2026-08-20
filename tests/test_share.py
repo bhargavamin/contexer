@@ -213,6 +213,215 @@ def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
     assert "contexer login" in err and "--team" not in err  # a flag that never existed
 
 
+def test_reconcile_previews_then_atomically_submits_team_candidate(tmp_repo, monkeypatch):
+    _, did = store.update_decision(
+        tmp_repo, "scope adapter rule to new assistant targets", "s1", subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+
+    class Fake:
+        def __init__(self):
+            self.events = []
+
+        def list_teams(self):
+            return [remote.RemoteTeam("team-1", "Platform", "member")]
+
+        def get_capabilities(self):
+            return remote.ServerCapabilities(remote.DecisionReconciliationCapabilities(
+                1, True, True, False))
+
+        def preview_decision_reconciliation(self, decision_id, team_id, **decision):
+            self.events.append(("preview", decision_id, team_id, decision))
+            return remote.DecisionReconciliationPreview(
+                "personal-head", "team-head", None, "diverged", "submit_update", [],
+                ["submit"], remote.RemoteTeam("team-1", "Platform", "member"))
+
+        def submit_team_decision(self, decision_id, revision_id, team_id, **kwargs):
+            self.events.append(("submit", decision_id, revision_id, team_id, kwargs))
+            return remote.TeamSubmissionResult(
+                "submitted", "update", "personal-new", "team-head", "candidate-1",
+                revision_id, False, remote.RemoteTeam("team-1", "Platform", "member"))
+
+    fake = Fake()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    out = share.reconcile(tmp_repo, did[:8], profile=TEAM)
+
+    assert "candidate-1" in out and "Platform" in out and "lead review" in out
+    assert fake.events[0][:3] == ("preview", did, "team-1")
+    assert fake.events[1][0] == "submit" and fake.events[1][1] == did
+    assert fake.events[1][2] and fake.events[1][3] == "team-1"
+    assert fake.events[1][4]["expected_personal_head"] == "personal-head"
+    assert fake.events[1][4]["expected_team_head"] == "team-head"
+    assert fake.events[1][4]["idempotency_key"]
+
+
+def test_reconcile_requires_explicit_team_when_memberships_are_ambiguous(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "use the shared deployment helper", "s1",
+                                   subtype="convention")
+
+    class Fake:
+        def list_teams(self):
+            return [
+                remote.RemoteTeam("t-1", "Platform", "member"),
+                remote.RemoteTeam("t-2", "Security", "member"),
+            ]
+
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
+    out = share.reconcile(tmp_repo, did, profile=TEAM)
+    assert "--team" in out and "Platform" in out and "Security" in out
+
+
+def test_cli_reconcile_confirms_and_routes_team(monkeypatch, capsys):
+    from contexer import cli
+    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(config, "load_profile", lambda: TEAM)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    captured = {}
+    plan = object()
+    monkeypatch.setattr(share, "prepare_reconciliation", lambda repo, did, team, **kwargs:
+                        captured.update(repo=repo, did=did, team=team) or plan)
+    monkeypatch.setattr(share, "format_reconciliation_preview", lambda p: "server preview")
+    monkeypatch.setattr(share, "submit_reconciliation", lambda p, **kwargs: "submitted")
+
+    cli.reconcile_cmd(["abc12345", "--team", "Platform"])
+    assert captured == {"repo": "/repo", "did": "abc12345", "team": "Platform"}
+    output = capsys.readouterr().out
+    assert "server preview" in output and "submitted" in output
+
+
+def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "keep atomic retries identical", "s1",
+                                   subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+
+    class Fake:
+        def list_teams(self):
+            return [remote.RemoteTeam("team-1", "Platform", "member")]
+
+        def get_capabilities(self):
+            return remote.ServerCapabilities(remote.DecisionReconciliationCapabilities(
+                1, True, True, False))
+
+        def preview_decision_reconciliation(self, decision_id, team_id, **decision):
+            return remote.DecisionReconciliationPreview(
+                "ph-1", "th-1", None, "diverged", "submit_update", [], ["submit"],
+                remote.RemoteTeam(team_id, "Platform", "member"))
+
+        def submit_team_decision(self, *args, **kwargs):
+            raise RemoteUnavailableError("offline")
+
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
+    out = share.reconcile(tmp_repo, did, profile=TEAM)
+    queued = share._load_reconcile_outbox()
+    assert "queued" in out.lower() and len(queued) == 1
+    assert queued[0]["decision_id"] == did
+    assert queued[0]["expected_personal_head"] == "ph-1"
+    assert queued[0]["expected_team_head"] == "th-1"
+    assert queued[0]["idempotency_key"]
+    assert queued[0]["stage"] == "confirmed"
+
+
+def test_heads_changed_is_not_blindly_queued(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "review moved heads first", "s1",
+                                   subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+
+    class Fake:
+        def list_teams(self):
+            return [remote.RemoteTeam("team-1", "Platform", "member")]
+
+        def get_capabilities(self):
+            return remote.ServerCapabilities(remote.DecisionReconciliationCapabilities(
+                1, True, True, False))
+
+        def preview_decision_reconciliation(self, decision_id, team_id, **decision):
+            return remote.DecisionReconciliationPreview(
+                "ph-1", "th-1", None, "diverged", "submit_update", [], ["submit"],
+                remote.RemoteTeam(team_id, "Platform", "member"))
+
+        def submit_team_decision(self, decision_id, revision_id, team_id, **kwargs):
+            return remote.TeamSubmissionResult(
+                "heads_changed", "update", "ph-2", "th-2", None, revision_id, False,
+                remote.RemoteTeam(team_id, "Platform", "member"))
+
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
+    out = share.reconcile(tmp_repo, did, profile=TEAM)
+    assert "changed after the preview" in out
+    assert share._load_reconcile_outbox() == []
+
+
+def test_reconcile_falls_back_for_server_without_capability_tool(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "support the older team server", "s1",
+                                   subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+
+    class Fake:
+        def __init__(self):
+            self.events = []
+
+        def list_teams(self):
+            return [remote.RemoteTeam("team-1", "Platform", "member")]
+
+        def get_capabilities(self):
+            raise remote.RemoteStoreError("Unknown tool: get_capabilities")
+
+        def push_decision(self, **kwargs):
+            self.events.append("push")
+            return "personal-1"
+
+        def submit_decision_to_team(self, decision_id, team_id):
+            self.events.append("submit")
+            return remote.TeamShareResult(
+                "submitted", "update", "candidate-1",
+                remote.RemoteTeam(team_id, "Platform", "member"))
+
+    fake = Fake()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    out = share.reconcile(tmp_repo, did, profile=TEAM)
+    assert fake.events == ["push", "submit"]
+    assert "candidate-1" in out
+
+
+def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monkeypatch):
+    operation = {
+        "operation": "submit_team_decision", "idempotency_key": "idem-stable",
+        "decision_id": "d1", "revision_id": "r1", "team_id": "t1",
+        "team_name": "Platform", "expected_personal_head": "ph1",
+        "expected_team_head": "th1", "payload": {"type": "constraint", "content": "new"},
+        "stage": "confirmed", "attempts": 0,
+    }
+    share._enqueue_reconciliation(operation)
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+
+        def get_capabilities(self):
+            return remote.ServerCapabilities(remote.DecisionReconciliationCapabilities(
+                1, True, True, False))
+
+        def submit_team_decision(self, decision_id, revision_id, team_id, **kwargs):
+            self.calls.append((decision_id, revision_id, team_id, kwargs))
+            return remote.TeamSubmissionResult(
+                "already_pending", "update", "ph2", "th1", "c1", revision_id, True,
+                remote.RemoteTeam(team_id, "Platform", "member"))
+
+    fake = Fake()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    assert share.drain_outbox(TEAM) == 1
+    assert fake.calls[0][3]["idempotency_key"] == "idem-stable"
+    assert fake.calls[0][3]["expected_personal_head"] == "ph1"
+    assert fake.calls[0][3]["content"] == "new"
+    assert share._load_reconcile_outbox() == []
+
+
+def test_discard_outbox_also_clears_confirmed_reconciliations(tmp_repo):
+    share._enqueue_reconciliation({
+        "decision_id": "d1", "team_id": "t1", "idempotency_key": "i1",
+        "stage": "confirmed"})
+    assert share.discard_outbox() == (1, 0)
+    assert share._load_reconcile_outbox() == []
+
+
 # ── share.share_all ──────────────────────────────────────────────────────────────
 
 def test_share_all_nothing_to_share(tmp_repo):

@@ -268,6 +268,18 @@ def test_get_context_title_none_when_row_lacks_key(monkeypatch):
     assert ctx.decisions[0].title is None
 
 
+def test_get_context_parses_author_scoped_reconciliation_metadata(monkeypatch):
+    structured = {"result": [{
+        "id": "team-1", "type": "constraint", "content": "lead wording", "scope": "team",
+        "localDecisionId": "local-1", "teamId": "t-1", "teamName": "Platform",
+        "reconciliation": {"state": "team_ahead", "personalHead": "p1", "teamHead": "t2"},
+    }], "deleted": [], "cursor": "c1"}
+    monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(structured=structured))
+    row = RemoteStore("https://t/mcp", "tok").get_context().decisions[0]
+    assert row.local_decision_id == "local-1" and row.team_id == "t-1"
+    assert row.team_name == "Platform" and row.reconciliation["state"] == "team_ahead"
+
+
 def test_get_context_omits_none_args(monkeypatch):
     captured = {}
     monkeypatch.setattr(
@@ -639,6 +651,93 @@ def test_aget_context_awaits_acall_tool_and_parses(monkeypatch):
     assert isinstance(ctx, RemoteContext)
     assert ctx.deleted == ["9"]
     assert ctx.decisions[0].content == "c"
+
+
+def test_team_discovery_and_submission_use_structured_mcp_results(monkeypatch):
+    calls = []
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        calls.append((name, arguments))
+        if name == "list_teams":
+            return _result(structured={"teams": [
+                {"id": "team-1", "name": "Platform", "role": "member"},
+            ]})
+        return _result(structured={
+            "status": "submitted", "kind": "update", "candidateId": "candidate-1",
+            "team": {"id": "team-1", "name": "Platform"},
+        })
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    rs = RemoteStore("https://t/mcp", "tok")
+    teams = rs.list_teams()
+    result = rs.submit_decision_to_team("local-1", "team-1")
+
+    assert [(t.id, t.name, t.role) for t in teams] == [("team-1", "Platform", "member")]
+    assert result.status == "submitted"
+    assert result.kind == "update"
+    assert result.candidate_id == "candidate-1"
+    assert result.team.name == "Platform"
+    assert calls == [
+        ("list_teams", {}),
+        ("share_decision", {"decisionId": "local-1", "teamId": "team-1"}),
+    ]
+
+
+def test_reconciliation_capabilities_preview_and_atomic_submit(monkeypatch):
+    calls = []
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        calls.append((name, arguments))
+        if name == "get_capabilities":
+            return _result(structured={"capabilities": {"decisionReconciliation": {
+                "version": 1, "atomicSubmit": True, "preview": True,
+                "threeWayMerge": False}}})
+        if name == "preview_decision_reconciliation":
+            return _result(structured={
+                "personalHead": "ph", "teamHead": "th", "pendingCandidateId": None,
+                "state": "diverged", "operation": "submit_update",
+                "fields": [{"field": "content", "before": "old", "after": "new"}],
+                "availableActions": ["submit"],
+                "team": {"id": "t1", "name": "Platform", "role": "member"}})
+        return _result(structured={
+            "status": "submitted", "kind": "update", "personalHead": "ph2",
+            "teamHead": "th", "candidateId": "c1", "revisionId": "r2",
+            "replayed": False, "team": {"id": "t1", "name": "Platform"}})
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    rs = RemoteStore("https://t/mcp", "tok")
+    caps = rs.get_capabilities().decision_reconciliation
+    preview = rs.preview_decision_reconciliation(
+        "d1", "t1", type="constraint", content="new", repo="github.com/a/b")
+    result = rs.submit_team_decision(
+        "d1", "r2", "t1", expected_personal_head="ph", expected_team_head="th",
+        idempotency_key="idem-1", type="constraint", content="new", repo="github.com/a/b")
+
+    assert caps and caps.atomic_submit and caps.preview and not caps.three_way_merge
+    assert preview.fields[0].before == "old" and preview.team.name == "Platform"
+    assert result.status == "submitted" and result.candidate_id == "c1"
+    assert calls[1] == ("preview_decision_reconciliation", {
+        "decisionId": "d1", "teamId": "t1",
+        "proposed": {"type": "constraint", "content": "new", "repo": "github.com/a/b"}})
+    assert calls[2][0] == "submit_team_decision"
+    assert calls[2][1]["idempotencyKey"] == "idem-1"
+    assert calls[2][1]["expectedPersonalHead"] == "ph"
+    assert calls[2][1]["expectedTeamHead"] == "th"
+
+
+def test_submit_decision_to_team_can_strip_evidence(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(
+        lambda e, t, n, args, to: captured.update(name=n, args=args) or _result(structured={
+            "status": "submitted", "kind": "initial", "candidateId": "c-1",
+            "team": {"id": "t-1", "name": "T"},
+        })))
+    RemoteStore("https://t/mcp", "tok").submit_decision_to_team(
+        "d-1", "t-1", include_evidence=False)
+    assert captured == {
+        "name": "share_decision",
+        "args": {"decisionId": "d-1", "teamId": "t-1", "includeEvidence": False},
+    }
 
 
 def test_sync_push_decision_is_thin_shim_over_async_core(monkeypatch):
