@@ -235,12 +235,14 @@ def _sync(repo_path: str, profile: config.Profile,
                 removed.append(rd.id)
             continue
         row = _row_to_dict(rd)
-        _apply_reconciliation_metadata(repo_path, row)
         if by_id.get(rd.id) == row:
             # Unchanged re-send: the live server's updatedSince filter is INCLUSIVE, so
             # rows stamped exactly at the cursor come back on every delta fetch. Treating
-            # them as new would re-inject the same decisions every poll window.
+            # them as new would re-inject the same decisions every poll window. It also
+            # must not re-apply reconciliation metadata: a user may have approved the
+            # previous team-created Suggested Update since the row was cached locally.
             continue
+        _apply_reconciliation_metadata(repo_path, row)
         by_id[rd.id] = row
         new_rows.append(row)
     for dead in ctx.deleted:

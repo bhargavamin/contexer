@@ -144,10 +144,12 @@ def _enqueue_reconciliation(operation: dict) -> None:
     every automatic retry of this exact row."""
     with outbox_lock():
         key = (operation.get("decision_id"), operation.get("team_id"))
-        entries = [e for e in _load_reconcile_outbox()
-                   if (e.get("decision_id"), e.get("team_id")) != key]
+        loaded = _load_reconcile_outbox()
+        entries = [e for e in loaded if (e.get("decision_id"), e.get("team_id")) != key]
+        if len(entries) == len(loaded) and len(entries) >= _OUTBOX_CAP:
+            raise RuntimeError("reconciliation retry queue is full")
         entries.append(operation)
-        _save_reconcile_outbox(entries[-_OUTBOX_CAP:])
+        _save_reconcile_outbox(entries)
 
 
 @contextlib.contextmanager
@@ -1101,6 +1103,32 @@ def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
         return ("Not in team mode. Run `contexer login` to connect this machine before "
                 "submitting a team update.")
 
+    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    try:
+        capabilities = remote.get_capabilities()
+    except RemoteStoreError as exc:
+        if _unsupported_capability_error(exc):
+            try:
+                teams = remote.list_teams()
+            except RemoteStoreError as team_exc:
+                if team and _unsupported_capability_error(team_exc):
+                    target = RemoteTeam(team, team, "member")
+                elif _unsupported_capability_error(team_exc):
+                    return ("This team server does not support team discovery. "
+                            "Run reconcile again with `--team TEAM_ID`.")
+                else:
+                    return "Could not list shared teams (see the warning above); nothing was submitted."
+            else:
+                target = _select_team(teams, team)
+                if isinstance(target, str):
+                    return target
+            return ReconciliationPlan(
+                dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
+        return f"Could not discover reconciliation capabilities: {exc}. Nothing was submitted."
+
+    protocol = capabilities.decision_reconciliation
+    atomic = bool(protocol and protocol.version >= 1
+                  and protocol.atomic_submit and protocol.preview)
     try:
         teams = remote.list_teams()
     except RemoteStoreError:
@@ -1108,17 +1136,6 @@ def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
     target = _select_team(teams, team)
     if isinstance(target, str):
         return target
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
-    try:
-        capabilities = remote.get_capabilities()
-    except RemoteStoreError as exc:
-        if _unsupported_capability_error(exc):
-            return ReconciliationPlan(
-                dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
-        return f"Could not discover reconciliation capabilities: {exc}. Nothing was submitted."
-    protocol = capabilities.decision_reconciliation
-    atomic = bool(protocol and protocol.version >= 1
-                  and protocol.atomic_submit and protocol.preview)
     if not atomic:
         return ReconciliationPlan(
             dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)

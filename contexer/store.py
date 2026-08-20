@@ -2031,6 +2031,10 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
         if existing:
             origin = existing.get("team_reconciliation") or {}
             return bool(origin.get("team_head") == team_head and team_head)
+        last = entry.get("last_team_reconciliation")
+        if (isinstance(last, dict) and team_head and last.get("team_head") == team_head
+                and _current_content(entry) == content):
+            return True
         now = datetime.now(timezone.utc).isoformat()
         proposal = _build_proposal(
             entry, content, entry.get("subtype", ""), f"team:{team_id}", now,
@@ -2105,6 +2109,10 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
                      title=carried_title)
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
+    origin = prop.get("team_reconciliation")
+    if isinstance(origin, dict):
+        entry["last_team_reconciliation"] = {
+            **origin, "outcome": "approved", "at": datetime.now(timezone.utc).isoformat()}
     entry.pop("proposed_revision", None)
     entry.pop("conflict_memo", None)          # the pair it resolved no longer exists
     if prop.get("clear_anchors"):

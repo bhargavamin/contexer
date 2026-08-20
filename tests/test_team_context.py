@@ -109,6 +109,28 @@ def test_pull_in_sync_clears_only_team_created_proposal(team_env, monkeypatch):
     assert entry["last_team_reconciliation"]["outcome"] == "in_sync"
 
 
+def test_repeated_team_ahead_pull_does_not_reattach_after_approval(team_env, monkeypatch):
+    local_id = _seed_local(team_env, "keep the original local wording", subtype="constraint")
+    store.approve_decision(team_env, local_id, "approve")
+    rd = RemoteDecision(
+        id="team-1", type="constraint", title="Lead wording", content="use the lead wording",
+        rationale=None, repo="github.com/a/b", agent=None, scope="team",
+        local_decision_id=local_id, team_id="t-1", team_name="Platform",
+        reconciliation={"state": "team_ahead", "personalHead": "p1", "teamHead": "th2"})
+    fake = _fake_rs(monkeypatch, ctx=RemoteContext([rd], [], "c1"))
+
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    assert store.approve_decision(team_env, local_id, "approve")[0]
+    fake._ctx = RemoteContext([rd], [], "c1")
+
+    team_context.pull(team_env, profile=TEAM_PROFILE)
+    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    assert entry["content"].casefold() == "use the lead wording"
+    assert "proposed_revision" not in entry
+    assert entry["last_team_reconciliation"]["team_head"] == "th2"
+    assert entry["last_team_reconciliation"]["outcome"] == "approved"
+
+
 # ── pull ─────────────────────────────────────────────────────────────────────────
 
 def test_pull_local_mode_is_noop(team_env, monkeypatch):

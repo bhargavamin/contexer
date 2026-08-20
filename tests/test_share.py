@@ -259,6 +259,9 @@ def test_reconcile_requires_explicit_team_when_memberships_are_ambiguous(tmp_rep
                                    subtype="convention")
 
     class Fake:
+        def get_capabilities(self):
+            raise remote.RemoteStoreError("Unknown tool: get_capabilities")
+
         def list_teams(self):
             return [
                 remote.RemoteTeam("t-1", "Platform", "member"),
@@ -384,6 +387,39 @@ def test_reconcile_falls_back_for_server_without_capability_tool(tmp_repo, monke
     assert "candidate-1" in out
 
 
+def test_reconcile_falls_back_with_explicit_team_when_discovery_is_missing(
+        tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "support team-id fallback", "s1",
+                                   subtype="constraint")
+    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+
+    class Fake:
+        def __init__(self):
+            self.events = []
+
+        def get_capabilities(self):
+            raise remote.RemoteStoreError("Unknown tool: get_capabilities")
+
+        def list_teams(self):
+            raise remote.RemoteStoreError("Unknown tool: list_teams")
+
+        def push_decision(self, **kwargs):
+            self.events.append(("push", kwargs["decision_id"]))
+            return "personal-1"
+
+        def submit_decision_to_team(self, decision_id, team_id):
+            self.events.append(("submit", decision_id, team_id))
+            return remote.TeamShareResult(
+                "submitted", "update", "candidate-1",
+                remote.RemoteTeam(team_id, team_id, "member"))
+
+    fake = Fake()
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    out = share.reconcile(tmp_repo, did, team="team-legacy", profile=TEAM)
+    assert fake.events == [("push", did), ("submit", did, "team-legacy")]
+    assert "candidate-1" in out
+
+
 def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monkeypatch):
     operation = {
         "operation": "submit_team_decision", "idempotency_key": "idem-stable",
@@ -415,6 +451,23 @@ def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monke
     assert fake.calls[0][3]["expected_personal_head"] == "ph1"
     assert fake.calls[0][3]["content"] == "new"
     assert share._load_reconcile_outbox() == []
+
+
+def test_reconciliation_outbox_full_refuses_new_distinct_operation(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 2)
+    for did in ("d1", "d2"):
+        share._enqueue_reconciliation({
+            "operation": "submit_team_decision", "idempotency_key": f"idem-{did}",
+            "decision_id": did, "revision_id": f"r-{did}", "team_id": "t1",
+            "team_name": "Platform", "payload": {"type": "constraint", "content": did},
+        })
+    with pytest.raises(RuntimeError, match="queue is full"):
+        share._enqueue_reconciliation({
+            "operation": "submit_team_decision", "idempotency_key": "idem-d3",
+            "decision_id": "d3", "revision_id": "r-d3", "team_id": "t1",
+            "team_name": "Platform", "payload": {"type": "constraint", "content": "d3"},
+        })
+    assert [e["decision_id"] for e in share._load_reconcile_outbox()] == ["d1", "d2"]
 
 
 def test_discard_outbox_also_clears_confirmed_reconciliations(tmp_repo):
