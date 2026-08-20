@@ -156,34 +156,69 @@ class TestStagedFiles:
 # ── _staged_content ──────────────────────────────────────────────────────────
 
 class TestStagedContent:
+    """Returns `(text, reason)`. `reason` is None only when the text IS the staged
+    content; every other case names why there is none, so a caller can never mistake
+    "could not read" for "nothing here" (see the function's own docstring for the two
+    bugs that collapse caused)."""
+
     def test_returns_index_not_working_tree_content(self, git_repo):
         _write(git_repo, "f.py", "committed\n")
         _git(git_repo, "add", "f.py")
         # edit working tree WITHOUT staging — index still holds the old content
         _write(git_repo, "f.py", "working-tree-only\n")
 
-        assert guard_engine._staged_content(str(git_repo), "f.py") == "committed\n"
+        text, reason, fingerprint = guard_engine._staged_content(str(git_repo), "f.py")
+        assert (text, reason) == ("committed\n", None) and fingerprint
 
     def test_binary_null_byte_skipped(self, git_repo):
         _write(git_repo, "bin.dat", b"\x00\x01\x02binarydata")
         _git(git_repo, "add", "bin.dat")
 
-        assert guard_engine._staged_content(str(git_repo), "bin.dat") == ""
+        text, reason, fingerprint = guard_engine._staged_content(str(git_repo), "bin.dat")
+        assert (text, reason) == ("", "binary")
+        # git READ it; only scannability was in question, so it still has an identity the
+        # throttle can compare. None here is what made such a pair re-advise forever.
+        assert fingerprint
 
-    def test_oversize_file_skipped(self, git_repo):
-        big = ("x" * (guard_engine._GUARD_MAX_FILE_BYTES + 1)).encode()
-        _write(git_repo, "big.txt", big)
+    def test_oversize_file_skipped(self, git_repo, monkeypatch):
+        # The cap is monkeypatched DOWN rather than exercised at its real 2MB value:
+        # this pins the size branch, not the constant, and writing 2MB through git on
+        # every run buys nothing. The real value's justification is measured in the
+        # constant's own comment.
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 64)
+        _write(git_repo, "big.txt", b"x" * 65)
         _git(git_repo, "add", "big.txt")
 
-        assert guard_engine._staged_content(str(git_repo), "big.txt") == ""
+        text, reason, fingerprint = guard_engine._staged_content(str(git_repo), "big.txt")
+        assert (text, reason) == ("", "too-large")
+        assert fingerprint, "an over-cap file was still read, so it has a fingerprint"
+
+    def test_a_file_exactly_at_the_cap_is_still_read(self, git_repo, monkeypatch):
+        # The comparison is `>`, not `>=`: an exactly-cap-sized file must be scanned,
+        # or the boundary silently costs one file's worth of coverage.
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 64)
+        _write(git_repo, "exact.txt", b"y" * 64)
+        _git(git_repo, "add", "exact.txt")
+
+        text, reason, _fp = guard_engine._staged_content(str(git_repo), "exact.txt")
+        assert reason is None and len(text) == 64
+
+    def test_an_empty_staged_file_is_read_not_an_error(self, git_repo):
+        # The state the old bare-"" return could not express at all: genuinely empty
+        # content is a successful read, so `reason` must stay None.
+        _write(git_repo, "empty.py", "")
+        _git(git_repo, "add", "empty.py")
+
+        assert guard_engine._staged_content(str(git_repo), "empty.py")[:2] == ("", None)
 
     def test_missing_path_fails_soft(self, git_repo):
-        assert guard_engine._staged_content(str(git_repo), "nope.py") == ""
+        # The one case with NO fingerprint: nothing was read, so nothing is known.
+        assert guard_engine._staged_content(str(git_repo), "nope.py") == ("", "unreadable", None)
 
     def test_non_repo_fails_soft(self, tmp_path):
         not_a_repo = tmp_path / "not_a_repo"
         not_a_repo.mkdir()
-        assert guard_engine._staged_content(str(not_a_repo), "f.py") == ""
+        assert guard_engine._staged_content(str(not_a_repo), "f.py") == ("", "unreadable", None)
 
 
 # ── _merge_in_progress ───────────────────────────────────────────────────────
@@ -2180,6 +2215,287 @@ class TestGuardStagedViolations:
         result = guard_engine.guard_staged(str(repo))
         assert result["violations"] == []
         assert "error" not in result
+
+
+# ── Unreadable staged content is reported, never a silent pass ─────────────────
+
+class TestUncheckedIsReported:
+    """A staged file an armed rule could not be run against must be REPORTED, not
+    skipped in silence. Before this, `_staged_content` returned a bare "" and
+    `_guard_violations` did `if not content: continue`, so an over-cap file passed
+    as a clean result: on this repo that silently exempted contexer/store.py (376KB)
+    and tests/test_store.py (390KB) from every armed rule, including `--check secret`."""
+
+    def _armed(self, repo):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        return entry
+
+    def test_over_cap_file_is_reported_not_silently_passed(self, repo, monkeypatch):
+        self._armed(repo)
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "big.py", "# TODO fix this\n" + "x" * 64)
+        _git(repo, "add", "big.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        # The rule genuinely could not see the TODO, which is the honest outcome of a
+        # cap; what must NOT happen is that outcome being indistinguishable from clean.
+        assert result["violations"] == []
+        assert result["unchecked"] == [{"file": "big.py", "reason": "too-large"}]
+
+    def test_clean_run_omits_the_key_entirely(self, repo):
+        self._armed(repo)
+        _write(repo, "a.py", "fine\n")
+        _git(repo, "add", "a.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        # Present only when there is something to report, like total_advisories, so a
+        # clean run's dict shape is exactly what it was before this existed.
+        assert "unchecked" not in result
+
+    def test_binary_is_not_reported(self, repo):
+        self._armed(repo)
+        _write(repo, "bin.dat", b"\x00\x01\x02binary")
+        _git(repo, "add", "bin.dat")
+
+        result = guard_engine.guard_staged(str(repo))
+        # Skipping binary is correct, not a gap: a regex over encoded bytes is
+        # meaningless, so reporting it would nag on every commit that stages an image.
+        assert "unchecked" not in result
+
+    def test_no_armed_rule_means_nothing_went_unchecked(self, repo, monkeypatch):
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "big.py", "x" * 64)
+        _git(repo, "add", "big.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        # Accurate rather than a gap: with no rule armed there was no check to skip.
+        assert "unchecked" not in result
+
+    def test_a_file_no_armed_rule_selects_is_not_reported(self, repo, monkeypatch):
+        """A rule scoped with --paths would never have been run against this file, so
+        calling it "not checked" invents a gap and nags on every commit."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
+                                paths="src/*.py")
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "data.json", "x" * 64)
+        _git(repo, "add", "data.json")
+
+        assert "unchecked" not in guard_engine.guard_staged(str(repo))
+
+    def test_a_file_the_glob_does_select_is_still_reported(self, repo, monkeypatch):
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
+                                paths="src/*.py")
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "src/big.py", "x" * 64)
+        _git(repo, "add", "src/big.py")
+
+        assert guard_engine.guard_staged(str(repo))["unchecked"] == \
+            [{"file": "src/big.py", "reason": "too-large"}]
+
+    def test_scan_budget_exhaustion_is_reported_not_left_to_the_deadline(
+            self, repo, monkeypatch):
+        """The wall-clock deadline fails OPEN by discarding every violation found so far,
+        so a byte budget must stop first and NAME what it did not reach. Otherwise a
+        commit of many large-but-textual files loses the violations from its small ones
+        too, and reports only "internal error"."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        # A reserve larger than the whole time budget puts the soft cut-off in the past,
+        # so everything after the first selected file is out of time.
+        monkeypatch.setattr(guard_engine, "_GUARD_SCAN_RESERVE", 10_000)
+        _write(repo, "a.py", "# TODO one\n")
+        _write(repo, "b.py", "# TODO two\n")
+        _git(repo, "add", "a.py", "b.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        # The first file always scans, so the run makes forward progress...
+        assert [v["path"] for v in result["violations"]] == ["a.py"]
+        # ...and the one it could not afford is reported rather than passing as clean.
+        assert result["unchecked"] == [{"file": "b.py", "reason": "budget"}]
+        assert "error" not in result
+
+    def test_files_no_rule_selects_do_not_consume_the_scan_budget(self, repo, monkeypatch):
+        """Security: a path-scoped rule plus a pile of out-of-scope staged files must not
+        starve the file the rule DOES cover. Charging the budget for a file that is then
+        scanned against nothing let unrelated bulk (a data dump, a lockfile) push the one
+        selected file past the budget, where it was skipped with only a non-blocking
+        notice and its violation shipped."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
+                                paths="src/*.py")
+        monkeypatch.setattr(guard_engine, "_GUARD_SCAN_RESERVE", 10_000)
+        # `data.json` sorts before `src/app.py`, so it is seen first and would have eaten
+        # the budget under the old accounting, leaving the covered file unscanned.
+        _write(repo, "data.json", "x" * 64)
+        _write(repo, "src/app.py", "# TODO fix this\n")
+        _git(repo, "add", "data.json", "src/app.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        assert [v["path"] for v in result["violations"]] == ["src/app.py"]
+        assert "unchecked" not in result
+
+    def test_a_file_no_rule_selects_is_never_read(self, repo, monkeypatch):
+        """The same rule, as an efficiency property: `git show` is not spent on a file no
+        armed rule would be run against."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO",
+                                paths="src/*.py")
+        _write(repo, "data.json", "{}\n")
+        _write(repo, "src/app.py", "clean\n")
+        _git(repo, "add", "data.json", "src/app.py")
+
+        seen = []
+        real = guard_engine._staged_content
+
+        def spy(repo_arg, path, *a, **k):
+            seen.append(path)
+            return real(repo_arg, path, *a, **k)
+        monkeypatch.setattr(guard_engine, "_staged_content", spy)
+
+        guard_engine._guard_violations(str(repo), ["data.json", "src/app.py"],
+                                        deadline=time.time() + 30)
+        assert seen == ["src/app.py"]
+
+    def test_several_MB_of_selected_text_is_still_fully_scanned(self, repo):
+        """Regression for the coverage band a fixed 4MB byte budget silently gave up. The
+        cut-off is now the real resource (time), so 4.5MB of selected text, well past the
+        old byte cap and nowhere near the 2s deadline, is scanned to the last file."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        for i in range(5):
+            _write(repo, f"f{i}.py", "x" * 900_000)
+        # The violation is in the LAST file, so only a run that got all the way there
+        # can find it.
+        _write(repo, "f9_last.py", "# TODO fix this\n")
+        _git(repo, "add", "-A")
+
+        result = guard_engine.guard_staged(str(repo))
+        assert [v["path"] for v in result["violations"]] == ["f9_last.py"]
+        assert "unchecked" not in result
+
+    def test_running_out_of_time_does_not_block_the_commit(self, repo, monkeypatch):
+        """Deliberate policy, pinned so it stays a choice rather than an accident: a
+        selected file the guard ran out of time for is REPORTED, not blocked on. Blocking
+        would contradict the ratified "the run path never blocks a commit on its own
+        failure" invariant, since running out of budget is the guard's own limitation and
+        not a rule violation. The trade-off is real and belongs in the open: a violation
+        in a file that went unscanned is not caught, which is why the file is named."""
+        entry = _seed_entry(repo, "Never commit TODO markers")
+        guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
+        monkeypatch.setattr(guard_engine, "_GUARD_SCAN_RESERVE", 10_000)
+        _write(repo, "a_clean.py", "nothing here\n")
+        _write(repo, "z_dirty.py", "# TODO fix this\n")
+        _git(repo, "add", "a_clean.py", "z_dirty.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        assert result["violations"] == []
+        assert result["unchecked"] == [{"file": "z_dirty.py", "reason": "budget"}]
+        # No error flag: this is a reported gap, not a guard malfunction, so the CLI keeps
+        # the violations it did find rather than degrading to "internal error".
+        assert "error" not in result
+
+    def test_a_readable_file_alongside_an_over_cap_one_still_blocks(self, repo, monkeypatch):
+        self._armed(repo)
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "big.py", "x" * 64)
+        _write(repo, "small.py", "# TODO fix this\n")
+        _git(repo, "add", "big.py", "small.py")
+
+        result = guard_engine.guard_staged(str(repo))
+        # One unreadable file must not cost the whole run: the file that COULD be read
+        # is still checked, and its violation still reported.
+        assert [v["path"] for v in result["violations"]] == ["small.py"]
+        assert result["unchecked"] == [{"file": "big.py", "reason": "too-large"}]
+
+
+class TestThrottleDoesNotFreezeOnUnreadableContent:
+    """Tier-1's throttle re-advises a pair once the file's staged content changes, by
+    comparing a stored fingerprint. Two opposite failures are pinned here. Hashing
+    `_staged_content`'s old bare "" meant an unreadable file hashed to the empty-string
+    sha1 every time, so the stamp always matched and the pair was suppressed FOREVER.
+    Withholding a fingerprint from every non-None reason is the mirror-image bug: an
+    over-cap or binary file could then never be throttled or stamped, so it re-advised on
+    every commit and, since the surfaced list is capped, could crowd out fresh advisories.
+    The line is drawn at what git actually READ, not at what the scanner accepted."""
+
+    def _unreadable(self, monkeypatch):
+        monkeypatch.setattr(guard_engine, "_staged_content",
+                            lambda *_a, **_k: ("", "unreadable", None))
+
+    def test_over_cap_pair_still_throttles_when_unchanged(self, repo, monkeypatch):
+        _seed_entry(repo, "Keep the store loader fail-soft", source_files=["big.py"])
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "big.py", "x" * 64)
+        _git(repo, "add", "big.py")
+
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+        assert guard_engine.guard_staged(str(repo))["advisories"] == [], \
+            "an over-cap file was still read, so unchanged content must throttle"
+
+    def test_over_cap_pair_re_advises_when_the_file_changes(self, repo, monkeypatch):
+        _seed_entry(repo, "Keep the store loader fail-soft", source_files=["big.py"])
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "big.py", "x" * 64)
+        _git(repo, "add", "big.py")
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+
+        _write(repo, "big.py", "y" * 64)
+        _git(repo, "add", "big.py")
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+
+    def test_unreadable_pair_re_advises_instead_of_freezing(self, repo, monkeypatch):
+        _seed_entry(repo, "Keep the store loader fail-soft", source_files=["a.py"])
+        _write(repo, "a.py", "x\n")
+        _git(repo, "add", "a.py")
+        self._unreadable(monkeypatch)
+
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1, \
+            "unproven sameness must surface, not suppress"
+
+    def test_no_throttle_stamp_is_written_for_unreadable_content(self, repo, monkeypatch):
+        _seed_entry(repo, "Keep the store loader fail-soft", source_files=["a.py"])
+        _write(repo, "a.py", "x\n")
+        _git(repo, "add", "a.py")
+        self._unreadable(monkeypatch)
+
+        guard_engine.guard_staged(str(repo))
+        # The stamp asserts "we advised on exactly this content"; with nothing read there
+        # is no content to say that about, and writing one created the freeze.
+        assert guard_engine._guard_advised(str(repo)) == {}
+
+    def test_over_cap_content_IS_stamped(self, repo, monkeypatch):
+        _seed_entry(repo, "Keep the store loader fail-soft", source_files=["big.py"])
+        monkeypatch.setattr(guard_engine, "_GUARD_MAX_FILE_BYTES", 32)
+        _write(repo, "big.py", "x" * 64)
+        _git(repo, "add", "big.py")
+
+        guard_engine.guard_staged(str(repo))
+        assert guard_engine._guard_advised(str(repo)) != {}, \
+            "a file git read has a comparable identity, so its pair must be stampable"
+
+    def test_readable_content_still_throttles(self, repo):
+        _seed_entry(repo, "Keep the store loader fail-soft", source_files=["a.py"])
+        _write(repo, "a.py", "x\n")
+        _git(repo, "add", "a.py")
+
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+        # Unchanged content still suppresses: the fix must not have disabled throttling.
+        assert guard_engine.guard_staged(str(repo))["advisories"] == []
+
+    def test_fingerprint_matches_the_pre_change_scheme_for_utf8_content(self, git_repo):
+        """On-disk stamps survive the switch from hashing decoded text to hashing raw
+        bytes: for valid UTF-8 the two digests are identical, so only a file whose bytes
+        are not valid UTF-8 gets one benign re-advise rather than the whole corpus."""
+        import hashlib
+        _write(git_repo, "f.py", "token = 1\n")
+        _git(git_repo, "add", "f.py")
+
+        text, _reason, fingerprint = guard_engine._staged_content(str(git_repo), "f.py")
+        assert fingerprint == hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
 
 
 # ── Task 3: wire-safety regression ────────────────────────────────────────────
