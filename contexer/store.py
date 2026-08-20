@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import redact          # pure stdlib leaf (no cycle): secret redaction
+from contexer import reconciliation, redact  # pure stdlib leaves (no cycles)
 
 try:
     import fcntl                       # POSIX advisory file locks (macOS/Linux)
@@ -2027,16 +2027,6 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
         entry = _entry_by_id([e for e in data["entries"] if e.get("type") == "decision"], entry_id)
         if entry is None or _entry_status(entry) == "pending_approval":
             return False
-        existing = entry.get("proposed_revision")
-        if existing:
-            origin = existing.get("team_reconciliation") or {}
-            return bool(origin.get("team_head") == team_head and team_head)
-        last = entry.get("last_team_reconciliation")
-        if isinstance(last, dict) and team_head and last.get("team_head") == team_head:
-            if last.get("outcome") in {"approved", "dismissed"}:
-                return True
-            if _current_content(entry) == _normalize_content(content):
-                return True
         now = datetime.now(timezone.utc).isoformat()
         proposal = _build_proposal(
             entry, content, entry.get("subtype", ""), f"team:{team_id}", now,
@@ -2046,7 +2036,11 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
             "team_name": team_name,
             "team_head": team_head,
         }
-        entry["proposed_revision"] = proposal
+        accepted, changed = reconciliation.attach_proposal(
+            entry, proposal, current_content=_current_content(entry),
+            normalized_content=_normalize_content(content), team_head=team_head)
+        if not changed:
+            return accepted
         _save(repo_path, data)
         _touch_pending_review(repo_path)
         return True
@@ -2060,17 +2054,9 @@ def clear_team_reconciliation_proposal(repo_path: str, entry_id: str, *,
         entry = _entry_by_id([e for e in data["entries"] if e.get("type") == "decision"], entry_id)
         if entry is None:
             return False
-        proposal = entry.get("proposed_revision") or {}
-        origin = proposal.get("team_reconciliation")
-        if not isinstance(origin, dict):
+        if not reconciliation.clear_proposal(
+                entry, team_head=team_head, at=datetime.now(timezone.utc).isoformat()):
             return False
-        # A newer pull-created proposal must not be cleared by an older/out-of-order delta.
-        if team_head and origin.get("team_head") not in {"", team_head}:
-            return False
-        entry.pop("proposed_revision", None)
-        entry.pop("conflict_memo", None)
-        entry["last_team_reconciliation"] = {
-            **origin, "outcome": "in_sync", "at": datetime.now(timezone.utc).isoformat()}
         _save(repo_path, data)
         return True
 
@@ -2111,10 +2097,8 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
                      title=carried_title)
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
-    origin = prop.get("team_reconciliation")
-    if isinstance(origin, dict):
-        entry["last_team_reconciliation"] = {
-            **origin, "outcome": "approved", "at": datetime.now(timezone.utc).isoformat()}
+    reconciliation.record_outcome(
+        entry, prop, outcome="approved", at=datetime.now(timezone.utc).isoformat())
     entry.pop("proposed_revision", None)
     entry.pop("conflict_memo", None)          # the pair it resolved no longer exists
     if prop.get("clear_anchors"):
@@ -2685,11 +2669,8 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if action in ("dismiss", "ignore"):
             rev = entry.get("revision", 1)
             prop = entry.get("proposed_revision") or {}
-            origin = prop.get("team_reconciliation")
-            if isinstance(origin, dict):
-                entry["last_team_reconciliation"] = {
-                    **origin, "outcome": "dismissed",
-                    "at": datetime.now(timezone.utc).isoformat()}
+            reconciliation.record_outcome(
+                entry, prop, outcome="dismissed", at=datetime.now(timezone.utc).isoformat())
             entry.pop("proposed_revision", None)
             entry.pop("conflict_memo", None)  # the pair it resolved no longer exists
             return True, f"Dismissed - kept current revision {rev}.", True
