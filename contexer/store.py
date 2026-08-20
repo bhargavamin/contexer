@@ -2033,7 +2033,7 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
             return bool(origin.get("team_head") == team_head and team_head)
         last = entry.get("last_team_reconciliation")
         if (isinstance(last, dict) and team_head and last.get("team_head") == team_head
-                and _current_content(entry) == content):
+                and _current_content(entry) == _normalize_content(content)):
             return True
         now = datetime.now(timezone.utc).isoformat()
         proposal = _build_proposal(

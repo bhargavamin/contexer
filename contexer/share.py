@@ -144,7 +144,9 @@ def _enqueue_reconciliation(operation: dict) -> None:
     every automatic retry of this exact row."""
     with outbox_lock():
         key = (operation.get("decision_id"), operation.get("team_id"))
-        loaded = _load_reconcile_outbox()
+        loaded, error = _read_reconcile_outbox()
+        if error is not None:
+            raise RuntimeError(f"cannot read reconciliation retry queue: {error}")
         entries = [e for e in loaded if (e.get("decision_id"), e.get("team_id")) != key]
         if len(entries) == len(loaded) and len(entries) >= _OUTBOX_CAP:
             raise RuntimeError("reconciliation retry queue is full")
@@ -762,7 +764,9 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
 
 def _drain_reconciliation_outbox_unlocked(profile: Profile) -> int:
     """Retry confirmed atomic writes verbatim; stale heads become attention, never retries."""
-    entries = _load_reconcile_outbox()
+    entries, error = _read_reconcile_outbox()
+    if error is not None:
+        return 0
     if not entries:
         return 0
     remote = RemoteStore.from_profile(profile)
@@ -861,7 +865,9 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
 
 async def _adrain_reconciliation_outbox_unlocked(profile: Profile) -> int:
     """Async-native twin of the confirmed-operation drain."""
-    entries = _load_reconcile_outbox()
+    entries, error = _read_reconcile_outbox()
+    if error is not None:
+        return 0
     if not entries:
         return 0
     remote = RemoteStore.from_profile(profile)

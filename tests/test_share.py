@@ -470,6 +470,20 @@ def test_reconciliation_outbox_full_refuses_new_distinct_operation(tmp_repo, mon
     assert [e["decision_id"] for e in share._load_reconcile_outbox()] == ["d1", "d2"]
 
 
+def test_reconciliation_enqueue_refuses_corrupt_queue_without_overwriting(tmp_repo):
+    path = share._reconcile_outbox_path()
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot read reconciliation retry queue"):
+        share._enqueue_reconciliation({
+            "operation": "submit_team_decision", "idempotency_key": "idem-d1",
+            "decision_id": "d1", "revision_id": "r-d1", "team_id": "t1",
+            "team_name": "Platform", "payload": {"type": "constraint", "content": "d1"},
+        })
+    assert path.read_text(encoding="utf-8") == "{not json"
+
+
 def test_discard_outbox_also_clears_confirmed_reconciliations(tmp_repo):
     share._enqueue_reconciliation({
         "decision_id": "d1", "team_id": "t1", "idempotency_key": "i1",
