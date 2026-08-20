@@ -2160,62 +2160,6 @@ class TestClassifyLevel:
         assert store._classify_level("Always use uv not pip", "convention", "memory") == "suggested"
 
 
-# ── _compute_confidence ────────────────────────────────────────────────────────
-
-class TestComputeConfidence:
-    def test_new_ai_entry_has_base_score(self):
-        entry = {"status": "suggested", "created_by": "ai", "occurrence_count": 1, "session_ids": ["s1"]}
-        score, factors = store._compute_confidence(entry)
-        assert score == 30
-        assert factors == []
-
-    def test_bootstrap_entry_gets_repo_bonus(self):
-        entry = {"status": "approved", "created_by": "bootstrap", "occurrence_count": 1, "session_ids": ["s1"]}
-        score, factors = store._compute_confidence(entry)
-        assert score == 45
-        assert "Observed in repository" in factors
-
-    def test_scan_entry_gets_repo_bonus(self):
-        entry = {"status": "approved", "created_by": "scan", "occurrence_count": 1, "session_ids": ["s1"]}
-        score, factors = store._compute_confidence(entry)
-        assert score == 45
-
-    def test_human_entry_gets_stated_bonus(self):
-        entry = {"status": "approved", "created_by": "human", "occurrence_count": 1, "session_ids": ["s1"]}
-        score, factors = store._compute_confidence(entry)
-        assert score == 50
-        assert "Stated by developer" in factors
-
-    def test_human_approval_adds_large_bonus(self):
-        entry = {"status": "approved", "created_by": "ai", "approved_by": "human",
-                 "occurrence_count": 1, "session_ids": ["s1"]}
-        score, factors = store._compute_confidence(entry)
-        assert score == 70
-        assert "Approved by developer" in factors
-
-    def test_multiple_sessions_adds_bonus(self):
-        entry = {"status": "suggested", "created_by": "ai", "occurrence_count": 3,
-                 "session_ids": ["s1", "s2", "s3"]}
-        score, factors = store._compute_confidence(entry)
-        assert score == 50  # 30 base + 20 for >=3 occurrences
-        assert any("Referenced in" in f for f in factors)
-
-    def test_score_capped_at_100(self):
-        entry = {"status": "approved", "created_by": "bootstrap", "approved_by": "human",
-                 "occurrence_count": 5, "session_ids": ["s1", "s2", "s3", "s4", "s5"],
-                 "memory_key": "some-key"}
-        score, _ = store._compute_confidence(entry)
-        assert score == 100
-
-    def test_memory_key_adds_small_bonus(self):
-        base_entry = {"status": "approved", "created_by": "ai", "occurrence_count": 1, "session_ids": ["s1"]}
-        score_without, _ = store._compute_confidence(base_entry)
-        memory_entry = {**base_entry, "memory_key": "some/file.md##section"}
-        score_with, factors = store._compute_confidence(memory_entry)
-        assert score_with == score_without + 5
-        assert "Persisted to memory tool" in factors
-
-
 # ── _new_decision_entry with new fields ───────────────────────────────────────
 
 class TestNewDecisionEntryFields:
@@ -6040,41 +5984,6 @@ class TestFollowThroughLog:
         store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
         path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
         assert not path.exists()
-
-
-# ── Title helpers (Task 1) ─────────────────────────────────────────────────────
-
-class TestTitleHelpers:
-    def test_normalize_flattens_and_strips(self):
-        assert store._normalize_title("  hello\n  world \t") == "hello world"
-
-    def test_normalize_truncates_with_ellipsis(self):
-        long = "x" * 150
-        out = store._normalize_title(long)
-        assert len(out) == store.MAX_TITLE_LEN
-        assert out.endswith("…")
-
-    def test_normalize_empty(self):
-        assert store._normalize_title("   \n ") == ""
-
-    def test_derive_verbatim_when_short(self):
-        c = "Never commit spec or plan files to git."
-        assert store._derive_title(c) == c  # <= 100 -> whole content, no ellipsis
-
-    def test_derive_first_sentence_when_long(self):
-        c = ("Native contexer-teams entry removed. Team sync is the Python path; "
-             "kept a legacy janitor pop; login now refreshes status.")
-        out = store._derive_title(c)
-        assert out.startswith("Native contexer-teams entry removed.")
-        assert len(out) <= store.MAX_TITLE_LEN
-
-    def test_derive_truncates_long_first_sentence(self):
-        c = "A " + "very " * 60 + "long first sentence with no early period"
-        out = store._derive_title(c)
-        assert len(out) == store.MAX_TITLE_LEN and out.endswith("…")
-
-    def test_derive_empty(self):
-        assert store._derive_title("") == ""
 
 
 # ── _title_and_body: the shared render primitive (findings #1-#3) ──────────────

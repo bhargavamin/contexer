@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import reconciliation, redact  # pure stdlib leaves (no cycles)
+from contexer import reconciliation, redact, revisions  # pure stdlib leaves (no cycles)
 
 try:
     import fcntl                       # POSIX advisory file locks (macOS/Linux)
@@ -21,7 +21,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
-MAX_TITLE_LEN = 100
+MAX_TITLE_LEN = revisions.MAX_TITLE_LEN
 _SCHEMA_VERSION = 4               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
@@ -703,26 +703,8 @@ def _is_storable(content: str) -> bool:
     return bool(_tokenize(content))
 
 
-def _normalize_title(title: str) -> str:
-    """Collapse a title to a single stripped line, capped at MAX_TITLE_LEN (adds an
-    ellipsis when it has to cut)."""
-    one_line = " ".join(title.split())
-    if len(one_line) <= MAX_TITLE_LEN:
-        return one_line
-    return one_line[:MAX_TITLE_LEN - 1].rstrip() + "…"
-
-
-def _derive_title(content: str) -> str:
-    """Deterministic fallback title from content: verbatim when the whole thing is short,
-    otherwise the first sentence/line, capped at MAX_TITLE_LEN."""
-    one_line = " ".join(content.split())
-    if not one_line:
-        return ""
-    if len(one_line) <= MAX_TITLE_LEN:
-        return one_line
-    first_line = content.strip().splitlines()[0]
-    first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
-    return _normalize_title(first_sentence)
+_normalize_title = revisions.normalize_title
+_derive_title = revisions.derive_title
 
 
 def _title_and_body(entry: dict, content: str | None = None) -> tuple[str, str | None]:
@@ -1062,45 +1044,7 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
     return subtype in _SIGNIFICANT_UPDATE_SUBTYPES
 
 
-def _compute_confidence(entry: dict) -> tuple[int, list[str]]:
-    """Compute a confidence score (0-100) and evidence factors from an entry's metadata.
-    Confidence reflects available evidence, NOT AI certainty."""
-    score = 30
-    factors: list[str] = []
-
-    if entry.get("approved_by") == "human":
-        score += 40
-        factors.append("Approved by developer")
-
-    created_by = entry.get("created_by", "ai")
-    if created_by in ("scan", "bootstrap"):
-        score += 15
-        factors.append("Observed in repository")
-    elif created_by == "human":
-        score += 20
-        factors.append("Stated by developer")
-
-    occ = entry.get("occurrence_count", 1)
-    if occ >= 3:
-        score += 20
-        factors.append(f"Referenced in {occ} sessions")
-    elif occ >= 2:
-        score += 10
-        factors.append("Mentioned multiple times")
-
-    sessions = entry.get("session_ids", [])
-    if len(sessions) >= 3 and occ < 3:
-        score += 10
-        factors.append("Confirmed across multiple sessions")
-    elif len(sessions) >= 2 and occ < 2:
-        score += 5
-        factors.append("Seen in multiple sessions")
-
-    if entry.get("memory_key"):
-        score += 5
-        factors.append("Persisted to memory tool")
-
-    return min(score, 100), factors
+_compute_confidence = revisions.compute_confidence
 
 
 # Prescriptive constraint/convention signals in user prompts.
@@ -1720,10 +1664,7 @@ def _redaction_enabled() -> bool:
         return True
 
 
-def _normalize_content(content: str) -> str:
-    """Strip whitespace, collapse internal runs, capitalize first character."""
-    normalized = " ".join(content.split())
-    return normalized[:1].upper() + normalized[1:] if normalized else normalized
+_normalize_content = revisions.normalize_content
 
 
 # ── Decision / Revision model (Git-like: revisions are immutable commits, the decision
@@ -1733,98 +1674,11 @@ def _normalize_content(content: str) -> str:
 # ── kept so the many read sites stay simple and replay is O(1). The revisions are the
 # ── source of truth; the cache is always rewritten from them on any change.
 
-def _new_revision(decision_id: str, version_number: int, content: str, source: str,
-                  confidence_score: int = 0, evidence: list | None = None,
-                  approved_at: str | None = None, created_at: str | None = None,
-                  normalize: bool = True, title: str = "") -> dict:
-    """Build one immutable revision object. `source` is the provenance
-    (ai | human | scan | bootstrap | memory) and maps to the upstream push contract.
-
-    normalize=False preserves content byte-for-byte - used by migration, which must be
-    lossless and must never rewrite (e.g. re-capitalize) an existing stored value."""
-    now = datetime.now(timezone.utc).isoformat()
-    return {
-        "revision_id": str(uuid.uuid4()),
-        "decision_id": decision_id,
-        "version_number": version_number,
-        "content": _normalize_content(content) if normalize else content,
-        "title": title,
-        "confidence_score": confidence_score,
-        "evidence": list(evidence or []),
-        "created_at": created_at or now,
-        "approved_at": approved_at,
-        "source": source,
-    }
-
-
-def _current_revision(entry: dict) -> dict | None:
-    """The active revision an entry points at via current_revision_id; falls back to the
-    last revision, then None. This is the only revision replay ever exposes."""
-    revs = entry.get("revisions") or []
-    cid = entry.get("current_revision_id")
-    if cid:
-        for r in revs:
-            if r.get("revision_id") == cid:
-                return r
-    return revs[-1] if revs else None
-
-
-def _current_content(entry: dict) -> str:
-    """Content of the entry's current revision (the only value replay should inject)."""
-    rev = _current_revision(entry)
-    if rev is not None:
-        return rev.get("content", "")
-    return entry.get("content", "")
-
-
-def _sync_decision_cache(entry: dict) -> None:
-    """Mirror the current revision onto the decision-level HEAD-cache fields so the read
-    sites (get_context display, replay) stay O(1). Revisions remain the source of truth."""
-    rev = _current_revision(entry)
-    if rev is None:
-        return
-    entry["content"] = rev.get("content", "")
-    entry["title"] = rev.get("title") or _derive_title(rev.get("content", ""))
-    entry["revision"] = rev.get("version_number", 1)
-    entry["confidence"] = rev.get("confidence_score", entry.get("confidence", 0))
-    evidence = rev.get("evidence") or []
-    if evidence:
-        entry["confidence_factors"] = evidence
-    else:
-        entry.pop("confidence_factors", None)
-
-
-def _append_revision(entry: dict, content: str, source: str,
-                     approved_at: str | None = None, title: str = "") -> dict:
-    """Create the next revision for a decision, make it current, and resync the cache.
-    Confidence is computed from the decision's aggregate evidence at this moment and
-    snapshotted onto the revision. `title` wins when given; otherwise it is re-derived
-    from `content` via `_normalize_title`/`_derive_title`. `approved_by == "human"` means
-    "the CURRENT revision was human-vouched" — so a non-human `source` here invalidates any
-    existing stamp (the content just changed under it, unseen by a human); a caller that IS
-    itself the human ratification (e.g. `_apply_approval` promoting a Suggested Update) must
-    (re)stamp `approved_by` AFTER calling this, not before. Returns the new revision."""
-    revs = entry.setdefault("revisions", [])
-    next_version = (revs[-1]["version_number"] + 1) if revs else 1
-    # Invalidate the stamp BEFORE computing confidence: a non-human source means the
-    # content about to be snapshotted was never seen by a human, so the new revision
-    # (and the resynced head cache) must not carry the approval bonus or its "Approved
-    # by developer" factor. Popping after the snapshot (the original bug) left both on
-    # the freshly-created revision even though `approved_by` was gone from the entry.
-    if source != "human":
-        entry.pop("approved_by", None)
-    score, factors = _compute_confidence(entry)
-    effective_title = _normalize_title(title) or _derive_title(content)
-    rev = _new_revision(
-        entry.get("id", ""), next_version, content,
-        source=source, confidence_score=score, evidence=factors,
-        approved_at=approved_at, title=effective_title,
-    )
-    revs.append(rev)
-    entry["current_revision_id"] = rev["revision_id"]
-    entry["updated_at"] = rev["created_at"]
-    _sync_decision_cache(entry)
-    return rev
+_new_revision = revisions.new_revision
+_current_revision = revisions.current_revision
+_current_content = revisions.current_content
+_sync_decision_cache = revisions.sync_decision_cache
+_append_revision = revisions.append_revision
 
 
 def _backfill_titles(entry: dict) -> bool:
