@@ -4270,30 +4270,8 @@ RV1_CORPUS = [
 ]
 
 
-class TestDeriveTopics:
-    def test_single_alias_hit(self):
-        assert store._derive_topics("we migrated the postgres schema for orders") == ["db"]
-
-    def test_multi_topic_sorted(self):
-        topics = store._derive_topics("the react component calls a rest endpoint")
-        assert topics == ["api", "frontend"]  # sorted, both facets present
-
-    def test_no_alias_returns_empty(self):
-        assert store._derive_topics("a plain sentence about widgets and gadgets") == []
-
-    def test_case_insensitive(self):
-        assert store._derive_topics("Using JWT for LOGIN flows") == ["auth"]
-
-    def test_session_words_do_not_mean_auth(self):
-        # "session" means agent sessions in this domain — it mis-tagged docs
-        # questions as auth when it lived in the auth alias set.
-        assert store._derive_topics("SessionStart hooks run each session") == []
-
-    def test_compound_auth_session_phrases_still_mean_auth(self):
-        # Greptile #123: genuine auth-session text carries no surviving alias
-        # token; the compound-phrase check restores the tag.
-        assert store._derive_topics("invalidate all user sessions on password change") == ["auth"]
-        assert store._derive_topics("login sessions expire after thirty minutes") == ["auth"]
+# Topic derivation is pure and its cases moved to tests/test_retrieval.py; the index
+# sidecar tests below stay here because they exercise the store's read/write path.
 
 
 class TestRetrievalIndex:
@@ -5343,15 +5321,8 @@ class TestProjectRelaxation:
 
 
 class TestArtifactRouteGate:
-    def test_prose_slashes_are_not_routes(self):
-        for prose in ("light/dark mode", "read/write splitting", "either/or choice"):
-            assert store._ARTIFACT_ROUTE_RE.findall(prose) == [], prose
-            assert store._extract_artifacts(prose) == [], prose
-
-    def test_real_route_matches(self):
-        assert store._ARTIFACT_ROUTE_RE.findall("GET /api/users/{id} returns json") == ["/api/users/{id}"]
-        arts = store._extract_artifacts("GET /api/users/{id} returns json")
-        assert "users" in arts and "api" in arts
+    # The pure route-regex/extraction cases moved to tests/test_retrieval.py; what stays
+    # here is the end-to-end prompt behaviour they feed.
 
     def test_artifact_only_prompt_no_global_leak(self, tmp_repo):
         # An index must exist (a repo decision) so the BM25 path — not legacy — runs.

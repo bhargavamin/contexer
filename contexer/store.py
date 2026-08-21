@@ -12,7 +12,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import reconciliation, redact, review, revisions  # pure stdlib leaves (no cycles)
+from contexer import (  # pure stdlib leaves (no cycles)
+    reconciliation,
+    redact,
+    retrieval,
+    review,
+    revisions,
+)
 
 try:
     import fcntl                       # POSIX advisory file locks (macOS/Linux)
@@ -4457,18 +4463,7 @@ _PROJECT_CONTEXT_WORDS = frozenset({
     "purpose", "goal", "planned", "overview", "scope",
 })
 
-_QUERY_STOP_WORDS = frozenset({
-    "why", "was", "the", "did", "we", "for", "what", "how", "is", "are",
-    "can", "does", "this", "that", "it", "to", "of", "in", "a", "an",
-    "and", "or", "but", "not", "with", "at", "by", "from", "reason",
-    "rationale", "decision", "decided", "chose", "choice", "about", "have",
-    "has", "been", "would", "could", "should", "will", "tell", "explain",
-    "know", "me", "you", "do", "our", "my", "your", "them", "they",
-    "implement", "implemented", "implementation", "use", "using", "used",
-    "build", "built", "create", "created", "add", "added", "make", "made",
-    "just", "here", "there", "when", "then", "than", "also", "get",
-    "into", "which", "who", "where", "its",
-})
+_QUERY_STOP_WORDS = retrieval._QUERY_STOP_WORDS
 
 # Additional words excluded when deciding if a project-context question is domain-specific.
 # "repo" can be a valid search term ("repo pattern") so it stays in the keyword pool for
@@ -4480,34 +4475,19 @@ _OVERVIEW_GENERIC_WORDS = frozenset({
 
 # ── Retrieval V1: topic router (lexical BM25 index + working set + injection ladder) ──
 #
-# Topic → alias words. A decision (or prompt) is tagged with a topic when its lowercase
-# tokens hit >=1 alias. Derived only — never stored on the entry (the index sidecar owns
-# topics). Each topic's own bare name IS a member of its alias set (a question naming the
-# topic word directly — "what is the auth feature doing?" — must still tag as that topic),
-# but pruned words like bare "session" stay deliberately excluded — see below.
-_TOPIC_ALIASES: dict[str, frozenset] = {
-    "db": frozenset({"db", "postgres", "postgresql", "mysql", "sqlite", "sql", "migration",
-                     "migrations", "schema", "query", "orm", "database", "redis", "mongo"}),
-    "api": frozenset({"api", "endpoint", "endpoints", "rest", "route", "routes", "request",
-                      "response", "http", "graphql"}),
-    # Bare "session"/"sessions" deliberately absent: in agent-tooling repos those
-    # words overwhelmingly mean agent sessions, not auth sessions — they mis-tagged
-    # documentation questions as auth (observed live 2026-07-15). Genuine auth-session
-    # phrasing is caught by _AUTH_SESSION_RE below instead.
-    "auth": frozenset({"auth", "jwt", "oauth", "login", "token", "tokens"}),
-    "frontend": frozenset({"frontend", "react", "component", "components", "css", "ui", "dom"}),
-    "deploy": frozenset({"deploy", "docker", "kubernetes", "k8s", "ci", "terraform", "helm",
-                         "release"}),
-    "testing": frozenset({"testing", "pytest", "test", "tests", "fixture", "fixtures", "mock",
-                          "coverage"}),
-    "config": frozenset({"config", "toml", "yaml", "env", "settings"}),
-    "perf": frozenset({"perf", "cache", "latency", "optimize"}),
-    "security": frozenset({"security", "secret", "vulnerability", "sanitize", "injection"}),
-}
-
-# BM25 tuning (Robertson/Sparck-Jones defaults — corpus is <=500 short jargon sentences).
-_BM25_K1 = 1.5
-_BM25_B = 0.75
+# The scoring half — tokenization, topic aliases, BM25 tuning/ranking, and artifact
+# extraction — lives in contexer/retrieval.py. Aliased here (plain assignment, no
+# __getattr__ needed) because retrieval.py does not import store: guard_engine reaches
+# _ARTIFACT_PATH_RE/_ARTIFACT_DOTTED_RE through this facade, and the suite reaches
+# _QUERY_STOP_WORDS/_ARTIFACT_ROUTE_RE the same way.
+#
+# The index SIDECAR (path, read, write, ensure) and _build_retrieval_index stay below:
+# they are file I/O and store-shaped assembly (entry status, current content, and
+# function-level guard_engine/conflicts calls), and the suite monkeypatches the reader
+# and writer THROUGH this module, which only works while those calls resolve here.
+_TOPIC_ALIASES = retrieval._TOPIC_ALIASES
+_BM25_K1 = retrieval._BM25_K1
+_BM25_B = retrieval._BM25_B
 # Injection ladder — RELATIVE thresholds (never absolute cross-repo scores).
 _STRONG_CANDIDATES = 5      # top-k considered for a strong (content) injection
 _STRONG_SCORE_FRAC = 0.5    # a candidate is strong only within this fraction of the top score
@@ -4515,37 +4495,14 @@ _STRONG_MIN_HITS = 2        # ...and with at least this many distinct query-term
 _STRONG_CAP = 3             # never inject more than this many decisions per prompt
 _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
 
-# Artifact extraction: signal-rich tokens pulled from a paste even when the prose is empty.
-_ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|md|toml|yaml|json)\b")
-_ARTIFACT_DOTTED_RE = re.compile(r"\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+\b")
-_ARTIFACT_EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b")
-# Two+ path segments required: a lone slash in prose ("light/dark", "read/write",
-# "either/or") is not a route, but "/api/users/{id}" is.
-_ARTIFACT_ROUTE_RE = re.compile(r"/[a-z][\w{}-]*(?:/[\w{}-]+)+")
+_ARTIFACT_PATH_RE = retrieval._ARTIFACT_PATH_RE
+_ARTIFACT_DOTTED_RE = retrieval._ARTIFACT_DOTTED_RE
+_ARTIFACT_EXC_RE = retrieval._ARTIFACT_EXC_RE
+_ARTIFACT_ROUTE_RE = retrieval._ARTIFACT_ROUTE_RE
+_AUTH_SESSION_RE = retrieval._AUTH_SESSION_RE
 
-
-def _index_tokens(text: str) -> list[str]:
-    """Lowercase, punctuation-stripped, alnum tokens of length >=3, minus stop words.
-    The single tokenization used by both the index and the BM25 query side (distinct from
-    the novelty filter's set-based `_tokenize`)."""
-    toks = re.findall(r"[a-z0-9]+", (text or "").lower())
-    return [t for t in toks if len(t) >= 3 and t not in _QUERY_STOP_WORDS]
-
-
-# Compound auth-session phrasing ("invalidate all user sessions") carries no
-# surviving auth alias token; this phrase check restores the tag without letting
-# bare agent-session vocabulary ("SessionStart runs each session") mean auth.
-_AUTH_SESSION_RE = re.compile(r"\b(?:user|login|auth|authenticated) sessions?\b")
-
-
-def _derive_topics(content: str) -> list[str]:
-    """Sorted topics with >=1 alias hit in `content`. Derived, never persisted."""
-    low = (content or "").lower()
-    toks = set(re.findall(r"[a-z0-9]+", low))
-    topics = {t for t, aliases in _TOPIC_ALIASES.items() if toks & aliases}
-    if "auth" not in topics and _AUTH_SESSION_RE.search(low):
-        topics.add("auth")
-    return sorted(topics)
+_index_tokens = retrieval.index_tokens
+_derive_topics = retrieval.derive_topics
 
 
 def _index_path(repo_path: str) -> Path:
@@ -4719,79 +4676,8 @@ def ensure_retrieval_index(repo_path: str) -> bool:
         return False
 
 
-def _bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, int]]:
-    """BM25-score every indexed doc against `keywords` (which may repeat — repeats raise
-    that term's query weight). Returns (decision_id, score, distinct_term_hits,
-    discriminative_hits) sorted by score desc. Terms absent from the corpus contribute
-    nothing. A hit is *discriminative* when the matched term is rare in this corpus
-    (df <= max(2, n_docs // 20)) — the router's junk guard for question-only prompts."""
-    import math
-    docs = index.get("docs", {})
-    df = index.get("df", {})
-    n_docs = index.get("n_docs", 0) or 0
-    avgdl = index.get("avgdl", 0.0) or 0.0
-    if not docs or not keywords:
-        return []
-    # Query-term weights: a repeated keyword (e.g. a double-weighted artifact) counts twice.
-    qweight: dict[str, int] = {}
-    for kw in keywords:
-        qweight[kw] = qweight.get(kw, 0) + 1
-    # Resolve each query term to the corpus token(s) it scores against. An exact df hit maps
-    # to itself; a term absent from df expands to every indexed token having it as a prefix
-    # (restores legacy \b-prefix matching — 'postgres' must match a doc holding only
-    # 'postgresql'). Aggregated df is capped at n_docs so idf stays non-negative.
-    resolved: dict[str, tuple[list[str], int]] = {}
-    for term in qweight:
-        if term in df:
-            resolved[term] = ([term], df[term])
-            continue
-        pref = [t for t in df if t.startswith(term)]
-        if pref:
-            resolved[term] = (pref, min(sum(df[t] for t in pref), n_docs))
-    disc_cap = max(2, n_docs // 20)
-    ranked: list[tuple[str, float, int, int]] = []
-    for did, doc in docs.items():
-        tf = doc.get("tf", {})
-        dl = doc.get("len", 0) or 0
-        score = 0.0
-        hits = 0
-        dhits = 0
-        for term, w in qweight.items():
-            r = resolved.get(term)
-            if not r:
-                continue
-            toks_for, n_t = r
-            f = sum(tf.get(t, 0) for t in toks_for)
-            if not f:
-                continue
-            hits += 1
-            if n_t <= disc_cap:
-                dhits += 1
-            idf = math.log(1 + (n_docs - n_t + 0.5) / (n_t + 0.5))
-            denom = f + _BM25_K1 * (1 - _BM25_B + _BM25_B * (dl / avgdl if avgdl else 1))
-            score += w * idf * (f * (_BM25_K1 + 1) / denom)
-        if hits:
-            ranked.append((did, score, hits, dhits))
-    ranked.sort(key=lambda r: r[1], reverse=True)
-    return ranked
-
-
-def _extract_artifacts(prompt: str) -> list[str]:
-    """Signal tokens pulled from a paste: file paths (segmented), dotted module paths,
-    CamelCase *Error/*Exception names, and route-shaped strings. Lowercased, len>=3."""
-    if not prompt:
-        return []
-    raw: list[str] = []
-    raw += _ARTIFACT_PATH_RE.findall(prompt)
-    raw += _ARTIFACT_DOTTED_RE.findall(prompt)
-    raw += _ARTIFACT_EXC_RE.findall(prompt)
-    raw += _ARTIFACT_ROUTE_RE.findall(prompt)
-    out: list[str] = []
-    for m in raw:
-        for seg in re.split(r"[^a-zA-Z0-9]+", m.lower()):
-            if len(seg) >= 3:
-                out.append(seg)
-    return out
+_bm25_rank = retrieval.bm25_rank
+_extract_artifacts = retrieval.extract_artifacts
 
 
 def _ws_path(repo_path: str, session_id: str) -> Path:
