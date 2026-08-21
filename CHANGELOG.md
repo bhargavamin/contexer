@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.39.0](https://github.com/bhargavamin/contexer/compare/v0.38.0...v0.39.0) (2026-08-21)
+
+
+### Features
+
+* add decision reconciliation client ([a148c94](https://github.com/bhargavamin/contexer/commit/a148c94f11c1b794d57e8c2888fc25aff1a02c31))
+* **guard:** name the staged files no armed rule could check ([a3838c2](https://github.com/bhargavamin/contexer/commit/a3838c20e3192a91912bbd9be529ec6a51f4a3a9))
+
+
+### Bug Fixes
+
+* allow explicit-team legacy reconciliation ([d3891f8](https://github.com/bhargavamin/contexer/commit/d3891f8e327751ac18e0a32c42b2b41d1caad6a9))
+* consume edited reconciliation approvals ([332e113](https://github.com/bhargavamin/contexer/commit/332e1134d36cf018656a6b9c3b27c66b4f7affa8))
+* **guard:** budget Tier-2 scanning by time, not by a fixed byte cap ([51ee525](https://github.com/bhargavamin/contexer/commit/51ee525eccd640de6b22d6b4d8fa62d52720eed2))
+* **guard:** do not charge the scan budget for files no rule selects ([5709c21](https://github.com/bhargavamin/contexer/commit/5709c21be47da06f27ce19403b0e9dac27e11246))
+* **guard:** scan staged files up to 1MB and report the ones skipped ([c6ab262](https://github.com/bhargavamin/contexer/commit/c6ab262681d7dddbdccd2662848184d0b599be66))
+* **guard:** scan staged files up to 1MB and report the ones skipped ([c1024a1](https://github.com/bhargavamin/contexer/commit/c1024a1ee2445d9de4aba5e93e3a01758f0c757e))
+* harden decision reconciliation retries ([8f98ee0](https://github.com/bhargavamin/contexer/commit/8f98ee03a80730dc9eb879e6b4fe6bb846c4552a))
+* preserve reconciliation queue integrity ([7ba4664](https://github.com/bhargavamin/contexer/commit/7ba46640a3a2d0590ee7c2a2556df12b684eeeb6))
+* remember dismissed reconciliation heads ([c16aa49](https://github.com/bhargavamin/contexer/commit/c16aa49709011ee87afe402977bdc35f86d34a99))
+* serialize reconciliation outbox payloads through wire path ([92bc79a](https://github.com/bhargavamin/contexer/commit/92bc79a7f738144eda537ea83b1ad24ab6a66c89))
+
+
+### Documentation
+
+* record the guard cap fix, the scan budget, and the corrected numbers ([2e14943](https://github.com/bhargavamin/contexer/commit/2e14943808cca6354ceb0a58e39567df3236f846))
+* reflow reconciliation usage sentences ([ec8bd9a](https://github.com/bhargavamin/contexer/commit/ec8bd9a8460f9709646a95cbab6f91b0200f5282))
+* split reconciliation usage lines ([7e1f718](https://github.com/bhargavamin/contexer/commit/7e1f7187450d2c038301964c385cc1afe5c9a438))
+
 ## [0.38.0](https://github.com/bhargavamin/contexer/compare/v0.37.0...v0.38.0) (2026-08-19)
 
 
