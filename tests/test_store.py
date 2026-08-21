@@ -3787,16 +3787,8 @@ class TestContainmentCapture:
         assert "cfonirm" in target["proposed_revision"]["content"], "equal trust never displaces"
         assert "superseded_proposals" not in target
 
-    def test_proposal_slot_trust_order(self):
-        def outranks(new: str, existing: str) -> bool:
-            return store._outranks_proposal(new, {"source": existing})
-
-        assert outranks("human", "ai") and outranks("human", "scan") and outranks("plan", "ai")
-        assert not (outranks("ai", "human") or outranks("scan", "ai")
-                    or outranks("plan", "human"))
-        assert not (outranks("ai", "ai") or outranks("human", "human")), "equal trust refuses"
-        assert not outranks("mystery", "scan"), "an unknown source never displaces"
-        assert outranks("scan", "mystery"), "an unknown source is itself displaceable"
+    # The pure trust-order table moved to tests/test_review.py; the containment-routing
+    # cases above stay here because they exercise the store's load/save path.
 
     def test_identical_superset_recapture_stays_idempotent_with_pending_proposal(self, tmp_repo):
         # Companion to test_superset_capture_is_idempotent: pins that a byte-identical
