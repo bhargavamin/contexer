@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import reconciliation, redact, revisions  # pure stdlib leaves (no cycles)
+from contexer import reconciliation, redact, review, revisions  # pure stdlib leaves (no cycles)
 
 try:
     import fcntl                       # POSIX advisory file locks (macOS/Linux)
@@ -1437,60 +1437,15 @@ def capture_user_constraint(
         return entry["id"], content, status
 
 
-# Trust order for the single proposal slot (issue #200): a developer restatement is the
-# highest-trust signal in the system, a plan-sourced value survived reconciliation, an AI
-# guess is inferred, and a scan proposal is bookkeeping that re-proposes on its own TTL.
-_PROPOSAL_TRUST = {"human": 3, "plan": 2, "ai": 1, "scan": 0}
-
-
-def _outranks_proposal(source: str, prop: dict) -> bool:
-    """Whether a new proposal from `source` may displace the unreviewed `prop` already
-    holding the entry's one proposal slot. STRICTLY greater only: a human proposal is never
-    auto-replaced, and an equal-trust collision keeps the refusal. An unrecognised source
-    ranks below every known one — it never displaces, and is itself displaceable."""
-    return _PROPOSAL_TRUST.get(source, -1) > _PROPOSAL_TRUST.get(prop.get("source", ""), -1)
-
-
-def _claim_proposal_slot(entry: dict, source: str, now: str) -> bool:
-    """Whether a new `source`-sourced proposal may take the entry's ONE proposal slot,
-    archiving whatever DIFFERENT proposal already holds it (issue #200's trust order, which
-    the update_decision write sites must honour too — an ai correction there used to clobber
-    a human's unreviewed Suggested Update). False = the sitting proposal STRICTLY outranks
-    the incoming one and is left untouched; the caller returns success so the flow still
-    shows the pending prompt, failing toward review of the higher-trust proposal rather than
-    losing it.
-
-    A TIE claims the slot, unlike `_route_containment`'s refusal: there the two sides are
-    separate developer statements, each owed a review, while here they are the same
-    automated source retrying — refusing would silently drop a model's own correction of the
-    proposal it just wrote. Identical-content dedup belongs BEFORE this call."""
-    prop = entry.get("proposed_revision")
-    if not prop:
-        return True
-    if _PROPOSAL_TRUST.get(prop.get("source", ""), -1) > _PROPOSAL_TRUST.get(source, -1):
-        return False
-    # Displaced, not discarded — same archival shape as _route_containment/edit_decision.
-    entry.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
-    entry.pop("proposed_revision", None)
-    entry.pop("conflict_memo", None)   # it referenced the proposal just replaced
-    return True
-
-
-def _refusal_ack(entry: dict) -> str:
-    """Model-facing ack for a refused slot claim (issue #202). A refusal returns success to
-    the caller (the higher-trust proposal still awaits review), so without this the calling
-    model is told its correction is pending when it was dropped — same in-band-ack precedent
-    as capture_lint/constraint_ack, where silence loses the information."""
-    prop = entry.get("proposed_revision") or {}
-    return (
-        f"Correction NOT stored: decision {entry.get('id', '')[:8]} already has a "
-        f"higher-trust Suggested Update pending review (from {prop.get('source', 'unknown')}: "
-        f"'{prop.get('title', '')}'). The one proposal slot keeps the higher-trust version — "
-        "your correction was refused, not queued, and will not be reviewed. Do NOT retry this "
-        "call and do NOT approve anything yourself. This turn, tell the developer both "
-        "versions — the pending update and your refused correction — so they can review with "
-        "full context (approve_decision action='edit' can merge them)."
-    )
+# ── Proposal-slot policy (who may take a decision's ONE unreviewed Suggested Update slot)
+# ── lives in contexer/review.py. Kept pure there; the promotion of a proposal into a
+# ── revision stays below in this module because it anchors source files (git + entry
+# ── mutation). Aliased rather than re-exported lazily: review.py does not import store,
+# ── so there is no cycle to defer (contrast the __getattr__ block at the bottom).
+_PROPOSAL_TRUST = review.PROPOSAL_TRUST
+_outranks_proposal = review.outranks_proposal
+_claim_proposal_slot = review.claim_proposal_slot
+_refusal_ack = review.refusal_ack
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
@@ -1835,37 +1790,7 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
     return entry
 
 
-def _build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
-                    source: str = "ai", title: str = "", source_files=None) -> dict:
-    """A Suggested Update (pending revision) attached to a live decision: the detected new
-    value, its confidence/evidence, and provenance. The live decision is NOT modified - this
-    proposal waits for developer approval, at which point it is promoted to a new revision.
-
-    source_files: stashed on the proposal, not applied yet — the live entry's anchor must
-    keep describing the CURRENTLY RENDERED content until the proposal is actually promoted
-    (see _promote_proposal); re-anchoring here would clear the stale note while the old,
-    still-live text keeps rendering."""
-    sessions = sorted({s for s in (*(target.get("session_ids") or []), session_id) if s})
-    score, factors = _compute_confidence({
-        "created_by": "ai",
-        "occurrence_count": target.get("occurrence_count", 1),
-        "session_ids": sessions,
-        "memory_key": target.get("memory_key"),
-    })
-    normalized_content = _normalize_content(content)
-    proposal = {
-        "content": normalized_content,
-        "subtype": subtype or target.get("subtype", ""),
-        "session_id": session_id,
-        "source": source,
-        "created_at": now,
-        "confidence": score,
-        "confidence_factors": factors,
-    }
-    proposal["title"] = _normalize_title(title) or _derive_title(normalized_content)
-    if source_files:
-        proposal["source_files"] = source_files
-    return proposal
+_build_proposal = review.build_proposal
 
 
 def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, content: str,
