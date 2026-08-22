@@ -889,6 +889,76 @@ def test_load_outbox_corrupt_file_reads_empty(tmp_repo):
     assert share._load_outbox() == []
 
 
+# ── an unreadable queue must never be overwritten ────────────────────────────────────
+# `_load_outbox` answering "empty" for a damaged file is correct for every RENDER path and
+# wrong for a WRITE: enqueueing through it turns "empty plus the new row" into the whole file,
+# so one queued share destroyed every share already waiting. The rule is stated in
+# `_read_outbox`'s own docstring and already honoured by `_enqueue_reconciliation`, which
+# raises for the identical failure.
+
+def _damaged_outbox(count: int = 3):
+    path = share._outbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        share._enqueue({"decision_id": f"queued-{i}", "type": "architecture",
+                        "content": f"queued decision {i}", "repo": "r", "rationale": None,
+                        "confidence": 80, "evidence": None, "source": "ai",
+                        "queued_at": 1.0, "attempts": 0})
+    assert len(share._load_outbox()) == count
+    damaged = '[{"decision_id": "queued-0", "conten'
+    path.write_text(damaged, encoding="utf-8")
+    return path, damaged
+
+
+def test_enqueue_refuses_rather_than_destroying_an_unreadable_queue(tmp_repo):
+    path, damaged = _damaged_outbox()
+    with pytest.raises(RuntimeError, match="cannot read the share retry queue"):
+        share._enqueue({"decision_id": "new-one", "type": "architecture", "content": "new",
+                        "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                        "source": "ai", "queued_at": 2.0, "attempts": 0})
+    # Byte-for-byte untouched: refusing to write is the whole point. Before this, the file
+    # came back holding only "new-one" and the three queued shares were gone.
+    assert path.read_text(encoding="utf-8") == damaged
+
+
+def test_a_failed_queue_is_reported_as_not_queued_not_as_queued(tmp_repo, monkeypatch):
+    """The honest message already existed and was simply unreachable for this failure. A share
+    that could not be queued must not claim "it will retry automatically".
+
+    Uses a REAL projection, not a hand-made dict: a malformed dict makes `_payload` throw before
+    the outbox is touched at all, so the test would pass for the wrong reason and keep passing
+    if the fix were reverted."""
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    _, did = store.update_decision(tmp_repo, "a decision that cannot be queued", "s1",
+                                   subtype="constraint")
+    dec = store.get_shareable(tmp_repo, did)
+    assert dec is not None
+    _damaged_outbox()
+
+    status = share._finish_share(dec, "r", None, "https://example.test")
+    assert "Your local decision is unchanged" in status
+    assert "Queued" not in status
+
+
+def test_cancellation_still_wins_when_queueing_fails(tmp_repo, monkeypatch):
+    """The two cancellation paths queue on the way out. A queue refusal there must not replace
+    the CancelledError, or a cancelled share stops looking cancelled to its caller."""
+    _damaged_outbox()
+    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    _, did = store.update_decision(tmp_repo, "a decision to share while cancelled", "s1",
+                                   subtype="constraint")
+
+    async def _cancel(*_a, **_k):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(share, "awith_local_fallback", _cancel)
+    path = share._outbox_path()
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(share.share_async(tmp_repo, did, profile=TEAM))
+    # And it still refused to overwrite on the way out.
+    assert path.read_text(encoding="utf-8") == before
+
+
 def test_share_drains_queued_items_before_new_push(tmp_repo, monkeypatch):
     """A queued item from an earlier offline share is sent first, then the new decision --
     ordering is preserved."""
