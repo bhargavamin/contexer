@@ -291,17 +291,27 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     except TimeoutError:
         # The awaited push was cancelled at the deadline. Cancellation bypasses share_async's
         # own enqueue-on-failure, so queue the selection here (off the loop) to make the
-        # "outbox retries it" promise real — idempotent, so re-queuing an already-sent id is
+        # "outbox retries it" promise real - idempotent, so re-queuing an already-sent id is
         # safe. Best-effort: the local decision is unchanged and re-shareable regardless.
+        #
+        # The RESULT is what decides the message, not just whether the call raised. Queuing can
+        # legitimately record nothing: `enqueue_ids_for_retry` refuses outright when the outbox
+        # cannot be read (see share._enqueue_unlocked, which will not overwrite a queue it could
+        # not parse), and it returns 0 when no id resolved to a shareable decision. Promising an
+        # automatic retry in either case states something untrue, which is the same standard
+        # `share._finish_share` keeps for its own failure branch: the message must not promise a
+        # retry that was never recorded.
         try:
-            await asyncio.to_thread(_share.enqueue_ids_for_retry, resolved, ids)
+            queued = await asyncio.to_thread(_share.enqueue_ids_for_retry, resolved, ids)
         except Exception:
-            pass
-        return (
-            f"Saved locally — the team cloud did not respond within {int(_SHARE_TIMEOUT)}s. "
-            "The push was cancelled and the outbox retries it automatically; "
-            "your local decision is unchanged."
-        )
+            queued = 0
+        head = f"Saved locally - the team cloud did not respond within {int(_SHARE_TIMEOUT)}s."
+        if queued:
+            return (f"{head} The push was cancelled and the outbox retries it automatically; "
+                    "your local decision is unchanged.")
+        return (f"{head} The push was cancelled and could NOT be queued for retry, so nothing "
+                "will resend it on its own; share it again when the cloud is reachable. Your "
+                "local decision is unchanged.")
 
 
 @mcp.tool()

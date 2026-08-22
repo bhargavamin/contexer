@@ -334,8 +334,25 @@ def _enqueue(payload: dict) -> None:
 def _enqueue_unlocked(payload: dict) -> None:
     """Queue a failed push. Dedupes by decision_id (re-sharing the same decision while
     offline replaces the queued entry - fresh content wins) and caps at _OUTBOX_CAP,
-    dropping the oldest entries beyond that."""
-    entries = [e for e in _load_outbox() if e.get("decision_id") != payload.get("decision_id")]
+    dropping the oldest entries beyond that.
+
+    Reads through `_read_outbox` and REFUSES on a read error rather than writing. This used to
+    read through the fail-soft `_load_outbox`, which answers "empty" for a file it cannot parse,
+    so queueing one share against a damaged outbox saved "empty plus the new row" over the top
+    and every share already waiting in it was gone, silently. `_read_outbox`'s own docstring
+    states the rule this now follows - the fail-soft view is for RENDER paths, never for one that
+    decides an action - and `_enqueue_reconciliation` already raises for the identical failure on
+    the other queue in this module.
+
+    Raising is the right shape here because every caller already handles it and already reports
+    it honestly: `_finish_share` returns "Your local decision is unchanged" instead of promising a
+    retry, `_requeue_skipped` counts the row as lost, `_queue_rest_status` says the queue stopped,
+    and `server.share_decision`'s timeout path is explicitly best-effort. The honest message
+    already existed; this failure mode simply could never reach it."""
+    loaded, error = _read_outbox()
+    if error is not None:
+        raise RuntimeError(f"cannot read the share retry queue: {error}")
+    entries = [e for e in loaded if e.get("decision_id") != payload.get("decision_id")]
     entries.append(payload)
     if len(entries) > _OUTBOX_CAP:
         entries = entries[-_OUTBOX_CAP:]
@@ -1346,7 +1363,10 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
             lambda: remote.apush_decision(**_dec_push_kwargs(dec, key)),
             default=None, action="share decision")
     except asyncio.CancelledError:
-        _enqueue_unlocked(_payload(dec, key))
+        # Best-effort on the way out: a queue refusal (see _enqueue_unlocked) must not replace
+        # the CancelledError, or a cancelled share stops looking cancelled to its caller.
+        with contextlib.suppress(Exception):
+            _enqueue_unlocked(_payload(dec, key))
         raise
     return _finish_share(dec, key, server_id, profile.endpoint)
 
@@ -1379,8 +1399,10 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
     try:
         status = await _apush_batch(remote, projs, key, profile.endpoint)
     except asyncio.CancelledError:
-        for dec in projs:
-            _enqueue_unlocked(_payload(dec, key))
+        # Same reason as share_async's single-decision path above: cancellation must win.
+        with contextlib.suppress(Exception):
+            for dec in projs:
+                _enqueue_unlocked(_payload(dec, key))
         raise
     return _prepend_unknown(status, missing)
 

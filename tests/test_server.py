@@ -131,6 +131,43 @@ def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
     assert "outbox retries it" in result
 
 
+def _wedged_share(monkeypatch, enqueue):
+    """A share that never returns, so the timeout branch runs, with `enqueue` standing in for
+    the queue-for-retry step."""
+    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
+
+    async def wedged(repo, ids, **kw):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(share_mod, "share_ids_async", wedged)
+    monkeypatch.setattr(share_mod, "enqueue_ids_for_retry", enqueue)
+
+
+def test_timeout_does_not_promise_a_retry_when_the_queue_refused(monkeypatch):
+    """`_enqueue_unlocked` refuses rather than overwriting an unreadable outbox, so the queue-for-
+    retry step can raise. The message must then NOT claim an automatic retry, which is the standard
+    share._finish_share keeps for its own failure branch."""
+    def refuses(repo, ids, **k):
+        raise RuntimeError("cannot read the share retry queue: JSONDecodeError")
+
+    _wedged_share(monkeypatch, refuses)
+    result = asyncio.run(server.share_decision("ab12", "/repo", confirm=True))
+    assert "could NOT be queued" in result
+    assert "outbox retries it" not in result
+    assert "your local decision is unchanged" in result.lower()
+
+
+def test_timeout_does_not_promise_a_retry_when_nothing_resolved(monkeypatch):
+    """Queuing records nothing in two ways, not one: a refusal, and no id resolving to a
+    shareable decision. Branching on the returned count covers both; branching on whether the
+    call raised would only have covered the first."""
+    _wedged_share(monkeypatch, lambda repo, ids, **k: 0)
+    result = asyncio.run(server.share_decision("ab12", "/repo", confirm=True))
+    assert "could NOT be queued" in result
+    assert "outbox retries it" not in result
+
+
 # ── cloud-push preview gate + review_pending ─────────────────────────────────────
 
 
