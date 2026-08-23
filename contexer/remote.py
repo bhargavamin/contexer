@@ -60,7 +60,7 @@ _WIRE_SOURCE_FILES = True
 
 # Wire bounds for `source_files`, mirroring contexer-teams `INPUT_LIMITS.sourceFiles`. The server
 # commit justifies rejecting over-bounds input with "the client caps at the same numbers" - true
-# for the COUNT (store._MAX_SOURCE_FILES, enforced at every anchor write) and false for the
+# for the COUNT (store.MAX_SOURCE_FILES, enforced at every anchor write) and false for the
 # LENGTH: nothing on the capture side bounds a path at 300 chars, and the egress scrub can even
 # LENGTHEN one ([REDACTED:kind] is longer than some values it replaces). The singular
 # `push_decision` rejects over-bounds at its zod boundary, i.e. -32602, i.e. exactly the permanent
@@ -194,7 +194,7 @@ class RemoteDecision:
 
     ``title`` is the cloud's stored heading (``None`` for a row synced before Decision
     Titles v2, or a client that pushed no title) - display-time derivation is the
-    consumer's job (team_context.format_team_section / store._title_and_body), never
+    consumer's job (team_context.format_team_section / store.title_and_body), never
     re-computed here."""
 
     id: str

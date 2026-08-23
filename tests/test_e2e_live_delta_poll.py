@@ -41,7 +41,7 @@ def test_approve_mid_session_injects_after_background_refresh(team_stack, monkey
 
     # Simulate the detached refresher: run its body inline when the hook schedules it.
     monkeypatch.setattr(team_context, "_spawn_refresh", team_context._refresh_worker)
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: REPO)
+    monkeypatch.setattr(store, "resolve_repo", lambda p: REPO)
     monkeypatch.setattr("contexer.config.load_profile", lambda path=None: TEAM)
 
     # Prompt 1: due -> schedules the refresh (which parks the new decision); injects nothing.

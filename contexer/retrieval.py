@@ -14,8 +14,9 @@ Deliberately NOT here, and why:
   and current content, and calls into ``guard_engine``/``conflicts`` (function-level imports,
   to dodge the load-order cycle). That is store-shaped work, so it stays with the I/O.
 
-``store.py`` imports this leaf and keeps aliases for the private names; the dependency stays
-one-way (this module never imports store).
+The dependency stays one-way: this module never imports store. Callers that need a private
+name here reach it qualified (``retrieval._TOPIC_ALIASES``) rather than through an alias
+copied onto ``store``; a leaf does not re-export another leaf's internals.
 """
 
 import re
@@ -153,14 +154,27 @@ def bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, i
     return ranked
 
 
+def raw_path_artifacts(text: str) -> list[str]:
+    """Path- and module-shaped spans of `text`, matched but NOT segmented.
+
+    The one definition of "what a file path or dotted module looks like", shared by the two
+    callers that need it at different granularities: :func:`extract_artifacts` segments these
+    spans into BM25 tokens, while ``guard_engine._guard_content_artifacts`` needs the span
+    intact so it can compare it against a real staged path. Both used to reach the two
+    regexes directly, the guard doing so through an alias copied onto ``store`` - a three-hop
+    chain to read a compiled pattern. Exposing the match instead of the patterns keeps the
+    interface one function wide and puts this definition in one place."""
+    if not text:
+        return []
+    return _ARTIFACT_PATH_RE.findall(text) + _ARTIFACT_DOTTED_RE.findall(text)
+
+
 def extract_artifacts(prompt: str) -> list[str]:
     """Signal tokens pulled from a paste: file paths (segmented), dotted module paths,
     CamelCase *Error/*Exception names, and route-shaped strings. Lowercased, len>=3."""
     if not prompt:
         return []
-    raw: list[str] = []
-    raw += _ARTIFACT_PATH_RE.findall(prompt)
-    raw += _ARTIFACT_DOTTED_RE.findall(prompt)
+    raw: list[str] = raw_path_artifacts(prompt)
     raw += _ARTIFACT_EXC_RE.findall(prompt)
     raw += _ARTIFACT_ROUTE_RE.findall(prompt)
     out: list[str] = []

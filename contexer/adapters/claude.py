@@ -56,12 +56,12 @@ def clean_legacy_repo_settings(repo_path: str) -> bool:
     other key in the file are preserved. Writes only when something was removed.
     Returns True when the file was modified.
 
-    Guarded by _is_sane_repo so a home directory that is itself a git repo (dotfiles
+    Guarded by is_sane_repo so a home directory that is itself a git repo (dotfiles
     setups) can never select ~/.claude/settings.json — the GLOBAL config, whose modern
     hooks legitimately contain the legacy markers and would otherwise be stripped.
     The guard lives here, not at call sites, so every future caller inherits it."""
     try:
-        if not repo_path or not store._is_sane_repo(repo_path):
+        if not repo_path or not store.is_sane_repo(repo_path):
             return False
         path = Path(repo_path) / ".claude" / "settings.json"
         if not path.is_file():
@@ -138,7 +138,7 @@ def capture_constraint(repo_path: str, raw: str) -> str:
     try:
         # Verbose resolve: this hook process has no MCP server binding of its own, so it is
         # the capture path most exposed to a wrong repo — exactly the provenance the stamp
-        # exists to make visible. `_hook_repo_verbose`, not `_resolve_repo_verbose`: the hook
+        # exists to make visible. `_hook_repo_verbose`, not `resolve_repo_verbose`: the hook
         # always supplies a path (its shell's git root, or cwd), which the plain resolver
         # would label `argument` — the one label the audit reads as a DELIBERATE cross-repo
         # write, dismissing the very misroute this is meant to surface.
@@ -176,7 +176,7 @@ def rationale(repo_path: str, raw: str) -> str:
     Passes the host's session id (Retrieval V1 Part B) so the BM25 router's working set
     can dedup repeat injections within a session; Codex reuses this verbatim."""
     try:
-        repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
+        repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
         if not repo:
             return "{}"
         session_id = store.session_from_hook_stdin(raw)
@@ -234,7 +234,7 @@ def post_write(repo_path: str, raw: str) -> str:
     hook (see install()'s post_write_cmd) copies the exact `REPO=$(git rev-parse
     --show-toplevel 2>/dev/null || true) &&` prefix every other UserPromptSubmit hook here
     uses (cap_con/cap_rat/cap_poll/review_cmd), so record_edited_file's write and Task 3's
-    capture-time read key the identical sidecar. store._hook_cwd_repo is still the fallback
+    capture-time read key the identical sidecar. store.hook_cwd_repo is still the fallback
     for a non-git project (first-class stores keyed by absolute path), matching every other
     hook-invoked entrypoint in this module.
 
@@ -243,7 +243,7 @@ def post_write(repo_path: str, raw: str) -> str:
     invariant) preserves the capture-reminder signal the shell hook this replaces used to
     set (consumed by the next UserPromptSubmit anchor)."""
     try:
-        repo = store._hook_cwd_repo(repo_path)
+        repo = store.hook_cwd_repo(repo_path)
         try:
             data = json.loads(raw)
         except Exception:
@@ -273,7 +273,7 @@ def review_nudge(repo_path: str, raw: str) -> str:
     has pending ones, inject a one-time nudge. store.pending_review_nudge is per-repo and verifies
     the store, so an already-approved or cross-repo flag yields nothing. Codex reuses this verbatim."""
     try:
-        nudge = store.pending_review_nudge(store._hook_cwd_repo(repo_path))
+        nudge = store.pending_review_nudge(store.hook_cwd_repo(repo_path))
         if not nudge:
             return "{}"
         return json.dumps({"hookSpecificOutput": {
@@ -342,7 +342,7 @@ def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
     (or vice versa)."""
     try:
         from contexer import team_context
-        new = team_context.poll_for_injection(store._hook_cwd_repo(repo_path), consumer)
+        new = team_context.poll_for_injection(store.hook_cwd_repo(repo_path), consumer)
         if not new:
             return "{}"
         # Architecture-typed rows are deferred to a count-only pointer here too, mirroring
@@ -390,7 +390,7 @@ def sync_memory(repo_path: str) -> int:
     of newly-stored entries (0 on skip/absence/error). Wired to SessionStart,
     PreCompact, and SessionEnd hooks."""
     try:
-        repo = store._resolve_repo(store._hook_cwd_repo(repo_path))
+        repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
         if not repo:
             return 0
         # Self-heal: strip hooks a pre-CLI install left in <repo>/.claude/settings.json
@@ -404,7 +404,7 @@ def sync_memory(repo_path: str) -> int:
             return 0
         fingerprint = memory_sync.dir_fingerprint(mem)
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        marker = store.STORE_DIR / f".memory_synced_{store._slug(repo)}"
+        marker = store.STORE_DIR / f".memory_synced_{store.repo_slug(repo)}"
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == fingerprint:
             return 0
         stored = memory_sync.import_dir(mem, repo)
@@ -788,7 +788,7 @@ def install(home: Path) -> list[str]:
     # Upgrade hygiene: a pre-CLI install wrote hooks into the REPO's .claude/settings.json.
     # Clean the repo we're being run from (sync_memory self-heals every other repo the
     # user opens a session in), and warn about a stale plugin install we cannot edit.
-    repo = store._git_root(os.getcwd())
+    repo = store.git_root(os.getcwd())
     if repo and clean_legacy_repo_settings(repo):
         log.append(f"  ✓ Removed legacy Contexer hooks from {repo}/.claude/settings.json")
     plugin_warning = _stale_plugin_warning(home)
@@ -907,7 +907,7 @@ def uninstall(home: Path) -> list[str]:
 
     # Also remove legacy pre-CLI hooks from the repo we're being run from (the old
     # from-source installer wrote into <repo>/.claude/settings.json, not the home dir).
-    repo = store._git_root(os.getcwd())
+    repo = store.git_root(os.getcwd())
     if repo and clean_legacy_repo_settings(repo):
         log.append(f"  ✓ Removed legacy Contexer hooks from {repo}/.claude/settings.json")
 

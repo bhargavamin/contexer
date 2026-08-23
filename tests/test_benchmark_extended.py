@@ -65,7 +65,7 @@ def _print_stats(label: str, stats: dict) -> None:
 def _write_direct(repo: str, n: int, subtype: str = "architecture", offset: int = 0) -> None:
     """Write n decisions directly to the store, bypassing the novelty filter.
     Used for cap/capacity tests where we need exact entry counts."""
-    data = store._load(repo)
+    data = store.load(repo)
     for i in range(n):
         data["entries"].append({
             "id": str(uuid.uuid4()),
@@ -80,7 +80,7 @@ def _write_direct(repo: str, n: int, subtype: str = "architecture", offset: int 
     # production after its one-time upgrade) so capacity benchmarks measure steady-state
     # latency, not the one-time migration that would otherwise hit the first write.
     store._migrate_entries(data)
-    store._save(repo, data)
+    store.save(repo, data)
 
 SESSION = "ext-bench-session"
 RUNS    = 100
@@ -328,7 +328,7 @@ class TestStorageAtCapacity:
         self.d, self.repo = d, repo
 
     def test_cap_enforced(self):
-        slug = store._slug(self.repo)
+        slug = store.repo_slug(self.repo)
         data = json.loads((self.d / f"{slug}.json").read_text())
         count = len(data["entries"])
         print(f"\n{'='*60}")
@@ -338,7 +338,7 @@ class TestStorageAtCapacity:
         assert count == store.MAX_ENTRIES
 
     def test_oldest_entries_dropped(self):
-        slug = store._slug(self.repo)
+        slug = store.repo_slug(self.repo)
         data = json.loads((self.d / f"{slug}.json").read_text())
         first = data["entries"][0]["content"]
         last  = data["entries"][-1]["content"]
@@ -727,7 +727,7 @@ class TestConcurrentSessionIsolation:
         for t in threads:
             t.join()
 
-        store_file = tmp_path / f"{store._slug(repo)}.json"
+        store_file = tmp_path / f"{store.repo_slug(repo)}.json"
         data = json.loads(store_file.read_text())  # must parse — atomic save invariant
         count = len(data["entries"])
 
@@ -754,14 +754,14 @@ class TestConcurrentSessionIsolation:
                "entries": [{"id": str(n), "type": "decision", "subtype": "architecture",
                             "content": "x" * 500, "session_id": "s", "timestamp": "t"}
                            for n in range(120)]}
-        store._save(repo, big)
-        store_file = tmp_path / f"{store._slug(repo)}.json"
+        store.save(repo, big)
+        store_file = tmp_path / f"{store.repo_slug(repo)}.json"
         stop = threading.Event()
         torn: list[str] = []
 
         def writer():
             while not stop.is_set():
-                store._save(repo, big)
+                store.save(repo, big)
 
         def reader():
             while not stop.is_set():

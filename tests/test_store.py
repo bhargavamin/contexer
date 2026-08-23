@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from contexer import miner as miner_mod
+from contexer import retrieval, review, revisions
 from contexer import store
 
 
@@ -23,23 +24,23 @@ class TestRepoResolution:
         for bad in (str(home), str(home / ".claude"), str(home / ".cursor"),
                     str(home / ".codex"), str(home / ".gemini"),
                     str(home / ".contexer")):
-            assert store._is_sane_repo(bad) is False, bad
+            assert store.is_sane_repo(bad) is False, bad
 
     def test_real_repo_accepted(self, tmp_path):
-        assert store._is_sane_repo(str(tmp_path / "myproject")) is True
+        assert store.is_sane_repo(str(tmp_path / "myproject")) is True
 
     def test_relative_and_empty_rejected(self):
-        assert store._is_sane_repo("") is False
-        assert store._is_sane_repo("relative/path") is False
+        assert store.is_sane_repo("") is False
+        assert store.is_sane_repo("relative/path") is False
 
     def test_explicit_repo_wins(self, tmp_repo):
-        assert store._resolve_repo(tmp_repo) == tmp_repo
+        assert store.resolve_repo(tmp_repo) == tmp_repo
 
     def test_explicit_config_dir_never_honored(self, tmp_path, monkeypatch):
         # A caller passing ~/.claude must NOT resolve to it — falls back to safe sources.
         monkeypatch.setattr(store, "_SESSION_REPO", "")
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
-        assert store._resolve_repo(str(Path.home() / ".claude")) == ""
+        assert store.resolve_repo(str(Path.home() / ".claude")) == ""
 
     def test_session_repo_preferred_over_pointer(self, tmp_path, monkeypatch):
         # The clobber scenario: pointer poisoned to ~/.claude, but the server is bound to
@@ -48,13 +49,13 @@ class TestRepoResolution:
         store.STORE_DIR.mkdir()
         (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".claude"))
         monkeypatch.setattr(store, "_SESSION_REPO", str(tmp_path / "realproject"))
-        assert store._resolve_repo("") == str(tmp_path / "realproject")
+        assert store.resolve_repo("") == str(tmp_path / "realproject")
 
     def test_poisoned_pointer_read_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
         store.STORE_DIR.mkdir()
         (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".cursor"))
-        assert store._current_repo_path() == ""
+        assert store.current_repo_path() == ""
 
     def test_set_session_repo_rejects_config_dir(self, monkeypatch):
         monkeypatch.setattr(store, "_SESSION_REPO", "")
@@ -158,13 +159,13 @@ class TestUpdateDecision:
 
     def test_subtype_stored_in_entry(self, tmp_repo):
         store.update_decision(tmp_repo, "constraint: never store plaintext passwords in any log", "s1", subtype="constraint")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "constraint"
 
     def test_subtype_defaults_to_empty_string(self, tmp_repo):
         store.update_decision(tmp_repo, "decided to use postgres for primary storage layer", "s1")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == ""
 
@@ -188,7 +189,7 @@ class TestUpdateDecision:
         ]
         for i, content in enumerate(distinct):
             store.update_decision(tmp_repo, content, f"sess-{i}")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert len(data["entries"]) <= store.MAX_ENTRIES
         assert len(data["entries"]) == 15  # well under cap, all stored
 
@@ -362,23 +363,23 @@ class TestGetContext:
 
 class TestResolveRepo:
     def test_explicit_path_returned_unchanged(self, tmp_repo):
-        assert store._resolve_repo(tmp_repo) == tmp_repo
+        assert store.resolve_repo(tmp_repo) == tmp_repo
 
     def test_empty_string_falls_back_to_current_repo_file(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         (store.STORE_DIR / ".current_repo").write_text(tmp_repo)
-        assert store._resolve_repo("") == tmp_repo
+        assert store.resolve_repo("") == tmp_repo
 
     def test_empty_string_with_no_file_returns_empty(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer_empty")
-        assert store._resolve_repo("") == ""
+        assert store.resolve_repo("") == ""
 
     def test_nonempty_path_bypasses_file(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         (store.STORE_DIR / ".current_repo").write_text("/some/other/repo")
-        assert store._resolve_repo(tmp_repo) == tmp_repo
+        assert store.resolve_repo(tmp_repo) == tmp_repo
 
 
 class TestResolveRepoProvenance:
@@ -395,26 +396,26 @@ class TestResolveRepoProvenance:
 
     def test_explicit_argument(self, tmp_repo, monkeypatch, tmp_path):
         self._isolate(tmp_path, monkeypatch, session=str(tmp_path / "other"))
-        assert store._resolve_repo_verbose(tmp_repo) == (tmp_repo, "argument")
+        assert store.resolve_repo_verbose(tmp_repo) == (tmp_repo, "argument")
 
     def test_session_binding(self, tmp_path, monkeypatch):
         session = str(tmp_path / "realproject")
         self._isolate(tmp_path, monkeypatch, pointer=str(tmp_path / "elsewhere"), session=session)
-        assert store._resolve_repo_verbose("") == (session, "session")
+        assert store.resolve_repo_verbose("") == (session, "session")
 
     def test_shared_pointer_is_the_last_resort(self, tmp_path, monkeypatch):
         pointer = str(tmp_path / "whoever-wrote-last")
         self._isolate(tmp_path, monkeypatch, pointer=pointer)
-        assert store._resolve_repo_verbose("") == (pointer, "pointer")
+        assert store.resolve_repo_verbose("") == (pointer, "pointer")
 
     def test_nothing_resolvable(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)
-        assert store._resolve_repo_verbose("") == ("", "none")
+        assert store.resolve_repo_verbose("") == ("", "none")
 
     def test_non_sane_argument_falls_through_and_is_not_labelled_argument(self, tmp_path, monkeypatch):
         session = str(tmp_path / "realproject")
         self._isolate(tmp_path, monkeypatch, session=session)
-        repo, source = store._resolve_repo_verbose(str(Path.home() / ".claude"))
+        repo, source = store.resolve_repo_verbose(str(Path.home() / ".claude"))
         assert (repo, source) == (session, "session")
 
     @pytest.mark.parametrize("arg", ["", "/abs/given", "relative/path"])
@@ -422,21 +423,21 @@ class TestResolveRepoProvenance:
         # The refactor must not move a single resolution: same input, same repo out.
         self._isolate(tmp_path, monkeypatch, pointer=str(tmp_path / "ptr"),
                       session=str(tmp_path / "sess"))
-        assert store._resolve_repo(arg) == store._resolve_repo_verbose(arg)[0]
+        assert store.resolve_repo(arg) == store.resolve_repo_verbose(arg)[0]
 
 
 class TestRepoSourceStamp:
     def test_new_entry_records_which_signal_chose_the_store(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Postgres for the orders schema", "s1",
                               "architecture", repo_source="pointer")
-        (entry,) = store._load(tmp_repo)["entries"]
+        (entry,) = store.load(tmp_repo)["entries"]
         assert entry["repo_source"] == "pointer"
 
     def test_absent_when_the_caller_does_not_resolve_verbosely(self, tmp_repo):
         # Every pre-existing caller omits it and must be completely unaffected.
         store.update_decision(tmp_repo, "Use Postgres for the orders schema", "s1",
                               "architecture")
-        (entry,) = store._load(tmp_repo)["entries"]
+        (entry,) = store.load(tmp_repo)["entries"]
         assert "repo_source" not in entry
 
     def test_recurrence_does_not_overwrite_the_original_provenance(self, tmp_repo):
@@ -444,7 +445,7 @@ class TestRepoSourceStamp:
         store.update_decision(tmp_repo, content, "s1", "architecture", repo_source="session")
         store.update_decision(tmp_repo, content, "s2", "architecture", repo_source="pointer")
 
-        (entry,) = store._load(tmp_repo)["entries"]
+        (entry,) = store.load(tmp_repo)["entries"]
         assert entry["repo_source"] == "session"      # the write that created it
         assert entry["occurrence_count"] == 2         # and it WAS seen again
 
@@ -478,7 +479,7 @@ class TestRepoSourceStamp:
                                               "subtype": "convention", "tier": "high"}])
         store.bootstrap_apply(tmp_repo, "s1", "high", repo_source="pointer")
 
-        entries = store._load(tmp_repo)["entries"]
+        entries = store.load(tmp_repo)["entries"]
         assert entries and all(e["repo_source"] == "pointer" for e in entries)
 
     def test_constraint_capture_stamps_too(self, tmp_repo):
@@ -486,7 +487,7 @@ class TestRepoSourceStamp:
         # exposed to the shared pointer and the one the stamp matters most on.
         store.capture_user_constraint(tmp_repo, "always run the linter before committing",
                                       "s1", repo_source="pointer")
-        (entry,) = store._load(tmp_repo)["entries"]
+        (entry,) = store.load(tmp_repo)["entries"]
         assert entry["repo_source"] == "pointer"
 
 
@@ -931,12 +932,12 @@ class TestBootstrapScan:
     def test_skips_inferred_already_in_decisions(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "uv.lock").write_text("")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"].append({
             "id": "seed", "type": "decision", "content": "Package manager: uv",
             "session_id": "seed", "timestamp": "2026-01-01T00:00:00+00:00",
         })
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         result = store.bootstrap_scan(tmp_repo, insight="high")
         assert not any("uv" in i.lower() for i in result["inferred"])
@@ -1119,7 +1120,7 @@ class TestBootstrapApply:
             'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n'
         )
         result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        decisions = [e for e in store._load(tmp_repo)["entries"] if e["type"] == "decision"]
+        decisions = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
         stack_entries = [d for d in decisions if d["content"].startswith("Stack: ")]
         assert len(stack_entries) == 1
         inferred_facts = set(result["inferred"])
@@ -1130,7 +1131,7 @@ class TestBootstrapApply:
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
         result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
         entry = next(
-            e for e in store._load(tmp_repo)["entries"]
+            e for e in store.load(tmp_repo)["entries"]
             if e["type"] == "decision" and "snake_case" in e["content"]
         )
         assert entry["status"] == "approved"
@@ -1146,7 +1147,7 @@ class TestBootstrapApply:
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
         result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
         entry = next(
-            e for e in store._load(tmp_repo)["entries"]
+            e for e in store.load(tmp_repo)["entries"]
             if e["type"] == "decision" and "snake_case" in e["content"]
         )
         assert entry["status"] == "pending_approval"
@@ -1167,13 +1168,13 @@ class TestBootstrapApply:
         )
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
         calls = []
-        real_save = store._save
+        real_save = store.save
 
         def counting_save(repo_path, data):
             calls.append(1)
             return real_save(repo_path, data)
 
-        monkeypatch.setattr(store, "_save", counting_save)
+        monkeypatch.setattr(store, "save", counting_save)
         store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
         assert len(calls) == 1
 
@@ -1184,11 +1185,11 @@ class TestBootstrapApply:
         )
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
         store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        before = {e["id"]: e.get("occurrence_count", 1) for e in store._load(tmp_repo)["entries"]}
+        before = {e["id"]: e.get("occurrence_count", 1) for e in store.load(tmp_repo)["entries"]}
 
         result2 = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
 
-        after = {e["id"]: e.get("occurrence_count", 1) for e in store._load(tmp_repo)["entries"]}
+        after = {e["id"]: e.get("occurrence_count", 1) for e in store.load(tmp_repo)["entries"]}
         assert result2["stored"] == 0
         assert result2["pending"] == 0
         assert result2["skipped"] > 0
@@ -1216,7 +1217,7 @@ class TestBootstrapApply:
         )
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
         store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert not any(
             e["type"] == "decision" and e.get("created_by") == "scan" and e.get("subtype") == "constraint"
             for e in data["entries"]
@@ -1238,7 +1239,7 @@ class TestBootstrapApply:
 
         result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         surviving_scan = sum(1 for e in data["entries"]
                              if e["type"] == "decision" and e.get("created_by") == "scan"
                              and e.get("status") == "approved")
@@ -1263,7 +1264,7 @@ class TestBootstrapApply:
 
         store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert len(data["entries"]) <= store.MAX_ENTRIES
 
 
@@ -1742,7 +1743,7 @@ class TestCaptureUserConstraint:
         assert entry_id is not None
         assert content
         assert status == "approved"
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == 1
         assert decisions[0]["subtype"] == "constraint"
@@ -1752,7 +1753,7 @@ class TestCaptureUserConstraint:
             tmp_repo, "never push secrets or credentials to the repository", "sess-1"
         )
         assert entry_id is not None
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert decisions[0]["subtype"] == "constraint"
 
@@ -1763,7 +1764,7 @@ class TestCaptureUserConstraint:
         assert entry_id is None
         assert content is None
         assert status is None
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert data["entries"] == []
 
     def test_question_prompt_returns_none(self, tmp_repo):
@@ -1786,7 +1787,7 @@ class TestCaptureUserConstraint:
             tmp_repo, "always store terraform state on s3 with dynamodb lock table", "sess-2"
         )
         assert entry_id is None
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == 1
 
@@ -1794,7 +1795,7 @@ class TestCaptureUserConstraint:
         store.capture_user_constraint(
             tmp_repo, "never commit without running tests first", "sess-1"
         )
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = data["entries"][0]
         assert entry["type"] == "decision"
         assert entry["session_id"] == "sess-1"
@@ -1806,7 +1807,7 @@ class TestCaptureUserConstraint:
         long_prompt = "always " + "x" * 700
         entry_id, content, status = store.capture_user_constraint(tmp_repo, long_prompt, "sess-1")
         assert entry_id is None
-        assert store._load(tmp_repo)["entries"] == []
+        assert store.load(tmp_repo)["entries"] == []
 
 
 # ── Atomic save & corruption recovery ─────────────────────────────────────────
@@ -1822,9 +1823,9 @@ class TestAtomicSave:
         assert mode == 0o600
 
     def test_save_replaces_existing_file_atomically(self, tmp_repo):
-        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
         before = store._store_path(tmp_repo).read_text()
-        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": [
             {"id": "1", "type": "decision", "subtype": "", "content": "c",
              "session_id": "s", "timestamp": "t"}]})
         after = json.loads(store._store_path(tmp_repo).read_text())
@@ -1832,14 +1833,14 @@ class TestAtomicSave:
         assert len(after["entries"]) == 1
 
     def test_failed_write_cleans_up_temp_and_preserves_old_file(self, tmp_repo, monkeypatch):
-        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
         before = store._store_path(tmp_repo).read_text()
 
         def boom(src, dst):
             raise OSError("disk full")
         monkeypatch.setattr(store.os, "replace", boom)
         with pytest.raises(OSError):
-            store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+            store.save(tmp_repo, {"repo_path": tmp_repo, "entries": [
                 {"id": "1", "type": "decision", "subtype": "", "content": "c",
                  "session_id": "s", "timestamp": "t"}]})
         assert not list(store.STORE_DIR.glob("*.tmp")), "temp file must be removed on failure"
@@ -1849,10 +1850,10 @@ class TestAtomicSave:
         # Write side pins UTF-8 (ensure_ascii=False emits raw bytes); read side must
         # pin UTF-8 too — a locale-default read would corrupt this on non-UTF-8 systems.
         content = "décision: use café-naming → emoji ✓ 日本語"
-        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": [
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": [
             {"id": "1", "type": "decision", "subtype": "", "content": content,
              "session_id": "s", "timestamp": "t"}]})
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert data["entries"][0]["content"] == content
 
 
@@ -1862,12 +1863,12 @@ class TestCorruptionRecovery:
 
     def test_load_recovers_from_truncated_json(self, tmp_repo):
         self._corrupt(store._store_path(tmp_repo))
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert data == {"repo_path": tmp_repo, "entries": []}
 
     def test_load_global_recovers_from_truncated_json(self, tmp_repo):
         self._corrupt(store._global_path())
-        data = store._load_global()
+        data = store.load_global()
         assert data == {"repo_path": store.GLOBAL_SLUG, "entries": []}
 
     def test_get_context_on_corrupt_store_is_graceful(self, tmp_repo):
@@ -1989,7 +1990,7 @@ class TestNonDictStoreRecovery:
     @pytest.mark.parametrize("payload", ["[]", "null", '"x"', "42"])
     def test_non_dict_file_reads_as_empty(self, tmp_repo, payload):
         store._store_path(tmp_repo).write_text(payload, encoding="utf-8")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert isinstance(data, dict)
         assert data["entries"] == []
 
@@ -2002,13 +2003,13 @@ class TestNonDictStoreRecovery:
 
     def test_entries_wrong_type_reads_as_empty(self, tmp_repo):
         store._store_path(tmp_repo).write_text('{"entries": "oops"}', encoding="utf-8")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert data["entries"] == []
 
     @pytest.mark.parametrize("payload", ["[]", "null"])
     def test_global_non_dict_file_reads_as_empty(self, isolated_store_dir, payload):
         store._global_path().write_text(payload, encoding="utf-8")
-        data = store._load_global()
+        data = store.load_global()
         assert isinstance(data, dict)
         assert data["entries"] == []
 
@@ -2018,7 +2019,7 @@ class TestNonDictStoreRecovery:
         store._store_path(tmp_repo).write_text(
             json.dumps({"repo_path": tmp_repo, "entries": ["oops"]}), encoding="utf-8")
 
-        assert store._load(tmp_repo)["entries"] == []
+        assert store.load(tmp_repo)["entries"] == []
         ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
         assert ok is True
 
@@ -2043,10 +2044,10 @@ class TestSlugInjectivity:
     file (review finding H3)."""
 
     def test_dot_vs_underscore_paths_do_not_collide(self):
-        assert store._slug("/home/u/my.repo") != store._slug("/home/u/my_repo")
+        assert store.repo_slug("/home/u/my.repo") != store.repo_slug("/home/u/my_repo")
 
     def test_space_vs_underscore_paths_do_not_collide(self):
-        assert store._slug("/home/u/my repo") != store._slug("/home/u/my_repo")
+        assert store.repo_slug("/home/u/my repo") != store.repo_slug("/home/u/my_repo")
 
     def test_colliding_repos_keep_separate_stores(self, tmp_path, monkeypatch):
         monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
@@ -2095,7 +2096,7 @@ class TestConcurrentWriteIntegrity:
         for th in threads:
             th.join()
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == total, f"lost updates: kept {len(decisions)} of {total}"
 
@@ -2165,7 +2166,7 @@ class TestClassifyLevel:
 class TestNewDecisionEntryFields:
     def test_status_and_created_by_stored(self, tmp_repo):
         store.update_decision(tmp_repo, "Use pytest for all unit tests", "s1", subtype="convention")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert "status" in entry
         assert "created_by" in entry
@@ -2173,27 +2174,27 @@ class TestNewDecisionEntryFields:
 
     def test_constraint_subtype_stored_as_pending(self, tmp_repo):
         store.update_decision(tmp_repo, "Never expose internal stack traces to clients", "s1", subtype="constraint")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "pending_approval"
         assert entry["created_by"] == "ai"
 
     def test_convention_subtype_stored_as_suggested(self, tmp_repo):
         store.update_decision(tmp_repo, "Use conventional commits for all pull requests", "s1", subtype="convention")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "suggested"
 
     def test_l3_content_stored_as_pending(self, tmp_repo):
         store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka by design", "s1", subtype="architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "pending_approval"
 
     def test_scan_created_by_stored_as_approved(self, tmp_repo):
         store.update_decision(tmp_repo, "CI/CD: GitHub Actions (2 workflow files)", "s1",
                               subtype="convention", created_by="scan")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "approved"
         assert entry["created_by"] == "scan"
@@ -2201,7 +2202,7 @@ class TestNewDecisionEntryFields:
     def test_human_created_by_stored_as_approved(self, tmp_repo):
         store.update_decision(tmp_repo, "Always write tests before committing code", "s1",
                               subtype="constraint", created_by="human")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "approved"
         assert entry["created_by"] == "human"
@@ -2225,7 +2226,7 @@ class TestNewDecisionEntryFields:
         # get_context should still show it (treated as approved)
         result = store.get_context(tmp_repo)
         assert "Old decision without status field" in result
-        assert store._entry_status(old_entry) == "approved"
+        assert store.entry_status(old_entry) == "approved"
 
 
 # ── update_decision replace_id ────────────────────────────────────────────────
@@ -2241,7 +2242,7 @@ class TestUpdateDecisionReplaceId:
         ok, _ = store.update_decision(tmp_repo, "Name test files *_test.py by convention", "s1",
                                       "convention", replace_id=eid)
         assert ok is True
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entries = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(entries) == 1
         assert entries[0]["content"] == "Name test files *_test.py by convention"
@@ -2259,7 +2260,7 @@ class TestUpdateDecisionReplaceId:
                                        "convention")
         store.update_decision(tmp_repo, "Lint runs in CI and the pre-commit hook", "s1",
                               "convention", replace_id=eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         # current revision bumped, prior value preserved in history (never overwritten away).
         # revisions[] now holds ALL versions (incl current); current_revision_id is the pointer.
         assert entry["revision"] == 2
@@ -2271,25 +2272,25 @@ class TestUpdateDecisionReplaceId:
         assert v2["version_number"] == 2
         assert entry["current_revision_id"] == v2["revision_id"]
         # current revision content == decision HEAD-cache
-        assert store._current_content(entry) == entry["content"]
+        assert revisions.current_content(entry) == entry["content"]
 
     def test_replace_id_accumulates_multiple_revisions(self, tmp_repo):
         _, eid = store.update_decision(tmp_repo, "Deploy via script v1", "s1", "convention")
         store.update_decision(tmp_repo, "Deploy via script v2", "s1", "convention", replace_id=eid)
         store.update_decision(tmp_repo, "Deploy via script v3", "s1", "convention", replace_id=eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["revision"] == 3
         # all three versions retained, in order; current pointer is v3
         assert [r["content"] for r in entry["revisions"]] == [
             "Deploy via script v1", "Deploy via script v2", "Deploy via script v3",
         ]
         assert [r["version_number"] for r in entry["revisions"]] == [1, 2, 3]
-        assert store._current_content(entry) == "Deploy via script v3"
+        assert revisions.current_content(entry) == "Deploy via script v3"
 
     def test_new_entry_has_revision_one_and_updated_at(self, tmp_repo):
         _, eid = store.update_decision(tmp_repo, "Use uv for dependency management here", "s1",
                                        "convention")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["revision"] == 1
         assert entry["updated_at"] == entry["timestamp"]
         # A new decision is born with exactly one revision, pointed at by current_revision_id.
@@ -2311,7 +2312,7 @@ class TestUpdateDecisionReplaceId:
         _, eid = store.update_decision(tmp_repo, "Group helpers in a utils module", "s1", "convention")
         store.update_decision(tmp_repo, "Group helpers in a utils package", "s1",
                               "pattern", replace_id=eid)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("id") == eid)
         assert entry["subtype"] == "pattern"
 
@@ -2323,10 +2324,10 @@ class TestSuggestedUpdate:
     def _approved(self, repo: str, content: str, subtype: str = "architecture") -> str:
         """Create a decision and force it to approved/live so a change becomes a proposal."""
         store.update_decision(repo, content, "s1", subtype)
-        data = store._load(repo)
+        data = store.load(repo)
         entry = next(e for e in data["entries"] if e.get("type") == "decision")
         entry["status"] = "approved"
-        store._save(repo, data)
+        store.save(repo, data)
         return entry["id"]
 
     _PENDING_BASE = "Use Kafka instead of RabbitMQ for event streaming"
@@ -2335,7 +2336,7 @@ class TestSuggestedUpdate:
         """A base that lands pending_approval (L3 architecture signal) — what issue #199's
         replace_id correction lands on."""
         store.update_decision(repo, self._PENDING_BASE, "s1", "architecture")
-        entry = next(e for e in store._load(repo)["entries"] if e.get("type") == "decision")
+        entry = next(e for e in store.load(repo)["entries"] if e.get("type") == "decision")
         assert entry.get("status") == "pending_approval", (
             f"Expected pending_approval but got {entry.get('status')!r}")
         return entry["id"]
@@ -2345,7 +2346,7 @@ class TestSuggestedUpdate:
         ok, rid = store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
                                         "architecture", replace_id=eid)
         assert ok is True and rid == eid
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         # live decision is UNCHANGED; the change is parked as a proposal awaiting approval
         assert entry["content"] == "Rollback endpoint is /api/v1/rollback"
         assert entry["revision"] == 1
@@ -2356,7 +2357,7 @@ class TestSuggestedUpdate:
         eid = self._approved(tmp_repo, "Never log secrets to stdout", "constraint")
         store.update_decision(tmp_repo, "Never log secrets or tokens to stdout", "s2",
                               "constraint", replace_id=eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry.get("proposed_revision") is not None
 
     def test_recategorising_constraint_is_significant(self, tmp_repo):
@@ -2364,14 +2365,14 @@ class TestSuggestedUpdate:
         eid = self._approved(tmp_repo, "Always pin dependency versions", "constraint")
         store.update_decision(tmp_repo, "Prefer pinning dependency versions", "s2",
                               "convention", replace_id=eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry.get("proposed_revision") is not None
 
     def test_human_stated_change_applies_without_approval(self, tmp_repo):
         eid = self._approved(tmp_repo, "Use postgres for primary storage")
         store.update_decision(tmp_repo, "Use sqlite for primary storage", "s2",
                               "architecture", created_by="human", replace_id=eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["content"] == "Use sqlite for primary storage"
         assert entry["revision"] == 2
         assert "proposed_revision" not in entry
@@ -2382,7 +2383,7 @@ class TestSuggestedUpdate:
                               "architecture", replace_id=eid)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok is True
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["content"] == "Rollback endpoint is /api/v2/rollback"
         assert entry["revision"] == 2
         assert entry["revisions"][0]["content"] == "Rollback endpoint is /api/v1/rollback"
@@ -2395,7 +2396,7 @@ class TestSuggestedUpdate:
                               "architecture", replace_id=eid)
         ok, msg = store.approve_decision(tmp_repo, eid, "dismiss")
         assert ok is True
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["content"] == "Use postgres for primary storage"
         assert entry["revision"] == 1
         assert "proposed_revision" not in entry
@@ -2405,7 +2406,7 @@ class TestSuggestedUpdate:
         store.update_decision(tmp_repo, "Use sqlite for primary storage", "s2",
                               "architecture", replace_id=eid)
         store.approve_decision(tmp_repo, eid, "skip")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry.get("proposed_revision") is not None
 
     def test_edit_promotes_with_corrected_content(self, tmp_repo):
@@ -2414,7 +2415,7 @@ class TestSuggestedUpdate:
                               "architecture", replace_id=eid)
         store.approve_decision(tmp_repo, eid, "edit",
                                content="Use sqlite for local primary storage")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["content"] == "Use sqlite for local primary storage"
         assert entry["revision"] == 2
         assert "proposed_revision" not in entry
@@ -2434,7 +2435,7 @@ class TestSuggestedUpdate:
         eid = self._approved(tmp_repo, "Use postgres for primary storage")
         ok, rid = store.update_decision(tmp_repo, "   ", "s2", "convention", replace_id=eid)
         assert ok is False
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["content"] == "Use postgres for primary storage"
 
     def test_identical_content_is_noop_on_replace_id(self, tmp_repo):
@@ -2442,7 +2443,7 @@ class TestSuggestedUpdate:
         ok, rid = store.update_decision(tmp_repo, "Use postgres for primary storage", "s2",
                                         "architecture", replace_id=eid)
         assert ok is True and rid == eid
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["revision"] == 1
         assert "proposed_revision" not in entry
         # no-op: still exactly the original single revision, no new version appended
@@ -2455,7 +2456,7 @@ class TestSuggestedUpdate:
         store.update_decision(tmp_repo,
                               "Use Kafka instead of RabbitMQ for event streaming", "s1",
                               "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("type") == "decision")
         assert entry.get("status") == "pending_approval", (
             f"Expected pending_approval but got {entry.get('status')!r}")
@@ -2464,7 +2465,7 @@ class TestSuggestedUpdate:
                                         "Use RabbitMQ instead of Kafka for event streaming", "s2",
                                         "architecture", replace_id=eid)
         assert ok is True
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert "proposed_revision" not in entry
 
     def test_correction_on_pending_base_amends_the_draft_in_place(self, tmp_repo):
@@ -2475,7 +2476,7 @@ class TestSuggestedUpdate:
             tmp_repo, "Use DynamoDB instead of Kafka for event streaming", "s2",
             "architecture", replace_id=eid, title="Use DynamoDB for event streaming")
         assert (ok, rid) == (True, eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["content"] == "Use DynamoDB instead of Kafka for event streaming"
         assert entry["title"] == "Use DynamoDB for event streaming"
         assert entry["status"] == "pending_approval", "still the developer's to review"
@@ -2490,7 +2491,7 @@ class TestSuggestedUpdate:
             tmp_repo, "Never stream events through Kafka without a dead-letter queue", "s2",
             "constraint", replace_id=eid, source_files=["messaging/kafka.py"])
         assert (ok, rid) == (True, eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["subtype"] == "constraint"
         assert entry["source_files"] == ["messaging/kafka.py"]
         assert "anchor_commit" in entry
@@ -2509,12 +2510,12 @@ class TestSuggestedUpdate:
 
     def test_identical_recapture_on_pending_base_is_not_a_change(self, tmp_repo):
         eid = self._pending(tmp_repo)
-        stamp = next(e for e in store._load(tmp_repo)["entries"]
+        stamp = next(e for e in store.load(tmp_repo)["entries"]
                      if e.get("id") == eid)["updated_at"]
         ok, rid = store.update_decision(tmp_repo, self._PENDING_BASE, "s2",
                                         "architecture", replace_id=eid)
         assert (ok, rid) == (True, eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["updated_at"] == stamp and entry["revision"] == 1
         assert "proposed_revision" not in entry
 
@@ -2526,7 +2527,7 @@ class TestSuggestedUpdate:
         ok, rid = store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s3",
                                         "architecture", replace_id=eid)
         assert ok is True
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         # Proposal should still exist and be from s2 (not silently replaced by s3).
         assert entry["proposed_revision"]["session_id"] == "s2"
 
@@ -2538,10 +2539,10 @@ class TestSuggestedUpdate:
                               "architecture", replace_id=eid, title="Old proposal title")
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s3",
                               "architecture", replace_id=eid, title="Corrected proposal title")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["proposed_revision"]["title"] == "Corrected proposal title"
         store.approve_decision(tmp_repo, eid, "approve")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert entry["title"] == "Corrected proposal title"
 
     def test_approve_merges_proposing_session_into_session_ids(self, tmp_repo):
@@ -2549,7 +2550,7 @@ class TestSuggestedUpdate:
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
                               "architecture", replace_id=eid)
         store.approve_decision(tmp_repo, eid, "approve")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         assert "s2" in entry.get("session_ids", [])
         assert entry.get("occurrence_count", 1) >= 2
 
@@ -2562,8 +2563,8 @@ class TestRevisionModel:
 
     def test_new_decision_has_first_revision_object(self, tmp_repo):
         _, eid = store.update_decision(tmp_repo, "Use feature-folder module layout", "s1", "pattern")
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
-        rev = store._current_revision(entry)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
+        rev = revisions.current_revision(entry)
         assert rev is not None
         # full revision object per the forward-ready schema
         for field in ("revision_id", "decision_id", "version_number", "content",
@@ -2576,10 +2577,10 @@ class TestRevisionModel:
     def test_approval_moves_pointer_and_preserves_history(self, tmp_repo):
         # Build an approved architecture decision, then propose + approve a change.
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         entry["status"] = "approved"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         eid = entry["id"]
         v1_rev_id = entry["current_revision_id"]
 
@@ -2587,11 +2588,11 @@ class TestRevisionModel:
                               "architecture", replace_id=eid)
         store.approve_decision(tmp_repo, eid, "approve")
 
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         # pointer advanced; both revisions preserved; precedence is the pointer, not time
         assert entry["current_revision_id"] != v1_rev_id
         assert len(entry["revisions"]) == 2
-        assert store._current_content(entry) == "Rollback endpoint is /api/v2/rollback"
+        assert revisions.current_content(entry) == "Rollback endpoint is /api/v2/rollback"
         assert any(r["revision_id"] == v1_rev_id and r["content"] == "Rollback endpoint is /api/v1/rollback"
                    for r in entry["revisions"])
 
@@ -2604,17 +2605,17 @@ class TestRevisionModel:
 
     def test_pending_update_does_not_change_current_revision(self, tmp_repo):
         store.update_decision(tmp_repo, "Primary store is postgres", "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         entry["status"] = "approved"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         eid = entry["id"]
         before = entry["current_revision_id"]
         store.update_decision(tmp_repo, "Primary store is mysql", "s2", "architecture", replace_id=eid)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e.get("id") == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e.get("id") == eid)
         # proposal parked; current revision unchanged until approval
         assert entry["current_revision_id"] == before
-        assert store._current_content(entry) == "Primary store is postgres"
+        assert revisions.current_content(entry) == "Primary store is postgres"
         assert entry.get("proposed_revision")
 
     def test_legacy_entry_migrates_on_load(self, tmp_repo):
@@ -2646,26 +2647,26 @@ class TestRevisionModel:
                 ],
             }],
         }
-        store._save(tmp_repo, legacy)
+        store.save(tmp_repo, legacy)
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = data["entries"][0]
         # migrated: full revision objects incl current, pointer set, current content preserved
         assert entry.get("current_revision_id")
         assert len(entry["revisions"]) == 3
         assert [r["version_number"] for r in entry["revisions"]] == [1, 2, 3]
         assert all("revision_id" in r for r in entry["revisions"])
-        assert store._current_content(entry) == "Rollback endpoint is /api/v3"
+        assert revisions.current_content(entry) == "Rollback endpoint is /api/v3"
         # replay still shows only the current value
         out = store.get_context(tmp_repo)
         assert "/api/v3" in out and "/api/v1" not in out and "/api/v2" not in out
 
     def test_migration_is_idempotent(self, tmp_repo):
         _, eid = store.update_decision(tmp_repo, "Use uv for deps", "s1", "convention")
-        first = store._load(tmp_repo)["entries"][0]
+        first = store.load(tmp_repo)["entries"][0]
         rid = first["current_revision_id"]
         # a second load must not rebuild revisions or change the pointer
-        second = store._load(tmp_repo)["entries"][0]
+        second = store.load(tmp_repo)["entries"][0]
         assert second["current_revision_id"] == rid
         assert len(second["revisions"]) == 1
 
@@ -2692,9 +2693,9 @@ class TestRevisionModel:
                 # deliberately no "revisions" key - nothing revision-level ever existed
             }],
         }
-        store._save(tmp_repo, legacy)
+        store.save(tmp_repo, legacy)
 
-        entry = store._load(tmp_repo)["entries"][0]
+        entry = store.load(tmp_repo)["entries"][0]
         assert entry["current_revision_id"]
         assert entry["revisions"][0]["source"] == "human"
         projection = store._share_projection(entry)
@@ -2739,7 +2740,7 @@ class TestApproveDecision:
     def _store_pending(self, repo: str, content: str = "We use RabbitMQ instead of Kafka") -> str:
         """Store a decision that will land as pending_approval and return its id."""
         store.update_decision(repo, content, "s1", subtype="architecture")
-        data = store._load(repo)
+        data = store.load(repo)
         entry = next(
             e for e in data["entries"]
             if e.get("type") == "decision" and e.get("status") == "pending_approval"
@@ -2749,7 +2750,7 @@ class TestApproveDecision:
     def _store_active(self, repo: str, content: str, subtype: str = "convention") -> str:
         """Store a decision that lands ALREADY trusted (approved/suggested) and return its id."""
         store.update_decision(repo, content, "s1", subtype=subtype, created_by="human")
-        data = store._load(repo)
+        data = store.load(repo)
         entry = next(e for e in data["entries"] if e.get("type") == "decision")
         assert entry["status"] in ("approved", "suggested")
         return entry["id"]
@@ -2759,7 +2760,7 @@ class TestApproveDecision:
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok is True
         assert "approved" in msg.lower() or "trusted" in msg.lower()
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("id") == eid)
         assert entry["status"] == "approved"
         assert entry.get("approved_by") == "human"
@@ -2769,7 +2770,7 @@ class TestApproveDecision:
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "ignore")
         assert ok is True
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("id") == eid)
         assert entry["status"] == "ignored"
 
@@ -2778,7 +2779,7 @@ class TestApproveDecision:
         ok, msg = store.approve_decision(tmp_repo, eid, "edit",
                                          content="We use Kafka instead of RabbitMQ for throughput")
         assert ok is True
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("id") == eid)
         assert entry["status"] == "approved"
         assert "Kafka" in entry["content"]
@@ -2786,10 +2787,10 @@ class TestApproveDecision:
 
     def test_approve_boosts_confidence(self, tmp_repo):
         eid = self._store_pending(tmp_repo)
-        data_before = store._load(tmp_repo)
+        data_before = store.load(tmp_repo)
         conf_before = next(e for e in data_before["entries"] if e.get("id") == eid)["confidence"]
         store.approve_decision(tmp_repo, eid, "approve")
-        data_after = store._load(tmp_repo)
+        data_after = store.load(tmp_repo)
         conf_after = next(e for e in data_after["entries"] if e.get("id") == eid)["confidence"]
         assert conf_after > conf_before
 
@@ -2829,7 +2830,7 @@ class TestApproveDecision:
         ok, msg = store.approve_decision(tmp_repo, eid, "ignore")
         assert ok is True
         assert "retired" in msg.lower()
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "ignored"
         assert entry["revisions"], "full revision history is kept, not wiped"
 
@@ -2838,12 +2839,12 @@ class TestApproveDecision:
         # injected), distinct from "approved" and from "pending_approval".
         store.update_decision(tmp_repo, "Group route handlers under api/routes/", "s1",
                               subtype="pattern", created_by="ai")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "suggested"
         ok, _msg = store.approve_decision(tmp_repo, entry["id"], "ignore")
         assert ok is True
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == entry["id"])
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry["id"])
         assert entry["status"] == "ignored"
 
     def test_ignored_active_decision_excluded_from_session_start_injection(self, tmp_repo):
@@ -2861,14 +2862,14 @@ class TestApproveDecision:
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok is False
         assert "already approved" in msg.lower()
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "approved", "no re-approval mutation"
 
     def test_edit_action_on_approved_decision_rejected(self, tmp_repo):
         eid = self._store_active(tmp_repo, "Use snake_case for Python module names")
         ok, msg = store.approve_decision(tmp_repo, eid, "edit", content="Use camelCase instead")
         assert ok is False
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["content"] == "Use snake_case for Python module names", "untouched"
 
     def test_dismiss_and_skip_on_approved_decision_rejected(self, tmp_repo):
@@ -2876,7 +2877,7 @@ class TestApproveDecision:
         for action in ("dismiss", "skip"):
             ok, _msg = store.approve_decision(tmp_repo, eid, action)
             assert ok is False, f"{action} should stay pending-only"
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
 
     def test_ignore_on_already_ignored_decision_rejected(self, tmp_repo):
@@ -2892,7 +2893,7 @@ class TestApproveDecision:
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok is True
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
 
 
@@ -2901,7 +2902,7 @@ class TestApproveDecision:
 class TestApproveDecisionSourceFiles:
     def _store_pending(self, repo: str, content: str = "We use RabbitMQ instead of Kafka") -> str:
         store.update_decision(repo, content, "s1", subtype="architecture")
-        data = store._load(repo)
+        data = store.load(repo)
         entry = next(
             e for e in data["entries"]
             if e.get("type") == "decision" and e.get("status") == "pending_approval"
@@ -2912,7 +2913,7 @@ class TestApproveDecisionSourceFiles:
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve", source_files=["auth/jwt.py"])
         assert ok, msg
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["source_files"] == ["auth/jwt.py"]
         assert "anchor_commit" in entry
 
@@ -2921,7 +2922,7 @@ class TestApproveDecisionSourceFiles:
         ok, msg = store.approve_decision(tmp_repo, eid, "edit", content="We use Kafka for throughput",
                                          source_files=["messaging/kafka.py"])
         assert ok, msg
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["source_files"] == ["messaging/kafka.py"]
 
     def test_source_files_with_all_target_raises(self, tmp_repo):
@@ -2960,21 +2961,21 @@ class TestApproveDecisionSourceFiles:
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok, msg
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert "source_files" not in entry and "anchor_commit" not in entry
 
     def test_source_files_none_default_is_noop(self, tmp_repo):
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve", source_files=None)
         assert ok, msg
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert "source_files" not in entry
 
     def test_source_files_empty_list_is_noop(self, tmp_repo):
         eid = self._store_pending(tmp_repo)
         ok, msg = store.approve_decision(tmp_repo, eid, "approve", source_files=[])
         assert ok, msg
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert "source_files" not in entry
 
     def test_promoted_proposal_with_source_files_anchors_exactly_once(self, tmp_repo, monkeypatch):
@@ -2985,7 +2986,7 @@ class TestApproveDecisionSourceFiles:
         stored, eid = store.update_decision(tmp_repo, "We use RabbitMQ for the event bus",
                                             "s1", "architecture", created_by="human")
         assert stored
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
 
         # AI-sourced correction to a high-stakes subtype -> stashed on proposed_revision,
@@ -2994,7 +2995,7 @@ class TestApproveDecisionSourceFiles:
             tmp_repo, "We use Kafka for the event bus instead of RabbitMQ", "s2",
             "architecture", replace_id=eid, source_files=["messaging/kafka.py"])
         assert stored2 and returned_id == eid
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry.get("proposed_revision", {}).get("source_files") == ["messaging/kafka.py"]
 
         calls = []
@@ -3008,7 +3009,7 @@ class TestApproveDecisionSourceFiles:
         ok, msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok, msg
         assert len(calls) == 1
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["source_files"] == ["messaging/kafka.py"]
         assert "anchor_commit" in entry  # tmp_repo isn't a real git repo, so this may be ""
 
@@ -3029,7 +3030,7 @@ class TestGetPendingDecisions:
 
     def test_excludes_constraint_after_approval(self, tmp_repo):
         store.update_decision(tmp_repo, "Never create public S3 buckets", "s1", subtype="constraint")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
         store.approve_decision(tmp_repo, eid, "approve")
         pending = store.get_pending_decisions(tmp_repo)
@@ -3045,7 +3046,7 @@ class TestGetPendingApprovalPrompt:
     def test_returns_formatted_prompt_for_pending_entry(self, tmp_repo):
         store.update_decision(tmp_repo, "We deploy only to AWS — all other clouds prohibited", "s1",
                               subtype="architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
         prompt = store.get_pending_approval_prompt(tmp_repo, eid)
         assert "pending review" in prompt
@@ -3057,7 +3058,7 @@ class TestGetPendingApprovalPrompt:
 
     def test_returns_empty_for_approved_entry(self, tmp_repo):
         store.update_decision(tmp_repo, "Use pytest for unit tests", "s1", subtype="convention")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
         assert store.get_pending_approval_prompt(tmp_repo, eid) == ""
 
@@ -3095,7 +3096,7 @@ class TestGetContextFiles:
             tmp_repo, "Always validate the JWT signature server-side before trusting claims",
             "s1", "constraint", created_by="ai", source_files=["auth/jwt.py"])
         assert stored
-        entry = store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+        entry = store.entry_by_id(store.load(tmp_repo)["entries"], eid)
         assert entry["status"] == "pending_approval"
         result = store.get_context(tmp_repo, files=["auth/jwt.py"])
         assert "[pending]" in result
@@ -3332,7 +3333,7 @@ class TestGetContextStatusTags:
 
     def test_ignored_entries_excluded_from_context(self, tmp_repo):
         store.update_decision(tmp_repo, "We use RabbitMQ instead of Kafka", "s1", subtype="architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
         store.approve_decision(tmp_repo, eid, "ignore")
         result = store.get_context(tmp_repo)
@@ -3375,7 +3376,7 @@ class TestSessionStartWithPending:
 
     def test_approved_constraint_appears_in_project_rules(self, tmp_repo):
         store.update_decision(tmp_repo, "Never create public S3 buckets anywhere", SESSION_ID_CONF, "constraint")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         eid = next(e for e in data["entries"] if e["type"] == "decision")["id"]
         store.approve_decision(tmp_repo, eid, "approve")
         result = store.get_session_start_context(tmp_repo)
@@ -3406,7 +3407,7 @@ class TestSessionStartWithPending:
 class TestCaptureUserConstraintFields:
     def test_human_constraint_stored_as_approved(self, tmp_repo):
         store.capture_user_constraint(tmp_repo, "always use uv not pip", "s1")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "approved"
         assert entry["created_by"] == "human"
@@ -3447,7 +3448,7 @@ class TestDeicticConstraintScope:
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
         assert entry_id is not None, f"must still be stored: {prompt!r}"
         assert status == "pending_approval"
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == entry_id)
         assert entry["status"] == "pending_approval"
         assert entry["created_by"] == "human"  # provenance unchanged by the deictic check
@@ -3475,7 +3476,7 @@ class TestDeicticConstraintScope:
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
         assert entry_id is not None, f"must be stored trusted: {prompt!r}"
         assert status == "approved"
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == entry_id)
         assert entry["status"] == "approved"
 
@@ -3523,7 +3524,7 @@ class TestDeicticCleanRestatementPromotion:
         assert status2 == "promoted"
         assert "the feature" in content2.lower()
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert "the feature" in entry["content"].lower()
@@ -3539,7 +3540,7 @@ class TestDeicticCleanRestatementPromotion:
         eid, _, _ = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
         eid2, content2, status2 = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s2")
         assert (eid2, content2, status2) == (None, None, None)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "pending_approval"
         assert entry["occurrence_count"] == 1
 
@@ -3548,7 +3549,7 @@ class TestDeicticCleanRestatementPromotion:
         store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")  # promotes -> approved
         eid3, content3, status3 = store.capture_user_constraint(tmp_repo, self._CLEAN, "s3")
         assert (eid3, content3, status3) == (None, None, None)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["occurrence_count"] == 2, "no further bump on an ordinary duplicate"
 
@@ -3563,13 +3564,13 @@ class TestDeicticIgnoredTombstoneDoesNotBlock:
         eid, _, status = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
         assert status == "pending_approval"
         store.approve_decision(tmp_repo, eid, "ignore")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert next(e for e in data["entries"] if e["id"] == eid)["status"] == "ignored"
 
         eid2, content2, status2 = store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")
         assert eid2 is not None and eid2 != eid, "re-typed rule lands as a fresh entry"
         assert status2 == "approved"
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         fresh = next(e for e in data["entries"] if e["id"] == eid2)
         assert fresh["status"] == "approved"
         ignored = next(e for e in data["entries"] if e["id"] == eid)
@@ -3599,7 +3600,7 @@ class TestContainmentCapture:
         assert eid3 == eid2, "routed onto the contained entry, not stored as a third"
         assert near == [], "no near-miss note on a containment hit"
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == 2, "NO new overlapping entry"
         target = next(e for e in decisions if e["id"] == eid2)
@@ -3619,7 +3620,7 @@ class TestContainmentCapture:
         store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
         ok, msg = store.approve_decision(tmp_repo, eid2, "approve")
         assert ok
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid2)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid2)
         assert entry["revision"] == 2
         assert "cfonirm" in entry["content"]
 
@@ -3630,7 +3631,7 @@ class TestContainmentCapture:
         eid3b, _, status3b = store.capture_user_constraint(tmp_repo, self._SUPERSET, "s3")
         # Repeat lands on the same entry; the identical proposal is not re-attached.
         assert (eid3b, status3b) == (eid2, "revision_proposed")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert len([e for e in data["entries"] if e["type"] == "decision"]) == 2
 
     def test_pending_twin_clean_superset_promotes_with_new_content(self, tmp_repo):
@@ -3643,7 +3644,7 @@ class TestContainmentCapture:
             "s2")
         assert eid2 == eid
         assert status2 == "promoted"
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert "smoke suite" in entry["content"]
         assert entry["revision"] == 2, "promotion appends a revision (history preserved)"
@@ -3657,7 +3658,7 @@ class TestContainmentCapture:
             "s2")
         assert eid2 == eid
         assert status2 == "pending_approval"
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "pending_approval"
         assert "changelog" in entry["content"]
         assert entry["revision"] == 1, "pre-approval amend rewrites v1, no new revision"
@@ -3671,7 +3672,7 @@ class TestContainmentCapture:
             tmp_repo, "always validate before shipping", "s2")
         assert eid2 == eid
         assert status2 == "promoted"
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert "production environments" in entry["content"], "fuller content kept"
 
@@ -3682,7 +3683,7 @@ class TestContainmentCapture:
         result = store.capture_user_constraint(
             tmp_repo, "Always run the full integration suite", "s2")
         assert result == (None, None, None), "silent no-op like today's dup case"
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         decisions = [e for e in data["entries"] if e["type"] == "decision"]
         assert len(decisions) == 1, "recurrence of the existing rule, not a new entry"
         assert decisions[0]["occurrence_count"] == 2
@@ -3693,7 +3694,7 @@ class TestContainmentCapture:
         eid1, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
         eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
         assert eid1 is not None and eid2 is not None and eid1 != eid2
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert len([e for e in data["entries"] if e["type"] == "decision"]) == 2
 
     def test_near_miss_listed_in_ack_for_developer_confirmed_consolidation(self, tmp_repo):
@@ -3712,13 +3713,13 @@ class TestContainmentCapture:
         # A short generic rule ("Always commit") is contained (ratio 1.0) in every longer
         # directive that mentions committing. First-hit-wins would route to whichever
         # happens to iterate first; the fix picks the closest overall match instead.
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         short = store._new_decision_entry("Always commit", "seed", "constraint",
                                           created_by="human", status="approved")
         longer = store._new_decision_entry("Always commit automatically", "seed", "constraint",
                                            created_by="human", status="approved")
         data["entries"].extend([short, longer])  # short iterates first
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         eid, _content, status = store.capture_user_constraint(
             tmp_repo, "Always commit automatically after approvals", "s1")
@@ -3730,7 +3731,7 @@ class TestContainmentCapture:
         store.capture_user_constraint(tmp_repo, self._SEED_LONG, "s1")
         eid2, _, _ = store.capture_user_constraint(tmp_repo, self._SEED_SHORT, "s1")
         store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
-        original_prop = next(e for e in store._load(tmp_repo)["entries"]
+        original_prop = next(e for e in store.load(tmp_repo)["entries"]
                              if e["id"] == eid2)["proposed_revision"]
         assert original_prop is not None
 
@@ -3739,7 +3740,7 @@ class TestContainmentCapture:
         assert eid3 == eid2, "still routes onto the same contained entry"
         assert status3 == "revision_already_pending"
 
-        target = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid2)
+        target = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid2)
         assert target["proposed_revision"] == original_prop, "original proposal untouched"
 
         ack = store.constraint_ack(content3, status3, eid3)
@@ -3760,14 +3761,14 @@ class TestContainmentCapture:
         ok, rid = store.update_decision(tmp_repo, self._AI_UPDATE, "sAI", "constraint",
                                         replace_id=eid)
         assert (ok, rid) == (True, eid)
-        assert next(e for e in store._load(tmp_repo)["entries"]
+        assert next(e for e in store.load(tmp_repo)["entries"]
                     if e["id"] == eid)["proposed_revision"]["source"] == "ai"
         assert store.record_conflict_memo(tmp_repo, eid, "update", "sAI")[0]
         store.pending_review_nudge(tmp_repo)      # consume the flag the AI proposal armed
 
         eid3, _content3, status3 = store.capture_user_constraint(tmp_repo, self._SUPERSET, "s2")
         assert (eid3, status3) == (eid, "revision_proposed")
-        target = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        target = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert target["proposed_revision"]["source"] == "human"
         assert "cfonirm" in target["proposed_revision"]["content"]
         archived = target["superseded_proposals"]
@@ -3783,7 +3784,7 @@ class TestContainmentCapture:
         different = "Always commit automatically after every merge to keep history clean"
         eid3, _content3, status3 = store.capture_user_constraint(tmp_repo, different, "s3")
         assert (eid3, status3) == (eid, "revision_already_pending")
-        target = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        target = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert "cfonirm" in target["proposed_revision"]["content"], "equal trust never displaces"
         assert "superseded_proposals" not in target
 
@@ -3898,12 +3899,12 @@ class TestPendingReviewFlag:
         assert store.pending_review_nudge(tmp_repo)                  # A still nudges
 
     def test_session_start_escalates_growing_backlog(self, tmp_repo):
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         for i in range(store._BACKLOG_ESCALATE + 2):
             data["entries"].append(
                 store._new_decision_entry(f"Constraint {i} distinct text {i}", "s",
                                           "constraint", status="pending_approval"))
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         result = store.get_session_start_context(tmp_repo)
         assert "piling up" in result["systemMessage"]
         ctx = result["hookSpecificOutput"]["additionalContext"]
@@ -3921,12 +3922,12 @@ class TestPendingReviewFlag:
     def test_format_pending_review_caps_large_backlog(self, tmp_repo):
         # #1: a big backlog must not dump every decision — cap like get_context, point overflow
         # to `contexer review`. Build entries directly to bypass the novelty filter.
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         for i in range(30):
             data["entries"].append(
                 store._new_decision_entry(f"Decision number {i} unique text {i}", "s",
                                           "constraint", status="pending_approval"))
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         out = store.format_pending_review(tmp_repo)
         assert f"showing {store._FILTERED_DISPLAY} of 30" in out
         assert "contexer review" in out
@@ -3935,7 +3936,7 @@ class TestPendingReviewFlag:
 
     def test_format_share_preview_shows_content_endpoint_and_confirm(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
-        eid = store._load(tmp_repo)["entries"][0]["id"]
+        eid = store.load(tmp_repo)["entries"][0]["id"]
         out = store.format_share_preview(tmp_repo, eid)
         assert "Use Redis for caching" in out
         assert "PERSONAL cloud" in out
@@ -3958,7 +3959,7 @@ class TestPendingReviewFlag:
     def test_format_share_preview_multi_lists_all_selected(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
         store.update_decision(tmp_repo, "Store blobs in object storage", "s1", "architecture")
-        ids = [e["id"][:8] for e in store._load(tmp_repo)["entries"]]
+        ids = [e["id"][:8] for e in store.load(tmp_repo)["entries"]]
         out = store.format_share_preview(tmp_repo, ",".join(ids))
         assert "2 decisions" in out
         assert "Use Redis for caching" in out and "Store blobs in object storage" in out
@@ -3975,7 +3976,7 @@ class TestShareProjectionSourceFiles:
     def test_projection_carries_source_files(self, tmp_repo):
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1",
                               "architecture", source_files=["auth/jwt.py", "auth/session.py"])
-        entry = store._load(tmp_repo)["entries"][0]
+        entry = store.load(tmp_repo)["entries"][0]
         projected = store._share_projection(entry, redact_on=False)
         assert projected["source_files"] == ["auth/jwt.py", "auth/session.py"]
 
@@ -3983,7 +3984,7 @@ class TestShareProjectionSourceFiles:
         secret = "AKIAIOSFODNN7EXAMPLE"
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
                               source_files=[f"auth/{secret}.py"])
-        entry = store._load(tmp_repo)["entries"][0]
+        entry = store.load(tmp_repo)["entries"][0]
         projected = store._share_projection(entry, redact_on=True)
         joined = " ".join(projected["source_files"])
         assert secret not in joined
@@ -3992,14 +3993,14 @@ class TestShareProjectionSourceFiles:
 
     def test_projection_drops_empty_source_files(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
-        entry = store._load(tmp_repo)["entries"][0]
+        entry = store.load(tmp_repo)["entries"][0]
         projected = store._share_projection(entry, redact_on=False)
         assert projected["source_files"] == []
 
     def test_projection_never_carries_anchor_commit(self, tmp_repo):
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
                               source_files=["auth/jwt.py"])
-        entry = store._load(tmp_repo)["entries"][0]
+        entry = store.load(tmp_repo)["entries"][0]
         # tmp_repo isn't a real git checkout, so _anchor_sources stamps an empty anchor_commit
         # (fail-soft) — stamp a real-looking one directly to prove the FIELD never projects,
         # independent of whether git anchoring itself succeeded.
@@ -4012,7 +4013,7 @@ class TestShareProjectionSourceFiles:
         monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", False)
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
                               source_files=["auth/jwt.py"])
-        eid = store._load(tmp_repo)["entries"][0]["id"]
+        eid = store.load(tmp_repo)["entries"][0]["id"]
         out = store.format_share_preview(tmp_repo, eid)
         assert "files: auth/jwt.py" in out
         assert "not yet sent" in out
@@ -4022,14 +4023,14 @@ class TestShareProjectionSourceFiles:
         monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
                               source_files=["auth/jwt.py"])
-        eid = store._load(tmp_repo)["entries"][0]["id"]
+        eid = store.load(tmp_repo)["entries"][0]["id"]
         out = store.format_share_preview(tmp_repo, eid)
         assert "files: auth/jwt.py" in out
         assert "not yet sent" not in out
 
     def test_preview_omits_files_line_when_no_source_files(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
-        eid = store._load(tmp_repo)["entries"][0]["id"]
+        eid = store.load(tmp_repo)["entries"][0]["id"]
         out = store.format_share_preview(tmp_repo, eid)
         assert "files:" not in out
 
@@ -4039,11 +4040,11 @@ class TestShareProjectionSourceFiles:
         visible one the developer can narrow themselves."""
         from contexer import remote
         monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
-        many = [f"src/f{i}.py" for i in range(store._MAX_SOURCE_FILES + 7)]
+        many = [f"src/f{i}.py" for i in range(store.MAX_SOURCE_FILES + 7)]
         _stored, eid = store.update_decision(
             tmp_repo, "Use JWT tokens for session auth", "s1", "architecture", source_files=many)
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
-        assert len(entry["source_files"]) == store._MAX_SOURCE_FILES
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
+        assert len(entry["source_files"]) == store.MAX_SOURCE_FILES
         assert entry["source_files_total"] == len(many)
         assert f"of {len(many)}" in store.format_share_preview(tmp_repo, eid)
 
@@ -4059,7 +4060,7 @@ class TestShareProjectionSourceFiles:
         _stored, eid = store.update_decision(
             tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
             source_files=["auth/jwt.py", long_path])
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert long_path in entry["source_files"]  # stored locally, verbatim
 
         projected = store._share_projection(entry, redact_on=False)
@@ -4076,7 +4077,7 @@ class TestShareProjectionSourceFiles:
         _stored, eid = store.update_decision(
             tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
             source_files=["auth/jwt.py", "auth/session.py"])
-        entry = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert "source_files_total" not in entry
         assert "first 2 of" not in store.format_share_preview(tmp_repo, eid)
 
@@ -4099,7 +4100,7 @@ class TestShareProjectionSourceFiles:
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
-        assert not store._load(tmp_repo)["entries"][0].get("source_files")  # candidates only
+        assert not store.load(tmp_repo)["entries"][0].get("source_files")  # candidates only
         out = store.format_share_preview(tmp_repo, eid)
         assert "files: auth/jwt.py" in out
         assert "unconfirmed" in out
@@ -4109,7 +4110,7 @@ class TestShareProjectionSourceFiles:
         monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
         store.update_decision(tmp_repo, "Use JWT tokens for session auth", "s1", "architecture",
                               source_files=["auth/jwt.py"])
-        eid = store._load(tmp_repo)["entries"][0]["id"]
+        eid = store.load(tmp_repo)["entries"][0]["id"]
         out = store.format_share_preview(tmp_repo, eid)
         assert "files: auth/jwt.py" in out
         assert "unconfirmed" not in out
@@ -4138,15 +4139,15 @@ class TestInsightCache:
         return str(repo)
 
     def _counting_git(self, monkeypatch):
-        # Wraps the real store._git so call sites still get real answers, just counted.
-        real_git = store._git
+        # Wraps the real store.run_git so call sites still get real answers, just counted.
+        real_git = store.run_git
         calls = {"n": 0}
 
         def counting(repo_path, *args):
             calls["n"] += 1
             return real_git(repo_path, *args)
 
-        monkeypatch.setattr(store, "_git", counting)
+        monkeypatch.setattr(store, "run_git", counting)
         return calls
 
     def test_cache_hit_skips_git(self, git_repo, monkeypatch):
@@ -4286,10 +4287,10 @@ class TestRetrievalIndex:
 
     def test_reflects_current_content_after_revision(self, tmp_repo):
         store.update_decision(tmp_repo, "Use redis for caching the product feed", RV1_SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = data["entries"][0]
-        store._append_revision(entry, "Use memcached for caching the product feed now", source="human")
-        store._save(tmp_repo, data)
+        revisions.append_revision(entry, "Use memcached for caching the product feed now", source="human")
+        store.save(tmp_repo, data)
         (doc,) = store._read_retrieval_index(tmp_repo)["docs"].values()
         assert "memcached" in doc["tf"]      # current content indexed
         assert "redis" not in doc["tf"]      # superseded content dropped
@@ -4330,9 +4331,9 @@ class TestRetrievalIndex:
 
     def test_indexes_only_decisions(self, tmp_repo):
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"].append({"type": "task", "id": "task-1", "content": "a task not a decision"})
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         idx = store._read_retrieval_index(tmp_repo)
         assert idx["n_docs"] == 1
         assert "task-1" not in idx["docs"]
@@ -4395,9 +4396,9 @@ class TestIndexSelfHeal:
 
     def test_task_only_store_creates_no_index(self, tmp_repo):
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"] = [{"type": "task", "id": "task-1", "content": "a task not a decision"}]
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         store._index_path(tmp_repo).unlink()
 
         assert store.ensure_retrieval_index(tmp_repo) is False
@@ -4407,9 +4408,9 @@ class TestIndexSelfHeal:
         # "Nothing indexable" must mean what _build_retrieval_index means by it: an
         # all-ignored store would otherwise write a zero-doc sidecar.
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][0]["status"] = "ignored"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         store._index_path(tmp_repo).unlink()
 
         assert store.ensure_retrieval_index(tmp_repo) is False
@@ -4420,7 +4421,7 @@ class TestIndexSelfHeal:
         # hold it across whole-repo mines. A repo that can never satisfy the rebuild
         # condition must not queue behind that on every single session start.
         taken = []
-        real_lock = store._store_lock
+        real_lock = store.store_lock
 
         @contextlib.contextmanager
         def counting_lock(slug):
@@ -4428,14 +4429,14 @@ class TestIndexSelfHeal:
             with real_lock(slug):
                 yield
 
-        monkeypatch.setattr(store, "_store_lock", counting_lock)
+        monkeypatch.setattr(store, "store_lock", counting_lock)
         assert store.ensure_retrieval_index(tmp_repo) is False   # empty store
         assert taken == []
 
     def test_no_store_lock_taken_when_index_is_healthy(self, tmp_repo, monkeypatch):
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         taken = []
-        real_lock = store._store_lock
+        real_lock = store.store_lock
 
         @contextlib.contextmanager
         def counting_lock(slug):
@@ -4443,7 +4444,7 @@ class TestIndexSelfHeal:
             with real_lock(slug):
                 yield
 
-        monkeypatch.setattr(store, "_store_lock", counting_lock)
+        monkeypatch.setattr(store, "store_lock", counting_lock)
         assert store.ensure_retrieval_index(tmp_repo) is False
         assert taken == []
 
@@ -4463,7 +4464,7 @@ class TestIndexSelfHeal:
 
     def test_retrieval_log_survives_a_non_utf8_log_file(self, tmp_repo):
         store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        log = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        log = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         log.write_bytes(b"\xff\xfe not utf-8\n")
         store._retrieval_log(tmp_repo, {"e": "index_rebuild", "docs": 1})   # must not raise
 
@@ -4483,7 +4484,7 @@ class TestIndexSelfHeal:
         _downgrade_index_to_v1(tmp_repo)
         store.ensure_retrieval_index(tmp_repo)
 
-        log = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        log = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         events = [json.loads(line) for line in log.read_text().splitlines() if line]
         assert [e for e in events if e.get("e") == "index_rebuild" and e.get("docs") == 1]
 
@@ -4537,7 +4538,7 @@ class TestBM25Router:
             ("orders list uses cursor pagination with opaque cursors", "pattern"),
         ])
         idx = store._read_retrieval_index(tmp_repo)
-        ranked = store._bm25_rank(["orders", "pagination"], idx)
+        ranked = retrieval.bm25_rank(["orders", "pagination"], idx)
         top_id = ranked[0][0]
         assert top_id == self._id_by(ids, "cursor pagination")   # 2 term hits wins
         assert ranked[0][2] == 2
@@ -4618,7 +4619,7 @@ class TestRenderPromptDecisions:
         assert lines[3] == "    JWT refresh tokens live in httpOnly cookies"
 
     def test_derives_title_when_none_stored_short_content_dedups_to_one_line(self, tmp_repo):
-        # No explicit title -> falls back to _derive_title(content), same as get_context.
+        # No explicit title -> falls back to revisions.derive_title(content), same as get_context.
         # Content is short (<=100 chars) so the derived title IS the content verbatim —
         # showing it again on an indented line would just repeat it, so there's no 2nd line.
         _, eid = store.update_decision(
@@ -4745,7 +4746,7 @@ class TestEditedFilesSignal:
         # stdin) and the reader (server.SESSION_ID, a uuid4 minted in another process) look
         # at different files, always. The key is now the repo slug alone.
         store.record_edited_file(tmp_repo, "src/a.py")
-        assert store._edited_files_path(tmp_repo).name == f".edited_{store._slug(tmp_repo)}.json"
+        assert store._edited_files_path(tmp_repo).name == f".edited_{store.repo_slug(tmp_repo)}.json"
 
     def test_dedup_refreshes_the_slot_to_most_recent(self, tmp_repo):
         store.record_edited_file(tmp_repo, "a.py")
@@ -4805,7 +4806,7 @@ class TestEditedFilesSignal:
     def test_write_error_is_fail_soft(self, tmp_repo, monkeypatch):
         def _boom(*a):
             raise OSError("disk full")
-        monkeypatch.setattr(store, "_atomic_write", _boom)
+        monkeypatch.setattr(store, "atomic_write", _boom)
         store.record_edited_file(tmp_repo, "a.py")  # must not raise
 
     def test_gc_sweep_drops_stale_edited_files_sidecar(self, tmp_repo):
@@ -4828,7 +4829,7 @@ class TestEditedFilesSignal:
 
 class TestAnchorCandidates:
     def _entry(self, tmp_repo, eid):
-        return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+        return store.entry_by_id(store.load(tmp_repo)["entries"], eid)
 
     def test_hook_written_signal_reaches_a_different_server_session(self, tmp_repo):
         """C1 regression, end to end across the process boundary: the WRITER is the hook
@@ -4889,7 +4890,7 @@ class TestAnchorCandidates:
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         assert stored
         candidates = self._entry(tmp_repo, eid)["anchor_candidates"]
-        assert len(candidates) == store._MAX_SOURCE_FILES == 10
+        assert len(candidates) == store.MAX_SOURCE_FILES == 10
         assert candidates[0] == "f5.py" and candidates[-1] == "f14.py"
 
     def test_scan_sourced_capture_never_attaches_candidates(self, tmp_repo):
@@ -4958,7 +4959,7 @@ class TestAnchorCandidates:
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-2", "constraint")
         assert not stored  # recurrence, not a new entry
-        entry = store._load(tmp_repo)["entries"][0]
+        entry = store.load(tmp_repo)["entries"][0]
         assert "anchor_candidates" not in entry
 
     def test_approval_blesses_candidates_into_a_real_anchor(self, tmp_repo):
@@ -5025,9 +5026,9 @@ class TestAnchorCandidates:
         assert stored
         entry = self._entry(tmp_repo, eid)
         assert entry["status"] == "approved" and "source_files" not in entry
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][0]["anchor_candidates"] = ["auth/jwt.py"]
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         ok, _msg = store.update_decision(
             tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
@@ -5045,9 +5046,9 @@ class TestAnchorCandidates:
         stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "s1", "constraint", created_by="human")
         assert stored
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][0]["anchor_candidates"] = ["stale_candidate.py"]
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         store.update_decision(
             tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
@@ -5131,9 +5132,9 @@ class TestAnchorCandidates:
         # A human capture is born approved (never earns real candidates by the status gate),
         # so hand-seed anchor_candidates directly to exercise the promotion path in isolation
         # — simulating an entry that already carried leftover candidates from some prior state.
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][0]["anchor_candidates"] = ["candidate.py"]
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         # A Suggested Update correction stashes its own source_files.
         ok, _msg = store.update_decision(
@@ -5159,7 +5160,7 @@ class TestConstraintCaptureCandidates:
                "and ensure this feature is actual improvement")
 
     def _entry(self, tmp_repo, eid):
-        return store._entry_by_id(store._load(tmp_repo)["entries"], eid)
+        return store.entry_by_id(store.load(tmp_repo)["entries"], eid)
 
     def test_deictic_constraint_capture_attaches_candidates(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
@@ -5181,7 +5182,7 @@ class TestConstraintCaptureCandidates:
             store.record_edited_file(tmp_repo, f"f{i}.py")
         eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
         candidates = self._entry(tmp_repo, eid)["anchor_candidates"]
-        assert len(candidates) == store._MAX_SOURCE_FILES == 10
+        assert len(candidates) == store.MAX_SOURCE_FILES == 10
         assert candidates[-1] == "f14.py"
 
     def test_capture_with_no_edited_files_attaches_nothing(self, tmp_repo):
@@ -5222,7 +5223,7 @@ class TestRetrievalLog:
     def test_pointer_event_appended(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
         store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-log")
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         assert path.exists()
         events = [json.loads(line) for line in path.read_text().splitlines() if line]
         assert events[-1]["e"] == "pointer"
@@ -5232,13 +5233,13 @@ class TestRetrievalLog:
     def test_log_cap_enforced(self, tmp_repo):
         for i in range(store._RETRIEVAL_LOG_CAP + 25):
             store._retrieval_log(tmp_repo, {"e": "pointer", "topics": ["db"], "sid": "s", "ts": i})
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         lines = [line for line in path.read_text().splitlines() if line]
         assert len(lines) == store._RETRIEVAL_LOG_CAP
         assert json.loads(lines[-1])["ts"] == store._RETRIEVAL_LOG_CAP + 24  # tail kept
 
     def test_corrupt_log_ignored(self, tmp_repo):
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         path.write_text("not\x00valid json line\n")
         # append still succeeds (fail-soft rewrite), never raises
@@ -5247,11 +5248,11 @@ class TestRetrievalLog:
 
 
 def _ignore(repo, eid):
-    data = store._load(repo)
+    data = store.load(repo)
     for e in data["entries"]:
         if e["id"] == eid:
             e["status"] = "ignored"
-    store._save(repo, data)
+    store.save(repo, data)
 
 
 # ── Retrieval V1 review findings: indexed path must dominate legacy ─────────────
@@ -5307,7 +5308,7 @@ class TestBM25PrefixAndDigits:
         _seed_rv1(tmp_repo, RV1_CORPUS)
         idx = store._read_retrieval_index(tmp_repo)
         # 'postgres' is absent as an exact token but 'postgres'-prefixed tokens exist
-        ranked = store._bm25_rank(["postgres"], idx)
+        ranked = retrieval.bm25_rank(["postgres"], idx)
         assert ranked and ranked[0][2] == 1
 
 
@@ -5480,11 +5481,11 @@ class TestFileRoute:
         _, gid = store.update_global_decision(
             "Secrets loading happens in contexer/config.py at import time",
             RV1_SESSION, "constraint")
-        data = store._load_global()
+        data = store.load_global()
         for e in data["entries"]:
             if e.get("id") == gid:
                 e["source_files"] = ["contexer/config.py"]
-        store._save_global(data)
+        store.save_global(data)
         result = store.get_context_for_prompt(
             tmp_repo, "update contexer/config.py loading order")
         assert result.startswith("[Contexer: auto-fetched for this question]")
@@ -5587,7 +5588,7 @@ class TestFileRoute:
         live decisions_for_files scan breaches at this scale (measured ~7.7ms p50 / ~8.6ms
         p95 for the live scan vs. ~0.91ms p50 / ~0.93ms p95 for the index-served lookup, ~8x
         faster — see _index_file_lookup's docstring for the numbers this pins)."""
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         for i in range(500):
             data["entries"].append({
                 "id": str(uuid.uuid4()), "type": "decision", "subtype": "architecture",
@@ -5597,7 +5598,7 @@ class TestFileRoute:
                 "source_files": [f"contexer/mod_{i:04d}.py"] if i % 5 == 0 else [],
             })
         store._migrate_entries(data)
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         index = store._read_retrieval_index(tmp_repo)
         assert index is not None and index["v"] == 2
@@ -5637,7 +5638,7 @@ class TestTopicAliasRetry:
         _seed_rv1(tmp_repo, RV1_CORPUS)
         # Arm a fresh pointer for the db topic.
         store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-fu")
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         before = path.read_text().count('"followup"')
         # A get_context that found nothing must not log a follow-through, even in-window.
         store.log_followup_if_matching(tmp_repo, "db", found=False)
@@ -5811,7 +5812,7 @@ class TestCompactRehydration:
 class TestWorkingSetGC:
     def test_gc_removes_stale_and_keeps_fresh(self, tmp_repo):
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        slug = store._slug(tmp_repo)
+        slug = store.repo_slug(tmp_repo)
         stale_ws = store.STORE_DIR / f".ws_{slug}_stale.json"
         fresh_ws = store.STORE_DIR / f".ws_{slug}_fresh.json"
         stale_log = store.STORE_DIR / f".retrieval_{slug}.jsonl"
@@ -5831,7 +5832,7 @@ class TestWorkingSetGC:
 
     def test_gc_runs_at_non_resume_session_start(self, tmp_repo):
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        stale_ws = store.STORE_DIR / f".ws_{store._slug(tmp_repo)}_old.json"
+        stale_ws = store.STORE_DIR / f".ws_{store.repo_slug(tmp_repo)}_old.json"
         stale_ws.write_text('{"injected": [], "ts": 0}')
         old = time.time() - store._WS_GC_AGE_SECONDS - 3600
         os.utime(stale_ws, (old, old))
@@ -5840,7 +5841,7 @@ class TestWorkingSetGC:
 
     def test_gc_skipped_on_resume(self, tmp_repo):
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        stale_ws = store.STORE_DIR / f".ws_{store._slug(tmp_repo)}_old.json"
+        stale_ws = store.STORE_DIR / f".ws_{store.repo_slug(tmp_repo)}_old.json"
         stale_ws.write_text('{"injected": [], "ts": 0}')
         old = time.time() - store._WS_GC_AGE_SECONDS - 3600
         os.utime(stale_ws, (old, old))
@@ -5924,7 +5925,7 @@ class TestFollowThroughLog:
     def test_followup_logged_on_matching_query(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
         store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-follow")
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         assert json.loads(path.read_text().splitlines()[-1])["e"] == "pointer"
 
         store.log_followup_if_matching(tmp_repo, "db")
@@ -5936,7 +5937,7 @@ class TestFollowThroughLog:
     def test_no_followup_when_topic_does_not_match(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
         store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-follow2")
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         before = path.read_text()
 
         store.log_followup_if_matching(tmp_repo, "frontend")
@@ -5945,7 +5946,7 @@ class TestFollowThroughLog:
 
     def test_no_pointer_no_followup_no_crash(self, tmp_repo):
         store.log_followup_if_matching(tmp_repo, "db")  # nothing logged yet, must not raise
-        path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+        path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
         assert not path.exists()
 
 
@@ -5962,7 +5963,7 @@ class TestTitleAndBody:
         # body is None so callers don't print the same text twice.
         c = "Never commit spec or plan files to git."
         e = store._new_decision_entry(c, "s1", "architecture")
-        title, body = store._title_and_body(e)
+        title, body = store.title_and_body(e)
         assert title == c
         assert body is None
 
@@ -5974,8 +5975,8 @@ class TestTitleAndBody:
         c = ("Native contexer-teams entry removed. Team sync is the Python path; "
              "kept a legacy janitor pop; login now refreshes status.")
         e = store._new_decision_entry(c, "s1", "architecture")
-        title, body = store._title_and_body(e)
-        assert title == store._derive_title(c)
+        title, body = store.title_and_body(e)
+        assert title == revisions.derive_title(c)
         assert title != c
         assert body == ("Team sync is the Python path; kept a legacy janitor pop; "
                          "login now refreshes status.")
@@ -5985,18 +5986,18 @@ class TestTitleAndBody:
         # since it is NOT a repeat of the title.
         c = "Use Postgres for the queue."
         e = store._new_decision_entry(c, "s1", "architecture", title="Queue backend: Postgres")
-        title, body = store._title_and_body(e)
+        title, body = store.title_and_body(e)
         assert title == "Queue backend: Postgres"
         assert body == c
 
     def test_authored_title_that_is_a_literal_prefix_keeps_full_body(self):
         # Greptile #221 P1: the prefix-strip is scoped to DERIVED titles (always a clean
-        # sentence boundary via _derive_title). An authored title can be an arbitrary
+        # sentence boundary via revisions.derive_title). An authored title can be an arbitrary
         # fragment that happens to literally prefix the content — stripping it would cut
         # off the body's own leading words instead of removing a genuine duplicate.
         c = "Use Postgres for the queue, since ordering matters."
         e = store._new_decision_entry(c, "s1", "architecture", title="Use Postgres")
-        title, body = store._title_and_body(e)
+        title, body = store.title_and_body(e)
         assert title == "Use Postgres"
         assert body == c
 
@@ -6004,7 +6005,7 @@ class TestTitleAndBody:
         # Explicit `content` (e.g. a proposed_revision's content) is used instead of the
         # entry's current revision.
         e = store._new_decision_entry("Original short body.", "s1", "architecture")
-        title, body = store._title_and_body(e, content="A different candidate body.")
+        title, body = store.title_and_body(e, content="A different candidate body.")
         assert title == e["title"]  # authored/derived title on the entry itself is unchanged
         assert body == "A different candidate body."
 
@@ -6016,17 +6017,17 @@ class TestTitleOnEntry:
         e = store._new_decision_entry("some long body " * 10, "s1", "architecture",
                                        title="Short authored title")
         assert e["title"] == "Short authored title"
-        assert store._current_revision(e)["title"] == "Short authored title"
+        assert revisions.current_revision(e)["title"] == "Short authored title"
 
     def test_derived_when_omitted(self):
         e = store._new_decision_entry("Use Postgres for the queue.", "s1", "architecture")
         assert e["title"] == "Use Postgres for the queue."  # short -> verbatim
-        assert store._current_revision(e)["title"] == "Use Postgres for the queue."
+        assert revisions.current_revision(e)["title"] == "Use Postgres for the queue."
 
     def test_sync_cache_mirrors_revision_title(self):
         e = store._new_decision_entry("Body.", "s1", "architecture", title="T1")
-        store._current_revision(e)["title"] = "T2"
-        store._sync_decision_cache(e)
+        revisions.current_revision(e)["title"] = "T2"
+        revisions.sync_decision_cache(e)
         assert e["title"] == "T2"
 
 
@@ -6039,7 +6040,7 @@ class TestTitleRevision:
         # revise with new content, no title -> re-derive from new content
         store.update_decision(tmp_repo, "Brand new short body.", "s1",
                               subtype="architecture", created_by="human", replace_id=eid[:8])
-        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        d = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert d["title"] == "Brand new short body."   # re-derived, not carried forward
         assert d["revision"] == 2
 
@@ -6047,7 +6048,7 @@ class TestTitleRevision:
         _, eid = store.update_decision(tmp_repo, "Body one.", "s1", subtype="architecture", created_by="human")
         store.update_decision(tmp_repo, "Body two.", "s1", subtype="architecture",
                               created_by="human", replace_id=eid[:8], title="Explicit new title")
-        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        d = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert d["title"] == "Explicit new title"
 
     def test_title_only_correction_persists_without_new_revision(self, tmp_repo):
@@ -6060,11 +6061,11 @@ class TestTitleRevision:
                                         subtype="architecture", created_by="human",
                                         replace_id=eid[:8], title="Corrected title")
         assert ok and rid == eid
-        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        d = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert d["title"] == "Corrected title"           # persisted
         assert d["content"] == "Some short decision body."
         assert d["revision"] == 1                          # no new revision created
-        assert store._current_revision(d)["title"] == "Corrected title"
+        assert revisions.current_revision(d)["title"] == "Corrected title"
 
     def test_gated_title_only_change_goes_through_approval(self, tmp_repo):
         # SECURITY: an AI title-only change to a trusted architecture/constraint decision must
@@ -6076,12 +6077,12 @@ class TestTitleRevision:
         store.update_decision(tmp_repo, "Some approved arch body.", "s1",
                               subtype="architecture", created_by="ai",
                               replace_id=eid[:8], title="AI reframed title")
-        d = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        d = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert d["title"] == "Original title"                          # live title unchanged
         assert d.get("proposed_revision", {}).get("title") == "AI reframed title"  # pending review
         # ...and approving it promotes the new title.
         store.approve_decision(tmp_repo, eid, "approve")
-        d2 = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        d2 = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert d2["title"] == "AI reframed title"
 
     def test_title_only_correction_on_pending_applies_in_place(self, tmp_repo):
@@ -6089,13 +6090,13 @@ class TestTitleRevision:
         # and not gated: the developer reviews the base with the fixed title.
         store.update_decision(tmp_repo, "Use Kafka instead of RabbitMQ for event streaming", "s1",
                               subtype="architecture")  # ai + L3 signal -> pending_approval
-        e = next(x for x in store._load(tmp_repo)["entries"] if x.get("type") == "decision")
+        e = next(x for x in store.load(tmp_repo)["entries"] if x.get("type") == "decision")
         assert e["status"] == "pending_approval"
         eid = e["id"]
         store.update_decision(tmp_repo, "Use Kafka instead of RabbitMQ for event streaming", "s1",
                               subtype="architecture", replace_id=eid,
                               title="Kafka for event streaming")
-        d = next(x for x in store._load(tmp_repo)["entries"] if x.get("id") == eid)
+        d = next(x for x in store.load(tmp_repo)["entries"] if x.get("id") == eid)
         assert d["title"] == "Kafka for event streaming"   # applied in place
         assert d["status"] == "pending_approval"           # still pending
         assert "proposed_revision" not in d                 # no proposal stacked
@@ -6104,11 +6105,11 @@ class TestTitleRevision:
         # Same content, no (or identical) title -> pure no-op, current behavior preserved.
         _, eid = store.update_decision(tmp_repo, "A short body here.", "s1",
                                        subtype="architecture", created_by="human")
-        before = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        before = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         before_updated = before["updated_at"]
         store.update_decision(tmp_repo, "A short body here.", "s1", subtype="architecture",
                               created_by="human", replace_id=eid[:8])
-        after = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        after = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert after["updated_at"] == before_updated       # untouched
 
     def test_gated_proposal_carries_title_through_approval(self, tmp_repo):
@@ -6116,11 +6117,11 @@ class TestTitleRevision:
         # approval gate (Suggested Update) instead of revising immediately - the title must
         # survive capture -> proposal -> promoted revision.
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("type") == "decision")
         eid = entry["id"]
         entry["status"] = "approved"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         # default created_by="ai" -> significant change on an architecture decision is gated.
         ok, rid = store.update_decision(
@@ -6128,28 +6129,28 @@ class TestTitleRevision:
             subtype="architecture", replace_id=eid, title="Gated new title")
         assert ok is True and rid == eid
 
-        gated = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        gated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         # still gated: live revision untouched, but the pending proposal carries the title.
         assert gated["revision"] == 1
         assert gated["proposed_revision"]["title"] == "Gated new title"
 
         ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok is True
-        promoted = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        promoted = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert promoted["revision"] == 2
         assert promoted["title"] == "Gated new title"
-        assert store._current_revision(promoted)["title"] == "Gated new title"
+        assert revisions.current_revision(promoted)["title"] == "Gated new title"
 
     def test_gated_proposal_title_rederived_when_edited_at_approval(self, tmp_repo):
         # If the lead edits the content while approving a Suggested Update, the proposal's
         # title (derived for the ORIGINAL proposed content) must not be carried onto the
         # edited content - it should re-derive instead of going stale.
         store.update_decision(tmp_repo, "Rollback endpoint is /api/v1/rollback", "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("type") == "decision")
         eid = entry["id"]
         entry["status"] = "approved"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         store.update_decision(
             tmp_repo, "Rollback endpoint is /api/v2/rollback", "s2",
@@ -6158,7 +6159,7 @@ class TestTitleRevision:
         ok, _msg = store.approve_decision(
             tmp_repo, eid, "edit", content="Rollback endpoint is /api/v3/rollback with retries")
         assert ok is True
-        promoted = next(e for e in store._load(tmp_repo)["entries"] if e["id"] == eid)
+        promoted = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert promoted["revision"] == 2
         assert promoted["title"] == "Rollback endpoint is /api/v3/rollback with retries"
         assert promoted["title"] != "Gated new title"
@@ -6169,18 +6170,18 @@ class TestTitleBackfill:
         # Write a store file with a revision-model entry that predates `title`.
         store.update_decision(tmp_repo, "Legacy decision body kept verbatim.", "s1",
                               subtype="architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         for e in data["entries"]:
             e.pop("title", None)
             for r in e.get("revisions", []):
                 r.pop("title", None)
         data["schema_version"] = 2  # simulate an older store
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         # Next load must backfill.
-        reloaded = store._load(tmp_repo)
+        reloaded = store.load(tmp_repo)
         e = reloaded["entries"][0]
         assert e["title"] == "Legacy decision body kept verbatim."
-        assert store._current_revision(e)["title"] == "Legacy decision body kept verbatim."
+        assert revisions.current_revision(e)["title"] == "Legacy decision body kept verbatim."
         assert reloaded.get("schema_version") == 4
 
 
@@ -6192,7 +6193,7 @@ class TestServerTitleParam:
             seen.update(title=title, content=content)
             return True, "id123", {}
         monkeypatch.setattr(server.store, "update_decision_with_meta", fake_update)
-        monkeypatch.setattr(server.store, "_resolve_repo_verbose",
+        monkeypatch.setattr(server.store, "resolve_repo_verbose",
                             lambda p: (tmp_repo, "argument"))
         server.update_context("body", subtype="architecture", title="My Title")
         assert seen["title"] == "My Title"
@@ -6290,10 +6291,10 @@ class TestSecretRedactionOutbound:
 
     def test_share_projection_redacts_evidence(self, tmp_repo, monkeypatch):
         self._store_raw_secret(tmp_repo, monkeypatch, "a plain decision")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(x for x in data["entries"] if x["type"] == "decision")
-        store._current_revision(entry)["evidence"] = [f"observed {_GH}", "plain"]
-        store._save(tmp_repo, data)
+        revisions.current_revision(entry)["evidence"] = [f"observed {_GH}", "plain"]
+        store.save(tmp_repo, data)
         proj = store.get_shareable(tmp_repo, "")
         assert all(_GH not in ev for ev in (proj["evidence"] or []))
         assert "plain" in (proj["evidence"] or [])
@@ -6361,7 +6362,7 @@ class TestShareProjectionTitle:
         long_body = ("Adopt the outbox pattern for share retries. " + "detail " * 30)
         store.update_decision(tmp_repo, long_body, "s1", subtype="architecture")
         proj = store.get_shareable(tmp_repo, "")
-        assert proj["title"] == store._derive_title(long_body)
+        assert proj["title"] == revisions.derive_title(long_body)
         assert proj["title"] != long_body
 
     def test_share_projection_all_includes_title_per_row(self, tmp_repo):
@@ -6445,7 +6446,7 @@ class TestShareItemLine:
         # must still dedup here the same way - a strict `title == content` equality would
         # wrongly show a repeated body line for this exact case.
         content = "Use   Postgres\nfor the queue."
-        title = " ".join(content.split())  # "Use Postgres for the queue." - what _derive_title yields
+        title = " ".join(content.split())  # "Use Postgres for the queue." - what revisions.derive_title yields
         proj = {"id": "abc12345", "type": "architecture", "title": title, "content": content}
         line = store._share_item_line(proj)
         assert line.count("Use Postgres for the queue.") == 1
@@ -6582,13 +6583,13 @@ class TestShareItemBlock:
 
 class TestQueryMatchesTitle:
     def test_matches_query_hits_title_and_content(self):
-        pat = store._query_pattern("outbox")
-        assert store._matches_query(pat, {"title": "Adopt the outbox pattern", "content": "unrelated body"})
-        assert store._matches_query(pat, {"title": "Unrelated heading", "content": "uses an outbox"})
-        assert not store._matches_query(pat, {"title": "Unrelated", "content": "unrelated body"})
+        pat = store.query_pattern("outbox")
+        assert store.matches_query(pat, {"title": "Adopt the outbox pattern", "content": "unrelated body"})
+        assert store.matches_query(pat, {"title": "Unrelated heading", "content": "uses an outbox"})
+        assert not store.matches_query(pat, {"title": "Unrelated", "content": "unrelated body"})
         # a missing/None title must not blow up the filter
-        assert store._matches_query(pat, {"content": "the outbox drains later"})
-        assert not store._matches_query(pat, {"title": None, "content": "nothing here"})
+        assert store.matches_query(pat, {"content": "the outbox drains later"})
+        assert not store.matches_query(pat, {"title": None, "content": "nothing here"})
 
     def test_get_context_finds_a_decision_by_its_authored_title(self, tmp_repo):
         # An authored title can be entirely different words from the body; searching only the
@@ -6794,9 +6795,9 @@ class TestBodyClipping:
         store.update_decision(tmp_repo, long_content, "sess1", "architecture",
                               created_by="ai")
         # force it pending so format_pending_review shows it
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][-1]["status"] = "pending_approval"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         out = store.format_pending_review(tmp_repo)
         assert "… [+" in out
         assert len(out) < len(long_content)
@@ -6817,7 +6818,7 @@ class TestScanConventionVerify:
                                         "subtype": "convention", "tier": "high"}])
         changed = store.verify_scan_conventions(repo, force=True)
         assert changed == 1
-        data = store._load(repo)
+        data = store.load(repo)
         entry = data["entries"][-1]
         assert entry["content"] == self.RULE_NEW
         assert len(entry["revisions"]) == 2
@@ -6846,7 +6847,7 @@ class TestScanConventionVerify:
                                         "subtype": "convention", "tier": "high"}])
         changed = store.verify_scan_conventions(repo, force=True)
         assert changed == 1
-        entry = store._load(repo)["entries"][-1]
+        entry = store.load(repo)["entries"][-1]
         assert entry["proposed_revision"] is not None
         prop_content = entry["proposed_revision"]["content"]
         # Rule-shaped, not meta-shaped: approving this must yield a convention a developer
@@ -6860,7 +6861,7 @@ class TestScanConventionVerify:
         self._seed_scan_convention(repo)
         monkeypatch.setattr(miner_mod, "mine_conventions", lambda p: [])
         assert store.verify_scan_conventions(repo, force=True) == 0
-        assert store._load(repo)["entries"][-1].get("proposed_revision") is None
+        assert store.load(repo)["entries"][-1].get("proposed_revision") is None
 
     def test_ttl_gate_skips_second_run(self, tmp_repo, monkeypatch):
         repo = tmp_repo
@@ -6893,7 +6894,7 @@ class TestScanConventionVerify:
                             lambda p: [{"content": reworded,
                                         "subtype": "convention", "tier": "high"}])
         assert store.verify_scan_conventions(repo, force=True) == 1
-        entry = store._load(repo)["entries"][-1]
+        entry = store.load(repo)["entries"][-1]
         assert entry.get("proposed_revision") is None      # NOT flagged as disappeared
         assert entry["content"] == reworded                # refreshed in place
 
@@ -6919,12 +6920,12 @@ class TestScanConventionVerify:
         ignored_content = "Modules use kebab-case naming (92% of 30 modules across 8 files)"
         store.update_decision(repo, pending_content, "sess1", "convention", created_by="scan")
         store.update_decision(repo, ignored_content, "sess1", "convention", created_by="scan")
-        data = store._load(repo)
+        data = store.load(repo)
         pending_entry = next(e for e in data["entries"] if e["content"] == pending_content)
         ignored_entry = next(e for e in data["entries"] if e["content"] == ignored_content)
         pending_entry["status"] = "pending_approval"
         ignored_entry["status"] = "ignored"
-        store._save(repo, data)
+        store.save(repo, data)
 
         monkeypatch.setattr(miner_mod, "mine_conventions",
                             lambda p: [{"content": "Other rule entirely (99% of 10 things across 2 files)",
@@ -6932,7 +6933,7 @@ class TestScanConventionVerify:
         changed = store.verify_scan_conventions(repo, force=True)
         assert changed == 1  # only the approved participant
 
-        data = store._load(repo)
+        data = store.load(repo)
         pending_after = next(e for e in data["entries"] if e["id"] == pending_entry["id"])
         ignored_after = next(e for e in data["entries"] if e["id"] == ignored_entry["id"])
         approved_after = next(e for e in data["entries"] if e["content"].startswith("Functions use snake_case naming"))
@@ -6953,7 +6954,7 @@ class TestScanConventionVerify:
                             lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
                                         "subtype": "convention", "tier": "high"}])
         assert store.verify_scan_conventions(repo, force=True) == 1
-        entry = store._load(repo)["entries"][-1]
+        entry = store.load(repo)["entries"][-1]
         assert entry["proposed_revision"] is not None
         assert entry["proposed_revision"]["source"] == "scan"
 
@@ -6962,7 +6963,7 @@ class TestScanConventionVerify:
                                         "subtype": "convention", "tier": "high"}])
         changed = store.verify_scan_conventions(repo, force=True)
         assert changed == 1
-        entry = store._load(repo)["entries"][-1]
+        entry = store.load(repo)["entries"][-1]
         assert entry.get("proposed_revision") is None      # stale withdrawal retracted
         assert entry["content"] == self.RULE_NEW            # and content refreshed
 
@@ -6972,19 +6973,19 @@ class TestScanConventionVerify:
         repo = tmp_repo
         self._seed_scan_convention(repo)
         from datetime import datetime, timezone
-        data = store._load(repo)
+        data = store.load(repo)
         entry = data["entries"][-1]
-        entry["proposed_revision"] = store._build_proposal(
+        entry["proposed_revision"] = review.build_proposal(
             entry, "Functions use snake_case naming, per team style guide.", "convention",
             "sess1", datetime.now(timezone.utc).isoformat(), source="ai")
-        store._save(repo, data)
+        store.save(repo, data)
 
         monkeypatch.setattr(miner_mod, "mine_conventions",
                             lambda p: [{"content": self.RULE_NEW,
                                         "subtype": "convention", "tier": "high"}])
         changed = store.verify_scan_conventions(repo, force=True)
         assert changed == 1  # the content refresh itself
-        entry = store._load(repo)["entries"][-1]
+        entry = store.load(repo)["entries"][-1]
         assert entry["content"] == self.RULE_NEW
         assert entry.get("proposed_revision") is not None
         assert entry["proposed_revision"]["source"] == "ai"  # untouched
@@ -6996,7 +6997,7 @@ class TestScanConventionVerify:
                             lambda p: [{"content": "Classes use PascalCase naming (95% of 80 classes across 12 files)",
                                         "subtype": "convention", "tier": "high"}])
         assert store.verify_scan_conventions(repo, force=True) == 1
-        first_prop = store._load(repo)["entries"][-1]["proposed_revision"]
+        first_prop = store.load(repo)["entries"][-1]["proposed_revision"]
         assert store.verify_scan_conventions(repo, force=True) == 0
-        second_prop = store._load(repo)["entries"][-1]["proposed_revision"]
+        second_prop = store.load(repo)["entries"][-1]["proposed_revision"]
         assert second_prop == first_prop  # untouched, not replaced

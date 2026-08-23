@@ -10,7 +10,7 @@ import time
 import pytest
 
 import contexer.remote as remote
-from contexer import config, store, team_context
+from contexer import config, revisions, store, team_context
 from contexer.remote import RemoteAuthError, RemoteContext, RemoteDecision, RemoteUnavailableError
 
 TEAM_PROFILE = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
@@ -36,7 +36,7 @@ class _FakeRS:
 @pytest.fixture
 def team_env(tmp_repo, monkeypatch):
     """tmp_repo isolates STORE_DIR; give the repo a git origin so a canonical key resolves."""
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     remote.reset_degradation_warnings()
     return tmp_repo
 
@@ -84,7 +84,7 @@ def test_pull_team_ahead_attaches_local_proposal_without_overwriting_standing_re
     _fake_rs(monkeypatch, ctx=RemoteContext([rd], [], "c1"))
 
     assert team_context.pull(team_env, profile=TEAM_PROFILE) == (1, 0)
-    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == local_id)
     assert entry["content"].casefold() == "keep the original local wording"
     assert entry["proposed_revision"]["content"].casefold() == "use the lead wording"
     assert entry["proposed_revision"]["team_reconciliation"]["team_head"] == "th2"
@@ -104,7 +104,7 @@ def test_pull_in_sync_clears_only_team_created_proposal(team_env, monkeypatch):
     _fake_rs(monkeypatch, ctx=RemoteContext([rd], [], "c2"))
 
     team_context.pull(team_env, profile=TEAM_PROFILE)
-    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == local_id)
     assert "proposed_revision" not in entry
     assert entry["last_team_reconciliation"]["outcome"] == "in_sync"
 
@@ -124,7 +124,7 @@ def test_repeated_team_ahead_pull_does_not_reattach_after_approval(team_env, mon
     fake._ctx = RemoteContext([rd], [], "c1")
 
     team_context.pull(team_env, profile=TEAM_PROFILE)
-    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == local_id)
     assert entry["content"].casefold() == "use the lead wording"
     assert "proposed_revision" not in entry
     assert entry["last_team_reconciliation"]["team_head"] == "th2"
@@ -155,7 +155,7 @@ def test_repeated_team_ahead_pull_does_not_reattach_after_edited_approval(
     )], [], "c2")
 
     team_context.pull(team_env, profile=TEAM_PROFILE)
-    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == local_id)
     assert entry["content"].casefold() == "use the lead wording, with local nuance"
     assert "proposed_revision" not in entry
     assert entry["last_team_reconciliation"]["team_head"] == "th2"
@@ -183,7 +183,7 @@ def test_repeated_team_ahead_pull_does_not_reattach_after_dismissal(team_env, mo
     )], [], "c2")
 
     team_context.pull(team_env, profile=TEAM_PROFILE)
-    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == local_id)
     assert entry["content"].casefold() == "keep the original local wording"
     assert "proposed_revision" not in entry
     assert entry["last_team_reconciliation"]["team_head"] == "th2"
@@ -212,7 +212,7 @@ def test_repeated_team_ahead_pull_dedupes_normalized_approved_content(team_env, 
     )], [], "c2")
 
     team_context.pull(team_env, profile=TEAM_PROFILE)
-    entry = next(e for e in store._load(team_env)["entries"] if e["id"] == local_id)
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == local_id)
     assert entry["content"] == "Use the lead wording"
     assert "proposed_revision" not in entry
 
@@ -226,7 +226,7 @@ def test_pull_local_mode_is_noop(team_env, monkeypatch):
 
 
 def test_pull_no_git_remote_is_noop(team_env, monkeypatch):
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)  # no origin
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)  # no origin
     _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
     assert team_context.pull(team_env, profile=TEAM_PROFILE) == (0, 0)
 
@@ -409,7 +409,7 @@ def test_last_sync_no_cache_file_for_local_mode(team_env, monkeypatch):
 
 
 def test_last_sync_no_cache_file_for_no_origin_repo(team_env, monkeypatch):
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)  # no origin
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)  # no origin
     _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "x")], [], "c1"))
     team_context.pull(team_env, profile=TEAM_PROFILE)
     assert not team_context._cache_path(team_env).exists()
@@ -530,7 +530,7 @@ def test_format_team_section_filters_by_type_and_query(tmp_repo):
 
 
 # ── title-led rendering (Decision Titles v2, Task 5) ─────────────────────────────
-# format_team_section renders title-led exactly like a local decision (store._title_and_body):
+# format_team_section renders title-led exactly like a local decision (store.title_and_body):
 # title on the bullet line, content on an indented line below - skipped when it would merely
 # repeat the title - and derives a title when the cloud sent none.
 
@@ -562,7 +562,7 @@ def test_format_team_section_derives_title_when_cloud_sent_none(tmp_repo):
         {"id": "t1aaaaaa", "type": "architecture", "content": long_content, "rationale": None,
          "repo": None, "agent": None, "scope": "team"}]})  # no "title" key at all
     out = team_context.format_team_section(tmp_repo)
-    derived = store._derive_title(long_content)
+    derived = revisions.derive_title(long_content)
     lines = out.splitlines()
     assert lines[1] == f"- [scope=team] [architecture] {derived} (id=t1aaaaaa)"
     # The derived title is the leading sentence of long_content; _title_and_body strips
@@ -693,9 +693,9 @@ def test_dedup_overlap_variant_renders_title_led(tmp_repo):
 def test_dedup_ignores_ignored_local_decisions(tmp_repo):
     _seed_local(tmp_repo, _LOCAL8)
     # Mark the only local decision ignored - it must not be a dedup target.
-    data = store._load(tmp_repo)
+    data = store.load(tmp_repo)
     data["entries"][0]["status"] = "ignored"
-    store._save(tmp_repo, data)
+    store.save(tmp_repo, data)
     _one_team_row(tmp_repo, _LOCAL8, rid="teamdddd")
     out = team_context.format_team_section(tmp_repo)
     assert "ratifies" not in out        # ignored local is invisible to matching
@@ -708,7 +708,7 @@ def test_dedup_fail_soft_when_local_store_raises(tmp_repo, monkeypatch):
     def boom(_repo):
         raise RuntimeError("corrupt store")
 
-    monkeypatch.setattr(store, "_load", boom)
+    monkeypatch.setattr(store, "load", boom)
     out = team_context.format_team_section(tmp_repo)   # must not raise
     assert "- [scope=team] [architecture] " + _LOCAL8 + " (id=teameeee)" in out
     assert "ratifies" not in out
@@ -927,7 +927,7 @@ def test_get_context_no_local_no_team_is_empty(tmp_repo):
 
 def test_cli_pull_prints_summary(monkeypatch, capsys):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo: (3, 1))
     cli.pull([])
     out = capsys.readouterr().out
@@ -936,8 +936,8 @@ def test_cli_pull_prints_summary(monkeypatch, capsys):
 
 def test_cli_pull_no_repo_errors(monkeypatch):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "")
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(store, "git_root", lambda p: "")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "")
     with pytest.raises(SystemExit):
         cli.pull([])
 
@@ -947,7 +947,7 @@ def test_cli_pull_names_a_dead_session_instead_of_reporting_zero(monkeypatch, ca
     session died three days ago" — the ambiguity that let an expired login sit unnoticed while
     every sync failed. auth_state is a local read, so naming the cause costs nothing."""
     from contexer import auth, cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo: (0, 0))
     monkeypatch.setattr(auth, "auth_state", lambda profile: {
         "state": "refresh_failed", "issuer": "https://mcp.example", "expires_at": None,
@@ -961,7 +961,7 @@ def test_cli_pull_names_a_dead_session_instead_of_reporting_zero(monkeypatch, ca
 def test_cli_pull_stays_quiet_when_a_live_session_simply_has_nothing_new(monkeypatch, capsys):
     """A healthy zero-row pull must not grow a scary second line."""
     from contexer import auth, cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo: (0, 0))
     monkeypatch.setattr(auth, "auth_state", lambda profile: {
         "state": "logged_in", "issuer": "https://mcp.example", "expires_at": None,
@@ -976,14 +976,14 @@ def test_adapter_pull_team_swallows_errors(monkeypatch):
     def boom(repo):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", boom)
     assert claude.pull_team("/repo") == (0, 0)  # delegates to the fail-soft refresh() seam
 
 
 def test_adapter_pull_team_returns_counts(monkeypatch):
     from contexer.adapters import claude
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 0))
     assert claude.pull_team("/repo") == (2, 0)
 
@@ -1237,7 +1237,7 @@ def test_get_context_entry_type_architecture_limit_overrides_team_cap(tmp_repo):
 # ── Option A seam: neutral refresh / poll_for_injection ──────────────────────────
 
 def test_refresh_delegates_to_pull(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (2, 1))
     monkeypatch.setattr(team_context.share, "drain_outbox", lambda: 0)
     assert team_context.refresh("/x") == (2, 1)
@@ -1245,7 +1245,7 @@ def test_refresh_delegates_to_pull(monkeypatch):
 
 def test_refresh_passes_short_timeout_to_pull(monkeypatch):
     captured = {}
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
 
     def fake_pull(repo, *, profile=None, timeout=None):
         captured["timeout"] = timeout
@@ -1267,7 +1267,7 @@ def test_refresh_timeout_reaches_remote_store_construction(team_env, monkeypatch
 
     monkeypatch.setattr(team_context.RemoteStore, "from_profile", staticmethod(fake_from_profile))
     monkeypatch.setattr(team_context.config, "load_profile", lambda: TEAM_PROFILE)
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: team_env)
+    monkeypatch.setattr(store, "resolve_repo", lambda p: team_env)
     team_context.refresh(team_env)
     assert captured["timeout"] == 3.0
 
@@ -1286,12 +1286,12 @@ def test_poll_keeps_default_timeout(team_env, monkeypatch):
 
 
 def test_refresh_empty_repo_is_noop(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "")
     assert team_context.refresh("/x") == (0, 0)
 
 
 def test_refresh_never_raises(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
 
     def boom(repo):
         raise RuntimeError("boom")
@@ -1303,7 +1303,7 @@ def test_refresh_never_raises(monkeypatch):
 def test_refresh_drains_outbox_after_pull(monkeypatch):
     """refresh() is the SessionStart seam every adapter funnels through, so it must
     trigger the outbox drain (fail-soft) after a successful pull."""
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (1, 0))
     calls = []
     monkeypatch.setattr(team_context.share, "drain_outbox", lambda: calls.append(1))
@@ -1312,7 +1312,7 @@ def test_refresh_drains_outbox_after_pull(monkeypatch):
 
 
 def test_refresh_drain_failure_is_fail_soft(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "pull", lambda repo, **kw: (3, 2))
 
     def boom():
@@ -1323,7 +1323,7 @@ def test_refresh_drain_failure_is_fail_soft(monkeypatch):
 
 
 def test_poll_for_injection_delegates(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "poll_nonblocking",
                         lambda repo, consumer="claude": [{"id": "t1", "content": "c"}])
     assert team_context.poll_for_injection("/x") == [{"id": "t1", "content": "c"}]
@@ -1331,7 +1331,7 @@ def test_poll_for_injection_delegates(monkeypatch):
 
 def test_poll_for_injection_threads_consumer(monkeypatch):
     seen = {}
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "poll_nonblocking",
                         lambda repo, consumer="claude": seen.setdefault("consumer", consumer) or [])
     team_context.poll_for_injection("/x", "codex")
@@ -1339,12 +1339,12 @@ def test_poll_for_injection_threads_consumer(monkeypatch):
 
 
 def test_poll_for_injection_empty_repo_is_noop(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "")
     assert team_context.poll_for_injection("/x") == []
 
 
 def test_poll_for_injection_never_raises(monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
 
     def boom(repo, consumer="claude"):
         raise RuntimeError("boom")

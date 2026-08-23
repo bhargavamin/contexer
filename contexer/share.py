@@ -134,7 +134,7 @@ def _load_reconcile_outbox() -> list[dict]:
 
 def _save_reconcile_outbox(entries: list[dict]) -> None:
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    store._atomic_write(
+    store.atomic_write(
         _reconcile_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
 
 
@@ -166,7 +166,7 @@ def outbox_lock():
             _OUTBOX_LOCK_DEPTH.reset(token)
         return
     with _OUTBOX_LOCAL_LOCK:
-        with store._store_lock(_OUTBOX_LOCK_SLUG):
+        with store.store_lock(_OUTBOX_LOCK_SLUG):
             token = _OUTBOX_LOCK_DEPTH.set(1)
             try:
                 yield
@@ -229,7 +229,7 @@ def _load_outbox() -> list[dict]:
 
 def _save_outbox(entries: list[dict]) -> None:
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    store._atomic_write(_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
+    store.atomic_write(_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
 
 
 def discard_outbox() -> tuple[int, int]:
@@ -373,7 +373,7 @@ def _enqueue_unlocked(payload: dict) -> None:
 # write winning per (endpoint, id).
 _SHARED_LOG_MAX_LINES = 2000  # compaction threshold, so the log can't grow without bound
 # Lock slug shared by _append_shared and _compact_shared - the two must never overlap.
-# `_store_lock` is NOT reentrant (a second acquire in the same process blocks on its own
+# `store_lock` is NOT reentrant (a second acquire in the same process blocks on its own
 # lock), so these two must stay strictly sequential, never nested. See _mark_shared.
 _SHARED_LOCK_SLUG = ".shared"
 
@@ -435,12 +435,12 @@ def _append_shared(records: list[dict]) -> None:
     replaces the file wholesale, so an append landing between compaction's fold and its
     atomic rename would write to an inode about to be discarded. Holding the same lock as
     `_compact_shared` makes append and compaction mutually exclusive. Where locks are
-    unavailable (non-POSIX) `_store_lock` is a no-op and the append still can't clobber a
+    unavailable (non-POSIX) `store_lock` is a no-op and the append still can't clobber a
     peer append - only the rare compaction overlap stays exposed, which is cosmetic."""
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     path = _shared_path()
     blob = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
-    with store._store_lock(_SHARED_LOCK_SLUG):
+    with store.store_lock(_SHARED_LOCK_SLUG):
         # Heal a missing trailing newline first: appending straight onto a torn/partial last
         # line (a half-written record, or a hand-edited file) would fuse it with our first
         # record and lose BOTH. Starting on a fresh line costs one byte and confines the
@@ -464,11 +464,11 @@ def _compact_shared() -> None:
     try:
         if not path.exists() or len(path.read_text(encoding="utf-8").splitlines()) <= _SHARED_LOG_MAX_LINES:
             return
-        with store._store_lock(_SHARED_LOCK_SLUG):
+        with store.store_lock(_SHARED_LOCK_SLUG):
             folded = _load_shared()["endpoints"]
             lines = [{"endpoint": ep, "id": did, "at": at}
                      for ep, bucket in folded.items() for did, at in bucket.items()]
-            store._atomic_write(
+            store.atomic_write(
                 path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in lines))
     except Exception:
         pass  # cosmetic maintenance - never surface to the caller
@@ -988,7 +988,7 @@ def _share_all_unlocked(repo_path: str, *, profile: Profile | None = None) -> st
     if remote is None:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     return _push_batch(remote, decs, key, profile.endpoint)
 
 
@@ -1050,7 +1050,7 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
     if remote is None:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     server_id = with_local_fallback(
         lambda: remote.push_decision(**_dec_push_kwargs(dec, key)),
         default=None, action="share decision")
@@ -1139,7 +1139,7 @@ def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
         return ("Not in team mode. Run `contexer login` to connect this machine before "
                 "submitting a team update.")
 
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     try:
         capabilities = remote.get_capabilities()
     except RemoteStoreError as exc:
@@ -1325,7 +1325,7 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
     if remote is None:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     return _prepend_unknown(_push_batch(remote, projs, key, profile.endpoint), missing)
 
 
@@ -1357,7 +1357,7 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
     if remote is None:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     try:
         server_id = await awith_local_fallback(
             lambda: remote.apush_decision(**_dec_push_kwargs(dec, key)),
@@ -1395,7 +1395,7 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
     if remote is None:
         return ("Not in team mode. Set mode='team' + endpoint + token in "
                 "~/.contexer/config.toml to share.")
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     try:
         status = await _apush_batch(remote, projs, key, profile.endpoint)
     except asyncio.CancelledError:
@@ -1419,7 +1419,7 @@ def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
     Returns the count queued."""
     with outbox_lock():
         ids = decision_ids or [""]  # "" -> most recent, matching share_async("")
-        key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+        key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
         queued = 0
         for did in ids:
             dec = store.get_shareable(repo_path, did)

@@ -58,7 +58,7 @@ def _save_creds(creds: dict) -> None:
     # Atomic write (unique temp + os.replace); mkstemp yields 0o600, so the creds file
     # is never torn or world-readable even mid-write — critical when a refresher process
     # and the foreground process persist rotated tokens concurrently.
-    store._atomic_write(_creds_path(), json.dumps(creds, indent=2))
+    store.atomic_write(_creds_path(), json.dumps(creds, indent=2))
 
 
 def _pkce() -> tuple[str, str]:
@@ -180,13 +180,13 @@ def _locked_refresh(profile: Profile) -> str | None:
     Returns the usable access token, or ``profile.token`` (static/None) when refresh is
     impossible or fails. Never raises."""
     if store.fcntl is None:
-        # No POSIX advisory lock available (non-POSIX runtime): store._store_lock would yield
+        # No POSIX advisory lock available (non-POSIX runtime): store.store_lock would yield
         # WITHOUT serializing, so two processes could double-spend the single-use refresh token
         # and trip the server's replay detection → token-family revocation. Refreshing a
         # single-use secret UNSERIALIZED is worse than not refreshing: degrade to the static/None
         # token (the caller then surfaces the re-login warning) rather than risk the credentials.
         return profile.token
-    with store._store_lock(".team_auth"):
+    with store.store_lock(".team_auth"):
         creds = _load_creds()
         if not _creds_match(creds, profile):
             return profile.token
@@ -670,7 +670,7 @@ def login(endpoint: str | None = None) -> bool:
         raise RuntimeError("token endpoint returned no access_token — login failed.")
     from contexer import share
     with share.outbox_lock():
-        with store._store_lock(".team_auth"):
+        with store.store_lock(".team_auth"):
             _save_creds({
                 "issuer": issuer,
                 "client_id": client_id,

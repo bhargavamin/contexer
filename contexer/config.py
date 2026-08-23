@@ -282,7 +282,7 @@ def _atomic_write_private(path: Path, data: bytes) -> None:
 
     mkstemp creates the temp file 0600 regardless of umask, so a file that may hold a
     bearer token is never even briefly group/world-readable (write_text + chmod is).
-    Duplicates store._atomic_write deliberately: config.py has to stay at the bottom of
+    Duplicates store.atomic_write deliberately: config.py has to stay at the bottom of
     the import graph — store imports config, so importing store here would cycle."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:

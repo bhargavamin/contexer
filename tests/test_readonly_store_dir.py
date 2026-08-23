@@ -146,4 +146,4 @@ class TestSessionStartUnderReadOnlyStoreDir:
 
         store.anchor_repo(tmp_repo)
         monkeypatch.setattr(Path, "read_text", deny)
-        assert store._current_repo_path() == ""  # degrades to "no repo", never raises
+        assert store.current_repo_path() == ""  # degrades to "no repo", never raises

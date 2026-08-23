@@ -116,7 +116,7 @@ class TestAutostartOn:
         payload = _human(autostart)
         port = daemon.read_state().port
         assert payload["status"].startswith(f"{POPULATED} | console http://127.0.0.1:{port}/?p=")
-        assert payload["status"].endswith(f"#/store/{store._slug(autostart)}")
+        assert payload["status"].endswith(f"#/store/{store.repo_slug(autostart)}")
 
     def test_the_url_never_carries_the_console_token(self, autostart):
         seed(autostart)
@@ -182,7 +182,7 @@ class TestDeepLinkResolves:
     def test_the_deep_link_appears_once_the_store_file_exists(self, autostart):
         seed(autostart)
         assert _human(autostart)["status"].endswith(
-            f"#/store/{store._slug(autostart)}")
+            f"#/store/{store.repo_slug(autostart)}")
 
     def test_a_session_with_no_repo_never_links_to_the_empty_string_slug(self, autostart):
         """`_slug("")` is sha1 of the empty string — `-da39a3ee`, a slug no store can have."""
@@ -190,7 +190,7 @@ class TestDeepLinkResolves:
 
         assert " | console http://127.0.0.1:" in payload["status"]
         assert "#/store/" not in payload["status"]
-        assert store._slug("") not in payload["status"]
+        assert store.repo_slug("") not in payload["status"]
 
     def test_every_printed_deep_link_resolves(self, autostart):
         seed(autostart)
@@ -252,7 +252,7 @@ class TestEveryAdapterSeesTheSameSeam:
 
     def test_gemini_injects_context_only(self, monkeypatch, autostart, tmp_path):
         seed(autostart)
-        monkeypatch.setattr(store, "_resolve_repo", lambda p: autostart)
+        monkeypatch.setattr(store, "resolve_repo", lambda p: autostart)
         out = gemini.session_start(autostart, "{}")
         assert "console" not in out and "127.0.0.1" not in out
 

@@ -30,7 +30,7 @@ class _FakeRS:
 
 @pytest.fixture
 def team_env(tmp_repo, monkeypatch):
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     remote.reset_degradation_warnings()
     return tmp_repo
 
@@ -91,7 +91,7 @@ def test_pull_contract_intact_after_refactor(team_env, monkeypatch):
 
 def test_team_poll_injects_new_decisions(monkeypatch):
     from contexer.adapters import claude
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     # Non-architecture type: architecture rows are deferred to a count-only pointer
     # (see test_team_context.py::test_team_poll_defers_architecture_shows_rest).
     monkeypatch.setattr(team_context, "poll_nonblocking",
@@ -103,20 +103,20 @@ def test_team_poll_injects_new_decisions(monkeypatch):
 
 def test_team_poll_empty_when_nothing_new(monkeypatch):
     from contexer.adapters import claude
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(team_context, "poll_nonblocking", lambda repo, consumer="claude": [])
     assert claude.team_poll("/repo", "") == "{}"
 
 
 def test_team_poll_no_repo(monkeypatch):
     from contexer.adapters import claude
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "")
     assert claude.team_poll("", "") == "{}"
 
 
 def test_team_poll_swallows_errors(monkeypatch):
     from contexer.adapters import claude
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "/repo")
 
     def boom(repo, consumer="claude"):
         raise RuntimeError("boom")
@@ -268,7 +268,7 @@ def test_legacy_pending_file_deleted_on_poll(team_env, monkeypatch):
     _no_spawn(monkeypatch)
     team_context.store.STORE_DIR.mkdir(exist_ok=True)
     legacy = (team_context.store.STORE_DIR
-              / f".team_pending_{team_context.store._slug(team_env)}.json")
+              / f".team_pending_{team_context.store.repo_slug(team_env)}.json")
     legacy.write_text(json.dumps([{"id": "old", "content": "stale"}]))
     _seed_log(team_env, seq=0, sync_log=[], decisions=[])
     assert team_context.poll_nonblocking(team_env, "claude", profile=TEAM) == []

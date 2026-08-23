@@ -73,7 +73,7 @@ def repo(console, tmp_path):
     detail = store.get_decision_detail(path, approved)
     assert detail["proposed_revision"] is not None, "fixture failed to attach a proposal"
     assert store.get_decision_detail(path, pending)["status"] == "pending_approval"
-    return {"path": path, "slug": store._slug(path), "approved": approved,
+    return {"path": path, "slug": store.repo_slug(path), "approved": approved,
             "pending": pending, "plain": plain}
 
 
@@ -385,7 +385,7 @@ def files_repo(console, tmp_path):
         subtype="architecture", created_by="human", source_files=["auth/jwt.py"])
     _ok, plain = store.update_decision(
         path, "Use pytest for unit tests", "s1", subtype="convention", created_by="human")
-    return {"path": path, "slug": store._slug(path), "jwt": jwt, "plain": plain}
+    return {"path": path, "slug": store.repo_slug(path), "jwt": jwt, "plain": plain}
 
 
 def test_the_file_filter_matches(console, files_repo):
@@ -1394,16 +1394,16 @@ def test_a_pull_that_never_ran_with_a_usable_token_blames_the_git_remote(console
 
 def test_a_corrupt_store_reads_as_unreadable_not_empty(console, tmp_path):
     path = str(tmp_path / "broken")
-    (store.STORE_DIR / f"{store._slug(path)}.json").write_text(
+    (store.STORE_DIR / f"{store.repo_slug(path)}.json").write_text(
         json.dumps({"repo_path": path, "entries": "not a list"}))
     row = next(r for r in ok(console, "/api/stores") if r["repo_path"] == path)
     assert row["ok"] is False and row["error"]
 
-    dashboard = ok(console, f"/api/store/{store._slug(path)}")
+    dashboard = ok(console, f"/api/store/{store.repo_slug(path)}")
     assert dashboard["ok"] is False and dashboard["health"]["ok"] is False
     assert dashboard["health"]["error"] and dashboard["counts"]["decisions"] == 0
 
-    listing = ok(console, f"/api/store/{store._slug(path)}/decisions")
+    listing = ok(console, f"/api/store/{store.repo_slug(path)}/decisions")
     assert listing["ok"] is False and listing["decisions"] == []
 
 

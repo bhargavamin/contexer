@@ -7,7 +7,7 @@ git-budgeted rename detection, and the review-gated retirement proposal shape.
 Extracted out of store.py (user directive: don't crowd store.py with a second
 verification family) but reads/writes the store through the `store` module OBJECT (not
 `from`-imported), the same load-order discipline `guard_engine.py` documents at its own
-top: `store.STORE_DIR`/`store._load`/`store._save`/`store._store_lock`/... are looked up
+top: `store.STORE_DIR`/`store.load`/`store.save`/`store.store_lock`/... are looked up
 at call time, so anything a test monkeypatches on `contexer.store` is still seen here.
 
 Shape mirrors `store.verify_scan_conventions` deliberately:
@@ -16,8 +16,8 @@ Shape mirrors `store.verify_scan_conventions` deliberately:
   - a fast-path exit — before the stamp is even touched, before any git call — when no
     entry in the store carries `source_files` at all (the common case for every repo
     whose decisions were never anchored);
-  - one `_load` + one `_save` under one `_store_lock`, not a write per entry;
-  - proposals are attached via `store._build_proposal` and armed for review via
+  - one `load` + one `save` under one `store_lock`, not a write per entry;
+  - proposals are attached via `review.build_proposal` and armed for review via
     `store._touch_pending_review`, AFTER the save (same ordering as every other proposal
     site in store.py) — never a direct status flip.
 
@@ -55,7 +55,7 @@ nudge / `contexer review`), and a developer who dismisses that proposal keeps th
 exactly as it was.
 
 Rename detection is git-budgeted (`_ANCHOR_GIT_BUDGET` git calls per run, `store.
-_GIT_FAST_TIMEOUT`-second timeouts, fail-soft throughout) and CHASES THE RENAME CHAIN, not
+GIT_FAST_TIMEOUT`-second timeouts, fail-soft throughout) and CHASES THE RENAME CHAIN, not
 just one hop: `git log --follow --format=%H -1 -- <old>` finds the most recent commit that
 touched the path, then `git show --format= --name-status <commit>` (deliberately no
 pathspec — see `_parse_rename_target`) is parsed for the rename record(s) whose old side is
@@ -93,6 +93,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from contexer import review, revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 _ANCHOR_VERIFY_TTL = 86400   # 24h — file layouts don't churn fast enough to re-check every
@@ -107,13 +108,13 @@ _RENAME_CHAIN_MAX = 4
 # single, currently-existing target — so the file counts as missing under the entry's
 # existing missing/partial/total-loss classification (a possibly-spurious proposal or list
 # trim, not a hung verify run); a human reviewing that proposal can always dismiss it.
-_ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store._MAX_SOURCE_FILES + 1
+_ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store.MAX_SOURCE_FILES + 1
 # git calls per verify_anchors run — a session-start latency guarantee, same spirit as the
 # guard engine's budgets. The number is DERIVED, not picked: one entry's worst case is every
-# one of its (at most _MAX_SOURCE_FILES) anchored paths missing, and each of those paths
+# one of its (at most MAX_SOURCE_FILES) anchored paths missing, and each of those paths
 # potentially needing the full rename chain (up to _RENAME_CHAIN_MAX hops, 2 calls per hop
 # — `log` + `show`) before resolving or giving up, plus at most one `rev-parse HEAD` for
-# the outcome — so a budget of `_RENAME_CHAIN_MAX * 2 * _MAX_SOURCE_FILES + 1` guarantees
+# the outcome — so a budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 1` guarantees
 # the FIRST entry of every run always completes. That guarantee is what makes the run make
 # forward progress: a smaller budget lets a single fat entry exhaust it inside its own file
 # loop, so that entry — and every entry after it — is skipped on every run, forever,
@@ -135,21 +136,21 @@ class _BudgetExceeded(Exception):
 
 
 def _anchor_verify_stamp_path(repo_path: str) -> Path:
-    """Same key as every other verification stamp in this codebase: `store._slug`
+    """Same key as every other verification stamp in this codebase: `store.repo_slug`
     applied to the repo_path the session-start caller already resolved, so a writer
     here and the reader on the next session start agree on the file without either
     side re-resolving the repo (see store.verify_scan_conventions's identical
     `_miner_verify_stamp_path`)."""
-    return store.STORE_DIR / f".anchor_verify_{store._slug(repo_path)}"
+    return store.STORE_DIR / f".anchor_verify_{store.repo_slug(repo_path)}"
 
 
 def _run_git(repo_path: str, *args: str) -> str | None:
     """Single git-call chokepoint for anchor verification: every git invocation in this
     module funnels through here, so a test can monkeypatch `anchors._run_git` to count
     calls (fast-path / budget-exhaustion tests) exactly like store's tests monkeypatch
-    `miner.mine_conventions`. Fail-soft via `store._git` itself: any git failure is
+    `miner.mine_conventions`. Fail-soft via `store.run_git` itself: any git failure is
     `None`, never raises."""
-    return store._git(repo_path, *args, timeout=store._GIT_FAST_TIMEOUT)
+    return store.run_git(repo_path, *args, timeout=store.GIT_FAST_TIMEOUT)
 
 
 def _parse_rename_target(name_status: str, old_path: str) -> str | None:
@@ -218,12 +219,12 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
     for total losses. Returns {"reanchored": int, "proposed": int}. Called fail-soft from
     store's session-start path, immediately after `verify_scan_conventions`.
 
-    Participants: `type == "decision"`, non-empty `source_files`, `_entry_status` in
+    Participants: `type == "decision"`, non-empty `source_files`, `entry_status` in
     ("approved", "suggested") — the same "active status" set `_rehydrate_working_set`
     uses — and no `proposed_revision` already pending (an entry mid-review is skipped
     outright, never piled onto with a second proposal).
 
-    Fast path (session-start latency): participants are collected from a single `_load`
+    Fast path (session-start latency): participants are collected from a single `load`
     BEFORE the TTL stamp is touched and before any git work. Zero participants — every
     repo that has never anchored a decision — returns immediately, with no stamp write
     and no git call at all.
@@ -237,14 +238,14 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
     malformed entry, a git surprise beyond what `_run_git` already absorbs — degrades to
     a no-op {"reanchored": 0, "proposed": 0} rather than raising out of session start."""
     try:
-        with store._store_lock(store._slug(repo_path)):
-            data = store._load(repo_path)
+        with store.store_lock(store.repo_slug(repo_path)):
+            data = store.load(repo_path)
             entries = data.get("entries") or []
             participants = [
                 e for e in entries
                 if e.get("type") == "decision"
                 and e.get("source_files")
-                and store._entry_status(e) in _ACTIVE_STATUSES
+                and store.entry_status(e) in _ACTIVE_STATUSES
                 and e.get("proposed_revision") is None
             ]
             if not participants:
@@ -252,7 +253,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
 
             stamp = _anchor_verify_stamp_path(repo_path)
             if not force:
-                mtime = store._file_mtime(stamp)
+                mtime = store.file_mtime(stamp)
                 if mtime is not None and time.time() - mtime < _ANCHOR_VERIFY_TTL:
                     return {"reanchored": 0, "proposed": 0}
             try:
@@ -301,7 +302,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                             # rev-parse BEFORE any mutation: if the budget runs out here,
                             # _BudgetExceeded must find this entry still untouched.
                             new_commit = _call("rev-parse", "HEAD")
-                            entry["source_files"] = surviving[:store._MAX_SOURCE_FILES]
+                            entry["source_files"] = surviving[:store.MAX_SOURCE_FILES]
                             entry["anchor_commit"] = new_commit or entry.get("anchor_commit", "")
                             reanchored += 1
                             changed = True
@@ -312,7 +313,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                         # the list to what's actually still reachable (as-is or renamed).
                         # Same pre-mutation call ordering as above.
                         new_commit = _call("rev-parse", "HEAD") if renamed else None
-                        entry["source_files"] = surviving[:store._MAX_SOURCE_FILES]
+                        entry["source_files"] = surviving[:store.MAX_SOURCE_FILES]
                         if renamed:
                             entry["anchor_commit"] = new_commit or entry.get("anchor_commit", "")
                         reanchored += 1
@@ -324,7 +325,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     # until a human reviews the proposal (approve promotes the withdrawal
                     # note and exits anchor-decay participation, dismiss keeps the entry
                     # exactly as it was, ignore retires it deliberately).
-                    current = store._current_content(entry)
+                    current = revisions.current_content(entry)
                     if _ANCHOR_WITHDRAWN_MARKER in current:
                         continue  # dedupe guard: already carries a withdrawal clause
                     proposal_content = (
@@ -332,10 +333,10 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                         f"no longer exist)"
                     )
                     # Carry the entry's existing title: this proposal is bookkeeping, and
-                    # promoting it must not let _build_proposal's empty-title fallback
+                    # promoting it must not let review.build_proposal's empty-title fallback
                     # re-derive a title from content-plus-withdrawal-clause, silently
                     # destroying a curated one.
-                    proposal = store._build_proposal(
+                    proposal = review.build_proposal(
                         entry, proposal_content, "", "", now, source="scan",
                         title=entry.get("title") or "")
                     proposal["clear_anchors"] = True
@@ -351,7 +352,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     break
 
             if changed:
-                store._save(repo_path, data)
+                store.save(repo_path, data)
                 if review_needed:
                     store._touch_pending_review(repo_path)  # a retirement now awaits review
             return {"reanchored": reanchored, "proposed": proposed}

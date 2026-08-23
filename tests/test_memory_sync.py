@@ -234,8 +234,8 @@ class TestBatchWrite:
         # entry (which put O(entries × facts) rewrites on the SessionStart path).
         mem = _write_memory(tmp_path, **{"feedback_tooling.md": FEEDBACK, "project_spec.md": MULTI})
         calls = {"n": 0}
-        real_save = store._save
-        monkeypatch.setattr(store, "_save", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real_save(*a, **k))[1])
+        real_save = store.save
+        monkeypatch.setattr(store, "save", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real_save(*a, **k))[1])
         n = memory_sync.import_dir(mem, tmp_repo)
         assert n == 4
         assert calls["n"] == 1                                 # exactly one save for the whole batch

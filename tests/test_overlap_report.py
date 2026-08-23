@@ -72,7 +72,7 @@ class TestOverlapReport:
     def test_fail_soft_on_error(self, tmp_repo, monkeypatch):
         def _boom(_repo):
             raise RuntimeError("disk on fire")
-        monkeypatch.setattr(store, "_load", _boom)
+        monkeypatch.setattr(store, "load", _boom)
         assert store.overlap_report(tmp_repo) == []
 
     def test_pure_read_no_writes(self, tmp_repo):
@@ -101,7 +101,7 @@ class TestOverlapReport:
 class TestReviewOverlapSection:
     @pytest.fixture
     def cli_repo(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         return tmp_repo
 
     def test_clusters_shown_after_pending_queue(self, cli_repo, monkeypatch, capsys):
@@ -148,7 +148,7 @@ class TestReviewOverlapSection:
         assert "Possibly overlapping" not in out
 
     def test_outside_git_repo_exits(self, tmp_repo, monkeypatch, capsys):
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: "")
+        monkeypatch.setattr(store, "git_root", lambda _cwd: "")
         with pytest.raises(SystemExit):
             review()
         assert "Not inside a git repository." in capsys.readouterr().err

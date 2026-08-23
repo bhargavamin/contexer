@@ -130,7 +130,7 @@ class TestStatusTeamSync:
         (store_dir / "config.toml").write_text(
             'mode = "team"\nendpoint = "https://t/mcp"\n')
         (store_dir / ".current_repo").write_text("/repo/x")
-        slug = _store._slug("/repo/x")
+        slug = _store.repo_slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"repo_key": "k", "cursor": "c1", "decisions": [{"id": "a"}, {"id": "b"}]}))
         status()
@@ -143,7 +143,7 @@ class TestStatusTeamSync:
         (store_dir / "config.toml").write_text(
             'mode = "team"\nendpoint = "https://t/mcp"\n')
         (store_dir / ".current_repo").write_text("/repo/x")
-        slug = _store._slug("/repo/x")
+        slug = _store.repo_slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"repo_key": "k", "cursor": "c1", "decisions": [],
              "last_sync": {"at": time.time() - 4, "ok": True, "duration_ms": 42,
@@ -158,7 +158,7 @@ class TestStatusTeamSync:
         (store_dir / "config.toml").write_text(
             'mode = "team"\nendpoint = "https://t/mcp"\n')
         (store_dir / ".current_repo").write_text("/repo/x")
-        slug = _store._slug("/repo/x")
+        slug = _store.repo_slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"repo_key": "k", "cursor": None, "decisions": [],
              "last_sync": {"at": time.time(), "ok": False, "duration_ms": 3000,
@@ -173,7 +173,7 @@ class TestStatusTeamSync:
         (store_dir / "config.toml").write_text(
             'mode = "team"\nendpoint = "https://t/mcp"\n')
         (store_dir / ".current_repo").write_text("/repo/x")
-        slug = _store._slug("/repo/x")
+        slug = _store.repo_slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"repo_key": "k", "cursor": "c1", "decisions": [],
              "last_render": {"at": time.time(), "rows": 10, "chars": 1229}}))
@@ -216,7 +216,7 @@ class TestStatusTeamSync:
         (store_dir / "config.toml").write_text(
             'mode = "team"\nendpoint = "https://t/mcp"\n')
         (store_dir / ".current_repo").write_text("/repo/x")
-        slug = _store._slug("/repo/x")
+        slug = _store.repo_slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"decisions": 3, "last_sync": "yesterday", "last_render": {"chars": "lots"}}))
         status()
@@ -232,7 +232,7 @@ class TestStatusTeamSync:
         (store_dir / "config.toml").write_text(
             'mode = "team"\nendpoint = "https://t/mcp"\n')
         (store_dir / ".current_repo").write_text("/repo/x")
-        slug = _store._slug("/repo/x")
+        slug = _store.repo_slug("/repo/x")
         (store_dir / f".team_{slug}.json").write_text(json.dumps(
             {"repo_key": "k", "cursor": "c1", "decisions": []}))
         status()
@@ -673,7 +673,7 @@ class TestReviewTitleHeadline:
         (tmp_repo redirects STORE_DIR; _git_root is patched to point at it)."""
         from contexer import store
 
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         # subtype="constraint" always lands pending_approval (see _classify_level), so this
         # is deterministically in the review queue regardless of content-signal heuristics.
         stored, _entry_id = store.update_decision(
@@ -706,7 +706,7 @@ class TestReviewAnchorCandidates:
         human's approval signature is informed about what it will bless."""
         from contexer import store
 
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         stored, _entry_id = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
@@ -722,7 +722,7 @@ class TestReviewAnchorCandidates:
             self, tmp_repo, monkeypatch, capsys):
         from contexer import store
 
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         stored, _entry_id = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
         assert stored
@@ -738,10 +738,10 @@ class TestReviewConflictMemo:
     def _conflicted(self, tmp_repo, store):
         """An approved decision carrying an ai-sourced Suggested Update (issue #193 shape)."""
         store.update_decision(tmp_repo, "Use Postgres for the decision store", "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e.get("type") == "decision")
         entry["status"] = "approved"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         eid = entry["id"]
         ok, rid = store.update_decision(
             tmp_repo, "Switch to DynamoDB for the decision store", "s2", "architecture",
@@ -752,7 +752,7 @@ class TestReviewConflictMemo:
     def test_review_prints_update_choice_memo_line(self, tmp_repo, monkeypatch, capsys):
         from contexer import store
 
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         eid = self._conflicted(tmp_repo, store)
         store.record_conflict_memo(tmp_repo, eid, "update")
 
@@ -766,7 +766,7 @@ class TestReviewConflictMemo:
     def test_review_prints_standing_choice_memo_line(self, tmp_repo, monkeypatch, capsys):
         from contexer import store
 
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         eid = self._conflicted(tmp_repo, store)
         store.record_conflict_memo(tmp_repo, eid, "standing")
 
@@ -818,9 +818,9 @@ def _gseed(repo, content, *, subtype="architecture", status="approved",
                                        created_by=created_by, status=status, title=title)
     if source_files is not None:
         entry["source_files"] = source_files
-    data = store._load(str(repo))
+    data = store.load(str(repo))
     data["entries"].append(entry)
-    store._save(str(repo), data)
+    store.save(str(repo), data)
     return entry
 
 
@@ -1047,7 +1047,7 @@ class TestGuardDismiss:
         # Simulate a cwd git-root can't resolve, falling back to the shared
         # .current_repo pointer instead — exactly the path where the two calls
         # inside _guard_dismiss could diverge if not resolved once and reused.
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: "")
+        monkeypatch.setattr(store, "git_root", lambda _cwd: "")
         assert store.anchor_repo(str(guard_repo))
 
         _run_main(monkeypatch, "guard", "--dismiss", h)
@@ -1097,15 +1097,15 @@ class TestGuardArmDisarmList:
 
         _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "TODO")
         assert "Armed" in capsys.readouterr().out
-        data = store._load(str(guard_repo))
-        armed = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(guard_repo))
+        armed = store.entry_by_id(data["entries"], entry["id"])
         assert armed["guard_check"]["type"] == "regex"
         assert armed["guard_check"]["pattern"] == "TODO"
 
         _run_main(monkeypatch, "guard", "disarm", entry["id"])
         assert "Disarmed" in capsys.readouterr().out
-        data = store._load(str(guard_repo))
-        armed = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(guard_repo))
+        armed = store.entry_by_id(data["entries"], entry["id"])
         assert "guard_check" not in armed
 
     def test_arm_check_secret(self, guard_repo, monkeypatch, capsys):
@@ -1113,8 +1113,8 @@ class TestGuardArmDisarmList:
         entry = _gseed(guard_repo, "Never commit secrets")
         _run_main(monkeypatch, "guard", "arm", entry["id"], "--check", "secret")
         assert "Armed" in capsys.readouterr().out
-        data = store._load(str(guard_repo))
-        armed = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(guard_repo))
+        armed = store.entry_by_id(data["entries"], entry["id"])
         assert armed["guard_check"]["type"] == "secret"
 
     def test_arm_with_flags_paths_message(self, guard_repo, monkeypatch, capsys):
@@ -1122,8 +1122,8 @@ class TestGuardArmDisarmList:
         entry = _gseed(guard_repo, "Never commit TODO markers")
         _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "todo",
                    "--flags", "i", "--paths", "*.py", "--message", "no TODOs")
-        data = store._load(str(guard_repo))
-        gc = store._entry_by_id(data["entries"], entry["id"])["guard_check"]
+        data = store.load(str(guard_repo))
+        gc = store.entry_by_id(data["entries"], entry["id"])["guard_check"]
         assert gc["flags"] == "i"
         assert gc["paths"] == "*.py"
         assert gc["message"] == "no TODOs"
@@ -1224,7 +1224,7 @@ class TestGuardAnchors:
         assert entry["id"][:8] in out
         assert "auth/jwt.py" in out
         from contexer import store
-        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+        loaded = next(e for e in store.load(str(guard_repo))["entries"]
                       if e["id"] == entry["id"])
         assert not loaded.get("source_files")
 
@@ -1257,13 +1257,13 @@ class TestGuardAnchors:
         entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
 
         calls = []
-        real_save = store._save
+        real_save = store.save
 
         def _counting_save(repo_path, data):
             calls.append(1)
             real_save(repo_path, data)
 
-        monkeypatch.setattr(store, "_save", _counting_save)
+        monkeypatch.setattr(store, "save", _counting_save)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "Y")
 
@@ -1272,7 +1272,7 @@ class TestGuardAnchors:
         assert "1 anchored" in out
         assert len(calls) == 1
 
-        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+        loaded = next(e for e in store.load(str(guard_repo))["entries"]
                       if e["id"] == entry["id"])
         assert loaded["source_files"] == ["auth/jwt.py"]
         assert loaded["anchor_commit"]
@@ -1291,7 +1291,7 @@ class TestGuardAnchors:
         assert "Not found in working tree, dropped: bogus/missing.py" in out
         assert "1 anchored" in out
 
-        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+        loaded = next(e for e in store.load(str(guard_repo))["entries"]
                       if e["id"] == entry["id"])
         assert loaded["source_files"] == ["auth/other.py"]
 
@@ -1316,7 +1316,7 @@ class TestGuardAnchors:
         assert "No valid files given, skipping." in out
         assert "Anchor backfill complete: 1 skipped." in out
 
-        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+        loaded = next(e for e in store.load(str(guard_repo))["entries"]
                       if e["id"] == entry["id"])
         assert not loaded.get("source_files")
 
@@ -1332,7 +1332,7 @@ class TestGuardAnchors:
         out = capsys.readouterr().out
         assert "Anchor backfill complete: 1 skipped." in out
 
-        loaded = next(e for e in store._load(str(guard_repo))["entries"]
+        loaded = next(e for e in store.load(str(guard_repo))["entries"]
                       if e["id"] == entry["id"])
         assert not loaded.get("source_files")
         # Reappears next run — skip stores nothing.
@@ -1353,7 +1353,7 @@ class TestGuardAnchors:
         out = capsys.readouterr().out
         assert "1 anchored" in out
 
-        entries = {e["id"]: e for e in store._load(str(guard_repo))["entries"]}
+        entries = {e["id"]: e for e in store.load(str(guard_repo))["entries"]}
         anchored_ids = {eid for eid, e in entries.items() if e.get("source_files")}
         assert len(anchored_ids) == 1
         assert anchored_ids <= {e1["id"], e2["id"]}
@@ -1366,7 +1366,7 @@ class TestGuardAnchors:
 
     def _anchored(self, guard_repo):
         from contexer import store
-        return [e for e in store._load(str(guard_repo))["entries"] if e.get("source_files")]
+        return [e for e in store.load(str(guard_repo))["entries"] if e.get("source_files")]
 
     def test_interrupt_at_the_choice_prompt_writes_nothing(self, guard_repo, monkeypatch,
                                                             capsys):
@@ -1774,7 +1774,7 @@ class TestScopeAudit:
                  "timestamp": "2026-08-03T12:00:00+00:00", "content": f"content {eid}",
                  "title": f"title {eid}"}
         entry.update(extra)
-        (d / f"{store._slug(repo)}.json").write_text(
+        (d / f"{store.repo_slug(repo)}.json").write_text(
             json.dumps({"repo_path": repo, "entries": [entry]}))
 
     def test_reports_a_split_session(self, tmp_path, monkeypatch, capsys):
@@ -1822,7 +1822,7 @@ class TestReviewOneViewAccuracy:
 
     def _pending(self, tmp_repo, monkeypatch, content, **kw):
         from contexer import store
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         stored, eid = store.update_decision(tmp_repo, content, "sess-1", "constraint", **kw)
         assert stored
         monkeypatch.setattr("builtins.input", lambda *_a: "S")
@@ -1853,7 +1853,7 @@ class TestReviewOneViewAccuracy:
 
     def test_quit_stops_without_touching_the_rest(self, tmp_repo, monkeypatch, capsys):
         from contexer import store
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         for c in ("Never commit secrets here", "Never log personally identifying data"):
             store.update_decision(tmp_repo, c, "s", "constraint")
         assert len(store.get_pending_decisions(tmp_repo)) == 2
@@ -1868,7 +1868,7 @@ class TestReviewOneViewAccuracy:
         """repo_source == 'pointer' is the one branch that can silently target the WRONG
         repo, so review says so rather than leaving the developer to guess."""
         from contexer import store
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         store.update_decision(tmp_repo, "Never commit secrets to the repo", "s",
                               "constraint", repo_source="pointer")
         monkeypatch.setattr("builtins.input", lambda *_a: "S")
@@ -1877,7 +1877,7 @@ class TestReviewOneViewAccuracy:
 
     def test_argument_resolved_capture_is_not_flagged(self, tmp_repo, monkeypatch, capsys):
         from contexer import store
-        monkeypatch.setattr(store, "_git_root", lambda _cwd: tmp_repo)
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
         store.update_decision(tmp_repo, "Never commit secrets to the repo", "s",
                               "constraint", repo_source="argument")
         monkeypatch.setattr("builtins.input", lambda *_a: "S")

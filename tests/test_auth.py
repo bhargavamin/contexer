@@ -308,7 +308,7 @@ def test_refresh_single_flight_only_one_network_refresh(creds_env, monkeypatch):
 
 
 def test_refresh_skipped_when_serialization_unavailable(creds_env, monkeypatch):
-    """On a non-POSIX runtime (no fcntl → store._store_lock can't actually serialize), refreshing
+    """On a non-POSIX runtime (no fcntl → store.store_lock can't actually serialize), refreshing
     the single-use token unserialized risks family revocation. So we must NOT refresh — degrade to
     the static/None token instead (the caller surfaces the re-login warning)."""
     auth._save_creds({"issuer": "http://localhost:8080", "client_id": "c",
@@ -918,8 +918,8 @@ def test_cli_login_triggers_post_login_sync(monkeypatch):
 
 def test_post_login_sync_noop_when_no_repo(monkeypatch):
     from contexer import cli, store, team_context
-    monkeypatch.setattr(store, "_git_root", lambda cwd: None)
-    monkeypatch.setattr(store, "_current_repo_path", lambda: "")
+    monkeypatch.setattr(store, "git_root", lambda cwd: None)
+    monkeypatch.setattr(store, "current_repo_path", lambda: "")
     monkeypatch.setattr(team_context, "refresh",
                         lambda *a, **k: pytest.fail("refresh must not run with no repo"))
     cli._post_login_sync()  # returns cleanly, no refresh
@@ -927,8 +927,8 @@ def test_post_login_sync_noop_when_no_repo(monkeypatch):
 
 def test_post_login_sync_refreshes_and_reports(monkeypatch, capsys):
     from contexer import cli, store, team_context
-    monkeypatch.setattr(store, "_git_root", lambda cwd: "/repo")
-    monkeypatch.setattr(store, "_current_repo_path", lambda: "/repo")  # same → deduped
+    monkeypatch.setattr(store, "git_root", lambda cwd: "/repo")
+    monkeypatch.setattr(store, "current_repo_path", lambda: "/repo")  # same → deduped
     calls = []
     monkeypatch.setattr(team_context, "refresh", lambda repo: calls.append(repo) or (2, 1))
     cli._post_login_sync()
@@ -941,8 +941,8 @@ def test_post_login_sync_refreshes_current_repo_when_cwd_differs(monkeypatch, ca
     # The reported bug: login run outside the repo `status` displays. Both the cwd repo and
     # the .current_repo pointer must be refreshed so the stale line clears either way.
     from contexer import cli, store, team_context
-    monkeypatch.setattr(store, "_git_root", lambda cwd: "/cli-repo")
-    monkeypatch.setattr(store, "_current_repo_path", lambda: "/app-repo")
+    monkeypatch.setattr(store, "git_root", lambda cwd: "/cli-repo")
+    monkeypatch.setattr(store, "current_repo_path", lambda: "/app-repo")
     refreshed = []
     monkeypatch.setattr(team_context, "refresh", lambda repo: refreshed.append(repo) or (1, 0))
     cli._post_login_sync()
@@ -952,8 +952,8 @@ def test_post_login_sync_refreshes_current_repo_when_cwd_differs(monkeypatch, ca
 
 def test_post_login_sync_swallows_errors(monkeypatch):
     from contexer import cli, store, team_context
-    monkeypatch.setattr(store, "_git_root", lambda cwd: "/repo")
-    monkeypatch.setattr(store, "_current_repo_path", lambda: "")
+    monkeypatch.setattr(store, "git_root", lambda cwd: "/repo")
+    monkeypatch.setattr(store, "current_repo_path", lambda: "")
 
     def boom(repo):
         raise RuntimeError("network exploded")

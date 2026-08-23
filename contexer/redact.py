@@ -1,8 +1,15 @@
 """Deterministic secret redaction, stdlib only (`re`).
 
-Defense-in-depth: `scrub` runs at capture (store._normalize_content) so secrets never
-reach disk, and again at the wire (remote._wire_args) so they never egress to the remote
-Teams MCP. A leaf module — imported by store.py and remote.py, importing neither.
+EGRESS-ONLY, at the two points a decision leaves the machine: `store._share_projection`, so
+the confirm-preview and the durable outbox show exactly what will be sent, and
+`remote._wire_args`, the last-mile chokepoint every push funnels through and therefore the
+hard guarantee. Capture is deliberately NOT scrubbed: the local store is a verbatim record of
+what was decided, and silently rewriting a captured decision would corrupt the product's own
+value, while scrubbing 0600 local files buys little against a reader who already has
+~/.aws or .env (see CLAUDE.md, "Secrets never egress (capture stays faithful)").
+This docstring previously said `scrub` "runs at capture ... so secrets never reach disk",
+which was never true of any call site here. A leaf module: imported by store.py and remote.py,
+importing neither.
 
 Design (balanced detection, developer-confirmed):
   - high-confidence provider token shapes (AWS/GitHub/Slack/Stripe/Google/AI/SendGrid/npm/

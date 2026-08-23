@@ -23,7 +23,7 @@ from contexer import cli
 def tmp_home(tmp_path, monkeypatch):
     """Redirects Path.home() AND the process cwd to a temp dir so install() never touches real
     settings. The cwd half is not optional: install()/uninstall() run clean_legacy_repo_settings
-    against store._git_root(os.getcwd()), which the injected HOME does not reach, so HOME alone
+    against store.git_root(os.getcwd()), which the injected HOME does not reach, so HOME alone
     leaves this checkout's own .claude/settings.json exposed (issue #185). tmp_path is untracked.
     Tests needing a specific cwd (legacy_user, non_git_project) chdir again themselves."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1009,7 +1009,7 @@ class TestConstraintCapture:
     def test_prescriptive_directive_captured_with_correct_subtype(self, tmp_repo, prompt, expected_subtype):
         eid, content, status = store.capture_user_constraint(tmp_repo, prompt, SESSION)
         assert eid is not None, f"Expected capture for: {prompt!r}"
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["subtype"] == expected_subtype
 
@@ -1031,7 +1031,7 @@ class TestConstraintCapture:
 
     def test_stored_as_decision_type(self, tmp_repo):
         eid, content, status = store.capture_user_constraint(tmp_repo, "never push to main directly", SESSION)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["type"] == "decision"
 
@@ -1041,7 +1041,7 @@ class TestConstraintCapture:
         long_prompt = "always " + "x" * 700
         eid, content, status = store.capture_user_constraint(tmp_repo, long_prompt, SESSION)
         assert eid is None
-        assert store._load(tmp_repo)["entries"] == []
+        assert store.load(tmp_repo)["entries"] == []
 
 
 # ── 6. Decision storage — novelty filter ─────────────────────────────────────
@@ -1065,7 +1065,7 @@ class TestDecisionStorage:
 
     def test_subtype_persisted(self, tmp_repo):
         _, eid = store.update_decision(tmp_repo, "Route handlers in src/routes/", SESSION, "pattern")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry["subtype"] == "pattern"
 
@@ -1073,7 +1073,7 @@ class TestDecisionStorage:
         store.update_decision(tmp_repo, "Use Pydantic v2 for all data models", SESSION, "architecture")
         store.update_decision(tmp_repo, "Pydantic v2 is used for data models", SESSION, "architecture")
         store.update_decision(tmp_repo, "Use SQLAlchemy for database access", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert len(data["entries"]) == 2
 
 
@@ -1083,7 +1083,7 @@ class TestPatternPromotion:
     def test_near_duplicate_increments_occurrence_count(self, tmp_repo):
         store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
         store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry.get("occurrence_count", 1) == 2
 
@@ -1093,7 +1093,7 @@ class TestPatternPromotion:
         Category is a semantic judgment made at capture, never inferred from a count."""
         store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", SESSION, "architecture")
         store.update_decision(tmp_repo, "FastAPI used for HTTP routing", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "architecture"
         assert entry.get("occurrence_count") == 2
@@ -1101,31 +1101,31 @@ class TestPatternPromotion:
     def test_convention_near_duplicate_does_not_promote(self, tmp_repo):
         store.update_decision(tmp_repo, "Use conventional commits for all merges", SESSION, "convention")
         store.update_decision(tmp_repo, "Conventional commits used for all merges", SESSION, "convention")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "convention"
 
     def test_constraint_near_duplicate_does_not_promote(self, tmp_repo):
         store.update_decision(tmp_repo, "Never commit secrets to the repository", SESSION, "constraint")
         store.update_decision(tmp_repo, "Never commit secrets to the repo", SESSION, "constraint")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "constraint"
 
     def test_new_entry_has_occurrence_count_one(self, tmp_repo):
         _, eid = store.update_decision(tmp_repo, "Use Postgres for persistence", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["id"] == eid)
         assert entry.get("occurrence_count") == 1
 
     def test_legacy_entry_without_field_treated_as_count_one(self, tmp_repo):
         """Entries written before this change lack occurrence_count — must behave as count=1."""
         store.update_decision(tmp_repo, "Use Redis for caching decisions", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][0].pop("occurrence_count", None)
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         store.update_decision(tmp_repo, "Redis used for caching decisions", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry.get("occurrence_count") == 2
 
@@ -1141,7 +1141,7 @@ class TestPatternPromotion:
         restating a decision in the same conversation is repetition, not reuse."""
         store.update_decision(tmp_repo, "Validate inputs at HTTP boundary with Pydantic", SESSION, "architecture")
         store.update_decision(tmp_repo, "Validate inputs at the HTTP boundary using Pydantic", SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "architecture"
         assert entry.get("occurrence_count") == 2
@@ -1163,7 +1163,7 @@ class TestPatternPromotion:
         store.update_decision(tmp_repo, "Use FastAPI for HTTP routing", "s1", "architecture")
         store.update_decision(tmp_repo, "FastAPI used for HTTP routing", "s1", "architecture")
         store.update_decision(tmp_repo, "Using FastAPI for HTTP routing", "s2", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert set(entry["session_ids"]) == {"s1", "s2"}
         assert entry["occurrence_count"] == 3
@@ -1174,7 +1174,7 @@ class TestPatternPromotion:
         from the same fact restated, so it never auto-promotes."""
         store.update_decision(tmp_repo, "Use Postgres for the persistence layer", "s1", "architecture")
         store.update_decision(tmp_repo, "Postgres used for the persistence layer", "s2", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "architecture"
         assert set(entry["session_ids"]) == {"s1", "s2"}
@@ -1182,11 +1182,11 @@ class TestPatternPromotion:
     def test_legacy_entry_session_id_seeds_distinct_set(self, tmp_repo):
         """Legacy entries with only `session_id` contribute that id to the distinct set."""
         store.update_decision(tmp_repo, "Use Redis for caching", "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"][0].pop("session_ids", None)  # simulate pre-change entry
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         store.update_decision(tmp_repo, "Redis used for caching", "s2", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert set(entry["session_ids"]) == {"s1", "s2"}
 
@@ -1195,7 +1195,7 @@ class TestPatternPromotion:
         count on whichever entry it matches first, regardless of that entry's subtype."""
         store.update_decision(tmp_repo, "Always validate requests at the API boundary", SESSION, "constraint")
         store.update_decision(tmp_repo, "Always validate requests at the API boundary please", SESSION, "constraint")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["content"].startswith("Always"))
         assert entry["subtype"] == "constraint"
         assert entry.get("occurrence_count") == 2
@@ -1265,7 +1265,7 @@ class TestPatternPromotion:
         ]
         for f in fillers:
             store.update_decision(tmp_repo, f, SESSION, "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert len(data["entries"]) == 5
         assert any("FastAPI" in e["content"] for e in data["entries"]), "recurring decision must not be evicted"
 
@@ -1281,7 +1281,7 @@ class TestPatternPromotion:
         not stored as a blank decision (regression guard for the _find_match refactor)."""
         stored, eid = store.update_decision(tmp_repo, "!!! ...", SESSION, "architecture")
         assert stored is False and eid is None
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert not [e for e in data["entries"] if e["type"] == "decision"]
 
     def test_empty_token_global_content_not_stored(self, tmp_repo):
@@ -1303,7 +1303,7 @@ class TestPatternPromotion:
             store.update_decision(tmp_repo, b, SESSION, "architecture")  # → count 2
         stored, eid = store.update_decision(tmp_repo, "Brand new one-off decision lands last here", SESSION, "architecture")
         assert stored is True
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         assert any(e["id"] == eid for e in data["entries"]), "pinned new entry must not be evicted"
 
     def test_constraint_hook_near_dup_does_not_write_or_promote(self, tmp_repo):
@@ -1313,7 +1313,7 @@ class TestPatternPromotion:
         before = (store._store_path(tmp_repo)).stat().st_mtime_ns
         eid, _, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
         assert eid is None
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
         assert arch["subtype"] == "architecture", "constraint hook must not promote architecture"
         assert arch.get("occurrence_count", 1) == 1, "constraint hook must not bump the count"
@@ -1498,7 +1498,7 @@ class TestBootstrapApplyFlow:
         )
         store.bootstrap_apply(tmp_repo, "sess-flow")
 
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(
             e for e in data["entries"]
             if e["type"] == "decision" and "snake_case" in e["content"]
@@ -1996,5 +1996,5 @@ class TestNonGitProjectDir:
         assert store.bootstrap_prompt_payload("", "hello") is not None
 
     def test_filesystem_root_is_not_a_sane_repo(self):
-        assert store._is_sane_repo("/") is False
-        assert store._is_sane_repo("//") is False
+        assert store.is_sane_repo("/") is False
+        assert store.is_sane_repo("//") is False

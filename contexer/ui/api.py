@@ -381,7 +381,7 @@ def _add_global(body: object) -> tuple[int, object]:
         raise ApiError(400, f"subtype must be one of: {', '.join(GLOBAL_SUBTYPES)}")
     # `created_by="human"`, not SOURCE: a rule reaching this handler was typed by a developer
     # into the Add form, and `created_by` is where that fact has to land — it drives the entry's
-    # attribution, revision 1's `source`, and `_compute_confidence`'s "Stated by developer" +20.
+    # attribution, revision 1's `source`, and `revisions.compute_confidence`'s "Stated by developer" +20.
     # SOURCE ("ui") stays the session id and is deliberately not reused as the provenance:
     # `share._WIRE_SOURCES` is a closed allowlist (ai | human | scan | bootstrap | memory | plan)
     # mirroring the cloud's push_decision enum, so `_wire_source` degrades "ui" back to "ai" on

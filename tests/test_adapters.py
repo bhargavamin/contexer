@@ -125,7 +125,7 @@ class TestClaudeCaptureEntrypoints:
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert "pending" in ctx.lower()
         assert "review_pending" in ctx or "contexer review" in ctx
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "pending_approval"
 
@@ -272,14 +272,14 @@ class TestClaudePostWriteRepoResolutionParity:
 
     def test_post_write_prefix_matches_sibling_user_prompt_submit_hooks(self, tmp_path, monkeypatch):
         # Patching HOME alone isn't enough: cli.install() -> claude.install(home) also
-        # runs clean_legacy_repo_settings against store._git_root(os.getcwd()) — the
+        # runs clean_legacy_repo_settings against store.git_root(os.getcwd()) — the
         # PROCESS cwd's git root, unaffected by HOME — to strip a pre-CLI installer's
         # repo-level hooks. Left unpatched, running this test from a checkout whose
         # <repo>/.claude/settings.json carries legacy Contexer markers would rewrite
         # that real file. chdir(tmp_path) contains it structurally (tmp_path has no
         # .claude/settings.json to touch); the byte-identical check is belt-and-suspenders
         # since no session fixture watches <repo>/.claude/settings.json for this class of leak.
-        real_repo = store._git_root(str(Path.cwd()))
+        real_repo = store.git_root(str(Path.cwd()))
         real_settings = Path(real_repo) / ".claude" / "settings.json" if real_repo else None
         before = real_settings.read_bytes() if real_settings and real_settings.is_file() else None
 

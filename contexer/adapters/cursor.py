@@ -107,16 +107,16 @@ def _repo_from_verbose(raw: str, repo_path: str) -> tuple[str, str]:
     (`workspace_roots`), so it gets its own label rather than being flattened into
     `argument`, which the audit reads as a deliberate cross-repo write."""
     if repo_path:
-        repo, source = store._resolve_repo_verbose(repo_path)
+        repo, source = store.resolve_repo_verbose(repo_path)
         return repo, ("hook-arg" if source == "argument" else source)
     try:
         roots = json.loads(raw).get("workspace_roots") or []
         if roots:
-            repo, source = store._resolve_repo_verbose(roots[0])
+            repo, source = store.resolve_repo_verbose(roots[0])
             return repo, ("workspace-root" if source == "argument" else source)
     except Exception:
         pass
-    return store._resolve_repo_verbose("")
+    return store.resolve_repo_verbose("")
 
 
 def _ensure_rule_file(repo_dir: str) -> None:
@@ -149,7 +149,7 @@ def session_start(repo_path: str, raw: str) -> str:
     Never raises."""
     try:
         repo = _repo_from(raw, repo_path)
-        if repo and store._is_sane_repo(repo):
+        if repo and store.is_sane_repo(repo):
             # Sanity-checked AND fail-soft (#152): never poison the shared pointer with a
             # config/home dir, and never let an unwritable ~/.contexer drop us into the
             # except below, which would inject the bare nudge instead of the real rules.
@@ -171,7 +171,7 @@ def _anchor_current_repo(repo: str) -> None:
     _SESSION_REPO is empty — and only sessionStart wrote the pointer, which then went stale
     or got clobbered. Refreshing it on every prompt from workspace_roots (a base field on
     all Cursor hooks) mirrors Claude's per-prompt anchor and is what keeps get_context({})
-    working. Guarded by _is_sane_repo + best-effort (hooks must never crash the host)."""
+    working. Guarded by is_sane_repo + best-effort (hooks must never crash the host)."""
     store.anchor_repo(repo)
 
 

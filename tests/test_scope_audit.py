@@ -16,7 +16,7 @@ def store_dir(tmp_path, monkeypatch):
 
 def _write_store(store_dir, repo, entries):
     """Write a per-repo store file the way _save would name it."""
-    path = store_dir / f"{store._slug(repo)}.json"
+    path = store_dir / f"{store.repo_slug(repo)}.json"
     path.write_text(json.dumps({"repo_path": repo, "entries": entries}))
     return path
 
@@ -58,7 +58,7 @@ class TestAuditSessions:
 
     def test_sidecars_are_not_read_as_stores(self, store_dir):
         _write_store(store_dir, "/repo/a", [_decision("a1", "sess-1")])
-        (store_dir / f".retrieval_index_{store._slug('/repo/a')}.json").write_text(
+        (store_dir / f".retrieval_index_{store.repo_slug('/repo/a')}.json").write_text(
             json.dumps({"v": 2, "docs": {"x": {}}}))
         (store_dir / ".team_something.json").write_text(
             json.dumps({"entries": [_decision("t1", "sess-1")]}))
@@ -70,7 +70,7 @@ class TestAuditSessions:
         # store FOR THE SAME REPO — reporting one repo twice and telling the developer to
         # re-capture a decision they deliberately deleted.
         _write_store(store_dir, "/repo/a", [_decision("a1", "sess-1")])
-        (store_dir / f"{store._slug('/repo/a')}.deleted.json").write_text(
+        (store_dir / f"{store.repo_slug('/repo/a')}.deleted.json").write_text(
             json.dumps({"repo_path": "/repo/a", "entries": [_decision("a2", "sess-1")]}))
         assert scope_audit.audit_sessions() == []
 

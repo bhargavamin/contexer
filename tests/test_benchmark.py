@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from contexer import store
+from contexer import retrieval, store
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
@@ -321,7 +321,7 @@ class TestRationaleHitRate:
         if false_positives:
             print("\n  Known false positives (documented limitations):")
             for p, r in false_positives:
-                kw = [w for w in p.lower().split() if len(w) > 3 and w not in store._QUERY_STOP_WORDS and w.isalpha()]
+                kw = [w for w in p.lower().split() if len(w) > 3 and w not in retrieval._QUERY_STOP_WORDS and w.isalpha()]
                 print(f"    \"{p}\" → keyword '{kw}' substring-matched an unrelated decision")
 
         assert len(hits) >= 10, f"Hit rate too low: {len(hits)}/13. Missed: {misses}"
@@ -682,7 +682,7 @@ class TestLargeScaleBenchmark:
         print("\n  On-demand retrieval latency at 50 decisions:")
         for query, _ in LARGE_HIT_PROMPTS:
             kw = [w for w in query.lower().split()
-                  if len(w) > 3 and w not in store._QUERY_STOP_WORDS and w.isalpha()]
+                  if len(w) > 3 and w not in retrieval._QUERY_STOP_WORDS and w.isalpha()]
             if not kw:
                 continue
             kw = sorted(kw, key=len, reverse=True)[0]

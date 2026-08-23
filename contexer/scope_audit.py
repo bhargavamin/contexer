@@ -4,7 +4,7 @@ The failure this exists for was observed in the wild. One session captured nine 
 in an afternoon; five landed in the project it was actually working in and four landed in an
 unrelated project's store, where they now read as that project's engineering decisions
 forever. Retrieval is already hard-scoped per repo, so nothing "leaked" at read time — the
-records are physically in the wrong file, written there by `store._resolve_repo` picking a
+records are physically in the wrong file, written there by `store.resolve_repo` picking a
 repo the session was not in.
 
 The fingerprint is deterministic and needs no heuristics: **one session id appearing in more
@@ -27,7 +27,7 @@ import json
 import os
 from pathlib import Path
 
-from contexer import store
+from contexer import revisions, store
 
 # A session that legitimately spans repos is possible (a developer explicitly asking for a
 # capture against another project passes repo_path, and `repo_source` will say "argument").
@@ -42,7 +42,7 @@ _MAX_ENTRIES_SHOWN = 10       # per store, per session — every human surface h
 
 def _text(value: object) -> str:
     """A string, whatever the store actually held. Entries are read RAW here — never through
-    `_load` — so a field can be a JSON null, a number, or a list, and every one of those
+    `load` — so a field can be a JSON null, a number, or a list, and every one of those
     reaches a sort key or a slice further down."""
     return value if isinstance(value, str) else ""
 
@@ -59,7 +59,7 @@ def _is_memory_import(entry: dict) -> bool:
     repo a writer was aiming at — the importer runs per repo, so a session id shared across
     two memory dirs is ordinary, not evidence of a misroute.
 
-    Detected three ways because these entries are read raw, without `_load`'s migration: the
+    Detected three ways because these entries are read raw, without `load`'s migration: the
     provenance field, the `memory_key` every import carries, and the sentinel id itself — an
     entry predating any one of them is still caught by the others."""
     return (entry.get("created_by") == "memory"
@@ -93,12 +93,12 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
         if not sid or _is_memory_import(e):
             continue
         # Per-entry guard, not just around the parse: these entries are RAW json, never run
-        # through _load's _migrate_entries, so revision-model helpers can meet shapes they
+        # through load's _migrate_entries, so revision-model helpers can meet shapes they
         # were never handed in a live store (`{"revisions": ["oops"]}` raises inside
-        # _current_content). A malformed entry must cost its own title, not the whole audit —
+        # revisions.current_content). A malformed entry must cost its own title, not the whole audit —
         # `_run_guarded` would otherwise surface a traceback from a read-only report.
         try:
-            title = e.get("title") or store._derive_title(store._current_content(e))
+            title = e.get("title") or revisions.derive_title(revisions.current_content(e))
         except Exception:
             title = e.get("title") or ""
         # Coerced, not just defaulted: `.get(k, "")` still returns None for a key present
@@ -168,11 +168,11 @@ def audit_sessions() -> list[dict]:
     # (session id, logical repo) -> store record. Keyed on the repo IDENTITY rather than the
     # file so several files for one repo collapse into a single store here.
     seen: dict[str, dict[str, dict]] = {}
-    # `store._store_files()`, never a local re-glob: its predicate already knows what else
+    # `store.store_files()`, never a local re-glob: its predicate already knows what else
     # shares STORE_DIR, and the `<slug>.deleted.json` tombstones are the trap — same
     # {"repo_path", "entries"} shape as a real store, so a hand-rolled "skip dotfiles and
     # _global" filter reads a repo's DELETED decisions as a second store for that same repo.
-    for path in store._store_files():
+    for path in store.store_files():
         repo, by_session = _sessions_in(path)
         identity = _repo_identity(repo, path)
         for sid, entries in by_session.items():

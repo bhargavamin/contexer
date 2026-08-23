@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import store
+from contexer import revisions, store
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def _touch(repo: str, name: str, body: str) -> None:
 
 
 def _entry(repo: str) -> dict:
-    return store._load(repo)["entries"][0]
+    return store.load(repo)["entries"][0]
 
 
 SUMMARY = "auth flow: login() verifies the token then issues a session cookie"
@@ -102,9 +102,9 @@ def test_unrelated_file_change_is_not_stale(repo):
 def test_bogus_anchor_fails_soft(repo):
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
                                    source_files=["auth.py"])
-    data = store._load(repo)
+    data = store.load(repo)
     data["entries"][0]["anchor_commit"] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-    store._save(repo, data)
+    store.save(repo, data)
     assert store._staleness_note(repo, data["entries"][0]) == ""
     assert " [may be stale" not in store.get_context(repo, query="auth")
     assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
@@ -133,7 +133,7 @@ def test_source_files_capped_at_ten(repo):
     store.update_decision(repo, SUMMARY, "s1", "architecture",
                           source_files=[f"m{i}.py" for i in range(25)])
     files = _entry(repo)["source_files"]
-    assert len(files) == store._MAX_SOURCE_FILES == 10
+    assert len(files) == store.MAX_SOURCE_FILES == 10
     assert files[0] == "m0.py"
 
 
@@ -156,7 +156,7 @@ def test_recurrence_does_not_reanchor(repo):
 
 def test_check_budget_caps_git_calls(repo, monkeypatch):
     calls = []
-    monkeypatch.setattr(store, "_git", lambda *a, **kw: calls.append(a) or "")
+    monkeypatch.setattr(store, "run_git", lambda *a, **kw: calls.append(a) or "")
     entries = [{"id": f"e{i}", "source_files": ["a.py"], "anchor_commit": "abc"}
                for i in range(6)]
     store._staleness_notes(repo, entries)
@@ -207,7 +207,7 @@ def test_identical_content_recapture_reanchors_and_clears_note(repo):
     entry = _entry(repo)
     assert entry["anchor_commit"] != old_anchor
     # no revision was created — truly a no-op on content
-    assert entry["content"] == store._normalize_content(SUMMARY)
+    assert entry["content"] == revisions.normalize_content(SUMMARY)
     assert " [may be stale" not in store.get_context(repo, query="auth")
 
 
@@ -218,7 +218,7 @@ def test_gated_correction_defers_reanchor_until_approved(repo):
     keep describing that old content. Only approval re-anchors."""
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
                                    source_files=["auth.py"])
-    assert store._entry_status(_entry(repo)) in ("approved", "suggested")  # trusted, renders
+    assert store.entry_status(_entry(repo)) in ("approved", "suggested")  # trusted, renders
     old_anchor = _entry(repo)["anchor_commit"]
     _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
     assert " [may be stale" in store.get_context(repo, query="auth")
@@ -228,10 +228,10 @@ def test_gated_correction_defers_reanchor_until_approved(repo):
         repo, new_content, "s2", "architecture", replace_id=eid, source_files=["auth.py"])
     assert stored and returned_id == eid
     entry = _entry(repo)
-    assert entry.get("proposed_revision", {}).get("content") == store._normalize_content(new_content)
+    assert entry.get("proposed_revision", {}).get("content") == revisions.normalize_content(new_content)
     # The OLD content is still what's live/rendered, and its anchor — and note — are untouched.
     assert entry["anchor_commit"] == old_anchor
-    assert entry["content"] == store._normalize_content(SUMMARY)
+    assert entry["content"] == revisions.normalize_content(SUMMARY)
     out = store.get_context(repo, query="auth")
     assert " [may be stale" in out
     # #193: the proposal IS rendered now, but only as the labeled unreviewed-update line —
@@ -243,7 +243,7 @@ def test_gated_correction_defers_reanchor_until_approved(repo):
     ok, _ = store.approve_decision(repo, eid, "approve")
     assert ok
     entry = _entry(repo)
-    assert entry["content"] == store._normalize_content(new_content)
+    assert entry["content"] == revisions.normalize_content(new_content)
     assert entry["anchor_commit"] != old_anchor
     assert " [may be stale" not in store.get_context(repo, query="auth")
 
@@ -305,9 +305,9 @@ def test_session_start_payload_never_shows_staleness_note(repo):
 
 def test_legacy_entry_without_fields_round_trips(repo):
     store.update_decision(repo, SUMMARY, "s1", "architecture")
-    before = store._load(repo)["entries"]
-    store._save(repo, {"repo_path": repo, "entries": before})
-    after = store._load(repo)["entries"]
+    before = store.load(repo)["entries"]
+    store.save(repo, {"repo_path": repo, "entries": before})
+    after = store.load(repo)["entries"]
     assert after == before
     assert "No matching" not in store.get_context(repo, query="auth")
 
@@ -567,8 +567,8 @@ def test_review_metadata_memoises_repeated_anchor(repo, monkeypatch):
     entry = _entry(repo)
 
     calls = []
-    real = store._git
-    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
+    real = store.run_git
+    monkeypatch.setattr(store, "run_git", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
 
     budget = cli._review_git_budget()
     cli._review_metadata(repo, entry, budget)
@@ -587,7 +587,7 @@ def test_review_metadata_stops_spending_once_budget_is_gone(repo, monkeypatch):
     budget["left"] = 0.0                            # pretend git already ate the budget
 
     called = []
-    monkeypatch.setattr(store, "_git", lambda *a, **k: called.append(a))
+    monkeypatch.setattr(store, "run_git", lambda *a, **k: called.append(a))
     rows = cli._review_metadata(repo, entry, budget)
 
     assert called == []                             # no further git work
@@ -632,8 +632,8 @@ def test_review_screen_makes_at_most_two_git_calls(repo, monkeypatch):
     entry = _entry(repo)
 
     calls = []
-    real = store._git
-    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
+    real = store.run_git
+    monkeypatch.setattr(store, "run_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
 
     cli._review_metadata(repo, entry, cli._review_git_budget())
     assert len(calls) <= 2, f"one review screen must cost at most 2 git calls, got {calls}"
@@ -642,8 +642,8 @@ def test_review_screen_makes_at_most_two_git_calls(repo, monkeypatch):
 def _count_git(monkeypatch):
     """Record the git SUBCOMMAND of every call ('log' / 'diff'), passing through to real git."""
     calls = []
-    real = store._git
-    monkeypatch.setattr(store, "_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
+    real = store.run_git
+    monkeypatch.setattr(store, "run_git", lambda *a, **k: (calls.append(a[1]), real(*a, **k))[1])
     return calls
 
 

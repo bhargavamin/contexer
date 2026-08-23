@@ -148,7 +148,7 @@ def no_real_repo_settings_writes():
     """Fail the run if a test rewrote this checkout's own `.claude/settings.json`.
 
     `claude.install()`/`uninstall()` run `clean_legacy_repo_settings` against
-    `store._git_root(os.getcwd())` - the PROCESS cwd's git root, not the injected HOME - so
+    `store.git_root(os.getcwd())` - the PROCESS cwd's git root, not the injected HOME - so
     injecting HOME alone does NOT contain an installer-driving test. Run from a checkout whose
     `.claude/settings.json` carries legacy Contexer hook markers, such a test silently rewrites
     the developer's real file.
@@ -271,7 +271,7 @@ def team_stack(tmp_path, monkeypatch):
     """Hermetic Teams backend: isolates STORE_DIR, pins a git origin, and routes
     RemoteStore's transport to an in-memory FakeTeamsServer. Returns the server."""
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: FakeTeamsServer.ORIGIN)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: FakeTeamsServer.ORIGIN)
     server = FakeTeamsServer()
     monkeypatch.setattr(remote, "_acall_tool", _fake_transport(server))
     remote.reset_degradation_warnings()

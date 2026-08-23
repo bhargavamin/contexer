@@ -78,7 +78,7 @@ def read_state() -> UiState | None:
 def write_state(state: UiState) -> None:
     """Replace the statefile atomically, mode 0600.
 
-    Same guarantee as store._atomic_write (readers never see a torn file), hand-rolled because
+    Same guarantee as store.atomic_write (readers never see a torn file), hand-rolled because
     `tempfile` pulls in shutil and is outside this module's import budget."""
     STATE_PATH.parent.mkdir(mode=0o700, exist_ok=True)
     tmp = STATE_PATH.with_name(f"{STATE_PATH.name}.{os.getpid()}.tmp")

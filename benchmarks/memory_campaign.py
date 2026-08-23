@@ -129,11 +129,16 @@ def _find_never_log_id(work: Path, home: Path) -> tuple[str | None, str | None]:
     approved" outcome (the probe's own deliberate exit 3), or (None, error) for
     any OTHER exit — a uv resolution failure or corrupt store must not collapse
     into the same message as a real no-capture result (Important 4)."""
-    code = ("from contexer import store\n"
-            f"entries = store._load({str(work)!r})['entries']\n"
+    # The store names here are resolved in a CHILD interpreter, so nothing in this repo
+    # type-checks or imports them: a rename reaches this string only if someone greps
+    # inside string literals. `revisions.current_content` was `store._current_content`
+    # until the module-boundary rules removed that alias, and the resulting AttributeError
+    # exits 1, which this function reports as a probe error rather than a real no-capture.
+    code = ("from contexer import revisions, store\n"
+            f"entries = store.load({str(work)!r})['entries']\n"
             "hit = next((e['id'] for e in entries "
-            "if 'log request data' in store._current_content(e) "
-            "and store._entry_status(e) == 'approved'), None)\n"
+            "if 'log request data' in revisions.current_content(e) "
+            "and store.entry_status(e) == 'approved'), None)\n"
             "import sys\n"
             "sys.exit(3) if hit is None else print(hit)\n")
     proc = subprocess.run(["uv", "run", "python", "-c", code], cwd=_SRC,

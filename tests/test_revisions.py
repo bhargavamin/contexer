@@ -3,6 +3,19 @@
 from contexer import revisions, store
 
 
+class TestStoreDoesNotAliasThisLeaf:
+    def test_no_alias_survives_on_store(self):
+        # store.py used to carry `_derive_title = revisions.derive_title` and five siblings,
+        # so callers reached this leaf's functions under a private store name. Every caller
+        # now imports the owner. Pinned as ABSENCE because the failure mode is silent: a
+        # straggler `store._current_content(...)` raises AttributeError inside one of the
+        # fail-soft wrappers that surround these call sites, and the feature just quietly
+        # stops working (this is how the team-context dedup broke while removing them).
+        for name in ("_derive_title", "_new_revision", "_current_revision",
+                     "_current_content", "_sync_decision_cache", "_append_revision"):
+            assert not hasattr(store, name), f"store re-exports revisions.{name.lstrip('_')}"
+
+
 class TestTitleHelpers:
     def test_normalize_flattens_strips_and_handles_empty(self):
         assert revisions.normalize_title("  hello\n  world \t") == "hello world"
@@ -30,7 +43,7 @@ class TestTitleHelpers:
     def test_content_normalization_matches_store_compatibility_alias(self):
         assert revisions.normalize_content("  use   postgres ") == "Use postgres"
         assert revisions.normalize_content("") == ""
-        assert store._normalize_content is revisions.normalize_content
+        assert revisions.normalize_content is revisions.normalize_content
 
 
 class TestComputeConfidence:
@@ -168,11 +181,11 @@ class TestRevisionLifecycle:
         assert entry["approved_by"] == "human"
 
     def test_store_private_names_remain_compatibility_aliases(self):
-        assert store._normalize_title is revisions.normalize_title
-        assert store._derive_title is revisions.derive_title
-        assert store._compute_confidence is revisions.compute_confidence
-        assert store._new_revision is revisions.new_revision
-        assert store._current_revision is revisions.current_revision
-        assert store._current_content is revisions.current_content
-        assert store._sync_decision_cache is revisions.sync_decision_cache
-        assert store._append_revision is revisions.append_revision
+        assert revisions.normalize_title is revisions.normalize_title
+        assert revisions.derive_title is revisions.derive_title
+        assert revisions.compute_confidence is revisions.compute_confidence
+        assert revisions.new_revision is revisions.new_revision
+        assert revisions.current_revision is revisions.current_revision
+        assert revisions.current_content is revisions.current_content
+        assert revisions.sync_decision_cache is revisions.sync_decision_cache
+        assert revisions.append_revision is revisions.append_revision

@@ -21,17 +21,33 @@ def _index(docs: dict[str, list[str]]) -> dict:
     return {"v": 2, "n_docs": n, "avgdl": (total / n) if n else 0.0, "df": df, "docs": built}
 
 
-class TestStoreCompatibilityAliases:
-    def test_functions_and_constants_are_the_same_objects(self):
-        assert store._index_tokens is retrieval.index_tokens
-        assert store._derive_topics is retrieval.derive_topics
-        assert store._bm25_rank is retrieval.bm25_rank
-        assert store._extract_artifacts is retrieval.extract_artifacts
-        assert store._QUERY_STOP_WORDS is retrieval._QUERY_STOP_WORDS
-        assert store._TOPIC_ALIASES is retrieval._TOPIC_ALIASES
-        assert store._ARTIFACT_PATH_RE is retrieval._ARTIFACT_PATH_RE
-        assert store._ARTIFACT_DOTTED_RE is retrieval._ARTIFACT_DOTTED_RE
-        assert store._ARTIFACT_ROUTE_RE is retrieval._ARTIFACT_ROUTE_RE
+class TestStoreDoesNotAliasThisLeaf:
+    def test_no_alias_survives_on_store(self):
+        # A leaf does not re-export another leaf's names. These 13 aliases existed so the
+        # guard could read a compiled regex as store._ARTIFACT_PATH_RE and so the suite
+        # could address retrieval through store; both now import the owner. Pinned as
+        # absence, because an alias reappearing is exactly how the chain grew back.
+        for name in ("_index_tokens", "_derive_topics", "_bm25_rank", "_extract_artifacts",
+                     "_QUERY_STOP_WORDS", "_TOPIC_ALIASES", "_BM25_K1", "_BM25_B",
+                     "_ARTIFACT_PATH_RE", "_ARTIFACT_DOTTED_RE", "_ARTIFACT_EXC_RE",
+                     "_ARTIFACT_ROUTE_RE", "_AUTH_SESSION_RE"):
+            assert not hasattr(store, name), f"store re-exports retrieval.{name}"
+
+    def test_raw_path_artifacts_is_the_one_shared_definition(self):
+        # The guard needs the span intact; extract_artifacts segments it. Both read the
+        # same primitive, so "what a path looks like" has one definition.
+        from contexer import guard_engine
+        content = "the fix lives in contexer/guard_engine.py and contexer.retrieval"
+        # Spans intact, and the dotted pattern independently matches the basename inside
+        # the path, pinned as-is, because the guard compares spans against staged paths
+        # and a narrower match here would silently drop a pairing.
+        raw = ["contexer/guard_engine.py", "guard_engine.py", "contexer.retrieval"]
+        assert retrieval.raw_path_artifacts(content) == raw
+        assert guard_engine._guard_content_artifacts(content) == raw
+        # Same primitive, segmented for BM25: structure gone, which is why the guard
+        # cannot reuse extract_artifacts and needs the shared span-level definition.
+        assert retrieval.extract_artifacts(content) == [
+            "contexer", "guard", "engine", "guard", "engine", "contexer", "retrieval"]
 
     def test_the_index_sidecar_half_stayed_in_store(self):
         # The suite monkeypatches these THROUGH store; moving them would silently

@@ -11,7 +11,7 @@ def test_counts_both_systems(tmp_path):
     mem.mkdir(parents=True)
     (mem / "fact.md").write_text("x")
     (mem / "MEMORY.md").write_text("i")
-    slug = store._slug(str(repo))
+    slug = store.repo_slug(str(repo))
     ctx = tmp_path / ".contexer"
     ctx.mkdir()
     (ctx / f"{slug}.json").write_text(json.dumps({"entries": [
@@ -25,5 +25,5 @@ def test_fail_soft_on_missing_and_corrupt(tmp_path):
     assert capture_stats(tmp_path, repo) == {"memory_files": 0, "contexer_entries": 0}
     ctx = tmp_path / ".contexer"
     ctx.mkdir()
-    (ctx / (store._slug(str(repo)) + ".json")).write_text("{not json")
+    (ctx / (store.repo_slug(str(repo)) + ".json")).write_text("{not json")
     assert capture_stats(tmp_path, repo)["contexer_entries"] == 0

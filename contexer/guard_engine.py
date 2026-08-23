@@ -1,6 +1,6 @@
 """Commit-time guard engine: staged-file plumbing, Tier-1 advisory pairing, and
 Tier-2 armed (machine-checkable) blocking rules. Extracted out of store.py, whose
-`STORE_DIR`/`_load`/`_save`/... are read through the `store` module object (not
+`STORE_DIR`/`load`/`save`/... are read through the `store` module object (not
 `from`-imported) so store-owned values tests monkeypatch on `contexer.store` are
 still seen here at call time. `contexer/store.py` stays the public facade: it
 re-exports this module's five public entrypoints at the BOTTOM of its file
@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import redact          # pure stdlib leaf (no cycle): secret redaction
+from contexer import retrieval       # pure stdlib leaf (no cycle): path/module artifact shapes
+from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store           # module object, not `from`-imports: see docstring above
 
 
@@ -105,7 +107,7 @@ def _staged_files(repo: str) -> list[str]:
         out = subprocess.run(
             ["git", "-C", repo, "diff", "--cached", "--name-only", "-z",
              "--diff-filter=ACMR"],
-            capture_output=True, timeout=store._GIT_FAST_TIMEOUT,
+            capture_output=True, timeout=store.GIT_FAST_TIMEOUT,
         )
     except Exception:
         return []
@@ -131,7 +133,7 @@ def _staged_content(repo: str, path: str) -> tuple[str, str | None, str | None]:
     comparable identity, so its Tier-1 pair still throttles normally instead of
     re-advising on every commit.
 
-    Reads raw bytes directly rather than through the text-mode `_git` helper, because
+    Reads raw bytes directly rather than through the text-mode `run_git` helper, because
     the binary/size checks need the untouched byte stream; only decodes utf-8
     (errors="replace") once those checks pass. Fail-soft: any failure returns
     `("", "unreadable", None)`, never raises.
@@ -139,8 +141,8 @@ def _staged_content(repo: str, path: str) -> tuple[str, str | None, str | None]:
     The `reason` half is not decoration. This used to return a bare `""` for all
     three failures AND for a genuinely empty staged file, so every caller read
     "I could not read this" as "there is nothing here" — the same unreadable-vs-empty
-    collapse `store.load_diagnostics`, `store._read_store`, `store._read_global` and
-    `store._inspect_store_file` all exist to prevent, and it cost two real things.
+    collapse `store.load_diagnostics`, `store._read_global`, `console_api._read_store`
+    and `console_api._inspect_store_file` all exist to prevent, and it cost two real things.
     Tier-2's `_guard_violations` skipped the file with no trace, so an armed rule
     silently passed a file it never saw (this module's own docstring above already
     names that outcome for the C-quoting cause, which `-z` fixed; the size cause was
@@ -162,7 +164,7 @@ def _staged_content(repo: str, path: str) -> tuple[str, str | None, str | None]:
     try:
         out = subprocess.run(
             ["git", "-C", repo, "show", b":" + os.fsencode(path)],
-            capture_output=True, timeout=store._GIT_FAST_TIMEOUT,
+            capture_output=True, timeout=store.GIT_FAST_TIMEOUT,
         )
     except Exception:
         return "", "unreadable", None
@@ -180,8 +182,8 @@ def _staged_content(repo: str, path: str) -> tuple[str, str | None, str | None]:
 def _merge_in_progress(repo: str) -> bool:
     """True iff a merge is in progress (MERGE_HEAD resolves). Fail-soft: any git
     failure (including "no such repo") reads as no merge in progress."""
-    return store._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD",
-                timeout=store._GIT_FAST_TIMEOUT) is not None
+    return store.run_git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD",
+                timeout=store.GIT_FAST_TIMEOUT) is not None
 
 
 def _guard_relpath(repo: str, path: str) -> str:
@@ -253,7 +255,7 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
 
 # ── Commit-time guard: Tier-1 advisory engine (Task 2) — pairing, throttle, ──
 # dismissals. Builds on Task 1's plumbing above. The whole engine is READ-ONLY
-# against the decision store (never calls _save/_save_global) and its public
+# against the decision store (never calls save/save_global) and its public
 # entrypoint (guard_staged) never raises. Only the guard's own sidecar files
 # (dismiss list, throttle stamp) are ever written here, and always best-effort
 # except on the explicit management path (dismiss_guard).
@@ -294,11 +296,11 @@ def _guard_trusted(entry: dict) -> bool:
     provenance on the share wire, so the fallback lives here instead, at the
     point the guard actually needs a trust verdict. A falsy `created_by` too
     still resolves to untrusted."""
-    if store._entry_status(entry) != "approved":
+    if store.entry_status(entry) != "approved":
         return False
     if entry.get("approved_by") == "human":
         return True
-    rev = store._current_revision(entry)
+    rev = revisions.current_revision(entry)
     if rev is None:
         return False
     source = rev.get("source") or entry.get("created_by")
@@ -344,7 +346,7 @@ def _guard_content_hash(data: bytes) -> str:
 
 
 def _guard_dismissed_path(repo_path: str) -> Path:
-    return store.STORE_DIR / f".guard_dismissed_{store._slug(repo_path)}.json"
+    return store.STORE_DIR / f".guard_dismissed_{store.repo_slug(repo_path)}.json"
 
 
 def _dismissed_guard(repo_path: str) -> set[str]:
@@ -376,11 +378,11 @@ def dismiss_guard(repo_path: str, decision_id: str, source_ref: str) -> None:
     if h in dismissed:
         return
     dismissed.add(h)
-    store._atomic_write(_guard_dismissed_path(repo_path), json.dumps(sorted(dismissed)))
+    store.atomic_write(_guard_dismissed_path(repo_path), json.dumps(sorted(dismissed)))
 
 
 def _guard_advised_path(repo_path: str) -> Path:
-    return store.STORE_DIR / f".guard_advised_{store._slug(repo_path)}.json"
+    return store.STORE_DIR / f".guard_advised_{store.repo_slug(repo_path)}.json"
 
 
 def _guard_advised(repo_path: str) -> dict:
@@ -416,7 +418,7 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
             advised[h] = content_hash
         while len(advised) > _GUARD_THROTTLE_CAP:
             advised.pop(next(iter(advised)))
-        store._atomic_write(_guard_advised_path(repo_path), json.dumps(advised))
+        store.atomic_write(_guard_advised_path(repo_path), json.dumps(advised))
     except Exception:
         pass
 
@@ -424,16 +426,16 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
 def _guard_content_artifacts(content: str) -> list[str]:
     """Path/module-shaped artifacts pulled from decision content, for exact-path
     pairing against a staged file via _artifact_path_match. Deliberately reuses
-    the same underlying regexes as _extract_artifacts (_ARTIFACT_PATH_RE /
-    _ARTIFACT_DOTTED_RE) but WITHOUT that function's word-segmentation post-
-    processing step: _extract_artifacts is built for BM25/topic token overlap
-    and intentionally throws away path structure ("contexer/store.py" ->
-    ["contexer", "store", "py"]), which would never satisfy _pathlike_artifact
-    (it requires the "." / "/" structure back). The guard needs the raw matched
-    span intact so it can compare it against a real staged path, so this stays a
-    separate helper rather than a call to _extract_artifacts."""
-    raw = store._ARTIFACT_PATH_RE.findall(content) + store._ARTIFACT_DOTTED_RE.findall(content)
-    return [a for a in raw if _pathlike_artifact(a)]
+    the same path/module shapes as retrieval.extract_artifacts, via the primitive
+    both share (retrieval.raw_path_artifacts), but WITHOUT that function's word-
+    segmentation post-processing step: extract_artifacts is built for BM25/topic
+    token overlap and intentionally throws away path structure
+    ("contexer/store.py" -> ["contexer", "store", "py"]), which would never
+    satisfy _pathlike_artifact (it requires the "." / "/" structure back). The
+    guard needs the raw matched span intact so it can compare it against a real
+    staged path, so this stays a separate helper rather than a call to
+    extract_artifacts."""
+    return [a for a in retrieval.raw_path_artifacts(content) if _pathlike_artifact(a)]
 
 
 def _guard_artifact_reason(artifact: str) -> str:
@@ -482,7 +484,7 @@ def _guard_artifact_matches(artifact: str, staged_set: set[str],
 def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None = None,
                   deadline: float | None = None) -> list[dict]:
     """Candidate generation: pair every staged file against every trusted decision
-    from the repo store AND the global store (loaded via _load / _load_global).
+    from the repo store AND the global store (loaded via load / load_global).
     `decisions=` overrides BOTH loaded sources with the given list (tagged
     scope="personal") — an extension point that keeps this engine reusable by a
     future CI runner without touching this function's body.
@@ -510,8 +512,8 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
     if decisions is not None:
         sources: list[tuple[list[dict], str]] = [(decisions, "personal")]
     else:
-        sources = [(store._load(repo_path).get("entries") or [], "personal"),
-                   (store._load_global().get("entries") or [], "global")]
+        sources = [(store.load(repo_path).get("entries") or [], "personal"),
+                   (store.load_global().get("entries") or [], "global")]
 
     # Built ONCE for the whole call: matching is then a lookup per artifact
     # instead of a scan over every staged path per artifact (the pairing loop
@@ -527,9 +529,9 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
             if deadline is not None and time.time() > deadline:
                 raise _GuardBudgetExceeded
             decision_id = entry.get("id", "")
-            rev = store._current_revision(entry)
+            rev = revisions.current_revision(entry)
             content = rev.get("content", "") if rev else entry.get("content", "")
-            title = entry.get("title") or store._derive_title(content)
+            title = entry.get("title") or revisions.derive_title(content)
             # source_files goes through _guard_relpath like every other path the
             # guard compares — a decision anchored with an absolute or "./"-
             # prefixed spelling must still pair (fail-soft: unresolvable -> dropped).
@@ -633,7 +635,7 @@ def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
 # for `contexer guard anchors`. The stock converter: the existing corpus is
 # unanchored (trusted+anchored == 0 on real stores), so this mines each trusted
 # decision's OWN content for candidate anchors instead of waiting for a future
-# capture/approval to anchor it. Read-only (never calls _save); the CLI (cli.py's
+# capture/approval to anchor it. Read-only (never calls save); the CLI (cli.py's
 # _guard_anchors) ratifies selections per decision and applies them in one batch
 # via store.apply_backfill_anchors.
 
@@ -660,7 +662,7 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     path-like artifact it mentions (_guard_content_artifacts), expanded to its
     possible file spellings (_artifact_path_spellings), canonicalized, and kept
     only if the file exists in the working tree. Deduped (first-seen order)
-    and capped at store._MAX_SOURCE_FILES — the same cap _anchor_sources
+    and capped at store.MAX_SOURCE_FILES — the same cap _anchor_sources
     itself enforces on write."""
     seen: set[str] = set()
     results: list[str] = []
@@ -673,7 +675,7 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
                 continue
             seen.add(resolved)
             results.append(resolved)
-            if len(results) >= store._MAX_SOURCE_FILES:
+            if len(results) >= store.MAX_SOURCE_FILES:
                 return results
     return results
 
@@ -685,10 +687,10 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
     renamed file yields nothing rather than a guess.
 
     Returns [{decision_id, title, candidates}, ...]. Read-only (never calls
-    _save) and fail-soft (any failure returns [])."""
+    save) and fail-soft (any failure returns [])."""
     try:
-        repo = store._resolve_repo(repo_path)
-        entries = store._load(repo).get("entries") or []
+        repo = store.resolve_repo(repo_path)
+        entries = store.load(repo).get("entries") or []
         repo_root = Path(repo)
         results: list[dict] = []
         for entry in entries:
@@ -696,9 +698,9 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
                 continue
             if not _guard_trusted(entry):
                 continue
-            rev = store._current_revision(entry)
+            rev = revisions.current_revision(entry)
             content = rev.get("content", "") if rev else entry.get("content", "")
-            title = entry.get("title") or store._derive_title(content)
+            title = entry.get("title") or revisions.derive_title(content)
             candidates = _candidate_paths_for_entry(repo, repo_root, content)
             if not candidates:
                 continue
@@ -711,7 +713,7 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
 
 # ── Commit-time guard: Tier-2 armed rules (Task 3) — machine-checkable, ──────
 # blocking. Two paths, sharply separated:
-#   MANAGEMENT (arm_guard / disarm_guard): under _store_lock, WRITES the store,
+#   MANAGEMENT (arm_guard / disarm_guard): under store_lock, WRITES the store,
 #   and MAY raise ValueError — arming/disarming is a deliberate developer act, so
 #   a malformed request should fail loudly, not degrade silently.
 #   RUN (_armed_rules / _rule_violations, and guard_staged's violations half):
@@ -759,9 +761,9 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
               flags: str = "", paths: str = "", message: str = "") -> str:
     """Arm a decision with a machine-checkable commit-time rule — the blocking
     (Tier-2) counterpart to Tier-1's advisory pairing. MANAGEMENT path: under
-    _store_lock, may raise ValueError (see _validate_guard_check for the
+    store_lock, may raise ValueError (see _validate_guard_check for the
     machine-checkable refusals; separately refuses an entry that doesn't exist,
-    or one whose _entry_status isn't "approved" — an armed rule must already be
+    or one whose entry_status isn't "approved" — an armed rule must already be
     developer-trusted, since arming an unreviewed AI guess would let it block a
     commit no human ever signed off on).
 
@@ -770,29 +772,29 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
     store, so a global armed rule (see _armed_rules) also blocks every repo's
     commits, matching how global rules are already injected everywhere else."""
     _validate_guard_check(check_type, pattern, flags)
-    repo = store._resolve_repo(repo_path)
+    repo = store.resolve_repo(repo_path)
     guard_check = {"type": check_type, "pattern": pattern, "flags": flags,
                     "paths": paths, "message": message,
                     "armed_at": datetime.now(timezone.utc).isoformat()}
 
-    with store._store_lock(store._slug(repo)):
-        data = store._load(repo)
-        entry = store._entry_by_id(data["entries"], entry_id)
+    with store.store_lock(store.repo_slug(repo)):
+        data = store.load(repo)
+        entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
-            if store._entry_status(entry) != "approved":
+            if store.entry_status(entry) != "approved":
                 raise ValueError("only approved decisions can be armed")
             entry["guard_check"] = guard_check
-            store._save(repo, data)
+            store.save(repo, data)
             return f"Armed {entry['id'][:8]} ({check_type})."
 
-    with store._store_lock(store.GLOBAL_SLUG):
-        data = store._load_global()
-        entry = store._entry_by_id(data["entries"], entry_id)
+    with store.store_lock(store.GLOBAL_SLUG):
+        data = store.load_global()
+        entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
-            if store._entry_status(entry) != "approved":
+            if store.entry_status(entry) != "approved":
                 raise ValueError("only approved decisions can be armed")
             entry["guard_check"] = guard_check
-            store._save_global(data)
+            store.save_global(data)
             return f"Armed {entry['id'][:8]} ({check_type})."
 
     raise ValueError(f"Decision {entry_id!r} not found.")
@@ -801,28 +803,28 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
 def disarm_guard(repo_path: str, entry_id: str) -> str:
     """Remove a decision's guard_check (Tier-2 armed rule), repo store first then
     global — same id-resolution order as arm_guard. MANAGEMENT path: under
-    _store_lock, raises ValueError when the id resolves in neither store. A
+    store_lock, raises ValueError when the id resolves in neither store. A
     resolved entry that isn't currently armed is a no-op (not an error) —
     disarming an already-unarmed decision is a harmless idempotent request."""
-    repo = store._resolve_repo(repo_path)
+    repo = store.resolve_repo(repo_path)
 
-    with store._store_lock(store._slug(repo)):
-        data = store._load(repo)
-        entry = store._entry_by_id(data["entries"], entry_id)
+    with store.store_lock(store.repo_slug(repo)):
+        data = store.load(repo)
+        entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             had_check = entry.pop("guard_check", None) is not None
             if had_check:
-                store._save(repo, data)
+                store.save(repo, data)
                 return f"Disarmed {entry['id'][:8]}."
             return f"{entry['id'][:8]} was not armed."
 
-    with store._store_lock(store.GLOBAL_SLUG):
-        data = store._load_global()
-        entry = store._entry_by_id(data["entries"], entry_id)
+    with store.store_lock(store.GLOBAL_SLUG):
+        data = store.load_global()
+        entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             had_check = entry.pop("guard_check", None) is not None
             if had_check:
-                store._save_global(data)
+                store.save_global(data)
                 return f"Disarmed {entry['id'][:8]}."
             return f"{entry['id'][:8]} was not armed."
 
@@ -831,12 +833,12 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
 
 def _armed_rules(entries: list[dict]) -> list[dict]:
     """The subset of `entries` that are BOTH carrying a guard_check AND STILL
-    _entry_status == "approved" right now — status is re-checked at RUN time,
+    entry_status == "approved" right now — status is re-checked at RUN time,
     never trusted from arm time, so a decision later ignored or superseded
     stops firing without an explicit disarm. Pure, no I/O; the caller gathers
     from repo + global stores by calling this once per store and concatenating
     (see guard_staged), so a global armed rule fires in every repo's run."""
-    return [e for e in entries if e.get("guard_check") and store._entry_status(e) == "approved"]
+    return [e for e in entries if e.get("guard_check") and store.entry_status(e) == "approved"]
 
 
 def _rule_selects(rule: dict, path: str) -> bool:
@@ -873,7 +875,7 @@ def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
         if not _rule_selects(rule, path):
             continue
         decision_id = rule.get("id", "")
-        title = rule.get("title") or store._derive_title(store._current_content(rule))
+        title = rule.get("title") or revisions.derive_title(revisions.current_content(rule))
         message = gc.get("message") or ""
         check_type = gc.get("type")
 
@@ -926,8 +928,8 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
     violation gathered so far, so reaching it costs the report even for the files that
     scanned cleanly, whereas stopping early keeps those violations and names only what
     was missed. The first selected file always scans, so a run always makes progress."""
-    rules = (_armed_rules(store._load(repo).get("entries") or [])
-             + _armed_rules(store._load_global().get("entries") or []))
+    rules = (_armed_rules(store.load(repo).get("entries") or [])
+             + _armed_rules(store.load_global().get("entries") or []))
     if not rules:
         return [], [], False
     violations: list[dict] = []
@@ -980,7 +982,7 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
 def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     """The commit-time entrypoint (Task 4's CLI hook) combining Tier-1's
     advisory engine with Tier-2's armed blocking rules. Store-READ-ONLY (never
-    calls _save/_save_global) and fail-soft: the ENTIRE body is wrapped so any
+    calls save/save_global) and fail-soft: the ENTIRE body is wrapped so any
     exception — or a Tier-2 time-budget overrun — degrades to
     {"advisories": [], "violations": [], "error": True} rather than raising or
     ever blocking a commit on the guard's OWN failure.
@@ -1011,7 +1013,7 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
         if os.environ.get("CONTEXER_GUARD") == "0":
             return {"advisories": [], "violations": [], "skipped": "env"}
         deadline = time.time() + _GUARD_TIME_BUDGET
-        repo = store._resolve_repo(repo_path)
+        repo = store.resolve_repo(repo_path)
         staged = _guard_staged_paths(repo, paths)
         if not staged:
             return {"advisories": [], "violations": []}
@@ -1063,7 +1065,7 @@ def guard_candidates(repo_path: str, paths: list[str] | None = None, explain: bo
     includes every rejected candidate, each carrying its reason. Fail-soft: any
     exception -> []."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store.resolve_repo(repo_path)
         staged = _guard_staged_paths(repo, paths)
         if not staged:
             return []
@@ -1120,8 +1122,8 @@ def decisions_for_files(repo_path: str, files: list[str],
         if decisions is not None:
             sources: list[tuple[list[dict], str]] = [(decisions, "personal")]
         else:
-            sources = [(store._load(repo_path).get("entries") or [], "personal"),
-                       (store._load_global().get("entries") or [], "global")]
+            sources = [(store.load(repo_path).get("entries") or [], "personal"),
+                       (store.load_global().get("entries") or [], "global")]
 
         canon_set = set(canon)
         canon_by_base: dict[str, list[str]] = {}
@@ -1131,12 +1133,12 @@ def decisions_for_files(repo_path: str, files: list[str],
         hits: list[dict] = []
         for entries, scope in sources:
             for entry in entries:
-                if entry.get("type") != "decision" or store._entry_status(entry) == "ignored":
+                if entry.get("type") != "decision" or store.entry_status(entry) == "ignored":
                     continue
                 decision_id = entry.get("id", "")
-                rev = store._current_revision(entry)
+                rev = revisions.current_revision(entry)
                 content = rev.get("content", "") if rev else entry.get("content", "")
-                title = entry.get("title") or store._derive_title(content)
+                title = entry.get("title") or revisions.derive_title(content)
                 source_files = ({p for p in (_guard_relpath(repo_path, f)
                                               for f in (entry.get("source_files") or [])) if p}
                                  if scope == "personal" else set())
@@ -1157,7 +1159,7 @@ def decisions_for_files(repo_path: str, files: list[str],
                 hits.append({
                     "decision_id": decision_id,
                     "title": title,
-                    "status": store._entry_status(entry),
+                    "status": store.entry_status(entry),
                     "scope": scope,
                     "files_matched": files_matched,
                     "reason": reason,
