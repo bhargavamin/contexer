@@ -459,7 +459,14 @@ def _compact_shared() -> None:
     Rare, and mutually exclusive with `_append_shared` via the shared lock, so no marker is
     lost to an append racing the rewrite. Best-effort: if locks are unavailable the rewrite
     still can't corrupt the log (it is an atomic replace), only drop a marker written inside
-    the window - cosmetic, since the decision merely re-shows as unshared."""
+    the window - cosmetic, since the decision merely re-shows as unshared.
+
+    Reads through the fail-soft `_load_shared` on purpose, which is the one place in this
+    module that is allowed to (contrast `_enqueue_unlocked`, which must RAISE): this is
+    best-effort maintenance whose docstring already promises never to surface to the caller,
+    and its payload is a display hint, not queued work. Flagged as a possible second
+    `_enqueue`-shaped case during review, so the reasoning is recorded here rather than
+    re-derived."""
     path = _shared_path()
     try:
         if not path.exists() or len(path.read_text(encoding="utf-8").splitlines()) <= _SHARED_LOG_MAX_LINES:
