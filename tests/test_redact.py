@@ -1,9 +1,10 @@
 """Tests for contexer/redact.py — the stdlib-only secret redactor.
 
-Redaction is defense-in-depth: it runs at capture (store._normalize_content) so
-secrets never reach disk, and again at the wire (remote._wire_args) so they never
-egress. These tests pin the detector's contract: balanced provider patterns + a
-keyword-gated generic catch-all, idempotent placeholders, and never-raises.
+Redaction is EGRESS-ONLY: it runs at `store._share_projection` (so the confirm-preview and
+the outbox match the wire) and at `remote._wire_args` (the chokepoint every push funnels
+through). Capture is deliberately not scrubbed, so the local store stays a verbatim record.
+These tests pin the detector's contract: balanced provider patterns + a keyword-gated
+generic catch-all, idempotent placeholders, and never-raises.
 """
 import pytest
 
