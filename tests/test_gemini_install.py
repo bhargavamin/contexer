@@ -222,11 +222,11 @@ class TestGeminiRuntime:
 class TestGeminiAfterWriteHookCwdFallback:
     """Greptile P1, PR #181: in a non-git project the installed AfterTool hook's shell
     wrapper computes an empty $REPO (`git rev-parse --show-toplevel || true`), and
-    after_write used to resolve that via `store._resolve_repo`, which — in this
+    after_write used to resolve that via `store.resolve_repo`, which — in this
     hook-invoked process (not the MCP server, so `_SESSION_REPO` is always empty) —
     falls through to the shared `.current_repo` pointer, recording the edit under
     whatever OTHER repo that pointer names (or discarding it). Fixed by falling back to
-    the hook's own cwd (`store._hook_cwd_repo`), matching claude.post_write."""
+    the hook's own cwd (`store.hook_cwd_repo`), matching claude.post_write."""
 
     def test_empty_repo_records_under_hook_cwd_in_non_git_project(self, home, tmp_path, monkeypatch):
         project = tmp_path / "non_git_project"
@@ -270,9 +270,9 @@ class TestGeminiAfterWriteHookCwdFallback:
 
 class TestGeminiBeforeAgentHookCwdFallback:
     """Greptile P1 #2, PR #181, follow-up to 3fde7aa: after_write records the edited-file
-    signal under `store._hook_cwd_repo`, but `before_agent` — where CAPTURE actually runs
+    signal under `store.hook_cwd_repo`, but `before_agent` — where CAPTURE actually runs
     (`capture_user_constraint`, plus the pending-review nudge and context payloads) — used
-    to resolve its repo via bare `store._resolve_repo`, which in this hook-invoked process
+    to resolve its repo via bare `store.resolve_repo`, which in this hook-invoked process
     (not the MCP server, so `_SESSION_REPO` is always empty) falls through to the shared
     `.current_repo` pointer on an empty hook-supplied repo. In a non-git project, if another
     session moved the pointer between hook events, the edit was recorded under the
@@ -280,7 +280,7 @@ class TestGeminiBeforeAgentHookCwdFallback:
     writer/reader repo-key split, the same shape as the session-id bug covered by
     TestAnchorCandidates.test_hook_written_signal_reaches_a_different_server_session in
     test_store.py, now at the repo-key level. Fixed by resolving through
-    `store._hook_cwd_repo` in before_agent (and session_start) too, matching after_write."""
+    `store.hook_cwd_repo` in before_agent (and session_start) too, matching after_write."""
 
     _DEICTIC_DIRECTIVE = "always validate this feature before shipping"
 
@@ -302,7 +302,7 @@ class TestGeminiBeforeAgentHookCwdFallback:
         prompt_raw = json.dumps({"session_id": "s2", "prompt": self._DEICTIC_DIRECTIVE})
         gemini.before_agent("", prompt_raw)
 
-        entries = [e for e in store._load(str(project))["entries"] if e["type"] == "decision"]
+        entries = [e for e in store.load(str(project))["entries"] if e["type"] == "decision"]
         assert entries, "before_agent must have captured the deictic directive"
         assert entries[0]["status"] == "pending_approval"
         assert entries[0].get("anchor_candidates") == ["src/a.py"], (
@@ -327,13 +327,13 @@ class TestGeminiBeforeAgentHookCwdFallback:
         prompt_raw = json.dumps({"session_id": "s2", "prompt": self._DEICTIC_DIRECTIVE})
         gemini.before_agent("", prompt_raw)
 
-        other_decisions = [e for e in store._load(str(other_repo))["entries"]
+        other_decisions = [e for e in store.load(str(other_repo))["entries"]
                             if e["type"] == "decision"]
         assert other_decisions == [], \
             "capture must not land under the unrelated .current_repo pointer target"
         assert store._read_edited_files(str(other_repo)) == []
 
-        project_decisions = [e for e in store._load(str(project))["entries"]
+        project_decisions = [e for e in store.load(str(project))["entries"]
                               if e["type"] == "decision"]
         assert project_decisions and project_decisions[0].get("anchor_candidates") == ["src/a.py"]
 

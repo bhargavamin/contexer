@@ -19,7 +19,7 @@ def isolated_config(tmp_path, monkeypatch):
 @pytest.fixture
 def clean_home(tmp_path, monkeypatch):
     """An isolated home AND an isolated cwd. Both are required: install()/uninstall() run
-    clean_legacy_repo_settings against store._git_root(os.getcwd()), which the injected HOME
+    clean_legacy_repo_settings against store.git_root(os.getcwd()), which the injected HOME
     does not reach, so without the chdir these tests rewrite this checkout's own
     .claude/settings.json (issue #185). tmp_path is untracked, so its git root carries nothing
     of ours. Tests needing a specific cwd chdir again themselves."""
@@ -461,7 +461,7 @@ class TestBookkeepingWritesAreFailSoft:
         old = ('py -c "from contexer import store; from contexer.adapters import claude as _c; '
                'import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); '
                "store.STORE_DIR.mkdir(exist_ok=True); "
-               "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+               "store.is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
                '_c.sync_memory(repo); _c.pull_team(repo); '
                'print(json.dumps(store.get_session_start_context(repo, '
                'store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw))))" "$REPO"')

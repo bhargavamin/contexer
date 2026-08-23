@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from contexer import anchors, store
+from contexer import anchors, review, revisions, store
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -63,15 +63,15 @@ def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
                                        created_by=created_by, status=status, title=title)
     if source_files is not None:
         entry["source_files"] = source_files
-        entry["anchor_commit"] = store._git(str(repo), "rev-parse", "HEAD") or ""
-    data = store._load(str(repo))
+        entry["anchor_commit"] = store.run_git(str(repo), "rev-parse", "HEAD") or ""
+    data = store.load(str(repo))
     data["entries"].append(entry)
-    store._save(str(repo), data)
+    store.save(str(repo), data)
     return entry
 
 
 def _reload(repo):
-    return store._load(str(repo))["entries"][-1]
+    return store.load(str(repo))["entries"][-1]
 
 
 # ── _parse_rename_target (pure) ──────────────────────────────────────────────
@@ -157,7 +157,7 @@ class TestRenameReanchor:
         assert reloaded["source_files"] == ["new.py"]
         assert reloaded.get("proposed_revision") is None
         assert reloaded["anchor_commit"] != old_anchor_commit
-        assert reloaded["anchor_commit"] == store._git(str(repo), "rev-parse", "HEAD")
+        assert reloaded["anchor_commit"] == store.run_git(str(repo), "rev-parse", "HEAD")
 
     def test_multi_hop_rename_chain_reanchors_to_final_target(self, repo):
         # Greptile P1 repro: a -> b -> c across two commits. `old.py`'s single
@@ -181,7 +181,7 @@ class TestRenameReanchor:
         assert reloaded["source_files"] == ["new.py"]
         assert reloaded.get("proposed_revision") is None
         assert reloaded["anchor_commit"] != old_anchor_commit
-        assert reloaded["anchor_commit"] == store._git(str(repo), "rev-parse", "HEAD")
+        assert reloaded["anchor_commit"] == store.run_git(str(repo), "rev-parse", "HEAD")
 
     def test_rename_chain_exceeding_hop_cap_treated_as_missing(self, repo, monkeypatch):
         # A chain longer than _RENAME_CHAIN_MAX must NOT be chased indefinitely — it's
@@ -234,7 +234,7 @@ class TestRenameReanchor:
                     return "R100\tmid.py\ta.py\nR090\tmid.py\tb.py"   # ambiguous
                 return None
             if args[:2] == ("rev-parse", "HEAD"):
-                return store._git(repo_path, *args)
+                return store.run_git(repo_path, *args)
             return None
         monkeypatch.setattr(anchors, "_run_git", fake_git)
 
@@ -281,7 +281,7 @@ class TestRenameReanchor:
             if args[0] == "show":
                 return "R100\told.py\ta.py\nR090\told.py\tb.py"
             if args[:2] == ("rev-parse", "HEAD"):
-                return store._git(repo_path, *args)
+                return store.run_git(repo_path, *args)
             return None
         monkeypatch.setattr(anchors, "_run_git", fake_git)
 
@@ -401,10 +401,10 @@ class TestTotalLoss:
         _commit(repo)
         entry = _seed_entry(repo, "Use gone.py to configure the thing.",
                             source_files=["gone.py"])
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         target = next(e for e in data["entries"] if e["id"] == entry["id"])
         target["anchor_candidates"] = ["unrelated.py"]
-        store._save(str(repo), data)
+        store.save(str(repo), data)
         os.remove(str(repo / "gone.py"))
 
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
@@ -441,7 +441,7 @@ class TestTotalLoss:
         store.approve_decision(str(repo), entry["id"], "approve")
         reloaded = _reload(repo)
         assert reloaded["title"] == curated
-        assert store._current_revision(reloaded)["title"] == curated
+        assert revisions.current_revision(reloaded)["title"] == curated
 
     def test_dismissing_proposal_preserves_entry_and_reproposes_once(self, repo, monkeypatch):
         _write(repo, "gone.py")
@@ -488,7 +488,7 @@ class TestTotalLoss:
         assert result == {"reanchored": 0, "proposed": 0}
         reloaded = _reload(repo)
         assert reloaded.get("proposed_revision") is None
-        assert reloaded["content"] == store._normalize_content(content)
+        assert reloaded["content"] == revisions.normalize_content(content)
         assert reloaded["content"].count("anchors withdrawn on re-verification") == 1
 
     def test_existing_proposal_entry_is_skipped(self, repo, monkeypatch):
@@ -497,11 +497,11 @@ class TestTotalLoss:
         _commit(repo)
         entry = _seed_entry(repo, "Use gone.py.", source_files=["gone.py"])
         os.remove(str(repo / "gone.py"))
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         target = next(e for e in data["entries"] if e["id"] == entry["id"])
-        target["proposed_revision"] = store._build_proposal(
+        target["proposed_revision"] = review.build_proposal(
             target, "some unrelated suggested edit", "", "", "2026-01-01T00:00:00+00:00")
-        store._save(str(repo), data)
+        store.save(str(repo), data)
 
         calls = []
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
@@ -524,7 +524,7 @@ class TestTotalLoss:
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 0}
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         by_id = {e["id"]: e for e in data["entries"]}
         assert by_id[pending["id"]].get("proposed_revision") is None
         assert by_id[ignored["id"]].get("proposed_revision") is None
@@ -568,7 +568,7 @@ class TestBudget:
         assert result == {"reanchored": 3, "proposed": 0}
         assert len(calls) <= anchors._ANCHOR_GIT_BUDGET
 
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         by_id = {e["id"]: e for e in data["entries"]}
         for i in range(3):
             assert by_id[entries[i]["id"]]["source_files"] == [f"new_{i}.py"]
@@ -596,7 +596,7 @@ class TestBudget:
 
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 2}
-        by_id = {e["id"]: e for e in store._load(str(repo))["entries"]}
+        by_id = {e["id"]: e for e in store.load(str(repo))["entries"]}
         assert by_id[fat_entry["id"]].get("proposed_revision") is not None
         assert by_id[lean_entry["id"]].get("proposed_revision") is not None
 
@@ -607,7 +607,7 @@ class TestFailSoft:
     def test_corrupt_store_never_raises(self, repo, monkeypatch):
         def boom(repo_path):
             raise ValueError("corrupt store")
-        monkeypatch.setattr(store, "_load", boom)
+        monkeypatch.setattr(store, "load", boom)
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 0}
 
@@ -655,7 +655,7 @@ class TestSessionStartWiring:
         _commit(repo, "rename")
 
         store.session_start_payload(str(repo))
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         entry = next(e for e in data["entries"] if e["subtype"] == "constraint")
         assert entry["source_files"] == ["new.py"]
 

@@ -113,7 +113,7 @@ def adapter_hooks(tmp_path, monkeypatch):
     home so this never touches the real ~/.claude config.
 
     Isolating the home dir alone is NOT enough: claude.install() also runs
-    clean_legacy_repo_settings against store._git_root(os.getcwd()) — the PROCESS cwd's
+    clean_legacy_repo_settings against store.git_root(os.getcwd()) — the PROCESS cwd's
     git root, not the injected home — to clean up a pre-CLI installer's repo-level
     hooks. Left unpatched, a test run from a checkout whose <repo>/.claude/settings.json
     still carries legacy Contexer hook markers would get silently rewritten (the same
@@ -123,7 +123,7 @@ def adapter_hooks(tmp_path, monkeypatch):
     clean_legacy_repo_settings has nothing of ours to touch. The explicit byte-identical
     assertion below is belt-and-suspenders — the session's leak-guard fixture
     (no_real_store_writes) only watches ~/.contexer, not <repo>/.claude/settings.json."""
-    real_repo = store._git_root(os.getcwd())
+    real_repo = store.git_root(os.getcwd())
     real_settings = Path(real_repo) / ".claude" / "settings.json" if real_repo else None
     before = real_settings.read_bytes() if real_settings and real_settings.is_file() else None
 

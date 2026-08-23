@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from contexer import config, share, store
+from contexer import config, revisions, share, store
 from contexer.remote import RemoteAuthError, RemoteDecision, RemoteStore, with_local_fallback
 from contexer.repo_key import canonical_repo_key
 
@@ -48,7 +48,7 @@ _STALE_AFTER = 24 * 3600
 
 
 def _cache_path(repo_path: str):
-    return store.STORE_DIR / f".team_{store._slug(repo_path)}.json"
+    return store.STORE_DIR / f".team_{store.repo_slug(repo_path)}.json"
 
 
 def _empty_cache() -> dict:
@@ -69,7 +69,7 @@ def _load_cache(repo_path: str) -> dict:
 
 def _save_cache(repo_path: str, data: dict) -> None:
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    store._atomic_write(_cache_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
+    store.atomic_write(_cache_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 # The credentials file lives in the same `.team_*` namespace as the caches but is NOT one:
@@ -182,7 +182,7 @@ def _sync(repo_path: str, profile: config.Profile,
     remote = RemoteStore.from_profile(profile, **kwargs)
     if remote is None:
         return None  # local mode / not configured - no cache file for a local-only repo
-    key = canonical_repo_key(store._git(repo_path, "remote", "get-url", "origin"))
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     if key is None:
         return None  # no git remote - nothing to sync on, no cache file
 
@@ -330,7 +330,7 @@ def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]
 
 
 def _seen_path(repo_path: str, consumer: str):
-    return store.STORE_DIR / f".team_seen_{store._slug(repo_path)}_{consumer}.json"
+    return store.STORE_DIR / f".team_seen_{store.repo_slug(repo_path)}_{consumer}.json"
 
 
 def _read_seen(repo_path: str, consumer: str) -> int | None:
@@ -355,7 +355,7 @@ def _read_seen(repo_path: str, consumer: str) -> int | None:
 
 def _write_seen(repo_path: str, consumer: str, seq: int) -> None:
     store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    store._atomic_write(_seen_path(repo_path, consumer), json.dumps({"seq": seq}, ensure_ascii=False))
+    store.atomic_write(_seen_path(repo_path, consumer), json.dumps({"seq": seq}, ensure_ascii=False))
 
 
 def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
@@ -412,7 +412,7 @@ def _drop_legacy_pending(repo_path: str) -> None:
     common case — an existence check up front avoids an unlink()-then-catch syscall on every
     single prompt. Still best-effort — a file that vanishes between the check and the unlink
     is silently ignored."""
-    path = store.STORE_DIR / f".team_pending_{store._slug(repo_path)}.json"
+    path = store.STORE_DIR / f".team_pending_{store.repo_slug(repo_path)}.json"
     if path.exists():
         try:
             path.unlink()
@@ -491,7 +491,7 @@ def refresh(repo_path: str) -> tuple[int, int]:
     cloud degrades to the existing cache (freshness, never correctness) rather than
     stalling session start for the full default timeout."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store.resolve_repo(repo_path)
         if not repo:
             return (0, 0)
         result = pull(repo, timeout=_SESSION_START_TIMEOUT)
@@ -515,7 +515,7 @@ def poll_for_injection(repo_path: str, consumer: str = "claude") -> list[dict]:
     don't steal each other's proactive injection. NEVER raises. Adapters format these rows for
     their own host's hook output. `consumer` defaults to "claude" (the original hook string)."""
     try:
-        repo = store._resolve_repo(repo_path)
+        repo = store.resolve_repo(repo_path)
         if not repo:
             return []
         return poll_nonblocking(repo, consumer)
@@ -531,10 +531,10 @@ def _local_decisions(repo_path: str) -> list[tuple[str, str]]:
     degrades to unmodified rendering (this runs inside session-start hooks and must not raise)."""
     try:
         out: list[tuple[str, str]] = []
-        for e in store._load(repo_path).get("entries", []):
+        for e in store.load(repo_path).get("entries", []):
             if e.get("type") != "decision" or e.get("status") == "ignored":
                 continue
-            content = store._current_content(e)
+            content = revisions.current_content(e)
             if content:
                 out.append((e.get("id", ""), content))
         return out
@@ -646,7 +646,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
     same shape as `get_context`'s own filtered-display truncation note, so a genuine excess is
     visible rather than silently dropped.
 
-    Each row renders title-led, same rule as a local decision (`store._title_and_body`): the
+    Each row renders title-led, same rule as a local decision (`store.title_and_body`): the
     row's own `title` when the cloud sent one, else one derived from `content` here (display
     time only - never written back into the cache), with the content line skipped entirely
     when it would merely repeat the title.
@@ -682,8 +682,8 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
     if entry_type:
         rows = [r for r in rows if r.get("type", "") == entry_type]
     if query:
-        pat = store._query_pattern(query)
-        rows = [r for r in rows if store._matches_query(pat, r)]
+        pat = store.query_pattern(query)
+        rows = [r for r in rows if store.matches_query(pat, r)]
     if not rows:
         return ""
 
@@ -724,11 +724,11 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
         rid = (r.get("id") or "")[:8]
         id_tag = f" (id={rid})" if rid else ""
         type_tag = f" [{r['type']}]" if r.get("type") else ""
-        # Title-led rendering, same rule a local decision uses (store._title_and_body): the
+        # Title-led rendering, same rule a local decision uses (store.title_and_body): the
         # cloud's own title when it sent one, else derived from content HERE at display time
         # (never stored back into the cache) - and the content line is skipped entirely when
         # it would merely repeat the title (collapsed-whitespace comparison).
-        title, body = store._title_and_body({"title": r.get("title")}, content=content)
+        title, body = store.title_and_body({"title": r.get("title")}, content=content)
         lid, overlap = _best_local_overlap(content, local_tokens)
         if lid and overlap >= 0.7:
             # Same rule already stored locally - collapse to a ratification pointer instead of

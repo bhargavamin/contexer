@@ -48,8 +48,8 @@ def test_share_then_other_clone_pulls_it(team_stack):
 
 
 def test_both_clones_resolve_same_canonical_key(team_stack):
-    key_a = canonical_repo_key(store._git(CLONE_A, "remote", "get-url", "origin"))
-    key_b = canonical_repo_key(store._git(CLONE_B, "remote", "get-url", "origin"))
+    key_a = canonical_repo_key(store.run_git(CLONE_A, "remote", "get-url", "origin"))
+    key_b = canonical_repo_key(store.run_git(CLONE_B, "remote", "get-url", "origin"))
     assert key_a == key_b == team_stack.REPO_KEY
 
 
@@ -129,7 +129,7 @@ def test_shared_title_round_trips_to_other_clones_team_context(team_stack):
     assert "## Team context" in out
     assert title in out  # title-led heading rendered
     # Distinct body still shown on its own indented line beneath the title (content is
-    # capitalized by store._normalize_content on capture, so match that normalized form).
+    # capitalized by revisions.normalize_content on capture, so match that normalized form).
     assert "Use blue/green deploys for zero-downtime releases across every service" in out
 
 

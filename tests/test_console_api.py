@@ -9,6 +9,10 @@ through a console read. Moving them here would have separated a global-store cor
 the global-store test file. They also reach the reads as `store.<name>`, which is what keeps
 store.py's `_CONSOLE_EXPORTS` facade exercised rather than an untested compatibility promise.
 
+That is a statement about the TESTS only. The facade is back-compat, not the surface production
+code uses: every module under contexer/ imports the owner, pinned mechanically below, because a
+production caller drifting onto the facade breaks nothing visible and so would never be noticed.
+
 What had no coverage at all is the seam this extraction created, so that is what these pin: the
 facade resolves, it resolves to the OWNER's object, `dir()` matches what `__getattr__` answers,
 the module imports first without a cycle, nothing was left behind as a second definition in
@@ -16,9 +20,12 @@ store.py, and store-owned helpers are looked up at CALL time (the whole reason t
 is imported instead of `from`-imports).
 """
 import ast
+import pathlib
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from contexer import console_api, store
 
@@ -33,6 +40,41 @@ MOVED_NAMES = frozenset({
     "list_decisions", "get_decision_detail", "list_tombstones", "list_global_rules",
     "delete_global_rule", "team_snapshot",
 })
+
+
+# Public names that console_api owns but store deliberately does NOT re-export.
+NOT_RE_EXPORTED = frozenset({"team_snapshot"})
+
+
+class TestFacadeIsBackCompatOnly:
+    """The facade exists so a name that was public on `store` before an extraction still
+    resolves there. It is not the surface production code uses: every caller in contexer/
+    imports the owner. So it is frozen, and a name no longer reached through it is dropped."""
+
+    def test_a_name_with_no_facade_consumer_is_not_re_exported(self):
+        for name in NOT_RE_EXPORTED:
+            assert hasattr(console_api, name), name       # the owner still has it
+            assert name not in store._CONSOLE_EXPORTS     # store does not advertise it
+            with pytest.raises(AttributeError):
+                getattr(store, name)
+
+    def test_production_code_reaches_the_owner_not_the_facade(self):
+        # Mechanical form of the rule: no module under contexer/ may address a moved read
+        # through `store.`. Written as a scan because the failure is invisible otherwise -
+        # the facade answers correctly, so nothing breaks and the seam quietly erodes.
+        watched = MOVED_NAMES | NOT_RE_EXPORTED
+        offenders = []
+        for path in pathlib.Path(store.__file__).parent.rglob("*.py"):
+            if path.name in ("store.py", "console_api.py"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                # AST, not grep: the rule is about code, and several modules discuss these
+                # names in prose while correctly never calling them.
+                if (isinstance(node, ast.Attribute) and node.attr in watched
+                        and isinstance(node.value, ast.Name) and node.value.id == "store"):
+                    offenders.append(f"{path.name}:{node.lineno} store.{node.attr}")
+        assert offenders == [], offenders
 
 
 class TestFacade:
@@ -83,11 +125,12 @@ class TestNothingLeftBehind:
 
     def test_what_deliberately_stayed_is_still_in_store(self):
         # `load_diagnostics` keeps its family (`global_diagnostics`, `deleted_diagnostics`);
-        # `_store_files`/`_is_repo_store_file` are the store-file enumeration scope_audit.py
-        # depends on by documented contract; `_file_mtime` is read by verify_scan_conventions
-        # and anchors.py as well as by the console.
+        # `store_files`/`_is_repo_store_file` are the store-file enumeration scope_audit.py
+        # depends on by documented contract; `file_mtime` is read by verify_scan_conventions
+        # and anchors.py as well as by the console. `store_files`/`file_mtime` are public
+        # because two extracted modules read them; `_is_repo_store_file` has one reader.
         for name in ("load_diagnostics", "global_diagnostics", "deleted_diagnostics",
-                     "_store_files", "_is_repo_store_file", "_file_mtime"):
+                     "store_files", "_is_repo_store_file", "file_mtime"):
             assert name in vars(store), name
 
 
@@ -121,7 +164,7 @@ class TestCallTimeResolution:
     def test_store_dir_is_read_at_call_time(self, tmp_path, monkeypatch):
         # Deliberately through `resolve_store`, the ONE read that dereferences `store.STORE_DIR`
         # in this module (its by-file-name short-circuit). `list_stores` would pass either way:
-        # it reaches the directory via `store._store_files()`, so the lookup happens inside
+        # it reaches the directory via `store.store_files()`, so the lookup happens inside
         # store.py and proves nothing about how THIS module holds the name.
         store_dir = tmp_path / ".contexer"
         store_dir.mkdir()
@@ -134,16 +177,16 @@ class TestCallTimeResolution:
 
     def test_store_functions_are_looked_up_at_call_time(self, tmp_repo, monkeypatch):
         store.update_decision(tmp_repo, "Use uv for dependency management", "s1", "convention")
-        monkeypatch.setattr(store, "_current_repo_path", lambda: tmp_repo)
+        monkeypatch.setattr(store, "current_repo_path", lambda: tmp_repo)
         assert [r["is_current"] for r in console_api.list_stores()] == [True]
-        monkeypatch.setattr(store, "_current_repo_path", lambda: "/somewhere/else")
+        monkeypatch.setattr(store, "current_repo_path", lambda: "/somewhere/else")
         assert [r["is_current"] for r in console_api.list_stores()] == [False]
 
     def test_the_global_read_write_pair_honours_a_patched_slug(self, tmp_repo, monkeypatch):
         # Pins the read/write pair end-to-end under a renamed global store, which is the one
         # console read that MUTATES. Deliberately not claimed as a call-time-lookup check:
         # `delete_global_rule`'s only direct use of the constant is the lock name
-        # (`store._store_lock(store.GLOBAL_SLUG)`), and the file itself is addressed inside
+        # (`store.store_lock(store.GLOBAL_SLUG)`), and the file itself is addressed inside
         # store.py via `_global_path`, so an import-time-bound slug here would take a
         # differently-named lock and still address the right file, invisible to a test.
         monkeypatch.setattr(store, "GLOBAL_SLUG", "_globals")

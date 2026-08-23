@@ -26,7 +26,7 @@ def _pending(repo: str, content: str = PENDING) -> dict:
 
 
 def _entry(repo: str, entry_id: str) -> dict:
-    return next(e for e in store._load(repo)["entries"] if e["id"] == entry_id)
+    return next(e for e in store.load(repo)["entries"] if e["id"] == entry_id)
 
 
 # ── the happy path ────────────────────────────────────────────────────────────

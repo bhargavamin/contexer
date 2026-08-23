@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import store
+from contexer import conflicts, store
 
 SESSION_ID = str(uuid.uuid4())
 
@@ -101,8 +101,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     """
     # Verbose resolve on the WRITE path only: the branch that chose this store is stamped
     # onto the new entry, so a decision that lands in the wrong repo is diagnosable after
-    # the fact instead of indistinguishable. Read tools keep the plain _resolve_repo.
-    resolved, repo_source = store._resolve_repo_verbose(repo_path)
+    # the fact instead of indistinguishable. Read tools keep the plain resolve_repo.
+    resolved, repo_source = store.resolve_repo_verbose(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
     lint = store.capture_lint(content, created_by=created_by, replace_id=replace_id)
@@ -145,7 +145,7 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
     source_files: repo-relative files this decision describes — anchors it for staleness
                   tracking and the commit-time guard; single-id approvals only.
     """
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
     target = entry_id.strip()
@@ -177,10 +177,10 @@ def resolve_conflict(entry_id: str, choice: str, repo_path: str = "") -> str:
               still renders as a demoted continuation line, since only a review action fully
               hides reviewed content).
     """
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
-    return store.record_conflict_memo(resolved, entry_id, choice, session_id=SESSION_ID)[1]
+    return conflicts.record_conflict_memo(resolved, entry_id, choice, session_id=SESSION_ID)[1]
 
 
 @mcp.tool()
@@ -189,7 +189,7 @@ def review_pending(repo_path: str = "") -> str:
     suggested updates — each with its id and full content, so you can surface them conversationally
     and approve via approve_decision. The in-session equivalent of the `contexer review` terminal
     command. Call this when the developer asks to review, or when SessionStart reported items pending."""
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
     return store.format_pending_review(resolved)
@@ -201,7 +201,7 @@ def list_shareable(repo_path: str = "") -> str:
     the developer can pick which to share. Use this when the developer wants to share but hasn't
     named a decision — show the list, let them choose, then call share_decision with the chosen
     id(s) (comma-separated for a multi-select)."""
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
     return store.format_shareable_list(resolved)
@@ -218,7 +218,7 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
     files: repo-relative files you are about to work on — returns the decisions that govern
     them (anchors + content references).
     """
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
     result = store.get_context(resolved, query, entry_type, limit, files)
@@ -251,7 +251,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     push — show the preview to the developer and call again with confirm=true to actually send.
     Pushing is an outward action (leaves the machine), so it is confirmed by default; a developer
     who set skip_confirm in config.toml bypasses the preview."""
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "Skipped — repo path not detected."
     from contexer import config as _config
@@ -336,7 +336,7 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
     # Verbose resolve: bootstrap is the largest bulk write in the system (one consolidated
     # Stack entry plus every mined convention, in a single save), so a misroute here plants
     # the most content in the wrong store — the write that most needs its branch recorded.
-    resolved, repo_source = store._resolve_repo_verbose(repo_path)
+    resolved, repo_source = store.resolve_repo_verbose(repo_path)
     if not resolved:
         return json.dumps({"error": "repo path not detected"})
     result = (store.bootstrap_apply(resolved, SESSION_ID, insight, repo_source=repo_source)
@@ -352,7 +352,7 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
 def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
     """Called on every UserPromptSubmit. Detects prescriptive directives ('always X', 'never Y',
     'from now on Z') and stores them as constraint or convention decisions automatically."""
-    resolved, repo_source = store._resolve_repo_verbose(repo_path)
+    resolved, repo_source = store.resolve_repo_verbose(repo_path)
     if not resolved:
         return ""
     near: list = []
@@ -368,7 +368,7 @@ def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
     """Auto-called by UserPromptSubmit hook on every prompt. Detects rationale/decision
     questions (why, reason, rationale, decided...) and injects matching stored decisions
     as additionalContext. Returns empty string for non-rationale prompts — silent no-op."""
-    resolved = store._resolve_repo(repo_path)
+    resolved = store.resolve_repo(repo_path)
     if not resolved:
         return ""
     return store.get_context_for_prompt(resolved, prompt)
@@ -413,8 +413,8 @@ def main():
     # Bind this server process to the repo it was spawned in (its cwd's git root). Each host
     # session launches its own server with cwd = that session's project, so decisions resolve
     # to the right repo even if the shared ~/.contexer/.current_repo pointer has been clobbered
-    # by a different tool or session. _resolve_repo prefers this over the shared pointer.
-    store.set_session_repo(store._git_root(os.getcwd()))
+    # by a different tool or session. resolve_repo prefers this over the shared pointer.
+    store.set_session_repo(store.git_root(os.getcwd()))
     mcp.run()
 
 

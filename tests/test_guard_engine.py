@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from contexer import store, guard_engine
+from contexer import guard_engine, revisions, store
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -82,13 +82,13 @@ def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
     if approved_by is not None:
         entry["approved_by"] = approved_by
     if global_store:
-        data = store._load_global()
+        data = store.load_global()
         data["entries"].append(entry)
-        store._save_global(data)
+        store.save_global(data)
     else:
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         data["entries"].append(entry)
-        store._save(str(repo), data)
+        store.save(str(repo), data)
     return entry
 
 
@@ -500,7 +500,7 @@ class TestDismissGuard:
 
     def test_corrupt_sidecar_fails_soft(self, repo):
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        path = store.STORE_DIR / f".guard_dismissed_{store._slug(str(repo))}.json"
+        path = store.STORE_DIR / f".guard_dismissed_{store.repo_slug(str(repo))}.json"
         path.write_text("not json{{{")
         assert guard_engine._dismissed_guard(str(repo)) == set()
 
@@ -665,7 +665,7 @@ class TestGuardPairs:
             str(repo), "Decided to use JWT for auth", "sess-1", "constraint",
             created_by="plan")
         assert stored
-        entry = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        entry = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert entry["anchor_candidates"] == ["auth/jwt.py"]
         assert "source_files" not in entry
         assert entry["status"] == "pending_approval"
@@ -676,7 +676,7 @@ class TestGuardPairs:
 
         ok, _msg = store.approve_decision(str(repo), eid, "approve")
         assert ok
-        entry = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        entry = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert entry["source_files"] == ["auth/jwt.py"]
         assert "anchor_candidates" not in entry
 
@@ -719,8 +719,8 @@ class TestGuardTrustsLegacyRevisionsAtReadTime:
         }
 
     def test_human_created_becomes_trusted_and_pairs_after_load(self, repo):
-        store._save(str(repo), self._legacy_data(created_by="human", rev_source=None))
-        entry = store._load(str(repo))["entries"][0]
+        store.save(str(repo), self._legacy_data(created_by="human", rev_source=None))
+        entry = store.load(str(repo))["entries"][0]
         # No storage rewrite: the falsy source persists exactly as stored.
         assert entry["revisions"][0]["source"] is None
         assert guard_engine._guard_trusted(entry) is True
@@ -729,8 +729,8 @@ class TestGuardTrustsLegacyRevisionsAtReadTime:
         assert pairs[0]["emitted"] is True
 
     def test_ai_created_stays_untrusted_after_load(self, repo):
-        store._save(str(repo), self._legacy_data(created_by="ai", rev_source=None))
-        entry = store._load(str(repo))["entries"][0]
+        store.save(str(repo), self._legacy_data(created_by="ai", rev_source=None))
+        entry = store.load(str(repo))["entries"][0]
         assert entry["revisions"][0]["source"] is None
         assert guard_engine._guard_trusted(entry) is False
         pairs = guard_engine._guard_pairs(str(repo), ["auth/jwt.py"])
@@ -739,8 +739,8 @@ class TestGuardTrustsLegacyRevisionsAtReadTime:
         assert pairs[0]["reason"] == "rejected: untrusted provenance"
 
     def test_falsy_created_by_also_stays_untrusted(self, repo):
-        store._save(str(repo), self._legacy_data(created_by="", rev_source=None))
-        entry = store._load(str(repo))["entries"][0]
+        store.save(str(repo), self._legacy_data(created_by="", rev_source=None))
+        entry = store.load(str(repo))["entries"][0]
         assert guard_engine._guard_trusted(entry) is False
 
     def test_legacy_source_stays_none_through_load_and_share_projection(self, repo):
@@ -749,8 +749,8 @@ class TestGuardTrustsLegacyRevisionsAtReadTime:
         projection built from that loaded entry must still carry `source: None` —
         `share._wire_source` relies on this to pass None through as honest unknown
         provenance rather than coercing it to a false "ai"."""
-        store._save(str(repo), self._legacy_data(created_by="human", rev_source=None))
-        entry = store._load(str(repo))["entries"][0]
+        store.save(str(repo), self._legacy_data(created_by="human", rev_source=None))
+        entry = store.load(str(repo))["entries"][0]
         assert entry["revisions"][0]["source"] is None
         projection = store._share_projection(entry)
         assert projection["source"] is None
@@ -802,7 +802,7 @@ class TestGuardStaged:
             "and ensure this feature is actual improvement",
             "s1")
         assert status == "pending_approval"
-        assert store._entry_by_id(store._load(str(repo))["entries"], eid)[
+        assert store.entry_by_id(store.load(str(repo))["entries"], eid)[
             "anchor_candidates"] == ["auth/jwt.py"]
 
         _write(repo, "auth/jwt.py", "token = 1\n")
@@ -911,7 +911,7 @@ class TestGuardStaged:
     def test_corrupt_dismissed_sidecar_fails_soft(self, repo):
         _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        (store.STORE_DIR / f".guard_dismissed_{store._slug(str(repo))}.json").write_text("{{{")
+        (store.STORE_DIR / f".guard_dismissed_{store.repo_slug(str(repo))}.json").write_text("{{{")
         _write(repo, "auth/jwt.py", "token = 1\n")
         _git(repo, "add", "auth/jwt.py")
         result = guard_engine.guard_staged(str(repo))
@@ -920,7 +920,7 @@ class TestGuardStaged:
     def test_corrupt_advised_sidecar_fails_soft(self, repo):
         _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        (store.STORE_DIR / f".guard_advised_{store._slug(str(repo))}.json").write_text("{{{")
+        (store.STORE_DIR / f".guard_advised_{store.repo_slug(str(repo))}.json").write_text("{{{")
         _write(repo, "auth/jwt.py", "token = 1\n")
         _git(repo, "add", "auth/jwt.py")
         result = guard_engine.guard_staged(str(repo))
@@ -961,14 +961,14 @@ class TestApprovalTimeAnchorGuardPairing:
                                              "never plain cookies", "s1", "constraint",
                                              created_by="plan")
         assert stored
-        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "pending_approval"
         assert "source_files" not in entry
 
         ok, msg = store.approve_decision(str(repo), eid, "approve",
                                          source_files=["auth/jwt.py"])
         assert ok, msg
-        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert entry["source_files"] == ["auth/jwt.py"]
         assert entry["anchor_commit"]
@@ -996,7 +996,7 @@ class TestApprovalTimeAnchorGuardPairing:
         stored, eid = store.update_decision(str(repo), "Always use JWT for session auth, "
                                              "never plain cookies", "s1", "constraint")
         assert stored
-        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "pending_approval"
         assert entry["created_by"] == "ai"
         assert "source_files" not in entry
@@ -1004,11 +1004,11 @@ class TestApprovalTimeAnchorGuardPairing:
         ok, msg = store.approve_decision(str(repo), eid, "approve",
                                          source_files=["auth/jwt.py"])
         assert ok, msg
-        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert entry["approved_by"] == "human"
         assert entry["source_files"] == ["auth/jwt.py"]
-        assert store._current_revision(entry)["source"] == "ai"
+        assert revisions.current_revision(entry)["source"] == "ai"
         assert guard_engine._guard_trusted(entry) is True
 
         _write(repo, "auth/jwt.py", "token = 1  # rewritten\n")
@@ -1033,7 +1033,7 @@ class TestApprovalTimeAnchorGuardPairing:
         ok, _msg = store.approve_decision(str(repo), eid, "approve")
         assert ok
 
-        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert entry["approved_by"] == "human"
         assert guard_engine._guard_trusted(entry) is True
@@ -1051,7 +1051,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
         status = store.upsert_memory_decision(
             str(repo), "Use bcrypt for password hashing", "s1", "convention", "mem-1")
         assert status == "created"
-        entry = next(e for e in store._load(str(repo))["entries"]
+        entry = next(e for e in store.load(str(repo))["entries"]
                      if e.get("memory_key") == "mem-1")
         assert entry["status"] == "approved"
         assert entry["created_by"] == "memory"
@@ -1066,7 +1066,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
         stored, eid = store.update_decision(str(repo), "Package manager: uv", "s1",
                                              "architecture")
         assert stored
-        entry = next(e for e in store._load(str(repo))["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load(str(repo))["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert entry["created_by"] == "ai"
         assert "approved_by" not in entry
@@ -1082,8 +1082,8 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
             "revision": 1,
             # status/created_by deliberately absent — pre-provenance entry.
         }
-        store._save(str(repo), {"entries": [legacy]})
-        entry = store._load(str(repo))["entries"][0]
+        store.save(str(repo), {"entries": [legacy]})
+        entry = store.load(str(repo))["entries"][0]
         assert entry["status"] == "approved"
         assert entry["created_by"] == "ai"
         assert "approved_by" not in entry
@@ -1096,7 +1096,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
         ok, eid = store.update_global_decision("Never log raw request bodies", "s1",
                                                 "constraint")
         assert ok
-        entry = next(e for e in store._load_global()["entries"] if e["id"] == eid)
+        entry = next(e for e in store.load_global()["entries"] if e["id"] == eid)
         assert entry["status"] == "approved"
         assert entry["created_by"] == "ai"
         assert "approved_by" not in entry
@@ -1108,9 +1108,9 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
 class TestApprovedByStampInvalidatedByNonHumanRevision:
     """`approved_by` is an ENTRY-level stamp, but pattern/convention trivial updates via
     `update_context(replace_id=...)` (and memory-sync refreshes) apply IN PLACE as a new
-    current revision (`_append_revision`) — before this fix the entry kept its 'human' stamp
+    current revision (`revisions.append_revision`) — before this fix the entry kept its 'human' stamp
     while the live content became unreviewed AI/tool text, so the guard trusted (and advised
-    with) content the developer never actually saw. `_append_revision` now pops `approved_by`
+    with) content the developer never actually saw. `revisions.append_revision` now pops `approved_by`
     whenever the new revision's `source` isn't 'human'; a genuine ratification site
     (`_apply_approval` promoting a Suggested Update) restamps AFTER appending."""
 
@@ -1129,7 +1129,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
             replace_id=eid, created_by="ai")
         assert ok and rid == eid
 
-        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        updated = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert updated["revision"] == 2
         assert "approved_by" not in updated
         assert guard_engine._guard_trusted(updated) is False
@@ -1153,7 +1153,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
             str(repo), "Rollback endpoint is /api/v2/rollback", "s2", "architecture",
             replace_id=eid, created_by="ai")
         assert ok and rid == eid
-        pending = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        pending = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert pending.get("proposed_revision") is not None
         # Unreviewed proposal: the live content (and its stamp) is untouched so far.
         assert pending["revision"] == 1
@@ -1162,7 +1162,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
         ok, msg = store.approve_decision(str(repo), eid, "approve")
         assert ok, msg
-        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        approved = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert approved["revision"] == 2
         assert approved["content"] == "Rollback endpoint is /api/v2/rollback"
         assert approved["approved_by"] == "human"
@@ -1170,7 +1170,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
     def test_suggested_update_promotion_ordering_pin(self, repo):
         """Ordering pin: `_apply_approval` stamps `approved_by` AFTER `_promote_proposal`
-        (which calls `_append_revision` with the proposal's own source — 'ai' by default,
+        (which calls `revisions.append_revision` with the proposal's own source — 'ai' by default,
         NOT 'human'). If a future change stamped BEFORE promoting again, the chokepoint's
         invalidation would immediately erase the stamp the approval action just set, and
         this assertion would catch it. The promoted revision's own `source` field stays
@@ -1185,8 +1185,8 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
         ok, msg = store.approve_decision(str(repo), eid, "approve")
         assert ok, msg
-        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
-        assert store._current_revision(approved)["source"] == "ai"
+        approved = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        assert revisions.current_revision(approved)["source"] == "ai"
         assert approved["approved_by"] == "human"
         assert guard_engine._guard_trusted(approved) is True
 
@@ -1197,17 +1197,17 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
                              status="approved", approved_by="human",
                              source_files=["auth/hash.py"])
         eid = entry["id"]
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], eid)
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], eid)
         stored["memory_key"] = "mem-1"
-        store._save(str(repo), data)
+        store.save(str(repo), data)
         assert guard_engine._guard_trusted(stored) is True
 
         status = store.upsert_memory_decision(
             str(repo), "Use argon2 for password hashing", "s2", "convention", "mem-1")
         assert status == "updated"
 
-        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
+        updated = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert updated["revision"] == 2
         assert "approved_by" not in updated
         assert guard_engine._guard_trusted(updated) is False
@@ -1216,7 +1216,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 # ── Greptile P1 #2: confidence recomputed AFTER stamp invalidation, not before ─────────
 
 class TestConfidenceRecomputedAfterStampInvalidation:
-    """`_append_revision` used to snapshot confidence (`_compute_confidence`) BEFORE
+    """`revisions.append_revision` used to snapshot confidence (`_compute_confidence`) BEFORE
     popping `approved_by` — so a non-human revision replacing human-approved content still
     carried the ~40-point approval bonus and the "Approved by developer" evidence factor on
     the freshly-created revision (and the resynced head cache), even though `approved_by`
@@ -1234,8 +1234,8 @@ class TestConfidenceRecomputedAfterStampInvalidation:
             replace_id=eid, created_by="ai")
         assert ok and rid == eid
 
-        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
-        cur = store._current_revision(updated)
+        updated = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        cur = revisions.current_revision(updated)
         assert "approved_by" not in updated
         assert "Approved by developer" not in cur["evidence"]
         assert "Approved by developer" not in updated.get("confidence_factors", [])
@@ -1248,17 +1248,17 @@ class TestConfidenceRecomputedAfterStampInvalidation:
                              status="approved", approved_by="human",
                              source_files=["auth/hash.py"])
         eid = entry["id"]
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], eid)
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], eid)
         stored["memory_key"] = "mem-1"
-        store._save(str(repo), data)
+        store.save(str(repo), data)
 
         status = store.upsert_memory_decision(
             str(repo), "Use argon2 for password hashing", "s2", "convention", "mem-1")
         assert status == "updated"
 
-        updated = store._entry_by_id(store._load(str(repo))["entries"], eid)
-        cur = store._current_revision(updated)
+        updated = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        cur = revisions.current_revision(updated)
         assert "approved_by" not in updated
         assert "Approved by developer" not in cur["evidence"]
         assert "Approved by developer" not in updated.get("confidence_factors", [])
@@ -1272,8 +1272,8 @@ class TestConfidenceRecomputedAfterStampInvalidation:
 
         ok, msg = store.approve_decision(str(repo), eid, "approve")
         assert ok, msg
-        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
-        cur = store._current_revision(approved)
+        approved = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        cur = revisions.current_revision(approved)
         assert approved["approved_by"] == "human"
         assert "Approved by developer" in cur["evidence"]
         assert "Approved by developer" in approved.get("confidence_factors", [])
@@ -1283,7 +1283,7 @@ class TestConfidenceRecomputedAfterStampInvalidation:
     def test_suggested_update_promotion_still_yields_bonus_and_factor(self, repo):
         """Pin: `_apply_approval`'s Suggested-Update promotion branch (stamp-then-recompute,
         fixed earlier on this branch) still ends with the approval bonus on the promoted
-        revision, unaffected by the `_append_revision` reorder."""
+        revision, unaffected by the `revisions.append_revision` reorder."""
         entry = _seed_entry(repo, "Rollback endpoint is /api/v1/rollback", created_by="ai",
                              subtype="architecture", status="approved", approved_by="human",
                              source_files=["api/rollback.py"])
@@ -1293,8 +1293,8 @@ class TestConfidenceRecomputedAfterStampInvalidation:
 
         ok, msg = store.approve_decision(str(repo), eid, "approve")
         assert ok, msg
-        approved = store._entry_by_id(store._load(str(repo))["entries"], eid)
-        cur = store._current_revision(approved)
+        approved = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        cur = revisions.current_revision(approved)
         assert approved["approved_by"] == "human"
         assert "Approved by developer" in cur["evidence"]
         assert cur["confidence_score"] >= 40
@@ -1591,7 +1591,7 @@ class TestAnchorCandidatesForBackfill:
         result = guard_engine.anchor_candidates_for_backfill(str(repo))
         assert len(result) == 1
         assert result[0]["decision_id"] == entry["id"]
-        assert len(result[0]["candidates"]) == store._MAX_SOURCE_FILES
+        assert len(result[0]["candidates"]) == store.MAX_SOURCE_FILES
 
     def test_zero_candidates_decision_skipped_entirely(self, repo):
         _seed_entry(repo, "We use bcrypt for password hashing")
@@ -1618,7 +1618,7 @@ class TestAnchorCandidatesForBackfill:
         _write(repo, "auth/jwt.py", "x\n")
         _seed_entry(repo, "See auth/jwt.py for the JWT decision")
         guard_engine.anchor_candidates_for_backfill(str(repo))
-        entry = store._load(str(repo))["entries"][0]
+        entry = store.load(str(repo))["entries"][0]
         assert not entry.get("source_files")
 
     def test_corrupt_store_fails_soft(self, repo):
@@ -1637,7 +1637,7 @@ class TestApplyBackfillAnchors:
         entry = _seed_entry(repo, "See auth/jwt.py for the JWT decision")
         count = store.apply_backfill_anchors(str(repo), {entry["id"]: ["auth/jwt.py"]})
         assert count == 1
-        loaded = next(e for e in store._load(str(repo))["entries"] if e["id"] == entry["id"])
+        loaded = next(e for e in store.load(str(repo))["entries"] if e["id"] == entry["id"])
         assert loaded["source_files"] == ["auth/jwt.py"]
         assert loaded["anchor_commit"]
 
@@ -1654,13 +1654,13 @@ class TestApplyBackfillAnchors:
         _write(repo, "auth/jwt.py", "x\n")
         _write(repo, "auth/oauth.py", "x\n")
         calls = []
-        real_save = store._save
+        real_save = store.save
 
         def _counting_save(repo_path, data):
             calls.append(1)
             real_save(repo_path, data)
 
-        monkeypatch.setattr(store, "_save", _counting_save)
+        monkeypatch.setattr(store, "save", _counting_save)
         count = store.apply_backfill_anchors(
             str(repo), {e1["id"]: ["auth/jwt.py"], e2["id"]: ["auth/oauth.py"]})
         assert count == 2
@@ -1682,7 +1682,7 @@ class TestApplyBackfillAnchors:
         # bypassing _anchor_sources) — a real pre-existing anchor snapshot to diff
         # against for byte-identity.
         before = copy.deepcopy(
-            next(e for e in store._load(str(repo))["entries"]
+            next(e for e in store.load(str(repo))["entries"]
                  if e["id"] == already_anchored["id"]))
         fresh = _seed_entry(repo, "See auth/oauth.py for the OAuth decision")
 
@@ -1692,7 +1692,7 @@ class TestApplyBackfillAnchors:
              fresh["id"]: ["auth/oauth.py"]})
 
         assert count == 1  # only the fresh decision counts as newly anchored
-        after_entries = {e["id"]: e for e in store._load(str(repo))["entries"]}
+        after_entries = {e["id"]: e for e in store.load(str(repo))["entries"]}
         assert after_entries[already_anchored["id"]] == before
         assert after_entries[fresh["id"]]["source_files"] == ["auth/oauth.py"]
         assert after_entries[fresh["id"]]["anchor_commit"]
@@ -1742,7 +1742,7 @@ class TestAnchorBackfillEndToEnd:
         assert len(result["advisories"]) == 1
         assert result["advisories"][0]["decision_id"] == entry["id"]
         assert result["advisories"][0]["reason"] == "source_files match"
-        anchored = store._entry_by_id(store._load(str(repo))["entries"], entry["id"])
+        anchored = store.entry_by_id(store.load(str(repo))["entries"], entry["id"])
         assert anchored["source_files"] == ["auth/jwt.py"]
         assert anchored["anchor_commit"]
 
@@ -1758,8 +1758,8 @@ class TestArmGuard:
         msg = guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern=r"TODO",
                                message="no TODOs allowed")
         assert isinstance(msg, str) and msg
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         gc = stored["guard_check"]
         assert gc["type"] == "regex"
         assert gc["pattern"] == "TODO"
@@ -1771,30 +1771,30 @@ class TestArmGuard:
     def test_arm_regex_with_i_flag(self, repo):
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern=r"todo", flags="i")
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert stored["guard_check"]["flags"] == "i"
 
     def test_arm_secret_success(self, repo):
         entry = _seed_entry(repo, "Never commit secrets")
         guard_engine.arm_guard(str(repo), entry["id"], "secret")
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert stored["guard_check"]["type"] == "secret"
         assert stored["guard_check"]["pattern"] == ""
 
     def test_arm_honors_paths_glob(self, repo):
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO", paths="*.py")
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert stored["guard_check"]["paths"] == "*.py"
 
     def test_arm_short_id_resolution(self, repo):
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"][:8], "regex", pattern="TODO")
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert stored.get("guard_check")
 
     def test_arm_refuses_unknown_id(self, repo):
@@ -1835,24 +1835,24 @@ class TestArmGuard:
     def test_arm_global_entry(self, repo):
         entry = _seed_entry(repo, "Never commit TODO markers globally", global_store=True)
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
-        data = store._load_global()
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load_global()
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert stored.get("guard_check")
 
     def test_arm_repo_entry_preferred_over_global_when_id_collides(self, repo):
         # Extremely unlikely in production (real UUIDs), but pins the documented
         # resolution order: repo store is tried before the global store.
         entry = _seed_entry(repo, "Repo-scoped decision")
-        global_data = store._load_global()
+        global_data = store.load_global()
         clashing = store._new_decision_entry("Global-scoped decision", "s", "architecture",
                                               created_by="human", status="approved")
         clashing["id"] = entry["id"]
         global_data["entries"].append(clashing)
-        store._save_global(global_data)
+        store.save_global(global_data)
 
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
-        repo_entry = store._entry_by_id(store._load(str(repo))["entries"], entry["id"])
-        global_entry = store._entry_by_id(store._load_global()["entries"], entry["id"])
+        repo_entry = store.entry_by_id(store.load(str(repo))["entries"], entry["id"])
+        global_entry = store.entry_by_id(store.load_global()["entries"], entry["id"])
         assert repo_entry.get("guard_check")
         assert not global_entry.get("guard_check")
 
@@ -1862,16 +1862,16 @@ class TestDisarmGuard:
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
         guard_engine.disarm_guard(str(repo), entry["id"])
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert "guard_check" not in stored
 
     def test_disarm_global_entry(self, repo):
         entry = _seed_entry(repo, "Never commit TODO markers globally", global_store=True)
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
         guard_engine.disarm_guard(str(repo), entry["id"])
-        data = store._load_global()
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load_global()
+        stored = store.entry_by_id(data["entries"], entry["id"])
         assert "guard_check" not in stored
 
     def test_disarm_unknown_id_raises(self, repo):
@@ -1890,13 +1890,13 @@ class TestArmedRulesLifecycle:
     def test_armed_approved_entry_is_returned(self, repo):
         entry = _seed_entry(repo, "Never commit TODO markers")
         guard_engine.arm_guard(str(repo), entry["id"], "regex", pattern="TODO")
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         rules = guard_engine._armed_rules(data["entries"])
         assert [r["id"] for r in rules] == [entry["id"]]
 
     def test_unarmed_entry_excluded(self, repo):
         _seed_entry(repo, "Never commit TODO markers")
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         assert guard_engine._armed_rules(data["entries"]) == []
 
     def test_ignored_after_arming_stops_firing_without_disarm(self, repo):
@@ -1905,8 +1905,8 @@ class TestArmedRulesLifecycle:
         ok, msg = store.approve_decision(str(repo), entry["id"], "ignore")
         assert ok, msg
 
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         # guard_check is still physically present (no disarm happened)...
         assert stored.get("guard_check")
         # ...but the runtime re-check excludes it because status != approved.
@@ -2182,7 +2182,7 @@ class TestGuardStagedViolations:
                     + ", ".join(f"lib{i}/part{j}.py" for j in range(15))
                     + f" and contexer{i}.store, tests/test_{i}.py")
 
-        data = store._load(str(repo))
+        data = store.load(str(repo))
         data["entries"] = [
             store._new_decision_entry(_content(i), "perf-session", "architecture",
                                        created_by="human", status="approved")
@@ -2190,7 +2190,7 @@ class TestGuardStagedViolations:
         ]
         for i, entry in enumerate(data["entries"]):
             entry["source_files"] = [f"other{i}/thing{i}.py"]
-        store._save(str(repo), data)
+        store.save(str(repo), data)
         staged = [f"src/module_{i}/file_{i}.py" for i in range(500)]
 
         start = time.time()
@@ -2205,11 +2205,11 @@ class TestGuardStagedViolations:
         # (defensive: guard_check written directly, bypassing arm_guard's validation)
         # must never raise the whole guard_staged call.
         entry = _seed_entry(repo, "Weird rule")
-        data = store._load(str(repo))
-        stored = store._entry_by_id(data["entries"], entry["id"])
+        data = store.load(str(repo))
+        stored = store.entry_by_id(data["entries"], entry["id"])
         stored["guard_check"] = {"type": "regex", "pattern": "(unclosed", "flags": "",
                                   "paths": "", "message": "", "armed_at": "t"}
-        store._save(str(repo), data)
+        store.save(str(repo), data)
         _write(repo, "a.py", "# TODO fix this\n")
         _git(repo, "add", "a.py")
         result = guard_engine.guard_staged(str(repo))

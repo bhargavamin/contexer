@@ -97,7 +97,7 @@ class TestUpdateGlobalDecision:
     def test_written_to_global_file_not_repo_file(self, isolated_store):
         _add_global("Use uv not pip", "convention")
         global_file = isolated_store / "_global.json"
-        repo_slug = store._slug(REPO)
+        repo_slug = store.repo_slug(REPO)
         repo_file = isolated_store / f"{repo_slug}.json"
         assert global_file.exists()
         assert not repo_file.exists()
@@ -106,7 +106,7 @@ class TestUpdateGlobalDecision:
         _add_global("Use uv not pip", "convention")
         _add_repo("Repo-specific constraint", "constraint")
         global_data = json.loads((isolated_store / "_global.json").read_text())
-        repo_slug = store._slug(REPO)
+        repo_slug = store.repo_slug(REPO)
         repo_data = json.loads((isolated_store / f"{repo_slug}.json").read_text())
         global_contents = [e["content"] for e in global_data["entries"]]
         repo_contents = [e["content"] for e in repo_data["entries"]]
@@ -144,10 +144,10 @@ class TestGetGlobalDecisions:
 
     def test_returns_only_decisions_not_tasks(self):
         # Tasks can't be stored globally, but verify type filter is applied
-        data = store._load_global()
+        data = store.load_global()
         data["entries"].append({"id": "x", "type": "task", "content": "some task",
                                 "session_id": SESSION, "timestamp": "2024-01-01T00:00:00+00:00"})
-        store._save_global(data)
+        store.save_global(data)
         decisions = store.get_global_decisions()
         assert not any(d["type"] == "task" for d in decisions)
 
@@ -210,7 +210,7 @@ class TestUnreadableGlobalStore:
     def test_a_session_read_still_degrades_instead_of_raising(self):
         _add_global("Never commit untested code to the main branch", "constraint")
         _truncate_global()
-        assert store._load_global() == {"repo_path": store.GLOBAL_SLUG, "entries": []}
+        assert store.load_global() == {"repo_path": store.GLOBAL_SLUG, "entries": []}
         assert store.get_global_decisions() == []
 
 
@@ -245,10 +245,10 @@ class TestListGlobalRules:
 
     def test_only_decision_entries_are_listed(self):
         _add_global("Use uv not pip for dependency management", "convention")
-        data = store._load_global()
+        data = store.load_global()
         data["entries"].append({"id": "x", "type": "task", "content": "some task",
                                 "session_id": SESSION, "timestamp": "2024-01-01T00:00:00+00:00"})
-        store._save_global(data)
+        store.save_global(data)
         assert [r["id"] for r in store.list_global_rules()["rules"]] != ["x"]
         assert len(store.list_global_rules()["rules"]) == 1
 
@@ -444,7 +444,7 @@ class TestGlobalRecurrence:
 
     def test_new_global_entry_has_recurrence_fields(self):
         store.update_global_decision("always sign commits with a gpg key", "s1", "convention")
-        entry = store._load_global()["entries"][0]
+        entry = store.load_global()["entries"][0]
         assert entry["occurrence_count"] == 1
         assert entry["session_ids"] == ["s1"]
 
@@ -452,7 +452,7 @@ class TestGlobalRecurrence:
         store.update_global_decision("always sign every commit with a gpg key", "s1", "convention")
         ok, _ = store.update_global_decision("always sign every commit with a gpg key", "s2", "convention")
         assert ok is False  # duplicate, not stored as new
-        entries = store._load_global()["entries"]
+        entries = store.load_global()["entries"]
         assert len(entries) == 1
         assert entries[0]["occurrence_count"] == 2
         assert set(entries[0]["session_ids"]) == {"s1", "s2"}

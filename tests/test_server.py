@@ -15,6 +15,7 @@ import pytest
 
 import contexer.share as share_mod
 from contexer import config as _config_mod
+from contexer import review
 from contexer import server, store
 
 
@@ -25,7 +26,7 @@ def test_share_decision_is_async_tool():
 
 
 def test_share_decision_short_circuits_without_repo(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
     called = {"share": False}
     monkeypatch.setattr(share_mod, "share", lambda *a, **k: called.__setitem__("share", True))
     result = asyncio.run(server.share_decision("d", ""))
@@ -36,7 +37,7 @@ def test_share_decision_short_circuits_without_repo(monkeypatch):
 def test_share_decision_awaits_async_share_path_on_the_loop(monkeypatch):
     # The async share path is AWAITED on the event loop (no thread offload), and its args +
     # return value pass through unchanged — a single id becomes a one-element selection.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo/x")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
     seen = {}
 
     async def fake_share_ids(repo, ids, **kw):
@@ -59,7 +60,7 @@ def test_share_decision_awaits_async_share_path_on_the_loop(monkeypatch):
 def test_share_decision_does_not_block_the_event_loop(monkeypatch):
     # While the awaited share path is in-flight, the loop must stay free to make progress on
     # other coroutines. If share_decision froze the loop, no tick could land before it finished.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     order = []
 
     async def slow_share_ids(repo, ids, **kw):
@@ -86,7 +87,7 @@ def test_share_decision_cancels_wedged_push_on_timeout(monkeypatch):
     # #108: the push is AWAITED, so the deadline CANCELS it. The cancellation reaches the
     # push coroutine (no leaked worker/socket, unlike the old thread offload), and the tool
     # returns the local-first degradation message.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
     state = {"started": False, "cancelled": False}
 
@@ -110,7 +111,7 @@ def test_share_decision_cancels_wedged_push_on_timeout(monkeypatch):
 def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
     # Greptile #1: cancellation bypasses share_async's own enqueue, so the timeout handler
     # must queue the selection itself — otherwise "the outbox retries it" is a false promise.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
 
     async def wedged(repo, ids, **kw):
@@ -134,7 +135,7 @@ def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
 def _wedged_share(monkeypatch, enqueue):
     """A share that never returns, so the timeout branch runs, with `enqueue` standing in for
     the queue-for-retry step."""
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
 
     async def wedged(repo, ids, **kw):
@@ -173,7 +174,7 @@ def test_timeout_does_not_promise_a_retry_when_nothing_resolved(monkeypatch):
 
 def test_share_decision_previews_by_default_without_pushing(monkeypatch):
     # confirm=False (default) + skip_confirm off -> preview only, NOTHING is pushed.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     # Team-configured + authenticated: the preview gate only fires when a push could actually happen.
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
@@ -194,7 +195,7 @@ def test_share_decision_previews_by_default_without_pushing(monkeypatch):
 
 def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
     # A developer who set skip_confirm bypasses the preview even with confirm=False.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(skip_confirm=True))
 
@@ -209,7 +210,7 @@ def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
 
 def test_share_decision_local_mode_skips_preview(monkeypatch):
     # #2: with no team configured, don't preview a push that would no-op — go straight to share().
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile", lambda *a, **k: _config_mod.Profile())  # local
     previewed = {"n": 0}
     monkeypatch.setattr(server.store, "format_share_preview",
@@ -227,7 +228,7 @@ def test_share_decision_local_mode_skips_preview(monkeypatch):
 
 def test_share_decision_team_no_token_skips_preview(monkeypatch):
     # #B: team mode + endpoint but no resolvable token -> from_profile None -> no misleading preview.
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: None)
@@ -246,32 +247,34 @@ def test_share_decision_team_no_token_skips_preview(monkeypatch):
 
 
 def test_review_pending_returns_identified_list(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server.store, "format_pending_review", lambda r: "PENDING-LIST")
     assert server.review_pending("/repo") == "PENDING-LIST"
 
 
 def test_review_pending_no_repo(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
     assert server.review_pending("") == "No repo path detected."
 
 
 def test_resolve_conflict_delegates(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     seen = {}
 
     def fake_record(repo, entry_id, choice, session_id=""):
         seen["args"] = (repo, entry_id, choice, session_id)
         return True, "MEMO-RECORDED"
 
-    monkeypatch.setattr(server.store, "record_conflict_memo", fake_record)
+    # Patched on the OWNER, not through store's back-compat facade: server.py reaches
+    # conflicts directly, so a facade patch would no longer intercept the call.
+    monkeypatch.setattr(server.conflicts, "record_conflict_memo", fake_record)
     result = server.resolve_conflict("ab12cd34", "update", "/repo")
     assert result == "MEMO-RECORDED"
     assert seen["args"] == ("/repo", "ab12cd34", "update", server.SESSION_ID)
 
 
 def test_resolve_conflict_no_repo(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
     assert server.resolve_conflict("ab12cd34", "update", "") == "Skipped — repo path not detected."
 
 
@@ -288,7 +291,7 @@ def test_approve_decision_all_is_refused(monkeypatch, tmp_path, target):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
     repo = "/bulk/repo"
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     for c in ("Never commit secrets", "Never log PII"):
         store.update_decision(repo, c, "s", "constraint")
 
@@ -301,7 +304,7 @@ def test_approve_decision_comma_list_is_refused(monkeypatch, tmp_path):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
     repo = "/comma/repo"
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     for c in ("Never commit secrets", "Never log PII"):
         store.update_decision(repo, c, "s", "constraint")
     ids = [d["id"][:8] for d in store.get_pending_decisions(repo)]
@@ -315,7 +318,7 @@ def test_bulk_refusal_covers_ignore_too(monkeypatch, tmp_path):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
     repo = "/ignorebulk/repo"
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     store.update_decision(repo, "Never commit secrets", "s", "constraint")
 
     out = server.approve_decision("all", "ignore")
@@ -327,7 +330,7 @@ def test_approve_decision_single_id_still_works(monkeypatch, tmp_path):
     from contexer import store
     monkeypatch.setattr(store, "STORE_DIR", tmp_path)
     repo = "/single/repo"
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: repo)
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     _ok, eid = store.update_decision(repo, "Never commit secrets", "s", "constraint")
 
     server.approve_decision(eid[:8], "approve")
@@ -345,7 +348,7 @@ def test_multi_target_with_source_files_raises_not_refusal_string(monkeypatch, t
     """A multi-target carrying source_files is caller misuse of the API, so it keeps RAISING
     rather than returning the developer-facing bulk-refusal text — and it must never reach
     the store."""
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
 
     def _boom(*a, **k):
         raise AssertionError("must not reach the store")
@@ -357,13 +360,13 @@ def test_multi_target_with_source_files_raises_not_refusal_string(monkeypatch, t
 
 
 def test_list_shareable_returns_list(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server.store, "format_shareable_list", lambda r: "SHAREABLE-LIST")
     assert server.list_shareable("/repo") == "SHAREABLE-LIST"
 
 
 def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
@@ -380,7 +383,7 @@ def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
 
 
 def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     got = {}
@@ -404,7 +407,7 @@ def test_get_context_logs_followup_on_matching_pointer(tmp_repo):
         "s1", "architecture",
     )
     store.get_context_for_prompt(tmp_repo, "why the schema design here?", "sess-x")
-    path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+    path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
     assert json.loads(path.read_text().splitlines()[-1])["e"] == "pointer"
 
     expected = store.get_context(tmp_repo, "db")
@@ -422,7 +425,7 @@ def test_get_context_no_followup_without_prior_pointer(tmp_repo):
         "s1", "architecture",
     )
     server.get_context(tmp_repo, "db")  # no pointer was ever logged for this repo
-    path = store.STORE_DIR / f".retrieval_{store._slug(tmp_repo)}.jsonl"
+    path = store.STORE_DIR / f".retrieval_{store.repo_slug(tmp_repo)}.jsonl"
     assert not path.exists()
 
 
@@ -440,7 +443,7 @@ def test_bootstrap_context_attaches_ask_shape_only_when_gaps_exist(monkeypatch):
     """The gap-question ask shape rides the tool result, not the session-start injection:
     it is unusable without gaps, while the injected block is paid on every context-less
     session start including the skip path."""
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo/x")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
     monkeypatch.setattr(
         server.store, "bootstrap_apply",
         lambda *a, **k: {"gaps": [{"question": "What does this repo do?"}], "stored": 3},
@@ -455,7 +458,7 @@ def test_bootstrap_context_attaches_ask_shape_only_when_gaps_exist(monkeypatch):
 
 
 def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
-    monkeypatch.setattr(server.store, "_resolve_repo", lambda p: "/repo/x")
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
     monkeypatch.setattr(server.store, "bootstrap_scan",
                         lambda *a, **k: {"gaps": [{"question": "Tests in scope?"}]})
     assert "how_to_ask" in json.loads(server.bootstrap_context("/repo/x", apply=False))
@@ -466,7 +469,7 @@ def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
 def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
     # The WRITE path resolves verbosely (it stamps repo_source onto the new entry), so the
     # double has to mirror that — patching _resolve_repo alone no longer intercepts it.
-    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     narrative = ("Investigated (2026-08-05) the loader bug at length. " +
                  " ".join(["detail"] * 150))
     out = server.update_context(content=narrative)
@@ -477,16 +480,16 @@ def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
 
 def test_update_context_relays_the_refusal_ack(tmp_repo, monkeypatch):
     # Issue #202: the refused correction must not come back as a "pending review" prompt.
-    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     standing = "Use Postgres for the decision store; SQLite won't handle concurrent sessions"
     store.update_decision(tmp_repo, standing, "s1", "architecture")
-    data = store._load(tmp_repo)
+    data = store.load(tmp_repo)
     entry = data["entries"][0]
     entry["status"] = "approved"
-    entry["proposed_revision"] = store._build_proposal(
+    entry["proposed_revision"] = review.build_proposal(
         entry, "Switch to DynamoDB for the decision store", "architecture", "s2",
         datetime.now(timezone.utc).isoformat(), source="human")
-    store._save(tmp_repo, data)
+    store.save(tmp_repo, data)
     out = server.update_context(content="Switch to Cassandra for the decision store",
                                 subtype="architecture", replace_id=entry["id"])
     assert "Correction NOT stored" in out and entry["id"][:8] in out
@@ -508,18 +511,18 @@ def test_update_global_context_bounce_names_itself(monkeypatch):
 def test_update_context_stamps_which_signal_chose_the_store(tmp_repo, monkeypatch):
     # End-to-end: the branch that picked this store is recorded on the entry, so a decision
     # that lands in the wrong repo is diagnosable (scope_audit reads it back).
-    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "pointer"))
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "pointer"))
     server.update_context(content="Use Postgres for the orders schema", subtype="architecture")
-    (entry,) = store._load(tmp_repo)["entries"]
+    (entry,) = store.load(tmp_repo)["entries"]
     assert entry["repo_source"] == "pointer"
 
 
 def test_update_context_bounces_a_multi_section_document(tmp_repo, monkeypatch):
-    monkeypatch.setattr(store, "_resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     filler = " ".join(["detail"] * 60)
     blob = (f"PRT-98 — why the picker never showed. WHY IT IS INVISIBLE: it is a session "
             f"task. {filler} WHAT THIS ADDS: a create dialog. {filler} "
             f"DECIDED SCOPE BOUNDARIES: sales only. {filler}")
     out = server.update_context(content=blob)
     assert "multi-section document" in out
-    assert store._load(tmp_repo)["entries"] == []      # nothing written
+    assert store.load(tmp_repo)["entries"] == []      # nothing written

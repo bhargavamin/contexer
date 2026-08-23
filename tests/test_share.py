@@ -154,7 +154,7 @@ def test_share_local_mode_message(tmp_repo, monkeypatch):
 
 def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-9" in msg
@@ -172,7 +172,7 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
 def test_share_happy_path_includes_title(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "use postgres for storage", "s1",
                           subtype="architecture", title="Storage: Postgres")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     share.share(tmp_repo, profile=TEAM)
     assert fake.calls[0]["title"] == "Storage: Postgres"
@@ -180,7 +180,7 @@ def test_share_happy_path_includes_title(tmp_repo, monkeypatch):
 
 def test_share_no_git_origin_pushes_repo_none(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "decision without a remote origin", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-x")
     assert "srv-x" in share.share(tmp_repo, profile=TEAM)
     assert fake.calls[0]["repo"] is None
@@ -189,7 +189,7 @@ def test_share_no_git_origin_pushes_repo_none(tmp_repo, monkeypatch):
 def test_share_by_id_prefix(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "alpha shareable decision", "s1", subtype="architecture")
     store.update_decision(tmp_repo, "beta newer decision here", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-a")
     share.share(tmp_repo, id1[:8], profile=TEAM)
     assert fake.calls[0]["decision_id"] == id1  # shared the requested one, not the latest
@@ -197,7 +197,7 @@ def test_share_by_id_prefix(tmp_repo, monkeypatch):
 
 def test_share_degraded_unreachable(tmp_repo, monkeypatch, capsys):
     store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share(tmp_repo, profile=TEAM)
     assert "fail" in msg.lower()
@@ -206,7 +206,7 @@ def test_share_degraded_unreachable(tmp_repo, monkeypatch, capsys):
 
 def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
     store.update_decision(tmp_repo, "decision with bad token sync", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteAuthError("401"))
     assert "fail" in share.share(tmp_repo, profile=TEAM).lower()
     err = capsys.readouterr().err
@@ -216,7 +216,7 @@ def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
 def test_reconcile_previews_then_atomically_submits_team_candidate(tmp_repo, monkeypatch):
     _, did = store.update_decision(
         tmp_repo, "scope adapter rule to new assistant targets", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
 
     class Fake:
         def __init__(self):
@@ -275,7 +275,7 @@ def test_reconcile_requires_explicit_team_when_memberships_are_ambiguous(tmp_rep
 
 def test_cli_reconcile_confirms_and_routes_team(monkeypatch, capsys):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda: TEAM)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     captured = {}
@@ -295,7 +295,7 @@ def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, m
     secret = "AKIAIOSFODNN7EXAMPLE"
     _, did = store.update_decision(
         tmp_repo, f"keep atomic retries identical with {secret}", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
 
     class Fake:
         def list_teams(self):
@@ -329,7 +329,7 @@ def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, m
 def test_heads_changed_is_not_blindly_queued(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "review moved heads first", "s1",
                                    subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
 
     class Fake:
         def list_teams(self):
@@ -358,7 +358,7 @@ def test_heads_changed_is_not_blindly_queued(tmp_repo, monkeypatch):
 def test_reconcile_falls_back_for_server_without_capability_tool(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "support the older team server", "s1",
                                    subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
 
     class Fake:
         def __init__(self):
@@ -391,7 +391,7 @@ def test_reconcile_falls_back_with_explicit_team_when_discovery_is_missing(
         tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "support team-id fallback", "s1",
                                    subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
 
     class Fake:
         def __init__(self):
@@ -424,7 +424,7 @@ def test_reconcile_falls_back_with_explicit_team_when_capabilities_are_generic(
         tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "support generic capability servers", "s1",
                                    subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
 
     class Fake:
         def __init__(self):
@@ -541,7 +541,7 @@ def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
     _, id3 = store.update_decision(tmp_repo, "snake case file naming", "s1", subtype="convention")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share_all(tmp_repo, profile=TEAM)
     assert "3" in msg
@@ -555,7 +555,7 @@ def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
 def test_share_all_happy_path_includes_title(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "use postgres for storage", "s1",
                           subtype="architecture", title="Storage: Postgres")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     share.share_all(tmp_repo, profile=TEAM)
     assert fake.batches[0][0]["title"] == "Storage: Postgres"
@@ -565,7 +565,7 @@ def test_share_all_excludes_ignored(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "keep this decision here", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "ignore this one please now", "s1", subtype="constraint")
     store.approve_decision(tmp_repo, id2, "ignore")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-1")
     share.share_all(tmp_repo, profile=TEAM)
     assert [c["decision_id"] for c in fake.batches[0]] == [id1]
@@ -591,7 +591,7 @@ def test_share_all_failure_enqueues_failed_and_remaining(tmp_repo, monkeypatch):
     fake = _FlakyRS()
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     remote.reset_degradation_warnings()
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share, "_BATCH_SIZE", 1)  # one decision per chunk -> partial progress
     msg = share.share_all(tmp_repo, profile=TEAM)
     assert "1" in msg  # one synced (the first chunk)
@@ -607,7 +607,7 @@ def test_share_all_partial_enqueue_failure_message_is_accurate(tmp_repo, monkeyp
                                    subtype="architecture")
     store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
     store.update_decision(tmp_repo, "snake case file naming", "s1", subtype="convention")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))  # first push fails -> queue all 3
     real_enqueue = share._enqueue
     calls = {"n": 0}
@@ -627,7 +627,7 @@ def test_share_all_partial_enqueue_failure_message_is_accurate(tmp_repo, monkeyp
 def test_share_all_total_failure_queues_everything(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "never commit secrets ever", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share_all(tmp_repo, profile=TEAM)
     assert "fail" in msg.lower() or "queued" in msg.lower()
@@ -638,7 +638,7 @@ def test_share_all_total_failure_queues_everything(tmp_repo, monkeypatch):
 
 def test_share_degraded_enqueues_payload(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share(tmp_repo, profile=TEAM)
     assert "queued" in msg.lower()
@@ -659,7 +659,7 @@ def test_share_degraded_enqueue_preserves_title(tmp_repo, monkeypatch):
     # later drain can still send it (round-trip guarantee, Decision Titles v2 Task 4).
     store.update_decision(tmp_repo, "decision that fails to sync", "s1",
                           subtype="architecture", title="Sync failure heading")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     share.share(tmp_repo, profile=TEAM)
     entry = share._load_outbox()[0]
@@ -668,7 +668,7 @@ def test_share_degraded_enqueue_preserves_title(tmp_repo, monkeypatch):
 
 def test_share_degraded_auth_also_enqueues(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "decision with bad token sync", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteAuthError("401"))
     share.share(tmp_repo, profile=TEAM)
     assert len(share._load_outbox()) == 1  # auth failures enqueue too -- retry after re-login
@@ -688,7 +688,7 @@ def test_share_local_mode_does_not_enqueue(tmp_repo, monkeypatch):
 
 def test_share_happy_path_does_not_enqueue(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _fake(monkeypatch, ret="srv-9")
     share.share(tmp_repo, profile=TEAM)
     assert share._load_outbox() == []
@@ -928,7 +928,7 @@ def test_a_failed_queue_is_reported_as_not_queued_not_as_queued(tmp_repo, monkey
     Uses a REAL projection, not a hand-made dict: a malformed dict makes `_payload` throw before
     the outbox is touched at all, so the test would pass for the wrong reason and keep passing
     if the fix were reverted."""
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _, did = store.update_decision(tmp_repo, "a decision that cannot be queued", "s1",
                                    subtype="constraint")
     dec = store.get_shareable(tmp_repo, did)
@@ -944,7 +944,7 @@ def test_cancellation_still_wins_when_queueing_fails(tmp_repo, monkeypatch):
     """The two cancellation paths queue on the way out. A queue refusal there must not replace
     the CancelledError, or a cancelled share stops looking cancelled to its caller."""
     _damaged_outbox()
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _, did = store.update_decision(tmp_repo, "a decision to share while cancelled", "s1",
                                    subtype="constraint")
 
@@ -966,7 +966,7 @@ def test_share_drains_queued_items_before_new_push(tmp_repo, monkeypatch):
                     "repo": "r", "rationale": None, "confidence": 80,
                     "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
     _, did = store.update_decision(tmp_repo, "brand new decision to share", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-ok")
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-ok" in msg
@@ -995,7 +995,7 @@ def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
     """A failing _enqueue (disk full saving the outbox) must not escape share() - and the
     message must not promise a queued retry that was never recorded."""
     store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
 
     def boom(payload):
@@ -1012,7 +1012,7 @@ def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
 
 def test_share_success_marks_shared(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, ret="srv-9")
     share.share(tmp_repo, profile=TEAM)
     marked = share.shared_map(TEAM.endpoint)
@@ -1022,7 +1022,7 @@ def test_share_success_marks_shared(tmp_repo, monkeypatch):
 
 def test_share_failure_does_not_mark_shared(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     share.share(tmp_repo, profile=TEAM)
     assert did not in share.shared_map(TEAM.endpoint)
@@ -1034,7 +1034,7 @@ def test_share_all_capacity_skip_not_marked_shared(tmp_repo, monkeypatch):
     projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
               "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
     remote.reset_degradation_warnings()
     share.share_all(tmp_repo, profile=TEAM)
@@ -1049,7 +1049,7 @@ def test_share_all_invalid_skip_not_marked_shared(tmp_repo, monkeypatch):
     projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
               "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
     remote.reset_degradation_warnings()
     share.share_all(tmp_repo, profile=TEAM)
@@ -1088,7 +1088,7 @@ def test_shared_map_endpoint_scoped(tmp_repo, monkeypatch):
     # Pushed while pointed at endpoint A; a profile resolved to a DIFFERENT endpoint must show
     # NO marker - switching endpoints must never leak a stale/false "already shared" hint.
     _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, ret="srv-9")
     share.share(tmp_repo, profile=TEAM)
     assert did in share.shared_map(TEAM.endpoint)
@@ -1117,7 +1117,7 @@ def test_mark_shared_write_failure_does_not_raise_or_block_share(tmp_repo, monke
     # A marker is purely cosmetic: a write failure to .shared.json must not surface, and must
     # not block or alter the (successful) share's own return value.
     store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, ret="srv-9")
 
     def boom(*a, **k):
@@ -1135,7 +1135,7 @@ def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("not json at all")
     _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, ret="srv-9")
     msg = share.share(tmp_repo, profile=TEAM)
     assert "srv-9" in msg
@@ -1146,7 +1146,7 @@ def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
 
 def test_cli_share_prints_result(monkeypatch, capsys):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(share, "share", lambda repo, decision_id="", **kw: f"shared {decision_id or 'latest'}")
     cli.share_cmd(["abc123", "--yes"])  # --yes bypasses the push-confirm preview
     assert "abc123" in capsys.readouterr().out
@@ -1154,7 +1154,7 @@ def test_cli_share_prints_result(monkeypatch, capsys):
 
 def test_cli_share_all_flag(monkeypatch, capsys):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(share, "share_all", lambda repo, **kw: "shared all of them")
     cli.share_cmd(["--all", "--yes"])
     assert "shared all of them" in capsys.readouterr().out
@@ -1163,7 +1163,7 @@ def test_cli_share_all_flag(monkeypatch, capsys):
 def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
     # Without --yes, share_cmd previews and asks; answering 'n' pushes nothing.
     from contexer import cli, config
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     monkeypatch.setattr(store, "get_shareable",
                         lambda repo, did="": {"id": "abc12345", "type": "constraint", "content": "never X"})
@@ -1178,7 +1178,7 @@ def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
 
 def test_share_ids_shares_selected_in_one_batch(tmp_repo, monkeypatch):
     # A multi-pick resolves each id then pushes them all in ONE batched call, not one per id.
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(store, "get_shareable", lambda repo, did="": {
         "id": did, "type": "constraint", "content": f"c-{did}",
         "confidence": None, "evidence": None, "source": "ai"})
@@ -1191,7 +1191,7 @@ def test_share_ids_shares_selected_in_one_batch(tmp_repo, monkeypatch):
 
 def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
     # A typo'd id in a multi-pick is REPORTED, not silently dropped; the valid id still shares.
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
 
     def _get(repo, did=""):
         return ({"id": did, "type": "constraint", "content": f"c-{did}",
@@ -1213,7 +1213,7 @@ def test_share_ids_empty_shares_most_recent(monkeypatch):
 
 def _three_shareable(monkeypatch):
     from contexer import config
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: [
         {"id": "aaa11111", "type": "constraint", "content": "never X"},
@@ -1242,7 +1242,7 @@ def test_cli_share_no_args_picker_multi_select(monkeypatch, capsys):
 def _mixed_status_shareable(monkeypatch):
     """Two not-yet-approved decisions + one approved, for the unapproved-share guard."""
     from contexer import config
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: [
         {"id": "aaa11111", "type": "constraint", "content": "never X", "status": "suggested"},
@@ -1351,7 +1351,7 @@ def test_cli_share_picker_shows_marker_and_orders_shared_last(monkeypatch, capsy
 
 def test_cli_share_picker_stable_order_within_each_group(monkeypatch, capsys):
     from contexer import cli, config
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     # ids are exactly 8 chars (_share_item_block truncates to id[:8]) so the printed text
     # matches these literally, with no truncation ambiguity.
@@ -1441,7 +1441,7 @@ def test_cli_share_picker_all_on_single_page_returns_shown_ids(monkeypatch, caps
 
 def _many_shareable(monkeypatch, n):
     from contexer import config
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     items = [{"id": f"id{i:06d}", "type": "convention", "title": f"Decision {i}",
               "content": f"Decision {i} body."} for i in range(1, n + 1)]
@@ -1589,7 +1589,7 @@ def test_cli_share_picker_quit_is_not_reported_as_ignored(monkeypatch, capsys):
 def test_cli_share_nothing_to_share_no_false_cancel(monkeypatch, capsys):
     # #4: an empty share prints only 'Nothing to share', not a contradictory 'Cancelled'.
     from contexer import cli, config
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     monkeypatch.setattr(store, "get_shareable", lambda repo, did="": None)
     cli.share_cmd(["missing"])
@@ -1600,7 +1600,7 @@ def test_cli_share_nothing_to_share_no_false_cancel(monkeypatch, capsys):
 
 def test_cli_share_all_with_id_rejected(monkeypatch, capsys):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     with pytest.raises(SystemExit):
         cli.share_cmd(["--all", "abc123"])
     assert "exactly one" in capsys.readouterr().err.lower()
@@ -1608,8 +1608,8 @@ def test_cli_share_all_with_id_rejected(monkeypatch, capsys):
 
 def test_cli_share_no_repo_exits(monkeypatch):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "")
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(store, "git_root", lambda p: "")
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "")
     with pytest.raises(SystemExit):
         cli.share_cmd([])
 
@@ -1650,7 +1650,7 @@ def test_share_plan_sourced_decision_preserves_plan_on_wire(tmp_repo, monkeypatc
         tmp_repo, "provisional plan decision to sync", "s1",
         subtype="architecture", created_by="plan")
     assert store.get_shareable(tmp_repo, did)["source"] == "plan"  # local value is plan
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     share.share(tmp_repo, did, profile=TEAM)
     assert fake.calls[0]["source"] == "plan"  # ... and the cloud now accepts it, unchanged
@@ -1659,7 +1659,7 @@ def test_share_plan_sourced_decision_preserves_plan_on_wire(tmp_repo, monkeypatc
 def test_share_all_plan_sourced_preserves_plan_on_wire(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "provisional plan decision one", "s1",
                           subtype="architecture", created_by="plan")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-1")
     share.share_all(tmp_repo, profile=TEAM)
     assert all(kw["source"] == "plan" for kw in fake.calls)
@@ -1669,7 +1669,7 @@ def test_payload_preserves_plan_source(tmp_repo, monkeypatch):
     _, did = store.update_decision(
         tmp_repo, "plan decision that fails to sync", "s1",
         subtype="architecture", created_by="plan")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     share.share(tmp_repo, did, profile=TEAM)
     # The queued outbox entry preserves "plan" (the cloud accepts it), so a later drain
@@ -1704,7 +1704,7 @@ def test_share_async_is_coroutine():
 
 def test_share_async_happy_path_awaits_apush(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "use postgres for storage", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _afake(monkeypatch, ret="srv-9")
     msg = asyncio.run(share.share_async(tmp_repo, profile=TEAM))
     assert "srv-9" in msg
@@ -1729,7 +1729,7 @@ def test_share_async_local_mode_message(tmp_repo, monkeypatch):
 def test_share_ids_async_shares_each_selected(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "use postgres for the database", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "never hardcode secret api keys", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _afake(monkeypatch, ret="srv-ok")
     msg = asyncio.run(share.share_ids_async(tmp_repo, [id1[:8], id2[:8]], profile=TEAM))
     assert len(fake.batches) == 1  # one awaited batched call for both, not one per id
@@ -1739,7 +1739,7 @@ def test_share_ids_async_shares_each_selected(tmp_repo, monkeypatch):
 
 def test_share_ids_async_empty_shares_most_recent(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "the newest decision to share", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _afake(monkeypatch, ret="srv-1")
     asyncio.run(share.share_ids_async(tmp_repo, [], profile=TEAM))
     assert fake.calls[0]["decision_id"] == did
@@ -1747,7 +1747,7 @@ def test_share_ids_async_empty_shares_most_recent(tmp_repo, monkeypatch):
 
 def test_share_async_degraded_enqueues(tmp_repo, monkeypatch, capsys):
     _, did = store.update_decision(tmp_repo, "decision that fails to sync", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _afake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = asyncio.run(share.share_async(tmp_repo, profile=TEAM))
     assert "queued" in msg.lower()
@@ -1758,7 +1758,7 @@ def test_share_async_degraded_enqueues(tmp_repo, monkeypatch, capsys):
 def test_share_async_serializes_overlapping_tasks(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "decision shared from overlapping tasks", "s1",
                           subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     calls = []
 
     async def scenario():
@@ -1821,7 +1821,7 @@ def test_share_async_drains_queued_before_new_push(tmp_repo, monkeypatch):
                     "repo": "r", "rationale": None, "confidence": 80,
                     "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
     _, did = store.update_decision(tmp_repo, "brand new decision to share", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: "git@github.com:a/b.git")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _afake(monkeypatch, ret="srv-ok")
     asyncio.run(share.share_async(tmp_repo, profile=TEAM))
     # queued-1 drains via the awaited batch path; the new decision via the single awaited push.
@@ -1833,7 +1833,7 @@ def test_share_async_drains_queued_before_new_push(tmp_repo, monkeypatch):
 def test_enqueue_ids_for_retry_queues_each(tmp_repo, monkeypatch):
     _, id1 = store.update_decision(tmp_repo, "use postgres for the database", "s1", subtype="architecture")
     _, id2 = store.update_decision(tmp_repo, "never hardcode secret api keys", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     n = share.enqueue_ids_for_retry(tmp_repo, [id1, id2])
     assert n == 2
     assert [e["decision_id"] for e in share._load_outbox()] == [id1, id2]
@@ -1841,7 +1841,7 @@ def test_enqueue_ids_for_retry_queues_each(tmp_repo, monkeypatch):
 
 def test_enqueue_ids_for_retry_empty_queues_most_recent(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "the newest decision here now", "s1", subtype="constraint")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     n = share.enqueue_ids_for_retry(tmp_repo, [])
     assert n == 1
     assert share._load_outbox()[0]["decision_id"] == did
@@ -1849,14 +1849,14 @@ def test_enqueue_ids_for_retry_empty_queues_most_recent(tmp_repo, monkeypatch):
 
 def test_enqueue_ids_for_retry_is_idempotent(tmp_repo, monkeypatch):
     _, did = store.update_decision(tmp_repo, "a decision to queue twice", "s1", subtype="architecture")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     share.enqueue_ids_for_retry(tmp_repo, [did])
     share.enqueue_ids_for_retry(tmp_repo, [did])  # dedup by decision_id
     assert len([e for e in share._load_outbox() if e["decision_id"] == did]) == 1
 
 
 def test_enqueue_ids_for_retry_skips_missing(tmp_repo, monkeypatch):
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     n = share.enqueue_ids_for_retry(tmp_repo, ["no-such-id"])
     assert n == 0
     assert share._load_outbox() == []
@@ -1866,7 +1866,7 @@ def test_share_async_preserves_plan_source_on_wire(tmp_repo, monkeypatch):
     _, did = store.update_decision(
         tmp_repo, "provisional plan decision to sync", "s1",
         subtype="architecture", created_by="plan")
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _afake(monkeypatch, ret="srv-9")
     asyncio.run(share.share_async(tmp_repo, did, profile=TEAM))
     assert fake.calls[0]["source"] == "plan"
@@ -1915,7 +1915,7 @@ def test_share_all_capacity_skip_requeues_only_skipped(tmp_repo, monkeypatch):
     projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
               "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
     remote.reset_degradation_warnings()
     msg = share.share_all(tmp_repo, profile=TEAM)
@@ -1936,7 +1936,7 @@ def test_drain_outbox_capacity_skip_keeps_skipped_queued(tmp_repo, monkeypatch):
 
 
 def test_share_ids_async_capacity_skip_requeues(tmp_repo, monkeypatch):
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(store, "get_shareable", lambda repo, did="": {
         "id": did, "type": "constraint", "content": f"c-{did}",
         "confidence": None, "evidence": None, "source": "ai"})
@@ -1955,7 +1955,7 @@ def test_share_all_capacity_skip_and_enqueue_failure_reports_lost(tmp_repo, monk
              {"id": "id1", "type": "architecture", "content": "d1",
               "confidence": None, "evidence": None, "source": "ai"}]
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
     monkeypatch.setattr(share, "_enqueue", lambda payload: (_ for _ in ()).throw(OSError("disk full")))
     remote.reset_degradation_warnings()
@@ -1969,7 +1969,7 @@ def test_share_all_chunks_large_selection(tmp_repo, monkeypatch):
     projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
               "confidence": None, "evidence": None, "source": "ai"} for i in range(5)]
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share, "_BATCH_SIZE", 2)
     fake = _fake(monkeypatch, ret="srv-1")
     msg = share.share_all(tmp_repo, profile=TEAM)
@@ -2005,7 +2005,7 @@ def test_share_all_invalid_skip_reported_and_dropped(tmp_repo, monkeypatch):
     projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
               "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
     monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
-    monkeypatch.setattr(store, "_git", lambda repo, *a: None)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
     remote.reset_degradation_warnings()
     msg = share.share_all(tmp_repo, profile=TEAM)
@@ -2057,7 +2057,7 @@ def test_mark_shared_still_fail_soft_when_locking_unavailable(tmp_path, monkeypa
 def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypatch):
     """The append-only log must not lose markers where advisory locking is unavailable.
 
-    `store._store_lock` yields WITHOUT serializing when fcntl is missing (non-POSIX), so a
+    `store.store_lock` yields WITHOUT serializing when fcntl is missing (non-POSIX), so a
     read-modify-write design would still drop a concurrent writer's marker there. Appending
     self-contained lines has no read to lose, so both writers survive on every platform."""
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
@@ -2110,14 +2110,14 @@ def test_shared_log_append_is_excluded_during_compaction(tmp_path, monkeypatch):
     share._append_shared([{"endpoint": ep, "id": f"old{i}", "at": "t"} for i in range(11)])
 
     folded = threading.Event()
-    real_atomic = store._atomic_write
+    real_atomic = store.atomic_write
 
     def stalled_atomic(path, text):
         folded.set()        # compaction has read the log; the replace is now pending
         time.sleep(0.2)     # widen the fold->replace window the appender must not slip into
         real_atomic(path, text)
 
-    monkeypatch.setattr(store, "_atomic_write", stalled_atomic)
+    monkeypatch.setattr(store, "atomic_write", stalled_atomic)
 
     def appender():
         folded.wait(5)
@@ -2171,7 +2171,7 @@ def test_share_global_does_not_call_git(tmp_repo, monkeypatch):
     """No repo means no origin to derive a key from. A stray _git call here would be the
     bug the repo-scoped paths have: binding a cross-repo rule to whatever repo cwd is in."""
     _add_globals("always use conventional commits here")
-    monkeypatch.setattr(store, "_git", lambda *a, **k: pytest.fail("share_global must not shell out to git"))
+    monkeypatch.setattr(store, "run_git", lambda *a, **k: pytest.fail("share_global must not shell out to git"))
     _fake(monkeypatch, ret="srv-1")
     share.share_global(profile=TEAM)
 
@@ -2179,9 +2179,9 @@ def test_share_global_does_not_call_git(tmp_repo, monkeypatch):
 def test_share_global_excludes_ignored(tmp_repo, monkeypatch):
     keep, drop = _add_globals("always use conventional commits here",
                               "never use an em dash in prose")
-    data = store._load_global()
+    data = store.load_global()
     next(e for e in data["entries"] if e["id"] == drop)["status"] = "ignored"
-    store._save_global(data)
+    store.save_global(data)
     fake = _fake(monkeypatch, ret="srv-1")
     share.share_global(profile=TEAM)
     assert [c["decision_id"] for c in fake.batches[0]] == [keep]
@@ -2212,7 +2212,7 @@ def test_share_global_failure_queues_with_no_repo(tmp_repo, monkeypatch):
 
 def test_cli_share_global_flag(monkeypatch, capsys, tmp_repo):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: None)   # NOT in a git repo
+    monkeypatch.setattr(store, "git_root", lambda p: None)   # NOT in a git repo
     monkeypatch.setattr(share, "share_global", lambda **kw: "pushed the globals")
     cli.share_cmd(["--global", "--yes"])
     assert "pushed the globals" in capsys.readouterr().out
@@ -2222,8 +2222,8 @@ def test_cli_share_global_needs_no_repo(monkeypatch, capsys, tmp_repo):
     """The repo check is skipped for --global: global rules belong to no repo, so exiting
     on 'no git repo detected' would be a gate with nothing behind it."""
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: None)
-    monkeypatch.setattr(store, "_resolve_repo", lambda p: "")
+    monkeypatch.setattr(store, "git_root", lambda p: None)
+    monkeypatch.setattr(store, "resolve_repo", lambda p: "")
     monkeypatch.setattr(share, "share_global", lambda **kw: "ok")
     cli.share_cmd(["--global", "--yes"])          # must not SystemExit
     assert "ok" in capsys.readouterr().out
@@ -2232,7 +2232,7 @@ def test_cli_share_global_needs_no_repo(monkeypatch, capsys, tmp_repo):
 @pytest.mark.parametrize("argv", [["--global", "--all"], ["--global", "abc12345"]])
 def test_cli_share_global_is_exclusive(monkeypatch, capsys, argv):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     with pytest.raises(SystemExit):
         cli.share_cmd(argv + ["--yes"])
     assert "exactly one" in capsys.readouterr().err
@@ -2240,7 +2240,7 @@ def test_cli_share_global_is_exclusive(monkeypatch, capsys, argv):
 
 def test_cli_share_global_previews_and_cancels_on_no(monkeypatch, capsys, tmp_repo):
     from contexer import cli
-    monkeypatch.setattr(store, "_git_root", lambda p: None)
+    monkeypatch.setattr(store, "git_root", lambda p: None)
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     store.update_global_decision("never use an em dash in prose", "s1", "convention")
     pushed = {"n": 0}
@@ -2256,7 +2256,7 @@ def test_cli_share_all_points_at_the_global_flag(monkeypatch, capsys, tmp_repo):
     """`--all` is repo-scoped by construction, so it must not let 'all' read as all."""
     from contexer import cli
     store.update_global_decision("never use an em dash in prose", "s1", "convention")
-    monkeypatch.setattr(store, "_git_root", lambda p: "/repo")
+    monkeypatch.setattr(store, "git_root", lambda p: "/repo")
     monkeypatch.setattr(share, "share_all", lambda repo, **kw: "shared all of them")
     cli.share_cmd(["--all", "--yes"])
     out = capsys.readouterr().out

@@ -5,7 +5,7 @@ Extracted out of store.py (same directive that produced `anchors.py` and `confli
 module per cohesive concern, store.py stays a thin call-site facade). The boundary was not
 guessed: `contexer/ui/api.py` is the only production caller and it reaches for exactly the
 names below and nothing else, and the rest of store.py called into this cluster exactly ONCE
-(`_file_mtime`, which is store-owned and stayed there). So this is a read/query layer for a
+(`file_mtime`, which is store-owned and stayed there). So this is a read/query layer for a
 web UI that had no business living inside the capture store.
 
 That one-caller property is load-bearing, so `overlap_report` did NOT come along even though it
@@ -17,15 +17,15 @@ above stops being checkable.
 
 The console must never open a store file itself (the same one-write-path rule the MCP surface
 follows), so every shape it renders is assembled here. Everything is a PURE READ except
-`delete_global_rule`: no lock, no network, and no `_load` side effects beyond the ones `_load`
+`delete_global_rule`: no lock, no network, and no `load` side effects beyond the ones `load`
 already has. When the shape the console needs does not exist yet, the fix is a new public read
 HERE, not a file read in `ui/api.py`.
 
 What deliberately did NOT move, and why: `load_diagnostics` is the third of a family with
 `global_diagnostics` and `deleted_diagnostics` (both store-owned, and `ui/api.py` calls
-`global_diagnostics` directly), so splitting one off would scatter the trio; `_store_files` /
+`global_diagnostics` directly), so splitting one off would scatter the trio; `store_files` /
 `_is_repo_store_file` enumerate which files in STORE_DIR are repo stores, which is store-level
-knowledge `scope_audit.py` also depends on by documented contract; `_file_mtime` is read by
+knowledge `scope_audit.py` also depends on by documented contract; `file_mtime` is read by
 `store.verify_scan_conventions` and `anchors.py` as well as here; and `overlap_report` is the
 terminal-only read described above.
 
@@ -43,13 +43,14 @@ import os
 import time
 from pathlib import Path
 
+from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 
 _CONSOLE_RECENT = 10          # rows in the dashboard's RECENT timeline
 
 # Reported for a store file that names no usable repo path — either it does not parse (so no
-# path could be read out of it) or the path it claims is one `_is_sane_repo` rejects. The
+# path could be read out of it) or the path it claims is one `is_sane_repo` rejects. The
 # console renders it as "store unreadable", never as "no decisions".
 _NO_REPO_PATH = "store file names no usable repo_path"
 
@@ -57,9 +58,9 @@ _NO_REPO_PATH = "store file names no usable repo_path"
 def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:
     """(store data, parse error, mtime) from ONE read of this repo's store file.
 
-    The console's poll path wants all three, and `load_diagnostics` + `_load` + `_file_mtime`
+    The console's poll path wants all three, and `load_diagnostics` + `load` + `file_mtime`
     parsed the same file TWICE and stat'd it again — every 10 seconds, over a store that is
-    routinely a few hundred KB. Data degrades to an empty store exactly like `_load` (revision
+    routinely a few hundred KB. Data degrades to an empty store exactly like `load` (revision
     migration included, so the console projections still see the normalized shape) and `error`
     is what keeps "unreadable" distinct from "empty". A missing file is a genuinely empty store,
     so it reports no error."""
@@ -70,8 +71,8 @@ def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:
     except FileNotFoundError:
         return empty, None, None
     except (OSError, UnicodeDecodeError) as exc:
-        return empty, f"{type(exc).__name__}: {exc}", store._file_mtime(path)
-    mtime = store._file_mtime(path)
+        return empty, f"{type(exc).__name__}: {exc}", store.file_mtime(path)
+    mtime = store.file_mtime(path)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -86,13 +87,13 @@ def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:
 def _inspect_store_file(path: Path) -> tuple[str, dict | None, str | None]:
     """(repo_path, parsed store or None, error or None) for one store file.
 
-    Deliberately NOT `_load`, which degrades a corrupt store to an empty one — the console
+    Deliberately NOT `load`, which degrades a corrupt store to an empty one — the console
     has to tell "unreadable" from "empty". `repo_path` is resolved even when `entries` is
     malformed, so such a store still reports its own error under its own name. It is NOT
     recoverable when the JSON itself will not parse: the repo path lives inside the file and
     the slug is a hash of it, so an unparseable file resolves with `repo_path` "" and
     addressing it is `_resolve_store`'s job, not this function's. A `repo_path` the file claims
-    but `_is_sane_repo` rejects reads as absent: a poisoned store file must not redirect a
+    but `is_sane_repo` rejects reads as absent: a poisoned store file must not redirect a
     console read."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -101,7 +102,7 @@ def _inspect_store_file(path: Path) -> tuple[str, dict | None, str | None]:
     if not isinstance(raw, dict):
         return "", None, "not a store object (no 'entries' list)"
     claimed = str(raw.get("repo_path") or "")
-    repo_path = claimed if store._is_sane_repo(claimed) else ""
+    repo_path = claimed if store.is_sane_repo(claimed) else ""
     problem = store._entries_error(raw.get("entries"))
     if problem:
         return repo_path, None, f"not a store object ({problem})"
@@ -113,7 +114,7 @@ def _repo_name(repo_path: str) -> str:
 
 
 def _console_factors(entry: dict) -> list[str]:
-    rev = store._current_revision(entry) or {}
+    rev = revisions.current_revision(entry) or {}
     return list(rev.get("evidence") or entry.get("confidence_factors") or [])
 
 
@@ -129,14 +130,14 @@ def _console_summary(entry: dict) -> dict:
     `dashboard_summary` — adding a git call per row there would multiply into a poll-time
     subprocess storm. Staleness stays confined to its two existing render sites
     (`get_context`, `_render_prompt_decisions`), both budget-capped and neither on a UI poll."""
-    content = store._current_content(entry)
-    rev = store._current_revision(entry) or {}
+    content = revisions.current_content(entry)
+    rev = revisions.current_revision(entry) or {}
     return {
         "id": entry.get("id", ""),
-        "title": entry.get("title") or store._derive_title(content),
+        "title": entry.get("title") or revisions.derive_title(content),
         "content": content,
         "subtype": entry.get("subtype", ""),
-        "status": store._entry_status(entry),
+        "status": store.entry_status(entry),
         "created_by": entry.get("created_by", "ai"),
         "timestamp": entry.get("timestamp"),
         "updated_at": entry.get("updated_at") or entry.get("timestamp"),
@@ -163,15 +164,15 @@ def _console_proposed(prop: dict) -> dict:
 
 def _console_proposal(entry: dict) -> dict:
     """A decision carrying a Suggested Update, as a before/after review card."""
-    rev = store._current_revision(entry) or {}
+    rev = revisions.current_revision(entry) or {}
     version = rev.get("version_number", entry.get("revision", 1))
     return {
         "id": entry.get("id", ""),
-        "title": entry.get("title") or store._derive_title(store._current_content(entry)),
+        "title": entry.get("title") or revisions.derive_title(revisions.current_content(entry)),
         "subtype": entry.get("subtype", ""),
-        "status": store._entry_status(entry),
+        "status": store.entry_status(entry),
         "revision": version,
-        "current": {"content": store._current_content(entry), "title": rev.get("title", ""),
+        "current": {"content": revisions.current_content(entry), "title": rev.get("title", ""),
                     "version_number": version},
         "proposed": _console_proposed(entry.get("proposed_revision") or {}),
     }
@@ -202,9 +203,9 @@ def list_stores() -> list[dict]:
     (a pending_approval decision OR a live one carrying a Suggested Update), counted from
     the store read already done here rather than a second load. `ok: false` marks a file
     that could not be parsed — a caller must render that as "unreadable", never "empty"."""
-    current = store._current_repo_path()
+    current = store.current_repo_path()
     rows = []
-    for path in store._store_files():
+    for path in store.store_files():
         repo_path, data, error = _inspect_store_file(path)
         decisions = [e for e in (data or {}).get("entries", []) if e.get("type") == "decision"]
         rows.append({
@@ -212,10 +213,10 @@ def list_stores() -> list[dict]:
             "repo_path": repo_path,
             "name": _repo_name(repo_path) or path.stem,
             "decisions": len(decisions),
-            "pending": sum(1 for e in decisions if store._entry_status(e) == "pending_approval"
+            "pending": sum(1 for e in decisions if store.entry_status(e) == "pending_approval"
                            or e.get("proposed_revision")),
             "tombstoned": len(store._load_deleted(repo_path)["entries"]) if repo_path else 0,
-            "mtime": store._file_mtime(path),
+            "mtime": store.file_mtime(path),
             "is_current": bool(repo_path) and repo_path == current,
             "ok": error is None,
             "error": error,
@@ -230,10 +231,10 @@ def _resolve_store(slug: str) -> tuple[Path, str, str | None] | None:
     THE security boundary for the console: a repo path is never accepted from a request, so no
     crafted URL can make the daemon read or write an arbitrary filesystem location.
 
-    Three spellings resolve to the same store — the file's own name, `_slug(repo_path)`, and
+    Three spellings resolve to the same store — the file's own name, `repo_slug(repo_path)`, and
     `_legacy_slug(repo_path)`. The last one is what keeps a slug STABLE across the pre-hash
     rename: `_store_path` renames `someorg_somerepo.json` to `someorg_somerepo-8539fba8.json`
-    on the first `_load`, so without it a client's slug stopped resolving the moment anything
+    on the first `load`, so without it a client's slug stopped resolving the moment anything
     opened that store. Exact spellings are matched before the legacy one, which is not
     injective (`/a/my.repo` and `/a/my_repo` share it) and must never shadow a canonical
     address. The file-name hit short-circuits the directory scan: it is the common case and
@@ -248,11 +249,11 @@ def _resolve_store(slug: str) -> tuple[Path, str, str | None] | None:
         repo_path, _data, error = _inspect_store_file(direct)
         return direct, repo_path, error
     legacy_hit = None
-    for path in store._store_files():
+    for path in store.store_files():
         repo_path, _data, error = _inspect_store_file(path)
         if not repo_path:
             continue
-        if slug == store._slug(repo_path):
+        if slug == store.repo_slug(repo_path):
             return path, repo_path, error
         if legacy_hit is None and slug == store._legacy_slug(repo_path):
             legacy_hit = (path, repo_path, error)
@@ -272,7 +273,7 @@ def resolve_store(slug: str) -> dict | None:
     no store file in STORE_DIR.
 
     `repo_path` is "" when it could not be recovered: the file will not parse (the path lives
-    inside it and the slug is a hash), or the path it claims is one `_is_sane_repo` rejects.
+    inside it and the slug is a hash), or the path it claims is one `is_sane_repo` rejects.
     That is still a KNOWN slug, so it resolves rather than 404ing, and `store_summary` is the
     ready-made degraded payload for it. `ok` is False whenever the file did not parse cleanly,
     including the case where `repo_path` IS usable (a store object with a malformed `entries`)
@@ -311,7 +312,7 @@ def store_summary(slug: str) -> dict | None:
         "is_current": False,
         "ok": False,
         "error": message,
-        "mtime": store._file_mtime(path),
+        "mtime": store.file_mtime(path),
         "counts": {"decisions": 0, "pending": 0, "proposed_updates": 0,
                    "global": len(store.get_global_decisions()), "team": 0, "tombstoned": 0},
         "subtype_mix": [],
@@ -338,7 +339,7 @@ def dashboard_summary(repo_path: str) -> dict:
     data, error, mtime = _read_store(repo_path)
     health = {"ok": error is None, "error": error}
     decisions = [e for e in data.get("entries", []) if e.get("type") == "decision"]
-    pending = [e for e in decisions if store._entry_status(e) == "pending_approval"]
+    pending = [e for e in decisions if store.entry_status(e) == "pending_approval"]
     proposals = [e for e in decisions if e.get("proposed_revision")]
     team = team_snapshot(repo_path)
     graveyard, tomb_error = store._read_deleted(repo_path)
@@ -348,7 +349,7 @@ def dashboard_summary(repo_path: str) -> dict:
     by_status: dict[str, int] = {}
     for entry in decisions:
         by_subtype[entry.get("subtype") or ""] = by_subtype.get(entry.get("subtype") or "", 0) + 1
-        status = store._entry_status(entry)
+        status = store.entry_status(entry)
         by_status[status] = by_status.get(status, 0) + 1
     recent = sorted(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp") or "",
                     reverse=True)[:_CONSOLE_RECENT]
@@ -356,7 +357,7 @@ def dashboard_summary(repo_path: str) -> dict:
     return {
         "repo_path": repo_path,
         "name": _repo_name(repo_path),
-        "is_current": repo_path == store._current_repo_path(),
+        "is_current": repo_path == store.current_repo_path(),
         "ok": health["ok"],
         "error": health["error"],
         "mtime": mtime,
@@ -413,10 +414,10 @@ def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status
     if subtype:
         rows = [e for e in rows if e.get("subtype") == subtype]
     if status:
-        rows = [e for e in rows if store._entry_status(e) == status]
+        rows = [e for e in rows if store.entry_status(e) == status]
     if query:
-        pat = store._query_pattern(query)
-        rows = [e for e in rows if store._matches_query(pat, e)]
+        pat = store.query_pattern(query)
+        rows = [e for e in rows if store.matches_query(pat, e)]
     rows.sort(key=lambda e: e.get("updated_at") or e.get("timestamp") or "", reverse=True)
     start = max(offset, 0)
     window = rows[start:] if limit <= 0 else rows[start:start + limit]
@@ -437,11 +438,11 @@ def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
     function. `confidence` widens from the summary's bare score to {score, factors} here.
     `rationale` is not a local store field today (the share wire hardcodes None); it is
     projected as whatever the entry carries, so a row imported with one still shows it."""
-    entries = [e for e in store._load(repo_path).get("entries", []) if e.get("type") == "decision"]
-    entry = store._entry_by_id(entries, entry_id)
+    entries = [e for e in store.load(repo_path).get("entries", []) if e.get("type") == "decision"]
+    entry = store.entry_by_id(entries, entry_id)
     if entry is None:
         return None
-    rev = store._current_revision(entry) or {}
+    rev = revisions.current_revision(entry) or {}
     current_revision_id = rev.get("revision_id")
     proposal = entry.get("proposed_revision")
     return {
@@ -514,17 +515,17 @@ def delete_global_rule(entry_id: str) -> tuple[bool, str]:
 
     Refuses on an unreadable file for the same reason `delete_decision` does: the degraded read
     is an empty store, so saving it back would discard every rule the file still holds."""
-    with store._store_lock(store.GLOBAL_SLUG):
+    with store.store_lock(store.GLOBAL_SLUG):
         data, error = store._read_global()
         if error is not None:
             return False, (f"Cannot delete {entry_id!r}: {store._global_path().name} is unreadable "
                            f"({error}), and overwriting it would discard every global rule "
                            "already in it. Move that file aside, then retry.")
-        entry = store._entry_by_id(data["entries"], entry_id)
+        entry = store.entry_by_id(data["entries"], entry_id)
         if entry is None:
             return False, f"Global rule {entry_id!r} not found."
         data["entries"] = [e for e in data["entries"] if e is not entry]
-        store._save_global(data)
+        store.save_global(data)
         return True, f"Deleted global rule {entry['id'][:8]}."
 
 

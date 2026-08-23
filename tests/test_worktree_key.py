@@ -62,12 +62,12 @@ class TestCanonicalStoreKey:
     def test_worktree_collapses_to_main(self, wt_repo, store_dir):
         main, wt = wt_repo
         assert store._canonical_store_key(wt) == main
-        assert store._slug(wt) == store._slug(main)
+        assert store.repo_slug(wt) == store.repo_slug(main)
         assert store._legacy_slug(wt) == store._legacy_slug(main)
         assert store._store_path(wt) == store._store_path(main)
         # Same slug → same lock sidecar name → one cross-process critical section.
-        assert (store.STORE_DIR / f"{store._slug(wt)}.lock") == \
-               (store.STORE_DIR / f"{store._slug(main)}.lock")
+        assert (store.STORE_DIR / f"{store.repo_slug(wt)}.lock") == \
+               (store.STORE_DIR / f"{store.repo_slug(main)}.lock")
 
     def test_global_slug_guard_with_cwd_in_worktree(self, wt_repo, monkeypatch):
         # _slug("") is used for global-store contexts; without the empty-path guard,
@@ -77,7 +77,7 @@ class TestCanonicalStoreKey:
         monkeypatch.chdir(wt)
         assert store._canonical_store_key("") == ""
         expected = f"-{hashlib.sha1(b'').hexdigest()[:8]}"
-        assert store._slug("") == expected
+        assert store.repo_slug("") == expected
 
     def test_submodule_gitfile_no_collapse_no_subprocess(self, tmp_path, monkeypatch):
         d = tmp_path / "sub"
@@ -135,8 +135,8 @@ class TestCanonicalStoreKey:
 
     def test_insane_root_never_selected(self, wt_repo, monkeypatch):
         main, wt = wt_repo
-        real = store._is_sane_repo
-        monkeypatch.setattr(store, "_is_sane_repo",
+        real = store.is_sane_repo
+        monkeypatch.setattr(store, "is_sane_repo",
                             lambda p: False if p == main else real(p))
         assert store._canonical_store_key(wt) == wt
 

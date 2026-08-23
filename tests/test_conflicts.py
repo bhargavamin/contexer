@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from contexer import store
+from contexer import revisions, store
 
 
 CONFLICT_STANDING = "Use Postgres for the decision store; SQLite won't handle concurrent sessions"
@@ -17,18 +17,18 @@ CONFLICT_UPDATE = "Switch to DynamoDB for the decision store; Postgres is supers
 
 
 def _entry(repo: str, eid: str) -> dict:
-    return next(e for e in store._load(repo)["entries"] if e.get("id") == eid)
+    return next(e for e in store.load(repo)["entries"] if e.get("id") == eid)
 
 
 def _conflicted(repo: str, standing: str = CONFLICT_STANDING, update: str = CONFLICT_UPDATE,
                 subtype: str = "architecture") -> str:
     """An approved decision carrying an ai-sourced Suggested Update — the shape #193 renders."""
     store.update_decision(repo, standing, "s1", subtype)
-    data = store._load(repo)
+    data = store.load(repo)
     entry = next(e for e in data["entries"]
                  if e.get("type") == "decision" and e["content"].startswith(standing[:20]))
     entry["status"] = "approved"
-    store._save(repo, data)
+    store.save(repo, data)
     eid = entry["id"]
     ok, rid = store.update_decision(repo, update, "s2", subtype, replace_id=eid)
     assert ok and rid == eid and _entry(repo, eid).get("proposed_revision")
@@ -36,10 +36,10 @@ def _conflicted(repo: str, standing: str = CONFLICT_STANDING, update: str = CONF
 
 
 def _poke_proposal(repo: str, eid: str, **fields) -> None:
-    data = store._load(repo)
+    data = store.load(repo)
     entry = next(e for e in data["entries"] if e.get("id") == eid)
     entry["proposed_revision"].update(fields)
-    store._save(repo, data)
+    store.save(repo, data)
 
 
 class TestConflictDualInjection:
@@ -112,7 +112,7 @@ class TestConflictDualInjection:
 
     def test_title_only_proposal_renders_content_once_no_guide(self, tmp_repo):
         eid = _conflicted(tmp_repo)
-        current = store._current_content(_entry(tmp_repo, eid))
+        current = revisions.current_content(_entry(tmp_repo, eid))
         _poke_proposal(tmp_repo, eid, content=current, title="Postgres over SQLite")
         out = store.get_context(tmp_repo)
         assert out.count("SQLite won't handle concurrent sessions") == 1
@@ -128,9 +128,9 @@ class TestConflictDualInjection:
 
     def test_legacy_proposal_without_title_renders_no_none(self, tmp_repo):
         eid = _conflicted(tmp_repo)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         next(e for e in data["entries"] if e.get("id") == eid)["proposed_revision"].pop("title")
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         store.record_conflict_memo(tmp_repo, eid, "update")
         out = store.get_context(tmp_repo)
         assert "None" not in out and "DynamoDB" in out
@@ -170,14 +170,14 @@ class TestConflictMemo:
     def test_identical_reproposal_after_non_revision_pop_does_not_revive_memo(self, tmp_repo):
         eid = _conflicted(tmp_repo)
         store.record_conflict_memo(tmp_repo, eid, "update")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         # A proposal death that does NOT advance the revision (verify_scan_conventions' shape).
         old = next(e for e in data["entries"] if e.get("id") == eid).pop("proposed_revision")
-        store._save(tmp_repo, data)
-        data = store._load(tmp_repo)
+        store.save(tmp_repo, data)
+        data = store.load(tmp_repo)
         next(e for e in data["entries"] if e.get("id") == eid)["proposed_revision"] = dict(
             old, created_at=datetime.now(timezone.utc).isoformat())
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         out = store.get_context(tmp_repo)
         assert "Unreviewed update" in out
         assert "picked with the developer" not in out
@@ -197,25 +197,25 @@ class TestConflictMemo:
     def test_orphan_memo_renders_identically_to_plain(self, tmp_repo):
         eid = _conflicted(tmp_repo)
         store.record_conflict_memo(tmp_repo, eid, "update")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         next(e for e in data["entries"] if e.get("id") == eid).pop("proposed_revision")
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         with_memo = store.get_context(tmp_repo)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         next(e for e in data["entries"] if e.get("id") == eid).pop("conflict_memo")
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         assert with_memo == store.get_context(tmp_repo)
 
     def test_record_holds_the_store_lock(self, tmp_repo, monkeypatch):
         eid = _conflicted(tmp_repo)
-        real_load = store._load
+        real_load = store.load
 
         def slow_load(repo_path):
             data = real_load(repo_path)
             time.sleep(0.15)          # widen the load→save window a lockless writer would lose
             return data
 
-        monkeypatch.setattr(store, "_load", slow_load)
+        monkeypatch.setattr(store, "load", slow_load)
         t = threading.Thread(target=store.record_conflict_memo, args=(tmp_repo, eid, "update"))
         t.start()
         time.sleep(0.03)
@@ -367,7 +367,7 @@ class TestProposalSlotAtReplaceId:
         eid = _conflicted(tmp_repo)
         _poke_proposal(tmp_repo, eid, source="human")
         before = dict(_entry(tmp_repo, eid)["proposed_revision"])
-        ok, rid = store.update_decision(tmp_repo, store._current_content(_entry(tmp_repo, eid)),
+        ok, rid = store.update_decision(tmp_repo, revisions.current_content(_entry(tmp_repo, eid)),
                                         "s3", "architecture", replace_id=eid,
                                         title="Postgres over SQLite")
         assert (ok, rid) == (True, eid)
@@ -411,7 +411,7 @@ class TestRefusedCorrectionAck:
         _poke_proposal(tmp_repo, eid, source="human")
         before = dict(_entry(tmp_repo, eid)["proposed_revision"])
         stored, rid, meta = store.update_decision_with_meta(
-            tmp_repo, store._current_content(_entry(tmp_repo, eid)), "s3", "architecture",
+            tmp_repo, revisions.current_content(_entry(tmp_repo, eid)), "s3", "architecture",
             replace_id=eid, title="Postgres over SQLite")
         assert (stored, rid) == (True, eid)
         assert eid[:8] in meta["refusal_ack"] and "NOT stored" in meta["refusal_ack"]
@@ -426,10 +426,10 @@ class TestRefusedCorrectionAck:
 
     def test_empty_slot_acks_nothing(self, tmp_repo):
         store.update_decision(tmp_repo, CONFLICT_STANDING, "s1", "architecture")
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         entry = data["entries"][0]
         entry["status"] = "approved"
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
         stored, rid, meta = store.update_decision_with_meta(
             tmp_repo, CONFLICT_UPDATE, "s2", "architecture", replace_id=entry["id"])
         assert (stored, rid, meta) == (True, entry["id"], {})

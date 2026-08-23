@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import memory_sync, store
+from contexer import memory_sync, revisions, store
 
 SESSION = "test-delete-session"
 
@@ -24,7 +24,7 @@ def _store_one(repo: str, content: str, **kwargs) -> str:
 
 
 def _live_ids(repo: str) -> list[str]:
-    return [e["id"] for e in store._load(repo)["entries"] if e["type"] == "decision"]
+    return [e["id"] for e in store.load(repo)["entries"] if e["type"] == "decision"]
 
 
 def _snake_file(n_snake: int) -> str:
@@ -39,7 +39,7 @@ def tracker(monkeypatch):
     time, so a test can prove which files a write path touched, in what order, and that they
     all happened inside ONE critical section."""
     state = types.SimpleNamespace(sections=0, depth=0, writes=[])
-    real_lock, real_write = store._store_lock, store._atomic_write
+    real_lock, real_write = store.store_lock, store.atomic_write
 
     @contextlib.contextmanager
     def tracked_lock(slug):
@@ -55,8 +55,8 @@ def tracker(monkeypatch):
         state.writes.append((path.name, state.depth))
         real_write(path, text)
 
-    monkeypatch.setattr(store, "_store_lock", tracked_lock)
-    monkeypatch.setattr(store, "_atomic_write", tracked_write)
+    monkeypatch.setattr(store, "store_lock", tracked_lock)
+    monkeypatch.setattr(store, "atomic_write", tracked_write)
     return state
 
 
@@ -93,7 +93,7 @@ class TestSidecar:
         assert len(data["entries"]) == 1
         tomb = data["entries"][0]
         assert tomb["id"] == entry_id
-        assert tomb["content"] == store._normalize_content(CACHE_DECISION)
+        assert tomb["content"] == revisions.normalize_content(CACHE_DECISION)
         assert tomb["deleted_by"] == "ui"
         assert tomb["deleted_at"].endswith("+00:00")
 
@@ -103,7 +103,7 @@ class TestSidecar:
         assert mode == 0o600
 
     def test_sidecar_name_is_derived_from_the_slug(self, tmp_repo):
-        assert store._deleted_path(tmp_repo).name == f"{store._slug(tmp_repo)}.deleted.json"
+        assert store._deleted_path(tmp_repo).name == f"{store.repo_slug(tmp_repo)}.deleted.json"
 
     def test_entry_leaves_the_live_store_file(self, tmp_repo):
         keep = _store_one(tmp_repo, QUEUE_DECISION)
@@ -119,7 +119,7 @@ class TestSidecar:
         raw = store._store_path(tmp_repo).read_text(encoding="utf-8")
         assert "deleted_at" not in raw
         assert "deleted_by" not in raw
-        assert store._load(tmp_repo)["entries"] == []
+        assert store.load(tmp_repo)["entries"] == []
 
     def test_two_deletes_append_to_one_sidecar(self, tmp_repo):
         first = _store_one(tmp_repo, CACHE_DECISION)
@@ -163,17 +163,17 @@ class TestSidecar:
         # delete_decision searched ALL entries, so an entry of another type was reachable by id
         # through the console's write surface.
         _store_one(tmp_repo, CACHE_DECISION)
-        data = store._load(tmp_repo)
+        data = store.load(tmp_repo)
         data["entries"].append({"id": "ctx-0000000000001", "type": "context",
                                 "content": "scratch note from a session",
                                 "timestamp": "2026-01-01T00:00:00+00:00"})
-        store._save(tmp_repo, data)
+        store.save(tmp_repo, data)
 
         ok, msg = store.delete_decision(tmp_repo, "ctx-0000000000001")
 
         assert ok is False
         assert "not found" in msg
-        assert any(e["id"] == "ctx-0000000000001" for e in store._load(tmp_repo)["entries"])
+        assert any(e["id"] == "ctx-0000000000001" for e in store.load(tmp_repo)["entries"])
         assert store.list_deleted(tmp_repo) == []
 
     def test_the_sidecar_is_capped_so_the_capture_guard_stays_bounded(self, tmp_repo,
@@ -327,7 +327,7 @@ class TestAbsentFromLiveReads:
         ok, entry_id = store.update_decision(
             tmp_repo, "Never commit generated lockfiles to the repository", SESSION,
             subtype="constraint")
-        assert ok and store._load(tmp_repo)["entries"][0]["status"] == "pending_approval"
+        assert ok and store.load(tmp_repo)["entries"][0]["status"] == "pending_approval"
         assert store.get_pending_decisions(tmp_repo)
 
         store.delete_decision(tmp_repo, entry_id)
@@ -398,14 +398,14 @@ class TestLockDiscipline:
 class TestRestore:
     def test_round_trip_returns_the_entry_unchanged(self, tmp_repo):
         entry_id = _store_one(tmp_repo, CACHE_DECISION)
-        before = json.dumps(store._load(tmp_repo)["entries"][0], sort_keys=True)
+        before = json.dumps(store.load(tmp_repo)["entries"][0], sort_keys=True)
 
         store.delete_decision(tmp_repo, entry_id)
         ok, msg = store.restore_decision(tmp_repo, entry_id)
         assert ok
         assert entry_id[:8] in msg
 
-        after = store._load(tmp_repo)["entries"]
+        after = store.load(tmp_repo)["entries"]
         assert len(after) == 1
         assert json.dumps(after[0], sort_keys=True) == before
         assert "deleted_at" not in after[0]
@@ -460,7 +460,7 @@ class TestRestoreIsIdempotent:
             raise OSError("crashed between the two writes")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(store, "_save", boom)
+            mp.setattr(store, "save", boom)
             with pytest.raises(OSError):
                 store.delete_decision(repo, entry_id)
 
@@ -634,7 +634,7 @@ class TestResurrectionGuard:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "mod.py").write_text(_snake_file(25), encoding="utf-8")
         store.bootstrap_apply(tmp_repo, SESSION)
-        mined = next(e for e in store._load(tmp_repo)["entries"]
+        mined = next(e for e in store.load(tmp_repo)["entries"]
                      if "snake_case" in e["content"])
 
         store.delete_decision(tmp_repo, mined["id"])
@@ -643,7 +643,7 @@ class TestResurrectionGuard:
         assert result["stored"] == 0
         assert result["skipped"] >= 1
         assert not any("snake_case" in e["content"]
-                       for e in store._load(tmp_repo)["entries"])
+                       for e in store.load(tmp_repo)["entries"])
 
     def test_miner_bootstrap_does_not_resurrect_the_stack_entry(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -651,14 +651,14 @@ class TestResurrectionGuard:
             '[project]\nname = "widgets-api"\nrequires-python = ">=3.12"\n'
             'dependencies = ["fastapi", "sqlalchemy", "boto3"]\n', encoding="utf-8")
         store.bootstrap_apply(tmp_repo, SESSION)
-        stack = next(e for e in store._load(tmp_repo)["entries"]
+        stack = next(e for e in store.load(tmp_repo)["entries"]
                      if e["content"].startswith("Stack: "))
 
         store.delete_decision(tmp_repo, stack["id"])
         store.bootstrap_apply(tmp_repo, SESSION)
 
         assert not any(e["content"].startswith("Stack: ")
-                       for e in store._load(tmp_repo)["entries"])
+                       for e in store.load(tmp_repo)["entries"])
 
     def test_unrelated_content_still_stores(self, tmp_repo):
         store.delete_decision(tmp_repo, _store_one(tmp_repo, CACHE_DECISION))
@@ -708,7 +708,7 @@ class TestLoadDiagnostics:
         assert store.load_diagnostics(tmp_repo) == {"ok": True, "error": None}
 
     def test_empty_but_valid_store_is_ok(self, tmp_repo):
-        store._save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
         assert store.load_diagnostics(tmp_repo) == {"ok": True, "error": None}
 
     def test_truncated_store_reports_the_parse_error(self, tmp_repo):
@@ -720,7 +720,7 @@ class TestLoadDiagnostics:
         assert diag["ok"] is False
         assert "JSONDecodeError" in diag["error"]
         # _load still degrades silently — diagnostics is the ONLY thing that tells them apart.
-        assert store._load(tmp_repo)["entries"] == []
+        assert store.load(tmp_repo)["entries"] == []
 
     def test_non_object_store_is_not_ok(self, tmp_repo):
         store._store_path(tmp_repo).write_text("[]", encoding="utf-8")
@@ -752,7 +752,7 @@ class TestSlugAddressing:
         # so clicking that row got a generic error page instead of "store unreadable".
         _store_one(tmp_repo, CACHE_DECISION)
         _truncate_store(tmp_repo)
-        slug = store._slug(tmp_repo)
+        slug = store.repo_slug(tmp_repo)
 
         resolved = store.resolve_store(slug)
 
@@ -765,7 +765,7 @@ class TestSlugAddressing:
         _store_one(tmp_repo, CACHE_DECISION)
         _truncate_store(tmp_repo)
 
-        payload = store.store_summary(store._slug(tmp_repo))
+        payload = store.store_summary(store.repo_slug(tmp_repo))
 
         assert payload is not None
         assert payload["ok"] is False
@@ -775,15 +775,15 @@ class TestSlugAddressing:
 
     def test_the_degraded_summary_carries_the_same_keys_as_a_healthy_one(self, tmp_repo):
         _store_one(tmp_repo, CACHE_DECISION)
-        healthy = store.store_summary(store._slug(tmp_repo))
+        healthy = store.store_summary(store.repo_slug(tmp_repo))
         _truncate_store(tmp_repo)
-        degraded = store.store_summary(store._slug(tmp_repo))
+        degraded = store.store_summary(store.repo_slug(tmp_repo))
         assert set(degraded) == set(healthy), "a caller must be able to branch on ok alone"
         assert set(degraded["counts"]) == set(healthy["counts"])
 
     def test_a_healthy_summary_is_the_dashboard_plus_the_slug(self, tmp_repo):
         _store_one(tmp_repo, CACHE_DECISION)
-        slug = store._slug(tmp_repo)
+        slug = store.repo_slug(tmp_repo)
         payload = store.store_summary(slug)
         assert payload["slug"] == slug
         assert payload["repo_path"] == tmp_repo
@@ -805,7 +805,7 @@ class TestSlugAddressing:
         _store_one(tmp_repo, CACHE_DECISION)
         store.update_global_decision("Never log secrets", SESSION, "constraint")
         store.delete_decision(tmp_repo, _store_one(tmp_repo, QUEUE_DECISION))
-        for slug in ("_global", "ui", f"{store._slug(tmp_repo)}.deleted"):
+        for slug in ("_global", "ui", f"{store.repo_slug(tmp_repo)}.deleted"):
             assert store.resolve_store(slug) is None, slug
 
     def test_a_legacy_named_store_keeps_its_slug_across_the_rename(self, tmp_repo):
@@ -817,13 +817,13 @@ class TestSlugAddressing:
         slug = legacy.stem
         assert store.resolve_store_slug(slug) == tmp_repo
 
-        store._load(tmp_repo)                      # migrates the file to the hashed name
+        store.load(tmp_repo)                      # migrates the file to the hashed name
         assert not legacy.exists()
 
         assert store.resolve_store_slug(slug) == tmp_repo, \
             "the client's slug stopped resolving the moment the store was opened"
         assert store.store_summary(slug)["repo_path"] == tmp_repo
-        assert store.resolve_store_slug(store._slug(tmp_repo)) == tmp_repo
+        assert store.resolve_store_slug(store.repo_slug(tmp_repo)) == tmp_repo
 
 
 # ── the 10-second poll reads each file once ───────────────────────────────────

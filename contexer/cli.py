@@ -142,7 +142,7 @@ def _read_team_cache(store_dir: Path, repo_path: str) -> dict:
     a module constant frozen at import time. Tolerant of missing/corrupt files, like
     team_context._load_cache - a diagnostic must never raise on bad state, ZERO network."""
     from contexer import store as _store
-    path = store_dir / f".team_{_store._slug(repo_path)}.json"
+    path = store_dir / f".team_{_store.repo_slug(repo_path)}.json"
     if not path.exists():
         return {}
     try:
@@ -173,7 +173,7 @@ def _is_repo_store(path: Path) -> bool:
     (`ui.json`), per-repo tombstone sidecars (`<slug>.deleted.json`) and a family of
     dot-prefixed caches (team cache, outbox, retrieval index, working sets). pathlib's glob
     does not hide any of them, so counting them inflates both `repo stores` and
-    `entries total`. A leading underscore alone is NOT disqualifying: `store._slug` keeps one
+    `entries total`. A leading underscore alone is NOT disqualifying: `store.repo_slug` keeps one
     from a repo path like /_vendor/app, and a pre-hash legacy store keeps its old name.
 
     The global store's file name comes from `store.GLOBAL_SLUG` rather than a second literal:
@@ -286,7 +286,7 @@ def _print_wrapped(text: str, indent: str = "  ", width: int = 64) -> None:
 # developer explicitly ran `contexer review` to inspect decisions, so paying for git IS the
 # feature — a 3-call cap would blank the accuracy rows from the 4th decision onward even on a
 # warm repo where each call costs ~10ms. A time budget only degrades when git is genuinely
-# slow, which this repo's 2s `_GIT_FAST_TIMEOUT` says does happen under load.
+# slow, which this repo's 2s `GIT_FAST_TIMEOUT` says does happen under load.
 _REVIEW_GIT_BUDGET = 3.0
 
 
@@ -366,7 +366,7 @@ def _review_metadata(repo_path: str, entry: dict,
         rows.append(("", "(git is slow — anchor/staleness checks skipped this run)"))
 
     # Only worth screen space when it is the branch that can silently target the WRONG repo;
-    # every other value means a caller named this repo explicitly. See _resolve_repo_verbose.
+    # every other value means a caller named this repo explicitly. See resolve_repo_verbose.
     if entry.get("repo_source") == "pointer":
         rows.append(("Origin", "! resolved via the shared repo pointer — verify this is the "
                                "right repo for this decision"))
@@ -386,9 +386,9 @@ _ORIGIN_LABELS = {
 
 def review() -> None:
     """Interactively review and approve/ignore/edit pending engineering decisions."""
-    from contexer import conflicts, store
+    from contexer import conflicts, revisions, store
 
-    repo_path = store._git_root(os.getcwd())
+    repo_path = store.git_root(os.getcwd())
     if not repo_path:
         print("Not inside a git repository.", file=sys.stderr)
         sys.exit(1)
@@ -419,7 +419,7 @@ def review() -> None:
             rev = entry.get("revision", 1)
             print(f"[{subtype}]  suggested update\n")
             print(f"Current (revision {rev}):")
-            _print_wrapped(store._current_content(entry))
+            _print_wrapped(revisions.current_content(entry))
             print("\nDetected:")
             _print_wrapped(prop.get("content", ""))
             steer = conflicts.memo_steer_line(entry)
@@ -427,9 +427,9 @@ def review() -> None:
                 print(f"\n{steer[:1].upper()}{steer[1:]}")
             print()
         else:
-            score, factors = store._compute_confidence(entry)
-            title, body = store._title_and_body(entry)
-            print(f"[{subtype}]  {store._entry_status(entry).replace('_', ' ')}\n")
+            score, factors = revisions.compute_confidence(entry)
+            title, body = store.title_and_body(entry)
+            print(f"[{subtype}]  {store.entry_status(entry).replace('_', ' ')}\n")
             print(title)
             if body is not None:
                 print()
@@ -738,7 +738,7 @@ def pull(rest: list | None = None) -> None:
 
     from contexer import store, team_context
 
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    repo = store.git_root(os.getcwd()) or store.resolve_repo("")
     if not repo:
         print("No git repo detected - run `contexer pull` inside a repository.", file=sys.stderr)
         sys.exit(1)
@@ -776,7 +776,7 @@ def share_cmd(rest: list | None = None) -> None:
     if sum((share_all, globals_, bool(ids))) > 1:
         print("Pass exactly one of: an id, --all, or --global.", file=sys.stderr)
         sys.exit(1)
-    repo = "" if globals_ else (store._git_root(os.getcwd()) or store._resolve_repo(""))
+    repo = "" if globals_ else (store.git_root(os.getcwd()) or store.resolve_repo(""))
     if not repo and not globals_:
         print("No git repo detected - run `contexer share` inside a repository.", file=sys.stderr)
         sys.exit(1)
@@ -865,7 +865,7 @@ def reconcile_cmd(rest: list | None = None) -> None:
         print("Usage: contexer reconcile <id> [--team NAME_OR_ID] [--yes]", file=sys.stderr)
         sys.exit(1)
 
-    repo = store._git_root(os.getcwd()) or store._resolve_repo("")
+    repo = store.git_root(os.getcwd()) or store.resolve_repo("")
     if not repo:
         print("No git repo detected - run `contexer reconcile` inside a repository.", file=sys.stderr)
         sys.exit(1)
@@ -1129,7 +1129,7 @@ def _post_login_sync() -> None:
         from contexer import store, team_context
 
         repos: list[str] = []
-        for candidate in (store._git_root(os.getcwd()), store._current_repo_path()):
+        for candidate in (store.git_root(os.getcwd()), store.current_repo_path()):
             if candidate and candidate not in repos:
                 repos.append(candidate)
         upserted = removed = 0
@@ -1351,7 +1351,7 @@ def _cli_repo() -> str:
     shared last-resort pointer) — factored out after a dismiss-path divergence
     once sent guard commands to a different store than the rest of the CLI."""
     from contexer import store
-    return store._git_root(os.getcwd()) or store._resolve_repo("")
+    return store.git_root(os.getcwd()) or store.resolve_repo("")
 
 
 def scope_audit_cmd(rest: list) -> None:
@@ -1440,7 +1440,7 @@ def _guard_dismiss(rest: list) -> None:
     arg = rest[i + 1]
     paths = [a for a in rest[:i] + rest[i + 2:] if not a.startswith("--")] or None
     # Resolved ONCE and reused for both the candidates lookup and dismiss_guard below:
-    # unlike arm_guard/disarm_guard, dismiss_guard does not call _resolve_repo itself
+    # unlike arm_guard/disarm_guard, dismiss_guard does not call resolve_repo itself
     # (it writes straight to the sidecar keyed on whatever path it's given), so passing
     # it something different from what guard_candidates just searched would dismiss a
     # pair found under one repo against a completely different sidecar file.
@@ -1542,11 +1542,11 @@ def _guard_disarm(rest: list) -> None:
 
 def _guard_list() -> None:
     """`contexer guard list` — show every currently armed rule, repo + global."""
-    from contexer import store, guard_engine
+    from contexer import store, guard_engine, revisions
 
     repo = _cli_repo()
-    personal = guard_engine._armed_rules(store._load(repo).get("entries") or []) if repo else []
-    glob = guard_engine._armed_rules(store._load_global().get("entries") or [])
+    personal = guard_engine._armed_rules(store.load(repo).get("entries") or []) if repo else []
+    glob = guard_engine._armed_rules(store.load_global().get("entries") or [])
     rows = [(e, "personal") for e in personal] + [(e, "global") for e in glob]
     if not rows:
         print("No armed guard rules.")
@@ -1555,7 +1555,7 @@ def _guard_list() -> None:
     for entry, scope in rows:
         gc = entry.get("guard_check") or {}
         id8 = (entry.get("id") or "")[:8]
-        title = entry.get("title") or store._derive_title(store._current_content(entry))
+        title = entry.get("title") or revisions.derive_title(revisions.current_content(entry))
         check_type = gc.get("type", "")
         detail = gc.get("pattern") if check_type == "regex" else "HIGH_CONFIDENCE_PATTERNS"
         paths = gc.get("paths") or "*"
@@ -1875,7 +1875,7 @@ def _guard_hook_status_line() -> str:
     it cannot decode)."""
     from contexer import store
 
-    repo = store._git_root(os.getcwd())
+    repo = store.git_root(os.getcwd())
     if not repo:
         return "(not in a git repo)"
     try:
@@ -1914,7 +1914,7 @@ def _guard_install_hook() -> None:
     the fail-soft commit-time run path."""
     from contexer import store
 
-    repo = store._git_root(os.getcwd())
+    repo = store.git_root(os.getcwd())
     if not repo:
         print("Not inside a git repository.", file=sys.stderr)
         sys.exit(1)
@@ -1976,7 +1976,7 @@ def _guard_uninstall_hook() -> None:
     is byte-preserved. No-op with a message when nothing is installed."""
     from contexer import store
 
-    repo = store._git_root(os.getcwd())
+    repo = store.git_root(os.getcwd())
     if not repo:
         print("Not inside a git repository.", file=sys.stderr)
         sys.exit(1)

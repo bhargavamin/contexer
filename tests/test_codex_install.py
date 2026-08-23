@@ -336,7 +336,7 @@ class TestCodexBookkeepingWritesAreFailSoft:
         old = ('py -c "from contexer import store; from contexer.adapters import claude as _c; '
                'import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); '
                "store.STORE_DIR.mkdir(exist_ok=True); "
-               "store._is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
+               "store.is_sane_repo(repo) and (store.STORE_DIR/'.current_repo').write_text(repo); "
                '_c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, '
                'store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw))))" "$REPO"')
         hooks_path.write_text(json.dumps({"hooks": {"SessionStart": [
@@ -521,14 +521,14 @@ class TestCodexPostWriteRepoResolutionParity:
         # claude.py's own post_write_cmd is generated the same way — reconstruct it via a
         # real claude.install() and compare prefixes rather than duplicating the literal.
         # claude_adapter.install() also runs clean_legacy_repo_settings against
-        # store._git_root(os.getcwd()) — the PROCESS cwd's git root, unaffected by
+        # store.git_root(os.getcwd()) — the PROCESS cwd's git root, unaffected by
         # claude_home — so chdir into an untracked temp dir before calling it, exactly
         # like the parity fixtures in test_plugin_hooks.py / test_adapters.py; otherwise
         # this could silently rewrite the real checkout's <repo>/.claude/settings.json.
         claude_home = home.parent / "claude_home_for_parity"
         (claude_home / ".claude").mkdir(parents=True)
 
-        real_repo = store._git_root(str(Path.cwd()))
+        real_repo = store.git_root(str(Path.cwd()))
         real_settings = Path(real_repo) / ".claude" / "settings.json" if real_repo else None
         before = real_settings.read_bytes() if real_settings and real_settings.is_file() else None
 

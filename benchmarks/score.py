@@ -102,7 +102,7 @@ def sup_current_score(answer: str, current: str = "dynamodb", superseded: str = 
 
 def capture_stats(home, repo) -> dict:
     home, repo = Path(home), Path(repo)
-    slug = _store._slug(str(repo))
+    slug = _store.repo_slug(str(repo))
     entries = 0
     store = home / ".contexer" / f"{slug}.json"
     try:

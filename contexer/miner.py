@@ -5,7 +5,7 @@ its own proof (a percentage + sample count, or the config file it came from).
 No model in the loop: everything here is ast/regex/config parsing, never an
 LLM guess. This module is a leaf: it is imported by store.py and must NEVER
 import contexer.store, so it carries its own tiny `_git` helper (a twin of
-store._git at line ~1520) rather than share store.py's.
+store.run_git at line ~1520) rather than share store.py's.
 
 Mining is an enhancement, not a gate: `mine_conventions` never raises — any
 unexpected failure returns whatever was gathered before the failure (or [])."""
@@ -43,7 +43,7 @@ _PRECOMMIT_ID = re.compile(r"^\s*-\s*id:\s*(\S+)", re.M)
 
 
 def _git(repo_path: str, *args: str) -> str | None:
-    """Local twin of store._git — kept local so miner.py never imports
+    """Local twin of store.run_git — kept local so miner.py never imports
     contexer.store (mining must stay a leaf dependency)."""
     try:
         out = subprocess.run(

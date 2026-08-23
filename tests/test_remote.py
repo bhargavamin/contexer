@@ -947,7 +947,7 @@ def test_wire_args_no_source_files_key_when_none():
 
 
 # ── wire bounds (mirror of contexer-teams INPUT_LIMITS.sourceFiles) ────────────
-# The capture side caps the COUNT (store._MAX_SOURCE_FILES) but nothing bounds path LENGTH, and
+# The capture side caps the COUNT (store.MAX_SOURCE_FILES) but nothing bounds path LENGTH, and
 # the singular push_decision rejects over-bounds at its zod boundary - a -32602, i.e. the same
 # permanent outbox poisoning the gate above exists to prevent. Dropping a path costs one piece of
 # metadata; sending it wedges the queue, so the clamp is deliberately silent and lossy.

@@ -18,7 +18,7 @@ import json
 from importlib import resources
 from pathlib import Path
 
-from contexer.store import _atomic_write
+from contexer.store import atomic_write
 
 _BOOTSTRAP_CMD_MARKER = "managed by contexer"
 
@@ -67,7 +67,7 @@ def _save(path: Path, data: dict) -> None:
     # Atomic for the same reason as the store: a torn ~/.claude.json or
     # settings.json would break all of Claude Code, not just contexer.
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, json.dumps(data, indent=2))
+    atomic_write(path, json.dumps(data, indent=2))
 
 
 def _hooks_of(grp) -> list:

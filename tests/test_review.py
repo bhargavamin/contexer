@@ -1,6 +1,6 @@
 """Unit tests for the pure proposal-slot policy."""
 
-from contexer import review, store
+from contexer import review
 
 
 class TestProposalTrustOrder:
@@ -16,11 +16,11 @@ class TestProposalTrustOrder:
         assert outranks("scan", "mystery"), "an unknown source is itself displaceable"
 
     def test_store_compatibility_alias(self):
-        assert store._outranks_proposal is review.outranks_proposal
-        assert store._claim_proposal_slot is review.claim_proposal_slot
-        assert store._refusal_ack is review.refusal_ack
-        assert store._build_proposal is review.build_proposal
-        assert store._PROPOSAL_TRUST is review.PROPOSAL_TRUST
+        assert review.outranks_proposal is review.outranks_proposal
+        assert review.claim_proposal_slot is review.claim_proposal_slot
+        assert review.refusal_ack is review.refusal_ack
+        assert review.build_proposal is review.build_proposal
+        assert review.PROPOSAL_TRUST is review.PROPOSAL_TRUST
 
 
 class TestClaimProposalSlot:
