@@ -19,7 +19,9 @@ from pathlib import Path
 
 from contexer.adapters import base
 from contexer.adapters import claude
-from contexer.store import atomic_write
+from contexer import store as _store   # module object, not a `from`-import: a value
+                                       # patched on contexer.store must resolve at
+                                       # CALL time (CLAUDE.md, module boundaries).
 
 NAME = "codex"
 
@@ -231,7 +233,7 @@ def install(home: Path) -> list[str]:
             log.append("  ! ~/.codex/config.toml is not valid TOML — left untouched (fix it, then re-run)")
         else:
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(config_path, new_text)
+            _store.atomic_write(config_path, new_text)
             log.append("  ✓ MCP server registered in ~/.codex/config.toml")
 
     # Hooks (~/.codex/hooks.json) — same JSON schema and event names as Claude Code.
@@ -390,7 +392,7 @@ def uninstall(home: Path) -> list[str]:
             except tomllib.TOMLDecodeError:
                 log.append("  ! ~/.codex/config.toml is not valid TOML — left untouched")
             else:
-                atomic_write(config_path, new_text)
+                _store.atomic_write(config_path, new_text)
                 log.append("  ✓ MCP server removed from ~/.codex/config.toml")
 
     hooks_path = home / ".codex" / "hooks.json"
