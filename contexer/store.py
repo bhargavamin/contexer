@@ -1872,7 +1872,7 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     entry.pop("proposed_revision", None)
     entry.pop("conflict_memo", None)          # the pair it resolved no longer exists
     if prop.get("clear_anchors"):
-        entry.pop("source_files", None)
+        clear_source_files(entry)   # both halves: an orphan total is the same invariant
         entry.pop("anchor_commit", None)
 
 
@@ -1952,6 +1952,52 @@ _STALENESS_MAX_CHECKS = 3  # git calls per render; anchored entries beyond this 
 GIT_FAST_TIMEOUT = 2      # injection/capture paths must never stall on a slow git
 
 
+def set_source_files(entry: dict, files: list, total: int | None = None) -> None:
+    """Write the `source_files` / `source_files_total` pair. `files` must be non-empty.
+
+    The two fields are one fact: the anchor list, and how many paths it was DERIVED FROM when
+    that is more than the list itself. `total` is that derivation count, not a "did I truncate"
+    flag, which is what makes every caller's job obvious: pass the number you derived the list
+    from if you know it, carry the stored one forward if your operation did not change the
+    derivation, and pass nothing if it did. The count is stored only when it exceeds the list,
+    so the pair can never claim a truncation that did not happen.
+
+    Written because the pair had three writers and only one kept them consistent.
+    `_anchor_sources` maintained both and said so ("a later re-anchor with fewer files can't
+    leave a stale count behind"), while `anchors.py` shrank the list directly on a partial
+    anchor loss and touched the count neither way. A decision anchored to 40 files keeps 10
+    with the total stamped 40; seven of those are later deleted, leaving 3, and `contexer
+    review` plus the share preview both rendered "(first 3 of 40)". The 3 are SURVIVORS and
+    nothing was truncated to reach them. Shrinking is not truncating, but it invalidates the
+    count just the same.
+
+    It deliberately does NOT own `anchor_commit`: that field is set from different values by
+    different callers (fresh HEAD here, a preserved value on a rename refresh) and takes no
+    part in the list-versus-count relationship this function keeps true. Use
+    :func:`clear_source_files` to retire an anchor; passing an empty list here is a caller
+    error, because "write the pair" and "remove the pair" are different operations and one of
+    them must not be reachable by accident.
+    """
+    if not files:
+        raise ValueError("set_source_files needs a non-empty list; use clear_source_files")
+    entry["source_files"] = files
+    if total is not None and total > len(files):
+        entry["source_files_total"] = total
+    else:
+        entry.pop("source_files_total", None)
+
+
+def clear_source_files(entry: dict) -> None:
+    """Retire an anchor: remove BOTH halves of the pair.
+
+    Named rather than folded into `set_source_files(entry, [])`, because that spelling read as
+    a write while actually deleting, and the count is the half that got forgotten the first
+    time (the retirement path popped `source_files` alone and left an orphan total behind).
+    """
+    entry.pop("source_files", None)
+    entry.pop("source_files_total", None)
+
+
 def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     """Anchor an entry (a new one, or a `replace_id` correction) to the files it describes
     plus the repo's current HEAD, so a later injection can flag it as possibly stale (see
@@ -1985,19 +2031,14 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     files = resolved[:MAX_SOURCE_FILES]
     if not files:
         return
-    entry["source_files"] = files
     # THE single truncation point for anchors (apply_backfill_anchors delegates here, and
     # anchors.py's own `[:MAX_SOURCE_FILES]` slices a list that was already capped by this
     # one, so it can never fire). A decision that genuinely governs 40 files keeps the first
     # 10 and the rest are gone - recording how many there were is what stops that being a
     # SILENT loss: the review and share-preview surfaces render "anchored to the first 10 of
-    # 40" so the developer can narrow the anchor themselves. Stamped only when it actually
-    # differs, and popped otherwise, so a later re-anchor with fewer files can't leave a
-    # stale count behind.
-    if len(resolved) > len(files):
-        entry["source_files_total"] = len(resolved)
-    else:
-        entry.pop("source_files_total", None)
+    # 40" so the developer can narrow the anchor themselves. This is the only caller that
+    # may pass `total`, because it is the only one that truncated.
+    set_source_files(entry, files, len(resolved))
     entry["anchor_commit"] = run_git(repo_path, "rev-parse", "HEAD", timeout=GIT_FAST_TIMEOUT) or ""
 
 

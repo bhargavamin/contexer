@@ -681,3 +681,91 @@ class TestImportOrderRegression:
                                  capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "OK"
+
+
+class TestAnchorCountHasOneWriter:
+    """`source_files` and `source_files_total` are one fact with one writer
+    (`store.set_source_files` / `store.clear_source_files`). Before that, `_anchor_sources`
+    maintained both while this module shrank the list directly, so a partial anchor loss left
+    the truncation count behind and `contexer review` rendered survivors as a truncation that
+    never happened."""
+
+    def _anchored(self, repo, count=12):
+        files = [f"src/mod{i}.py" for i in range(count)]
+        for f in files:
+            _write(repo, f, f"# {f}\n")
+        _git(repo, "add", "-A")
+        _commit(repo, "seed")
+        entry = _seed_entry(repo, "Route all writes through the queue.")
+        store._anchor_sources(str(repo), entry, files)
+        data = store.load(str(repo))
+        data["entries"][-1] = entry
+        store.save(str(repo), data)
+        return entry, files
+
+    def test_partial_loss_drops_the_truncation_count(self, repo):
+        entry, _ = self._anchored(repo)
+        # Truncation is real here, so the count is right and must survive.
+        assert len(entry["source_files"]) == store.MAX_SOURCE_FILES
+        assert entry["source_files_total"] == 12
+
+        for f in entry["source_files"][:7]:
+            (repo / f).unlink()
+        _git(repo, "add", "-A")
+        _commit(repo, "drop seven")
+
+        anchors.verify_anchors(str(repo), force=True)
+        after = _reload(repo)
+        assert len(after["source_files"]) == 3
+        # The 3 are survivors. Nothing was truncated to reach them, so no count may remain:
+        # cli._review_metadata renders "(first 3 of 12)" off exactly this key.
+        assert "source_files_total" not in after
+
+    def test_a_pure_rename_keeps_the_truncation_count(self, repo):
+        # The mirror-image bug, caught in review: nothing is lost on a rename, so the
+        # derivation count still describes the list and erasing it would destroy a REAL
+        # "(first 10 of 12)" record on the first rename the repo ever sees.
+        entry, _ = self._anchored(repo)
+        old = entry["source_files"][0]
+        _git(repo, "mv", old, old.replace("mod", "renamed"))
+        _commit(repo, "rename one")
+
+        anchors.verify_anchors(str(repo), force=True)
+        after = _reload(repo)
+        assert len(after["source_files"]) == store.MAX_SOURCE_FILES
+        assert after["source_files_total"] == 12
+        assert old not in after["source_files"]
+
+    def test_the_share_preview_stops_claiming_a_truncation_too(self, repo):
+        # The defect had TWO render surfaces and the first fix only pinned one. The share
+        # projection recomputes its own total via max(wire_total, ...), so it needs its own
+        # assertion: an edit there would otherwise regress silently with the suite green.
+        entry, _ = self._anchored(repo)
+        before = store._share_projection(entry)
+        assert before.get("source_files_total") == 12          # real truncation, still told
+
+        for f in entry["source_files"][:7]:
+            (repo / f).unlink()
+        _git(repo, "add", "-A")
+        _commit(repo, "drop seven")
+        anchors.verify_anchors(str(repo), force=True)
+
+        after = store._share_projection(_reload(repo))
+        assert len(after["source_files"]) == 3
+        # <= len(files) is what the render guards on, so this is "say nothing", not "say 3 of 3".
+        assert (after.get("source_files_total") or 0) <= len(after["source_files"])
+
+    def test_retiring_an_anchor_leaves_no_orphan_count(self, repo):
+        entry = _seed_entry(repo, "Guard the queue.", source_files=["a.py"])
+        entry["source_files_total"] = 40
+        entry["proposed_revision"] = {
+            "content": "Guard the queue. (anchors withdrawn on re-verification: `a.py`)",
+            "source": "scan", "clear_anchors": True, "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        data = store.load(str(repo))
+        data["entries"][-1] = entry
+        store.save(str(repo), data)
+
+        store._promote_proposal(str(repo), entry)
+        assert "source_files" not in entry
+        assert "source_files_total" not in entry

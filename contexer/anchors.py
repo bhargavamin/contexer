@@ -302,7 +302,13 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                             # rev-parse BEFORE any mutation: if the budget runs out here,
                             # _BudgetExceeded must find this entry still untouched.
                             new_commit = _call("rev-parse", "HEAD")
-                            entry["source_files"] = surviving[:store.MAX_SOURCE_FILES]
+                            # A pure rename: nothing was lost, only spellings moved, so the
+                            # derivation count is unchanged and is carried forward. Dropping
+                            # it here would erase a REAL truncation record ("first 10 of 40")
+                            # on the first rename the repo ever sees.
+                            store.set_source_files(
+                                entry, surviving[:store.MAX_SOURCE_FILES],
+                                entry.get("source_files_total"))
                             entry["anchor_commit"] = new_commit or entry.get("anchor_commit", "")
                             reanchored += 1
                             changed = True
@@ -313,7 +319,9 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                         # the list to what's actually still reachable (as-is or renamed).
                         # Same pre-mutation call ordering as above.
                         new_commit = _call("rev-parse", "HEAD") if renamed else None
-                        entry["source_files"] = surviving[:store.MAX_SOURCE_FILES]
+                        # No `total`: this list shrank because files vanished, so the stored
+                        # derivation count no longer describes it and must not survive.
+                        store.set_source_files(entry, surviving[:store.MAX_SOURCE_FILES])
                         if renamed:
                             entry["anchor_commit"] = new_commit or entry.get("anchor_commit", "")
                         reanchored += 1

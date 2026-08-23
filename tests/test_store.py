@@ -4115,6 +4115,28 @@ class TestShareProjectionSourceFiles:
         assert "files: auth/jwt.py" in out
         assert "unconfirmed" not in out
 
+    def test_the_pair_writer_is_the_only_way_to_set_a_count(self):
+        # `total` is the number of paths the list was DERIVED FROM, not a "did I truncate"
+        # flag, so it is stored only when it exceeds the list. That is what stops the pair
+        # ever claiming a truncation that did not happen.
+        e = {}
+        store.set_source_files(e, ["a.py", "b.py"], total=2)     # derived from 2, kept 2
+        assert "source_files_total" not in e
+        store.set_source_files(e, ["a.py"], total=9)             # derived from 9, kept 1
+        assert e["source_files_total"] == 9
+        store.set_source_files(e, ["a.py", "b.py"])              # derivation unknown now
+        assert "source_files_total" not in e
+
+    def test_clearing_and_writing_are_separate_operations(self):
+        # An empty list is a caller error: "write the pair" and "remove the pair" must not be
+        # reachable by the same call, because the removal is what got forgotten the first time.
+        e = {"source_files": ["a.py"], "source_files_total": 40}
+        with pytest.raises(ValueError):
+            store.set_source_files(e, [])
+        assert e["source_files"] == ["a.py"]
+        store.clear_source_files(e)
+        assert "source_files" not in e and "source_files_total" not in e
+
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
 
