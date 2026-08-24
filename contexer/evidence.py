@@ -1,26 +1,34 @@
-"""Evidence-ledger event schema and pure validation, stdlib + `contexer.redact` only.
+"""Evidence-ledger event schema, pure validation, and the per-repo sidecar that stores it.
 
 An evidence event is one observed fact about a session — a directive the developer stated, a
 file that changed, a conclusion an agent reached — recorded so a later policy pass can decide
-what deserves to become a decision. This module owns the SHAPE of such an event and nothing
-else: `validate_event` is a pure function, so the sidecar storage and the host adapters that
-emit events can be tested against a schema that never touches disk.
+what deserves to become a decision. `validate_event` is a pure function and the ONLY schema
+gate: storage never re-asserts flatness or caps, it validates once and writes what it gets.
 
-A leaf module: it imports `redact` (itself a leaf) and nothing else from the package — never
-`store`, the MCP server, or an adapter.
+A leaf module: it imports `redact` (itself a leaf) and reaches `store` through the MODULE
+OBJECT at call time (`store.STORE_DIR`, never `from contexer.store import ...`) — the same
+load-order discipline `guard_engine.py` documents, so store.py never needs this module at
+import time and a test patching `contexer.store.STORE_DIR` is seen here.
 
 The schema is FROZEN per version: an unknown top-level key is an error rather than being
 preserved, and a `schema_version` other than `SCHEMA_VERSION` is rejected in both directions
 (a forward version means a newer writer whose semantics this reader cannot assume).
 """
+import contextlib
 import json
 import math
 import re
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 
-from contexer import redact
+from contexer import redact, store
+
+try:
+    import fcntl
+except ImportError:                    # pragma: no cover - non-POSIX
+    fcntl = None
 
 SCHEMA_VERSION = 1
 
@@ -217,3 +225,270 @@ def validate_event(event: Mapping) -> tuple[dict | None, list[str]]:
     if size > _MAX_EVENT_BYTES:
         return None, [f"event exceeds {_MAX_EVENT_BYTES} bytes ({size})"]
     return normalized, []
+
+
+# ── sidecar storage ──────────────────────────────────────────────────────────────
+#
+# One ledger per repo, `STORE_DIR/.evidence_<slug>.json`, keyed by the worktree-canonical
+# slug every other sidecar uses. Measured implementation constants, not product promises:
+# 1000 events at the 8KB per-event ceiling is comfortably under the byte cap, and 2MB is a
+# file a session-start read can afford. Both are enforced after the append, oldest first.
+_MAX_EVENTS = 1000
+_MAX_SIDECAR_BYTES = 2 * 1024 * 1024
+
+
+def _sidecar_path(repo_path: str) -> Path:
+    return store.STORE_DIR / f".evidence_{store.repo_slug(repo_path)}.json"
+
+
+def _lock_path(repo_path: str) -> Path:
+    return store.STORE_DIR / f".evidence_lock_{store.repo_slug(repo_path)}"
+
+
+def _gap_path(repo_path: str) -> Path:
+    return store.STORE_DIR / f".evidence_gap_{store.repo_slug(repo_path)}"
+
+
+def _empty_ledger(repo_path: str) -> dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "repo_path": repo_path,
+        "events": [],
+        # candidate_id -> {"event_ids": [...], "status": "pending"|"approved"|"dismissed"}.
+        # Task 5 writes these; storage only respects them during eviction and compaction.
+        "candidate_checkpoints": {},
+        "compacted_through": None,
+        "evicted_total": 0,
+    }
+
+
+def _read_ledger(repo_path: str) -> tuple[dict, str | None]:
+    """(ledger, parse error) from ONE read — the degrade-but-report split `store._read_global`
+    carries. A MISSING sidecar is an empty ledger with no error; anything unparseable reports,
+    because an appender that took "unreadable" for "empty" would replace the whole ledger with
+    the one event it happened to be writing."""
+    empty = _empty_ledger(repo_path)
+    try:
+        raw = _sidecar_path(repo_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return empty, None
+    except (OSError, UnicodeDecodeError) as exc:
+        return empty, f"{type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return empty, f"{type(exc).__name__}: {exc}"
+    if not isinstance(data, dict) or not isinstance(data.get("events"), list) \
+            or not isinstance(data.get("candidate_checkpoints"), dict):
+        return empty, "not an evidence ledger object"
+    if data.get("schema_version") != SCHEMA_VERSION:
+        # Same both-directions rule the event schema holds: a ledger written by a newer
+        # version is not ours to rewrite.
+        return empty, f"schema_version is {data.get('schema_version')!r}, not {SCHEMA_VERSION}"
+    # The one place a hand-edited counter is coerced, so no later reader has to guard it.
+    if not isinstance(data.get("evicted_total"), int) or data["evicted_total"] is True:
+        data["evicted_total"] = 0
+    return data, None
+
+
+def _dump(ledger: dict) -> str:
+    return json.dumps(ledger, indent=2, ensure_ascii=False)
+
+
+def _pinned_event_ids(ledger: dict) -> set:
+    """Event ids a PENDING checkpoint still references — Task 5 needs them to judge the
+    candidate, so eviction skips them however old they are."""
+    return {eid for cp in ledger["candidate_checkpoints"].values()
+            if isinstance(cp, dict) and cp.get("status") == "pending"
+            for eid in (cp.get("event_ids") or [])}
+
+
+def _bounded_dump(ledger: dict) -> str:
+    """The exact text to write, evicting oldest-first until both caps hold.
+
+    Serializing inside the loop is what makes the byte cap measure the real file rather than
+    an estimate — including `evicted_total`, which grows as evictions happen. Eviction is real
+    loss, so it is counted rather than silent."""
+    text = _dump(ledger)
+    if len(ledger["events"]) <= _MAX_EVENTS and len(text.encode("utf-8")) <= _MAX_SIDECAR_BYTES:
+        return text
+    pinned = _pinned_event_ids(ledger)
+    while len(ledger["events"]) > _MAX_EVENTS \
+            or len(text.encode("utf-8")) > _MAX_SIDECAR_BYTES:
+        victim = next((i for i, e in enumerate(ledger["events"])
+                       if e.get("event_id") not in pinned), None)
+        if victim is None:
+            break              # every remaining event is pinned by a pending checkpoint
+        ledger["events"].pop(victim)
+        ledger["evicted_total"] += 1
+        text = _dump(ledger)
+    return text
+
+
+@contextlib.contextmanager
+def _evidence_lock(repo_path: str, *, blocking: bool):
+    """Yield True while this process holds the repo's evidence lock, False if a non-blocking
+    acquire found it busy.
+
+    A DEDICATED lock, never `store.store_lock`: that one is held across whole-repo mining and
+    anchor verification at session start, so an append behind it would stall a host hook for
+    seconds. An append would rather drop its event than wait."""
+    if fcntl is None:                  # pragma: no cover - non-POSIX
+        yield True
+        return
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    # Binary: only the fd is ever used, nothing is written through this handle.
+    handle = open(_lock_path(repo_path), "wb")
+    try:
+        try:
+            fcntl.flock(handle.fileno(),
+                        fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _bump_gap(repo_path: str, reason: str) -> None:
+    """Record that an event was lost. Best-effort — failing to record a gap must never be the
+    thing that raises into a host hook. Never cleared by a successful append: a gap means loss
+    already happened, and only explicit maintenance (`compact_evidence`) acknowledges it."""
+    try:
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        gap = _read_gap(repo_path) or {}
+        drops = gap.get("drops")
+        store.atomic_write(_gap_path(repo_path), json.dumps({
+            "drops": (drops if isinstance(drops, int) else 0) + 1,
+            "last_at": datetime.now(timezone.utc).isoformat(),
+            "last_reason": reason,
+        }))
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _read_gap(repo_path: str) -> dict | None:
+    try:
+        gap = json.loads(_gap_path(repo_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):      # ValueError covers JSON and UnicodeDecodeError both
+        return None
+    return gap if isinstance(gap, dict) else None
+
+
+def append_evidence(repo_path: str, event: Mapping) -> dict:
+    """Append one event to the repo's ledger. `{"status": ..., "errors": [...]}` where status
+    is `stored` | `dropped_busy` | `dropped_error` | `rejected_invalid`.
+
+    NEVER raises — host hooks call this on every prompt and tool use. A busy lock or an I/O
+    failure drops the event and bumps the gap marker (recorded loss); an invalid event is
+    rejected WITHOUT a gap bump, since a schema rejection is a caller bug, not lost evidence.
+    An unreadable sidecar is never replaced, only reported."""
+    normalized, errors = validate_event(event)
+    if normalized is None:
+        return {"status": "rejected_invalid", "errors": errors}
+    try:
+        with _evidence_lock(repo_path, blocking=False) as acquired:
+            if not acquired:
+                _bump_gap(repo_path, "busy")
+                return {"status": "dropped_busy", "errors": []}
+            ledger, error = _read_ledger(repo_path)
+            if error:
+                _bump_gap(repo_path, "error")
+                return {"status": "dropped_error", "errors": [error]}
+            ledger["events"].append(normalized)
+            store.atomic_write(_sidecar_path(repo_path), _bounded_dump(ledger))
+    except Exception as exc:           # broad on purpose: the never-raises contract
+        _bump_gap(repo_path, "error")
+        return {"status": "dropped_error", "errors": [f"{type(exc).__name__}: {exc}"]}
+    return {"status": "stored", "errors": []}
+
+
+def list_session_evidence(repo_path: str, session_id: str) -> list[dict]:
+    """This session's events, oldest first (append order). Lock-free: atomic writes mean a
+    reader never sees a torn file. A missing or corrupt sidecar reads as [] — this is a render
+    path, where "nothing to show" and "cannot read" cost the same."""
+    ledger, _ = _read_ledger(repo_path)
+    return [e for e in ledger["events"]
+            if isinstance(e, dict) and e.get("session_id") == session_id]
+
+
+def _disposition_event(repo_path: str, candidate_id: str, checkpoint: Mapping) -> dict | None:
+    """The one synthetic event a compacted checkpoint collapses into. Every field is built
+    within its own bound, so validation here is a self-check rather than a real branch — but
+    the ledger must never carry an event the validator would refuse."""
+    status = checkpoint.get("status")
+    count = len(checkpoint.get("event_ids") or [])
+    event, _errors = validate_event({
+        "schema_version": SCHEMA_VERSION,
+        "event_id": str(uuid.uuid4()),
+        "session_id": "compaction",
+        "repo_key": _clip(store.repo_slug(repo_path), _MAX_REPO_KEY_CHARS),
+        "kind": "candidate_disposition",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "source": "compact_evidence",
+        "summary": f"candidate {candidate_id} {status}: {count} evidence event(s) compacted",
+        "attributes": {"candidate_id": _clip(str(candidate_id), _MAX_ATTR_VALUE_CHARS),
+                       "candidate_status": str(status),
+                       "compacted_events": count},
+    })
+    return event
+
+
+def compact_evidence(repo_path: str) -> dict:
+    """Collapse every settled (`approved`/`dismissed`) checkpoint into one `candidate_disposition`
+    event each, dropping the events it consumed. CLI maintenance, so the lock is BLOCKING —
+    unlike an append, a compaction that skipped its turn would just be asked for again.
+
+    Clears the gap marker on success: maintenance is the one place that acknowledges loss."""
+    try:
+        with _evidence_lock(repo_path, blocking=True):
+            ledger, error = _read_ledger(repo_path)
+            if error:
+                return {"status": "error", "compacted": 0, "removed_events": 0,
+                        "errors": [error]}
+            consumed = {cid: cp for cid, cp in ledger["candidate_checkpoints"].items()
+                        if isinstance(cp, dict) and cp.get("status") in ("approved", "dismissed")}
+            if not consumed:
+                return {"status": "ok", "compacted": 0, "removed_events": 0, "errors": []}
+            drop = {eid for cp in consumed.values() for eid in (cp.get("event_ids") or [])}
+            removed = [e for e in ledger["events"] if e.get("event_id") in drop]
+            ledger["events"] = [e for e in ledger["events"] if e.get("event_id") not in drop]
+            for candidate_id, checkpoint in consumed.items():
+                del ledger["candidate_checkpoints"][candidate_id]
+                disposition = _disposition_event(repo_path, candidate_id, checkpoint)
+                if disposition is not None:
+                    ledger["events"].append(disposition)
+            if removed:
+                # ISO-8601 UTC with a fixed offset spelling, so max() is chronological.
+                ledger["compacted_through"] = max(e.get("occurred_at") or "" for e in removed)
+            store.atomic_write(_sidecar_path(repo_path), _bounded_dump(ledger))
+            with contextlib.suppress(OSError):
+                _gap_path(repo_path).unlink(missing_ok=True)
+    except Exception as exc:           # broad on purpose: a report, not a traceback
+        return {"status": "error", "compacted": 0, "removed_events": 0,
+                "errors": [f"{type(exc).__name__}: {exc}"]}
+    return {"status": "ok", "compacted": len(consumed), "removed_events": len(removed),
+            "errors": []}
+
+
+def evidence_diagnostics(repo_path: str) -> dict:
+    """What the ledger holds, for `contexer status`. Lock-free. `readable` is the honest half:
+    a missing sidecar reports `events=0, readable=True`, a corrupt one `readable=False`, so a
+    reader is never told "no evidence" about a file that could not be parsed."""
+    ledger, error = _read_ledger(repo_path)
+    try:
+        size = _sidecar_path(repo_path).stat().st_size
+    except OSError:
+        size = 0
+    return {
+        "events": len(ledger["events"]),
+        "bytes": size,
+        "checkpoints": len(ledger["candidate_checkpoints"]),
+        "evicted_total": ledger["evicted_total"],
+        "gap": _read_gap(repo_path),
+        "readable": error is None,
+    }
