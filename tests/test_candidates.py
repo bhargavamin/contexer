@@ -22,6 +22,8 @@ _SEED = "migrations must run before deploying postgres schema updates"
 # below the merge/duplicate bar (0.7).
 _PARTIAL = "run migrations before postgres upgrades manually"
 _PARTIAL_NEGATED = "never run migrations before postgres upgrades"
+# 7 tokens, 6 shared with _SEED -> 6/7 = 0.857: a negating seed ABOVE the ordinary merge bar.
+_NEGATED_ABOVE_MERGE = "never run migrations before deploying postgres schema"
 _UNRELATED = "graphql resolvers batch loader caching layer"
 
 
@@ -81,12 +83,17 @@ def test_same_events_in_any_order_produce_byte_identical_output():
         _ev("file_changed", "unrelated edit", session="s2",
             at="2026-08-24T10:05:00+00:00", files=["web/app.ts"]),
     ]
-    decisions = [_decision("dec-1", _PARTIAL)]
+    # dec-1 and dec-2 are the SAME content, so they tie on overlap: which one a candidate
+    # targets must come from the id tie-break, never from where they sat in the list.
+    decisions = [_decision("dec-0", _UNRELATED), _decision("dec-1", _PARTIAL),
+                 _decision("dec-2", _PARTIAL)]
     baseline = candidates.aggregate_candidates(events, decisions)
-    shuffled = list(events)
+    assert baseline["candidates"][0]["target_decision_id"] == "dec-1"
+    shuffled, shuffled_decisions = list(events), list(decisions)
     for seed in range(5):
         random.Random(seed).shuffle(shuffled)
-        assert json.dumps(candidates.aggregate_candidates(shuffled, decisions)) == \
+        random.Random(seed + 100).shuffle(shuffled_decisions)
+        assert json.dumps(candidates.aggregate_candidates(shuffled, shuffled_decisions)) == \
             json.dumps(baseline)
 
 
@@ -105,6 +112,18 @@ def test_candidates_are_sorted_by_score_then_id():
               _ev("agent_conclusion", _UNRELATED, at="2026-08-24T10:01:00+00:00")]
     scores = [c["score"] for c in candidates.aggregate_candidates(events, [])["candidates"]]
     assert scores == [50, 15]
+
+
+def test_equal_scores_break_the_tie_on_candidate_id():
+    """The output order is load-bearing, so equal scores must not fall back to the order the
+    groups happened to be created in — which is the arrival order of their seeds."""
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
+              _ev("user_directive", _UNRELATED, at="2026-08-24T10:01:00+00:00")]
+    got = candidates.aggregate_candidates(events, [])["candidates"]
+    assert [c["score"] for c in got] == [50, 50]
+    ids = [c["candidate_id"] for c in got]
+    assert ids == sorted(ids)
+    assert ids != sorted(ids, reverse=True), "the two ids must actually differ"
 
 
 # ── one test per _SCORES entry, explaining its threshold ─────────────────────────
@@ -210,6 +229,24 @@ def test_contradiction_penalty_drops_a_directive_below_the_bar_and_is_recorded()
     assert any("contradicted by a later statement" in u for u in got["uncertainties"])
     assert result["diagnostics"]["merged_duplicates"] == 1, \
         "the negating seed merged on the lowered 0.5 bar (0.667 overlap), not its own group"
+
+
+def test_a_negating_seed_over_the_normal_merge_bar_is_still_a_contradiction():
+    """RATIFIED behaviour, and the case that deviates from the brief's letter: 0.5 is a FLOOR
+    for a negating seed, not a ceiling. `_NEGATED_ABOVE_MERGE` clears the ordinary 0.7 merge
+    bar (6 of 7 tokens shared), so it would have merged anyway — a near-verbatim reversal is a
+    STRONGER contradiction than a loosely-worded one, and scoring it as a plain restatement
+    (+0, or worse +15 from another session) would rank a reversed decision as corroborated."""
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
+              _ev("user_directive", _NEGATED_ABOVE_MERGE, session="s2",
+                  at="2026-08-24T11:00:00+00:00")]
+    assert candidates._overlap(_NEGATED_ABOVE_MERGE, _SEED) > candidates._MERGE_OVERLAP
+    result = candidates.aggregate_candidates(events, [])
+    got = _only(result)
+    assert result["diagnostics"]["merged_duplicates"] == 1, "it merges, as it did before"
+    assert got["score"] == 20, "50 - 30: the penalty applies on the high-overlap route too"
+    assert [s["reason"] for s in got["signals"]][-1] == "contradicts the group's statement"
+    assert any("contradicted by a later statement" in u for u in got["uncertainties"])
 
 
 # ── grouping ─────────────────────────────────────────────────────────────────────
