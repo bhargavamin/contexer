@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import memory_sync, store
+from contexer import memory_sync, sidecars, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -260,7 +260,7 @@ def post_write(repo_path: str, raw: str) -> str:
                 pass
         try:
             store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-            (store.STORE_DIR / ".pending_capture").touch()
+            (store.STORE_DIR / sidecars.filename("pending_capture")).touch()
         except OSError:
             pass
         return "{}"
@@ -404,7 +404,7 @@ def sync_memory(repo_path: str) -> int:
             return 0
         fingerprint = memory_sync.dir_fingerprint(mem)
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        marker = store.STORE_DIR / f".memory_synced_{store.repo_slug(repo)}"
+        marker = store.STORE_DIR / sidecars.filename("memory_synced", slug=store.repo_slug(repo))
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == fingerprint:
             return 0
         stored = memory_sync.import_dir(mem, repo)

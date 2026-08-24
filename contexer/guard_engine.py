@@ -23,6 +23,7 @@ from pathlib import Path
 from contexer import redact          # pure stdlib leaf (no cycle): secret redaction
 from contexer import retrieval       # pure stdlib leaf (no cycle): path/module artifact shapes
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
+from contexer import sidecars
 from contexer import store           # module object, not `from`-imports: see docstring above
 
 
@@ -346,7 +347,7 @@ def _guard_content_hash(data: bytes) -> str:
 
 
 def _guard_dismissed_path(repo_path: str) -> Path:
-    return store.STORE_DIR / f".guard_dismissed_{store.repo_slug(repo_path)}.json"
+    return store.STORE_DIR / sidecars.filename("guard_dismissed", slug=store.repo_slug(repo_path))
 
 
 def _dismissed_guard(repo_path: str) -> set[str]:
@@ -382,7 +383,7 @@ def dismiss_guard(repo_path: str, decision_id: str, source_ref: str) -> None:
 
 
 def _guard_advised_path(repo_path: str) -> Path:
-    return store.STORE_DIR / f".guard_advised_{store.repo_slug(repo_path)}.json"
+    return store.STORE_DIR / sidecars.filename("guard_advised", slug=store.repo_slug(repo_path))
 
 
 def _guard_advised(repo_path: str) -> dict:

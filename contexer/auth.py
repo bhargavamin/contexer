@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from contexer import config, store
+from contexer import config, sidecars, store
 from contexer.config import Profile, default_endpoint
 
 # Refresh a little before the token actually expires, to avoid a race at the boundary.
@@ -38,7 +38,7 @@ _REFRESH_FAILED_AT = "refresh_failed_at"
 
 
 def _creds_path():
-    return store.STORE_DIR / ".team_auth.json"
+    return store.STORE_DIR / sidecars.filename("team_creds")
 
 
 def _load_creds() -> dict | None:
@@ -705,7 +705,8 @@ def login(endpoint: str | None = None) -> bool:
         # say "some" rather than printing "-1 queued share(s)".
         count = str(stranded) if stranded > 0 else "some"
         print(f"WARNING: could not clear {count} queued share(s) at "
-              f"{store.STORE_DIR / '.outbox.json'} - they were queued before this login and "
+              f"{store.STORE_DIR / sidecars.filename('outbox')} - they were queued before this "
+              "login and "
               "would be pushed to this account by the next sync. Team sync was skipped for "
               "safety; delete that file, then run `contexer pull`.", file=sys.stderr)
     return not stranded

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from contexer import config, revisions, share, store
+from contexer import config, revisions, share, sidecars, store
 from contexer.remote import RemoteAuthError, RemoteDecision, RemoteStore, with_local_fallback
 from contexer.repo_key import canonical_repo_key
 
@@ -48,7 +48,7 @@ _STALE_AFTER = 24 * 3600
 
 
 def _cache_path(repo_path: str):
-    return store.STORE_DIR / f".team_{store.repo_slug(repo_path)}.json"
+    return store.STORE_DIR / sidecars.filename("team_cache", slug=store.repo_slug(repo_path))
 
 
 def _empty_cache() -> dict:
@@ -74,7 +74,7 @@ def _save_cache(repo_path: str, data: dict) -> None:
 
 # The credentials file lives in the same `.team_*` namespace as the caches but is NOT one:
 # `clear_caches` runs from `auth.login`, which has just written it.
-_CREDS_FILE = ".team_auth.json"
+_CREDS_FILE = sidecars.filename("team_creds")
 
 
 def clear_caches() -> int:
@@ -107,7 +107,10 @@ def clear_caches() -> int:
         return 0
     removed = 0
     for path in paths:
-        if path.name == _CREDS_FILE:
+        # Ask the declaration, not a literal. Renaming the credentials file in auth.py used to
+        # make login delete the token it had just written, because this exclusion spelled the
+        # old name; anything the declaration calls durable is now skipped for the same reason.
+        if sidecars.lifetime_for(path.name) is None:
             continue
         try:
             path.unlink()
@@ -330,7 +333,8 @@ def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]
 
 
 def _seen_path(repo_path: str, consumer: str):
-    return store.STORE_DIR / f".team_seen_{store.repo_slug(repo_path)}_{consumer}.json"
+    return store.STORE_DIR / sidecars.filename("team_seen", slug=store.repo_slug(repo_path),
+                                               consumer=consumer)
 
 
 def _read_seen(repo_path: str, consumer: str) -> int | None:
@@ -412,7 +416,7 @@ def _drop_legacy_pending(repo_path: str) -> None:
     common case — an existence check up front avoids an unlink()-then-catch syscall on every
     single prompt. Still best-effort — a file that vanishes between the check and the unlink
     is silently ignored."""
-    path = store.STORE_DIR / f".team_pending_{store.repo_slug(repo_path)}.json"
+    path = store.STORE_DIR / sidecars.filename("team_pending", slug=store.repo_slug(repo_path))
     if path.exists():
         try:
             path.unlink()

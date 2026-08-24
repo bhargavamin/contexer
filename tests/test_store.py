@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from contexer import sidecars
 from contexer import miner as miner_mod
 from contexer import retrieval, review, revisions
 from contexer import store
@@ -4115,6 +4116,28 @@ class TestShareProjectionSourceFiles:
         assert "files: auth/jwt.py" in out
         assert "unconfirmed" not in out
 
+    def test_the_pair_writer_is_the_only_way_to_set_a_count(self):
+        # `total` is the number of paths the list was DERIVED FROM, not a "did I truncate"
+        # flag, so it is stored only when it exceeds the list. That is what stops the pair
+        # ever claiming a truncation that did not happen.
+        e = {}
+        store.set_source_files(e, ["a.py", "b.py"], total=2)     # derived from 2, kept 2
+        assert "source_files_total" not in e
+        store.set_source_files(e, ["a.py"], total=9)             # derived from 9, kept 1
+        assert e["source_files_total"] == 9
+        store.set_source_files(e, ["a.py", "b.py"])              # derivation unknown now
+        assert "source_files_total" not in e
+
+    def test_clearing_and_writing_are_separate_operations(self):
+        # An empty list is a caller error: "write the pair" and "remove the pair" must not be
+        # reachable by the same call, because the removal is what got forgotten the first time.
+        e = {"source_files": ["a.py"], "source_files_total": 40}
+        with pytest.raises(ValueError):
+            store.set_source_files(e, [])
+        assert e["source_files"] == ["a.py"]
+        store.clear_source_files(e)
+        assert "source_files" not in e and "source_files_total" not in e
+
 
 # ── insight-detection caching (_cached_insight) ───────────────────────────────
 
@@ -4813,7 +4836,7 @@ class TestEditedFilesSignal:
         store.record_edited_file(tmp_repo, "a.py")
         path = store._edited_files_path(tmp_repo)
         assert path.exists()
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(path, (old, old))
         store._gc_stale_session_files()
         assert not path.exists()
@@ -5819,7 +5842,7 @@ class TestWorkingSetGC:
         stale_ws.write_text('{"injected": [], "ts": 0}')
         fresh_ws.write_text('{"injected": [], "ts": 0}')
         stale_log.write_text('{"e": "pointer"}\n')
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(stale_ws, (old, old))
         os.utime(stale_log, (old, old))
         # fresh_ws keeps the mtime from the write above (just now)
@@ -5834,7 +5857,7 @@ class TestWorkingSetGC:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         stale_ws = store.STORE_DIR / f".ws_{store.repo_slug(tmp_repo)}_old.json"
         stale_ws.write_text('{"injected": [], "ts": 0}')
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(stale_ws, (old, old))
         store.get_session_start_context(tmp_repo)  # non-resume start
         assert not stale_ws.exists()
@@ -5843,7 +5866,7 @@ class TestWorkingSetGC:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         stale_ws = store.STORE_DIR / f".ws_{store.repo_slug(tmp_repo)}_old.json"
         stale_ws.write_text('{"injected": [], "ts": 0}')
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(stale_ws, (old, old))
         store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
         store.get_session_start_context(tmp_repo, "resume")

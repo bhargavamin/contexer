@@ -35,7 +35,7 @@ import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from contexer import store
+from contexer import sidecars, store
 from contexer.config import Profile, load_profile
 from contexer.remote import (
     DecisionReconciliationPreview,
@@ -104,11 +104,11 @@ def _wire_source(source: str | None) -> str | None:
 def _outbox_path():
     # Computed at call time (not module import time) so tests that monkeypatch
     # store.STORE_DIR see the redirected path, like every other store-adjacent file.
-    return store.STORE_DIR / ".outbox.json"
+    return store.STORE_DIR / sidecars.filename("outbox")
 
 
 def _reconcile_outbox_path():
-    return store.STORE_DIR / ".reconcile-outbox.json"
+    return store.STORE_DIR / sidecars.filename("reconcile_outbox")
 
 
 def _read_reconcile_outbox() -> tuple[list[dict], str | None]:
@@ -381,7 +381,7 @@ _SHARED_LOCK_SLUG = ".shared"
 def _shared_path():
     # Computed at call time (not module import time), same convention as _outbox_path -
     # tests that monkeypatch store.STORE_DIR see the redirected path.
-    return store.STORE_DIR / ".shared.jsonl"
+    return store.STORE_DIR / sidecars.filename("shared_markers")
 
 
 def forget_shared_markers() -> bool:
@@ -459,7 +459,14 @@ def _compact_shared() -> None:
     Rare, and mutually exclusive with `_append_shared` via the shared lock, so no marker is
     lost to an append racing the rewrite. Best-effort: if locks are unavailable the rewrite
     still can't corrupt the log (it is an atomic replace), only drop a marker written inside
-    the window - cosmetic, since the decision merely re-shows as unshared."""
+    the window - cosmetic, since the decision merely re-shows as unshared.
+
+    Reads through the fail-soft `_load_shared` on purpose, which is the one place in this
+    module that is allowed to (contrast `_enqueue_unlocked`, which must RAISE): this is
+    best-effort maintenance whose docstring already promises never to surface to the caller,
+    and its payload is a display hint, not queued work. Flagged as a possible second
+    `_enqueue`-shaped case during review, so the reasoning is recorded here rather than
+    re-derived."""
     path = _shared_path()
     try:
         if not path.exists() or len(path.read_text(encoding="utf-8").splitlines()) <= _SHARED_LOG_MAX_LINES:

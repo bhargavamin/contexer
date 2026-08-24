@@ -5,14 +5,14 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import store
+from contexer import sidecars, store
 from contexer.adapters import base
 
 NAME = "gemini"
 
 # Fix 1: namespaced so it doesn't collide with Claude's ~/.contexer/.pending_capture flag.
-_PENDING_CAPTURE = ".gemini_pending_capture"
-_PENDING_RELOAD = ".gemini_pending_reload"
+_PENDING_CAPTURE = sidecars.filename("gemini_capture")
+_PENDING_RELOAD = sidecars.filename("gemini_reload")
 _REMINDER = (
     "Contexer: you wrote or edited files last turn — call update_context for: "
     "(1) any NEW architecture/pattern/constraint/convention decisions; "
@@ -49,7 +49,7 @@ def _session_marker(raw: str) -> Path | None:
     if not identity:
         return None
     digest = hashlib.sha256(str(identity).encode()).hexdigest()[:24]
-    return store.STORE_DIR / f".gemini_first_prompt_{digest}"
+    return store.STORE_DIR / sidecars.filename("gemini_first", slug=digest)
 
 
 def _anchor(repo: str) -> None:

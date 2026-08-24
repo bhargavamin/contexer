@@ -38,6 +38,7 @@ import time. The public entrypoints stay reachable as `store.<name>` through sto
 PEP 562 `__getattr__`, so no existing caller had to change.
 """
 
+from contexer import sidecars
 import json
 import os
 import time
@@ -244,7 +245,7 @@ def _resolve_store(slug: str) -> tuple[Path, str, str | None] | None:
     unreadable", which a caller must keep distinct from None ("unknown slug")."""
     if not slug or "/" in slug or "\\" in slug or "\0" in slug:
         return None
-    direct = store.STORE_DIR / f"{slug}.json"
+    direct = store.STORE_DIR / sidecars.filename("store", slug=slug)
     if store._is_repo_store_file(direct) and direct.exists():
         repo_path, _data, error = _inspect_store_file(direct)
         return direct, repo_path, error
