@@ -1,3 +1,4 @@
+from contexer import sidecars
 import json
 import os
 import shlex
@@ -156,7 +157,7 @@ def _read_team_creds(store_dir: Path) -> dict | None:
     """Read stored Teams OAuth credentials directly off `store_dir` - the read-only,
     home-consistent counterpart to auth._load_creds() (which is pinned to the frozen
     auth.STORE_DIR constant). Never prints the token itself, only whether one exists."""
-    path = store_dir / ".team_auth.json"
+    path = store_dir / sidecars.filename("team_creds")
     if not path.exists():
         return None
     try:
@@ -182,7 +183,8 @@ def _is_repo_store(path: Path) -> bool:
 
     name = path.name
     return not (name.startswith(".") or name.endswith(".deleted.json")
-                or name in (f"{store.GLOBAL_SLUG}.json", "ui.json"))
+                or name in (sidecars.filename("store", slug=store.GLOBAL_SLUG),
+                            sidecars.filename("console_state")))
 
 
 def _usage(stream=None) -> None:
@@ -583,7 +585,7 @@ def status(rest: list | None = None) -> None:
     stores = sorted(p for p in store_dir.glob("*.json") if _is_repo_store(p)) \
         if store_dir.exists() else []
     entries = sum(_entry_count(p) for p in stores)
-    current = store_dir / ".current_repo"
+    current = store_dir / sidecars.filename("repo_pointer")
 
     installed = _version()
     installed_t = _version_tuple(installed)

@@ -94,6 +94,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import review, revisions      # pure stdlib leaf (no cycle): revision lifecycle
+from contexer import sidecars
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 _ANCHOR_VERIFY_TTL = 86400   # 24h — file layouts don't churn fast enough to re-check every
@@ -141,7 +142,7 @@ def _anchor_verify_stamp_path(repo_path: str) -> Path:
     here and the reader on the next session start agree on the file without either
     side re-resolving the repo (see store.verify_scan_conventions's identical
     `_miner_verify_stamp_path`)."""
-    return store.STORE_DIR / f".anchor_verify_{store.repo_slug(repo_path)}"
+    return store.STORE_DIR / sidecars.filename("anchor_verify", slug=store.repo_slug(repo_path))
 
 
 def _run_git(repo_path: str, *args: str) -> str | None:

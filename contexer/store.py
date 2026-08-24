@@ -14,6 +14,7 @@ from pathlib import Path
 
 from contexer import (  # pure stdlib leaves (no cycles)
     reconciliation,
+    sidecars,
     redact,
     retrieval,
     review,
@@ -105,7 +106,7 @@ def anchor_repo(repo_path: str) -> bool:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         # encoding pinned (never the locale default) so the pointer round-trips
         # identically to current_repo_path's read, on any host locale.
-        (STORE_DIR / ".current_repo").write_text(repo_path, encoding="utf-8")
+        (STORE_DIR / sidecars.filename("repo_pointer")).write_text(repo_path, encoding="utf-8")
         return True
     except Exception:
         # Deliberately broad, and the sanity check is inside it: this runs on every
@@ -119,7 +120,7 @@ def anchor_repo(repo_path: str) -> bool:
 
 
 def current_repo_path() -> str:
-    path = STORE_DIR / ".current_repo"
+    path = STORE_DIR / sidecars.filename("repo_pointer")
     try:
         if path.exists():
             val = path.read_text(encoding="utf-8").strip()
@@ -307,12 +308,12 @@ def _store_path(repo_path: str) -> Path:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     except OSError:
         pass
-    path = STORE_DIR / f"{repo_slug(repo_path)}.json"
+    path = STORE_DIR / sidecars.filename("store", slug=repo_slug(repo_path))
     # Back-compat: migrate a pre-hash store file to the new name on first access so an
     # upgrade never silently orphans existing context. os.replace is atomic; if a
     # colliding repo already claimed the legacy file, the loser just starts fresh.
     if not path.exists():
-        legacy = STORE_DIR / f"{_legacy_slug(repo_path)}.json"
+        legacy = STORE_DIR / sidecars.filename("store", slug=_legacy_slug(repo_path))
         if legacy.exists():
             try:
                 os.replace(legacy, path)
@@ -395,7 +396,7 @@ def store_lock(slug: str):
         yield
         return
     STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    lock_path = STORE_DIR / f"{slug}.lock"
+    lock_path = STORE_DIR / sidecars.filename("lock", slug=slug)
     # Binary, not text: only the fd is ever used (flock), nothing is written, so a text
     # wrapper would just be a locale-dependent codec attached to a file we never encode
     # into. "wb" says that outright — and keeps this call out of the text-IO invariant.
@@ -420,7 +421,7 @@ def _global_path() -> Path:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
     except OSError:
         pass
-    return STORE_DIR / f"{GLOBAL_SLUG}.json"
+    return STORE_DIR / sidecars.filename("store", slug=GLOBAL_SLUG)
 
 
 def _read_global() -> tuple[dict, str | None]:
@@ -1885,11 +1886,11 @@ _PENDING_REVIEW_NUDGE = (
 
 def _pending_review_flag(repo_path: str) -> Path:
     """Per-repo flag path — a pending decision in repo A must never nudge a session in repo B."""
-    return STORE_DIR / f".pending_review_{repo_slug(repo_path)}"
+    return STORE_DIR / sidecars.filename("pending_review", slug=repo_slug(repo_path))
 
 
 def _offer_flag(repo_path: str) -> Path:
-    return STORE_DIR / f".bootstrap_offered_{repo_slug(repo_path)}"
+    return STORE_DIR / sidecars.filename("bootstrap_offered", slug=repo_slug(repo_path))
 
 
 def _arm_offer(repo_path: str) -> None:
@@ -2682,7 +2683,7 @@ MAX_TOMBSTONES = MAX_ENTRIES      # sidecar cap; see _keep_recent_tombstones for
 
 def _deleted_path(repo_path: str) -> Path:
     STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    return STORE_DIR / f"{repo_slug(repo_path)}.deleted.json"
+    return STORE_DIR / sidecars.filename("deleted", slug=repo_slug(repo_path))
 
 
 def _read_deleted(repo_path: str) -> tuple[dict, str | None]:
@@ -2969,7 +2970,8 @@ def _is_repo_store_file(path: Path) -> bool:
     a repo path like /_vendor/app."""
     name = path.name
     return not (name.startswith(".") or name.endswith(".deleted.json")
-                or name in (f"{GLOBAL_SLUG}.json", "ui.json"))
+                or name in (sidecars.filename("store", slug=GLOBAL_SLUG),
+                            sidecars.filename("console_state")))
 
 
 def store_files() -> list[Path]:
@@ -3608,7 +3610,7 @@ _INSIGHT_CACHE_TTL = 24 * 3600  # git signals drift slowly — a day-old read is
 
 
 def _insight_cache_path(repo_path: str) -> Path:
-    return STORE_DIR / f".insight_{repo_slug(repo_path)}"
+    return STORE_DIR / sidecars.filename("insight", slug=repo_slug(repo_path))
 
 
 def _insight_cache_key(repo_path: str) -> tuple:
@@ -4102,7 +4104,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
-    resume_flag = STORE_DIR / ".resume_mining"
+    resume_flag = STORE_DIR / sidecars.filename("resume_mining")
 
     if source == "resume":
         if decisions:
@@ -4397,7 +4399,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
         return {"status": "", "context": ""}
-    resume_flag = STORE_DIR / ".resume_mining"
+    resume_flag = STORE_DIR / sidecars.filename("resume_mining")
     if resume_flag.exists():
         try:
             flagged = resume_flag.read_text(encoding="utf-8").strip()
@@ -4521,7 +4523,7 @@ _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
 
 
 def _index_path(repo_path: str) -> Path:
-    return STORE_DIR / f".retrieval_index_{repo_slug(repo_path)}.json"
+    return STORE_DIR / sidecars.filename("retrieval_index", slug=repo_slug(repo_path))
 
 
 def _build_retrieval_index(data: dict) -> dict:
@@ -4698,7 +4700,7 @@ def _ws_path(repo_path: str, session_id: str) -> Path:
     # (no path escape) and collision-free where truncation wasn't (two ids sharing
     # a 32-char prefix must not share a working set).
     safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
-    return STORE_DIR / f".ws_{repo_slug(repo_path)}_{safe}.json"
+    return STORE_DIR / sidecars.filename("working_set", slug=repo_slug(repo_path), session=safe)
 
 
 def working_set_ids(repo_path: str, session_id: str) -> list[str]:
@@ -4751,7 +4753,7 @@ _EDITED_FILES_WINDOW = 1800  # seconds: an edit older than this no longer correl
 
 def _edited_files_path(repo_path: str) -> Path:
     """Per-repo edited-files sidecar. Still matches the `.edited_*.json` GC pattern."""
-    return STORE_DIR / f".edited_{repo_slug(repo_path)}.json"
+    return STORE_DIR / sidecars.filename("edited_files", slug=repo_slug(repo_path))
 
 
 def record_edited_file(repo_path: str, file_path: str) -> None:
@@ -4812,7 +4814,7 @@ def _read_edited_files(repo_path: str, window: float = _EDITED_FILES_WINDOW) -> 
 
 def _retrieval_log(repo_path: str, event: dict) -> None:
     """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
-    path = STORE_DIR / f".retrieval_{repo_slug(repo_path)}.jsonl"
+    path = STORE_DIR / sidecars.filename("retrieval_log", slug=repo_slug(repo_path))
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         lines: list[str] = []
@@ -4834,7 +4836,6 @@ def _retrieval_log(repo_path: str, event: dict) -> None:
 _STANDING_MAP_MIN_DECISIONS = 20   # below this, a topic map is more noise than signal
 _STANDING_MAP_TOP_N = 6            # top-N topics by count shown in the map line
 _REHYDRATE_CAP = 10                # most-recently-injected working-set decisions replayed
-_WS_GC_AGE_SECONDS = 7 * 24 * 3600  # working-set/log files older than this are stale sessions
 _FOLLOWUP_WINDOW_SECONDS = 30 * 60  # a pointer counts as "followed through" within this window
 
 
@@ -4922,7 +4923,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
             return 0
         candidates: list[Path] = []
         if incoming_collapsed:
-            candidates.append(STORE_DIR / f"{_raw_slug(resolved)}.json")
+            candidates.append(STORE_DIR / sidecars.filename("store", slug=_raw_slug(resolved)))
         try:
             out = subprocess.run(
                 ["git", "-C", canonical, "worktree", "list", "--porcelain"],
@@ -4933,7 +4934,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
                     if line.startswith("worktree "):
                         wt = line[len("worktree "):].strip()
                         if wt and wt != canonical:
-                            candidates.append(STORE_DIR / f"{_raw_slug(wt)}.json")
+                            candidates.append(STORE_DIR / sidecars.filename("store", slug=_raw_slug(wt)))
         except Exception:
             pass
         canonical_store = _store_path(canonical)
@@ -4984,32 +4985,43 @@ def migrate_worktree_strays(repo_path: str) -> int:
 
 
 def _gc_stale_session_files() -> None:
-    """At non-resume session start: drop working-set dedup files, retrieval logs, and
-    edited-files sidecars whose session is well over — old enough that dedup/history no
-    longer matters. Fail-soft, a quick glob+mtime check; never touches the retrieval index
-    sidecar (owned by A2)."""
+    """At non-resume session start: drop cold sidecars, per the lifetimes declared in
+    `contexer/sidecars.py`. Fail-soft, one directory pass of stat+mtime.
+
+    It used to carry its own hand-kept list of four glob patterns, which is how a kind came
+    to opt out of cleanup merely by being added elsewhere: measured on one machine, the
+    per-repo caches for repos never reopened (`.team_*`, `.memory_synced_*`, `.insight_*`,
+    `.anchor_verify_*`) had accumulated indefinitely because no pattern here named them.
+    Iterating the declaration instead means a new kind is swept or durable by DECISION, and
+    the decision lives next to the path rather than in this function.
+
+    Deletion is opt-in, never opt-out: `sidecars.lifetime_for` returns None for anything
+    durable AND for anything it does not recognise, and None is skipped here. A file this
+    sweep has never heard of is left alone.
+    """
     try:
-        cutoff = time.time() - _WS_GC_AGE_SECONDS
-        # .bootstrap_offered_* is normally cleared by its own repo's next session start;
-        # this catches flags for repos that are never opened again, so they don't accumulate.
-        # .edited_*.json is normally cleared by its own consumer's read (Task 3's capture-
-        # time read, clear=False, leaves it for the sweep — or a session that never reads
-        # it at all); this catches those so they don't accumulate either.
-        for pattern in (".ws_*.json", ".retrieval_*.jsonl", ".bootstrap_offered_*", ".edited_*.json"):
-            for p in STORE_DIR.glob(pattern):
-                try:
-                    if p.stat().st_mtime < cutoff:
-                        p.unlink(missing_ok=True)
-                except OSError:
-                    continue
-    except OSError:
+        now = time.time()
+        for path in STORE_DIR.iterdir():
+            lifetime = sidecars.lifetime_for(path.name)
+            if lifetime is None:
+                continue
+            try:
+                if now - path.stat().st_mtime > lifetime:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except Exception:
+        # Deliberately wider than OSError. This runs inside session start, where the rule is
+        # that an optional bookkeeping file can never prevent a hook from rendering context,
+        # and `sidecars.lifetime_for` is not an I/O call, so an OSError-only guard would let a
+        # non-OSError escape. Same widening `_retrieval_log` already needed.
         pass
 
 
 def _recent_pointer_event(repo_path: str) -> dict | None:
     """Most recent 'pointer' log event for this repo within the follow-through window, or
     None. Read-only — never touches the log. Fail-soft."""
-    path = STORE_DIR / f".retrieval_{repo_slug(repo_path)}.jsonl"
+    path = STORE_DIR / sidecars.filename("retrieval_log", slug=repo_slug(repo_path))
     if not path.exists():
         return None
     try:
@@ -6422,7 +6434,7 @@ def _scan_rule_key(content: str) -> str | None:
 
 
 def _miner_verify_stamp_path(repo_path: str) -> Path:
-    return STORE_DIR / f".miner_verify_{repo_slug(repo_path)}"
+    return STORE_DIR / sidecars.filename("miner_verify", slug=repo_slug(repo_path))
 
 
 def verify_scan_conventions(repo_path: str, force: bool = False) -> int:

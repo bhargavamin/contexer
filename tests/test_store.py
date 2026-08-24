@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from contexer import sidecars
 from contexer import miner as miner_mod
 from contexer import retrieval, review, revisions
 from contexer import store
@@ -4835,7 +4836,7 @@ class TestEditedFilesSignal:
         store.record_edited_file(tmp_repo, "a.py")
         path = store._edited_files_path(tmp_repo)
         assert path.exists()
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(path, (old, old))
         store._gc_stale_session_files()
         assert not path.exists()
@@ -5841,7 +5842,7 @@ class TestWorkingSetGC:
         stale_ws.write_text('{"injected": [], "ts": 0}')
         fresh_ws.write_text('{"injected": [], "ts": 0}')
         stale_log.write_text('{"e": "pointer"}\n')
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(stale_ws, (old, old))
         os.utime(stale_log, (old, old))
         # fresh_ws keeps the mtime from the write above (just now)
@@ -5856,7 +5857,7 @@ class TestWorkingSetGC:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         stale_ws = store.STORE_DIR / f".ws_{store.repo_slug(tmp_repo)}_old.json"
         stale_ws.write_text('{"injected": [], "ts": 0}')
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(stale_ws, (old, old))
         store.get_session_start_context(tmp_repo)  # non-resume start
         assert not stale_ws.exists()
@@ -5865,7 +5866,7 @@ class TestWorkingSetGC:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         stale_ws = store.STORE_DIR / f".ws_{store.repo_slug(tmp_repo)}_old.json"
         stale_ws.write_text('{"injected": [], "ts": 0}')
-        old = time.time() - store._WS_GC_AGE_SECONDS - 3600
+        old = time.time() - sidecars.SESSION - 3600
         os.utime(stale_ws, (old, old))
         store.update_decision(tmp_repo, "Use postgres for storage", RV1_SESSION, "architecture")
         store.get_session_start_context(tmp_repo, "resume")
