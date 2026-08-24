@@ -174,7 +174,10 @@ def validate_event(event: Mapping) -> tuple[dict | None, list[str]]:
     source = _required_text(event, "source", _MAX_SOURCE_CHARS, errors)
 
     kind = event.get("kind")
-    if kind not in EVENT_KINDS:
+    # The isinstance guard is the never-raises half: `kind not in EVENT_KINDS` hashes its
+    # left side, so an unhashable value (a JSON list or object) raised TypeError out of a
+    # function whose whole contract is to return its errors instead.
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
         errors.append(f"kind must be one of {sorted(EVENT_KINDS)}, got {kind!r}")
 
     occurred_at = _normalized_time(event, errors)
