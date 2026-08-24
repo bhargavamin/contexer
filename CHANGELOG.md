@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.40.0](https://github.com/bhargavamin/contexer/compare/v0.39.0...v0.40.0) (2026-08-24)
+
+
+### Features
+
+* **sidecars:** declare every sidecar name and lifetime in one module ([0e2a37d](https://github.com/bhargavamin/contexer/commit/0e2a37dfe562a6caba0842d5b194dc5ee565a832))
+
+
+### Bug Fixes
+
+* give the anchor field pair a single writer ([79ce9c0](https://github.com/bhargavamin/contexer/commit/79ce9c0e278418b94e287cdd6ad45f52a74bf7da))
+* **server:** do not promise an outbox retry that was never recorded ([8bd867c](https://github.com/bhargavamin/contexer/commit/8bd867c5e4c94493fce942b506e8cdb3b4a0c8f1))
+* **share:** refuse to overwrite an unreadable share retry queue ([93e7cc1](https://github.com/bhargavamin/contexer/commit/93e7cc1ac8179a0895f975587939cc8e1f0d0ea3))
+* **share:** refuse to overwrite an unreadable share retry queue ([7c66b52](https://github.com/bhargavamin/contexer/commit/7c66b52a17a63ce36c96cdb27e173ec61c4cebe7))
+
+
+### Documentation
+
+* record the anchor field pair's single-writer invariant ([c469d43](https://github.com/bhargavamin/contexer/commit/c469d432ad3f37b2af68cc20757789c7d0567358))
+* record the module boundary rules and refresh stale helper names ([911772d](https://github.com/bhargavamin/contexer/commit/911772db04c22ce8b8063c7542800038f25bb78c))
+* record the outbox write rule and drop a duplicated clause list ([5b9b1f4](https://github.com/bhargavamin/contexer/commit/5b9b1f43d039170a4f153934eac57f76dfe04b67))
+* record the sidecar declaration and its three-direction test ([7dd4905](https://github.com/bhargavamin/contexer/commit/7dd490597c8940896e6226eef38ac3bd6d462473))
+* **redact:** state that redaction is egress-only, not at capture ([9ec9377](https://github.com/bhargavamin/contexer/commit/9ec937700e1d95c1da3c464f3812c676ec37142b))
+* **share:** record why _compact_shared reads fail-soft on purpose ([a95be19](https://github.com/bhargavamin/contexer/commit/a95be195d07a005b55ffe3a5356386e7d0fed3bb))
+
 ## [0.39.0](https://github.com/bhargavamin/contexer/compare/v0.38.0...v0.39.0) (2026-08-21)
 
 
