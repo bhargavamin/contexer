@@ -552,6 +552,32 @@ def reinstall() -> None:
     print("run `uv tool install --reinstall contexer`, then restart your AI assistant.")
 
 
+def _evidence_status_lines(repos) -> list[str]:
+    """One `evidence:` line per repo carrying an evidence ledger or a gap marker.
+
+    Silent for a repo with neither — which is every repo until a host adapter starts emitting
+    events, so this adds nothing to today's output. An unreadable sidecar says so rather than
+    reporting zero events: the diagnostics' `readable` flag exists for exactly that."""
+    from contexer import evidence
+
+    lines = []
+    for repo in sorted(repos):
+        diag = evidence.evidence_diagnostics(repo)
+        # `readable` is False only for a sidecar that EXISTS and could not be parsed, which is
+        # why it is part of the exists test: a truncated (zero-byte) ledger has no bytes to
+        # count and would otherwise be reported as no ledger at all.
+        if not diag["bytes"] and not diag["gap"] and diag["readable"]:
+            continue
+        parts = [f"{diag['events']} events" if diag["readable"] else "unreadable sidecar"]
+        gap = diag["gap"]
+        if gap:
+            drops = gap.get("drops", 0)
+            parts.append(f"{drops} gap{'' if drops == 1 else 's'} "
+                         f"(last: {gap.get('last_reason', '?')})")
+        lines.append(f"  evidence:     {repo}: {', '.join(parts)}")
+    return lines
+
+
 def status(rest: list | None = None) -> None:
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
@@ -605,14 +631,25 @@ def status(rest: list | None = None) -> None:
               f"then restart your AI assistant")
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
+    current_repo = ""
     if current.exists():
         try:
             # UnicodeDecodeError too, not just OSError: the shell hooks write this pointer
             # with `printf` (raw bytes, no encoding contract), so a non-UTF-8 path must
             # print "(unreadable)" rather than traceback out of `contexer status`.
-            print(f"  current repo: {current.read_text(encoding='utf-8').strip()}")
+            current_repo = current.read_text(encoding="utf-8").strip()
+            print(f"  current repo: {current_repo}")
         except (OSError, UnicodeDecodeError):
             print("  current repo: (unreadable)")
+
+    # Every repo status already knows about, plus the one this shell is in: a repo can carry
+    # evidence with no decisions stored yet, and a ledger records loss the stores never see.
+    repos = {r for r in (_load_safe(p).get("repo_path") for p in stores)
+             if isinstance(r, str) and r}
+    if current_repo:
+        repos.add(current_repo)
+    for line in _evidence_status_lines(repos):
+        print(line)
 
     # Team sync block (Phase 2 observability). ZERO network calls - config.toml + the team
     # cache file are read straight off disk, same as everything else in status(). Never
