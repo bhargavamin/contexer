@@ -427,10 +427,32 @@ def test_compaction_collapses_a_settled_checkpoint_and_spares_a_pending_one(tmp_
     assert "cand-1" in disposition["summary"] and "approved" in disposition["summary"]
     assert disposition["session_id"] == "compaction"
     assert disposition["source"] == "compact_evidence"
+    assert disposition["repo_key"] == tmp_repo        # the PATH, never the slug (R13)
     assert evidence.validate_event(disposition) == (disposition, [])
     assert ledger["compacted_through"] == "2026-08-24T10:01:00+00:00"
     assert list(ledger["candidate_checkpoints"]) == ["cand-2"]
     assert not evidence._gap_path(tmp_repo).exists()
+
+
+def test_a_hook_event_and_its_compaction_agree_on_repo_key(tmp_repo):
+    """One repo, one `repo_key` spelling, whichever writer produced the event (R13).
+
+    The two writers used to disagree — the emitter wrote the repo path, compaction the slug —
+    so a policy pass grouping by `repo_key` would read a compaction as a different repo than
+    the very events it compacted. Asserted against a REAL emitted event rather than the
+    module-level fixture, because the fixture's `repo_key` is a literal and would agree with
+    anything the test told it to."""
+    assert evidence.emit_hook_event(tmp_repo, "file_changed", session_id="s1",
+                                    source="post_tool_use",
+                                    files=["a.py"])["status"] == "stored"
+    (hook_event,) = evidence.list_session_evidence(tmp_repo, "s1")
+    _seed(tmp_repo, events=_ledger(tmp_repo)["events"], candidate_checkpoints={
+        "cand-1": {"event_ids": [hook_event["event_id"]], "status": "approved"}})
+
+    assert evidence.compact_evidence(tmp_repo)["status"] == "ok"
+    (disposition,) = _ledger(tmp_repo)["events"]
+    assert disposition["kind"] == "candidate_disposition"
+    assert disposition["repo_key"] == hook_event["repo_key"] == tmp_repo
 
 
 def test_compaction_of_a_corrupt_sidecar_reports_and_touches_nothing(tmp_repo):
