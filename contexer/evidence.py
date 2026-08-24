@@ -487,6 +487,59 @@ def list_session_evidence(repo_path: str, session_id: str) -> list[dict]:
             if isinstance(e, dict) and e.get("session_id") == session_id]
 
 
+def candidate_checkpoints(repo_path: str) -> dict:
+    """Every candidate checkpoint the ledger holds, `{candidate_id: {...}}`. Lock-free, and an
+    unreadable ledger reads as `{}` — a caller that must tell empty from unreadable asks
+    `evidence_diagnostics` first, exactly as `list_session_evidence` expects of its own."""
+    ledger, _ = _read_ledger(repo_path)
+    return {cid: cp for cid, cp in ledger["candidate_checkpoints"].items()
+            if isinstance(cp, dict)}
+
+
+def unconsumed_events(repo_path: str, session_id: str = "") -> list[dict]:
+    """Events NO checkpoint references yet, oldest first; `session_id=""` means every session.
+
+    Lock-free, like the other reads here. Scoped to the LEDGER FILE and never to `repo_key`:
+    a linked worktree shares the main worktree's canonical sidecar while its own events carry
+    the physical worktree path, so a repo_key filter would silently hide exactly the events
+    reconciliation exists to consume. Whichever worktree asks, the whole ledger answers.
+    """
+    ledger, _ = _read_ledger(repo_path)
+    consumed = {eid for cp in ledger["candidate_checkpoints"].values()
+                if isinstance(cp, dict) for eid in (cp.get("event_ids") or [])}
+    return [e for e in ledger["events"]
+            if isinstance(e, dict) and e.get("event_id") not in consumed
+            and (not session_id or e.get("session_id") == session_id)]
+
+
+def record_candidate_checkpoints(repo_path: str, checkpoints: Mapping) -> dict:
+    """Merge `{candidate_id: {"event_ids": [...], "status": ..., "entry_id": ...}}` into the
+    ledger, last writer wins per candidate. `{"status": ..., "recorded": N, "errors": [...]}`.
+
+    BLOCKING lock, `compact_evidence`'s pattern rather than an append's: the caller is a
+    reconciliation pass, not an editor hook, and a checkpoint that skipped its turn would
+    leave already-materialized decisions looking unconsumed. For the same reason a lock that
+    cannot be taken REFUSES rather than writing unlocked — this is a read-modify-write of the
+    whole ledger and would clobber a concurrent append.
+    """
+    if not checkpoints:
+        return {"status": "ok", "recorded": 0, "errors": []}
+    try:
+        with _evidence_lock(repo_path, blocking=True) as acquired:
+            if not acquired:
+                return {"status": "error", "recorded": 0,
+                        "errors": ["could not acquire the evidence lock"]}
+            ledger, error = _read_ledger(repo_path)
+            if error:
+                return {"status": "error", "recorded": 0, "errors": [error]}
+            for candidate_id, checkpoint in checkpoints.items():
+                ledger["candidate_checkpoints"][str(candidate_id)] = dict(checkpoint)
+            store.atomic_write(_sidecar_path(repo_path), _bounded_dump(ledger))
+    except Exception as exc:           # broad on purpose: a report, not a traceback
+        return {"status": "error", "recorded": 0, "errors": [f"{type(exc).__name__}: {exc}"]}
+    return {"status": "ok", "recorded": len(checkpoints), "errors": []}
+
+
 def _disposition_event(repo_path: str, candidate_id: str, checkpoint: Mapping) -> dict | None:
     """The one synthetic event a compacted checkpoint collapses into. Every field is built
     within its own bound, so validation here is a self-check rather than a real branch — but
