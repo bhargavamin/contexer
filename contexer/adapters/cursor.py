@@ -4,7 +4,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import store
+from contexer import evidence, store
 from contexer.adapters import base
 
 NAME = "cursor"
@@ -176,14 +176,20 @@ def _anchor_current_repo(repo: str) -> None:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
+    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives.
+
+    Cursor's evidence is prompt-only: its hooks cannot observe an edit, so this host emits
+    `user_directive` and never `file_changed` — an absent event here means Cursor could not
+    see the edit, which is what the ledger should say."""
     try:
         repo, repo_source = _repo_from_verbose(raw, repo_path)
         if repo:
             _anchor_current_repo(repo)
-            store.capture_user_constraint(repo, store.prompt_from_hook_stdin(raw),
-                                          store.session_from_hook_stdin(raw),
-                                          repo_source=repo_source)
+            # Store call + shadow-mode event in one (evidence.capture_directive): identical
+            # return and exceptions, so this hook's swallow-and-pass-through is unchanged.
+            evidence.capture_directive(repo, store.prompt_from_hook_stdin(raw),
+                                       store.session_from_hook_stdin(raw), "cursor_prompt",
+                                       repo_source=repo_source)
     except Exception:
         pass
     return json.dumps(format_prompt_passthrough())

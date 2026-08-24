@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import memory_sync, store
+from contexer import evidence, memory_sync, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -146,9 +146,13 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         if not repo:
             return "{}"
         near: list = []
-        entry_id, content, status = store.capture_user_constraint(
-            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw), near,
-            repo_source=repo_source)
+        # evidence.capture_directive is store.capture_user_constraint plus the shadow-mode
+        # user_directive event: same return, same exceptions (this hook's existing
+        # swallow-and-return-"{}" is the outer handler below, unchanged), and Codex reuses
+        # this entrypoint verbatim, so the source stays host-neutral.
+        entry_id, content, status = evidence.capture_directive(
+            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw),
+            "claude_prompt", near=near, repo_source=repo_source)
         if entry_id is None:
             return "{}"
         msg = store.constraint_ack(content, status, entry_id, near)
@@ -250,12 +254,13 @@ def post_write(repo_path: str, raw: str) -> str:
             data = {}
         tool_input = data.get("tool_input") if isinstance(data, dict) else None
         fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        relpath = ""
         if isinstance(fp, str) and fp:
             # Own try/except: this signal must not share failure fate with the
             # .pending_capture arm below — a non-OSError escaping record_edited_file
             # (e.g. from guard_engine) must not also cost the capture reminder.
             try:
-                store.record_edited_file(repo, fp)
+                relpath = store.record_edited_file(repo, fp)
             except Exception:
                 pass
         try:
@@ -263,6 +268,15 @@ def post_write(repo_path: str, raw: str) -> str:
             (store.STORE_DIR / ".pending_capture").touch()
         except OSError:
             pass
+        # Shadow-mode evidence, emitted LAST so neither existing signal above can be
+        # affected by it, and keyed on the path record_edited_file actually recorded (its
+        # return, not the host's raw file_path) so the event and the sidecar agree. The
+        # source is host-neutral: Codex runs this same entrypoint. emit_hook_event never
+        # raises, and the outer handler returns the identical "{}" if it somehow did.
+        if relpath:
+            evidence.emit_hook_event(repo, "file_changed",
+                                     session_id=store.session_from_hook_stdin(raw),
+                                     source="post_tool_use", files=[relpath])
         return "{}"
     except Exception:
         return "{}"
