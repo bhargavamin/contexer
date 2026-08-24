@@ -47,6 +47,15 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+# Session ids that are LITERALS rather than sessions, so sharing one across two repos says
+# nothing about where a writer was aiming — the same reasoning that excludes memory imports
+# below (whose own sentinel stays with `_is_memory_import`, its owner). `unknown` is what
+# `evidence.emit_hook_event` writes when the host supplied no session id; `reconcile` is what
+# `reconcile.py` stamps on a decision whose evidence named none. Both are shared by every repo
+# that has one, so counting them would flag every such pair forever.
+_SENTINEL_SESSIONS = frozenset({"unknown", "reconcile"})
+
+
 def _is_memory_import(entry: dict) -> bool:
     """Whether this entry came from `memory_sync`, which makes its session id meaningless
     as a write-site signal.
@@ -90,7 +99,7 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
         # audit on one malformed entry. A number is hashable and would survive that far only
         # to break the slicing in format_audit, so both are coerced away at the same point.
         sid = _text(e.get("session_id"))
-        if not sid or _is_memory_import(e):
+        if not sid or sid in _SENTINEL_SESSIONS or _is_memory_import(e):
             continue
         # Per-entry guard, not just around the parse: these entries are RAW json, never run
         # through load's _migrate_entries, so revision-model helpers can meet shapes they

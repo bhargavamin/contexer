@@ -206,8 +206,9 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
                 holds (the default, and what a session shared across git worktrees needs).
     dry_run:    report what would be proposed and write nothing at all.
 
-    Anything proposed is pending review — NOT yet trusted, and it does not block your work.
-    Retirements are only ever recommendations here; nothing is retired or approved.
+    Anything proposed is recorded `pending_approval` — NOT yet trusted, never injected into a
+    session, and it does not block your work. Retirements and replacements are only ever
+    recommendations here; nothing is retired, replaced or approved.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
@@ -215,9 +216,10 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
     receipt = reconcile.reconcile_session(resolved, session_id, dry_run=dry_run)
     text = reconcile.format_receipt(receipt)
     if receipt["proposed"]:
-        text += ("\n\nThese are pending review — not yet trusted, and they do not block your "
-                 "work. Surface them to the developer at a natural point (review_pending lists "
-                 "each with its content); never approve them yourself.")
+        text += ("\n\nThese are pending review — not yet trusted, not injected into any "
+                 "session, and they do not block your work. review_pending lists each with "
+                 "its full content; surface them to the developer at a natural point and let "
+                 "them answer. Never approve them yourself.")
     return text
 
 

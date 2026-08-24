@@ -2,9 +2,18 @@
 
 The one coordinator in the evidence pipeline: it reads the ledger (`evidence`), scores what
 it finds (`candidates`, pure), and materializes the result through the store's ordinary
-capture path. Nothing here approves, retires, or trusts anything — a proposal lands
-`pending_approval` (or as a `proposed_revision` on its target) and the existing review flow
-is the only gate. Retirement stays a READ-ONLY recommendation in the receipt.
+capture path. Nothing here approves, retires, or trusts anything, and every decision it
+creates is REVIEWABLE by construction:
+
+* a new candidate lands `pending_approval` — `force_pending`, never the `suggested` tier an
+  ai capture would otherwise get, because `suggested` injects at session start yet never
+  appears in `review_pending`: trusted without ever having been offered for review;
+* an update lands as a `proposed_revision` on its target, HEAD unmoved until approval;
+* a retirement or replacement is a READ-ONLY recommendation in the receipt, never a write.
+
+The same discipline governs the way back out: a checkpoint is only ever marked `approved`
+against real review evidence (`approved_by == "human"`), never inferred from an entry merely
+having stopped being pending.
 
 Above store rather than beside it: `store.py` never imports this module, and store-owned
 helpers are read through the store MODULE OBJECT at call time — the load-order discipline
@@ -61,11 +70,17 @@ def _projected(entry: dict, tombstoned: bool) -> dict:
 def _dispositions(checkpoints: dict, entries: list) -> dict:
     """The status flips a pending checkpoint has earned since the last pass.
 
-    Lazy on purpose: nothing hooks `approve_decision`: a checkpoint learns its decision's fate
-    the next time reconciliation runs. An entry that is GONE from the live store (deleted, or
-    ignored) settles as `dismissed`; one still awaiting the developer — `pending_approval`, or
-    carrying an unreviewed `proposed_revision` — stays pending, which is also what keeps its
-    evidence pinned against eviction until somebody actually reviews it.
+    Lazy on purpose: nothing hooks `approve_decision`, so a checkpoint learns its decision's
+    fate the next time reconciliation runs. Two flips, and only two:
+
+    * `approved` requires REAL review evidence — `approved_by == "human"`, which only
+      `_apply_approval`'s approve/edit paths stamp. Approval is never INFERRED from the
+      absence of something ("not pending and no proposal" would read an auto-settled or
+      dismissed entry as reviewed, which is the whole failure this pipeline must not have).
+    * `dismissed` when the entry is gone from the live store, or `ignored`.
+
+    Anything else stays pending — which is also what keeps its evidence pinned against
+    eviction until somebody actually reviews it.
     """
     by_id = {str(e.get("id") or ""): e for e in entries}
     flips = {}
@@ -75,10 +90,10 @@ def _dispositions(checkpoints: dict, entries: list) -> dict:
         entry = by_id.get(str(checkpoint.get("entry_id") or ""))
         if entry is None or store.entry_status(entry) == "ignored":
             status = "dismissed"
-        elif store.entry_status(entry) == "pending_approval" or entry.get("proposed_revision"):
-            continue
-        else:
+        elif entry.get("approved_by") == "human" and not entry.get("proposed_revision"):
             status = "approved"
+        else:
+            continue
         flips[candidate_id] = {**checkpoint, "status": status}
     return flips
 
@@ -96,19 +111,25 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         receipt["insufficient"] += 1
         return
     if kind in _RECOMMEND_ONLY:
+        # `kind` rides along so the receipt can say REPLACE where a replacement was named:
+        # "retire decision X" and "replace X with Y" are different asks of the developer, and
+        # rendering both as a bare retirement drops the half that says what takes its place.
         receipt["retire_recommendations"].append({
             "candidate_id": candidate_id,
+            "kind": kind,
             "target_decision_id": candidate.get("target_decision_id"),
+            "replacement_decision_id": candidate.get("replacement_decision_id"),
             "title": candidate.get("title") or "",
         })
         return
     if kind == "duplicate":
         # The store already holds this decision, so there is nothing to review — but the
         # events ARE settled, and a checkpoint is what stops them resurfacing every pass.
+        # (No dry_run guard: `_reconcile` discards `writes` wholesale on a dry run, which is
+        # the single gate — a second one here would be a second place to get it wrong.)
         receipt["duplicates"] += 1
-        if not dry_run:
-            writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
-                                    "entry_id": str(candidate.get("target_decision_id") or "")}
+        writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
+                                "entry_id": str(candidate.get("target_decision_id") or "")}
         return
     if dry_run:
         receipt["proposed"] += 1
@@ -116,7 +137,9 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
 
     # The ordinary capture path, deliberately: novelty filtering, revision construction,
     # capacity limits and the pending-review flow all apply, and `replace_id` lands an update
-    # in the existing trust-ordered proposal slot without moving HEAD.
+    # in the existing trust-ordered proposal slot without moving HEAD. `force_pending` applies
+    # to a brand-new entry only: an INFERRED decision must never rest in the `suggested` tier,
+    # which injects at session start but never appears in `review_pending`.
     stored, entry_id, _meta = store.update_decision_with_meta(
         repo_path,
         candidate.get("content") or "",
@@ -125,12 +148,15 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         created_by="ai",
         replace_id=str(candidate.get("target_decision_id") or "") if kind == "update" else "",
         title=candidate.get("title") or "",
+        force_pending=True,
     )
     if stored and entry_id:
         # Counted as proposed even in the one case where the store accepted the call but kept
         # a higher-trust proposal in the entry's single slot (`meta["refusal_ack"]`, #202): the
         # decision IS awaiting review, just not on this candidate's wording, and re-proposing
         # it every pass would be the worse answer. The receipt has no truer slot for it.
+        # The checkpoint STATUS, though, is settled from what the store actually did rather
+        # than from this optimism — see `_settle_write_statuses`.
         receipt["proposed"] += 1
         writes[candidate_id] = {"event_ids": event_ids, "status": "pending",
                                 "entry_id": str(entry_id)}
@@ -139,6 +165,30 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
     # duplicate, not an error, and it settles the events exactly like a matched one.
     receipt["duplicates"] += 1
     writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed", "entry_id": ""}
+
+
+def _settle_write_statuses(repo_path: str, writes: dict) -> None:
+    """Downgrade to `dismissed` every checkpoint whose entry is NOT actually awaiting review.
+
+    The store's return says a write happened, not what kind. `update_decision_with_meta`
+    answers `(True, entry_id, {})` identically for a brand-new pending entry, an attached
+    `proposed_revision`, and a trivial correction it applied in place as a new approved
+    revision — and only the first two leave anything for the developer to look at. A
+    checkpoint claiming `pending` over the third would pin its evidence forever waiting on a
+    review that will never be asked for. One re-read of the store settles it for the whole
+    batch, which is also why this is not done per candidate inside the loop.
+    """
+    pending_ids = {cid for cid, cp in writes.items() if cp.get("status") == "pending"}
+    if not pending_ids:
+        return
+    by_id = {str(e.get("id") or ""): e for e in store.load(repo_path).get("entries", [])
+             if isinstance(e, dict)}
+    for candidate_id in pending_ids:
+        entry = by_id.get(str(writes[candidate_id].get("entry_id") or ""))
+        awaiting = entry is not None and (entry.get("proposed_revision")
+                                          or store.entry_status(entry) == "pending_approval")
+        if not awaiting:
+            writes[candidate_id]["status"] = "dismissed"
 
 
 def _write_session(event_ids: list, sessions: dict) -> str:
@@ -167,12 +217,14 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
         return receipt
 
     entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
+    # `type == "decision"` on BOTH sides: the store holds tasks too, and a deleted task is no
+    # more a decision to classify against than a live one is.
     tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
-                  if isinstance(e, dict)]
+                  if isinstance(e, dict) and e.get("type") == "decision"]
     flips = {} if dry_run else _dispositions(checkpoints, entries)
 
     projection = [_projected(e, False) for e in entries if e.get("type") == "decision"]
-    projection += [_projected(e, True) for e in tombstones]
+    projection += [_projected(e, True) for e in tombstones]  # already decision-filtered above
     sessions = {str(e.get("event_id") or ""): str(e.get("session_id") or "") for e in events}
 
     writes: dict = {}
@@ -187,11 +239,18 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
 
     if dry_run:
         return receipt
+    _settle_write_statuses(repo_path, writes)
     if evidence.record_candidate_checkpoints(repo_path, {**flips, **writes})["status"] != "ok":
         # The decisions are stored but their evidence still reads as unconsumed. Say so: the
         # next pass re-proposes and the store's novelty filter absorbs it.
         receipt["incomplete"] = True
-    evidence.compact_evidence(repo_path)
+    compacted = evidence.compact_evidence(repo_path)["compacted"]
+    if not (writes or flips or compacted):
+        # Nothing happened, so nothing is recorded. A pass that appended its receipt
+        # unconditionally would write one event per SessionStart, PreCompact and SessionEnd
+        # forever on any repo holding a single stuck pending checkpoint — filling the ledger
+        # toward eviction with news of having done nothing.
+        return receipt
     evidence.emit_hook_event(
         repo_path, "session_reconcile", session_id=session_id or _FALLBACK_SESSION,
         source="reconcile_session",
@@ -245,9 +304,16 @@ def format_receipt(receipt: dict) -> str:
     ]
     for recommendation in receipt["retire_recommendations"]:
         target = (recommendation.get("target_decision_id") or "")[:8]
-        lines.append(f"  retirement suggested for {target}: {recommendation.get('title', '')}")
+        replacement = (recommendation.get("replacement_decision_id") or "")[:8]
+        if recommendation.get("kind") == "replace":
+            what = f"replacement suggested for {target}"
+            if replacement:
+                what += f" (by {replacement})"
+        else:
+            what = f"retirement suggested for {target}"
+        lines.append(f"  {what}: {recommendation.get('title', '')}")
     if receipt["retire_recommendations"]:
-        lines.append("  (retirements are recommendations only — nothing was retired.)")
+        lines.append("  (recommendations only — nothing was retired or replaced.)")
     if receipt["incomplete"]:
         lines.append("  incomplete: the evidence ledger could not be fully read or updated.")
     return "\n".join(lines)

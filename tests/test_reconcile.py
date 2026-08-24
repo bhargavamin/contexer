@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from contexer import candidates, evidence, reconcile, store
-from contexer.adapters import claude, gemini
+from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
 
@@ -159,6 +159,54 @@ class TestEndToEnd:
         assert _unconsumed(tmp_repo) == []
 
 
+class TestInferredDecisionsAreAlwaysReviewable:
+    """The whole pipeline's safety property: a decision NOBODY stated must never come to rest
+    anywhere the developer will not be shown it. `suggested` is exactly such a place — it
+    injects at session start yet never appears in `review_pending` — so evidence-derived
+    captures are forced to `pending_approval`, bootstrap's medium-tier precedent."""
+
+    # An agent conclusion with rationale, non-prescriptive, no L3 content signal, no tooling
+    # word: everything about it says `suggested` to the store's own classifier.
+    CONCLUSION = ("The router reads its sidecar index before ranking, because rebuilding "
+                  "inline would cost a prompt several milliseconds.")
+
+    def test_the_store_would_otherwise_file_this_as_suggested(self, tmp_repo):
+        # The defect this pins, stated as the store sees it — without this assertion the test
+        # below would keep passing if `force_pending` quietly stopped mattering.
+        assert store._classify_level(self.CONCLUSION, "architecture", "ai") == "suggested"
+
+    def test_an_agent_conclusion_lands_pending_and_stays_there_until_approved(self, tmp_repo):
+        _emit(tmp_repo, "agent_conclusion", self.CONCLUSION)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+        (entry,) = store.load(tmp_repo)["entries"]
+        assert store.entry_status(entry) == "pending_approval"
+        assert entry["subtype"] == "architecture"
+        assert entry["id"][:8] in store.format_pending_review(tmp_repo)
+        assert store.get_pending_decisions(tmp_repo) == [entry]
+
+        # Reconciling again does NOT settle it: nothing has reviewed it.
+        reconcile.reconcile_session(tmp_repo)
+        assert next(iter(_checkpoints(tmp_repo).values()))["status"] == "pending"
+
+        store.approve_decision(tmp_repo, entry["id"], "approve")
+        reconcile.reconcile_session(tmp_repo)
+        assert _checkpoints(tmp_repo) == {}          # settled, then compacted
+
+    def test_a_checkpoint_is_never_approved_without_review_evidence(self, tmp_repo):
+        # An entry can stop being pending without anyone reviewing it. Reading that as
+        # approval is how an inferred decision would launder itself into a reviewed one, so
+        # the flip requires `approved_by == "human"` — what only approve/edit stamps.
+        _emit(tmp_repo, "agent_conclusion", self.CONCLUSION)
+        reconcile.reconcile_session(tmp_repo)
+        data = store.load(tmp_repo)
+        data["entries"][0]["status"] = "approved"    # no approved_by: nobody looked at it
+        store.save(tmp_repo, data)
+
+        reconcile.reconcile_session(tmp_repo)
+        assert next(iter(_checkpoints(tmp_repo).values()))["status"] == "pending"
+
+
 # ── the four candidate kinds ─────────────────────────────────────────────────
 
 class TestUpdateCandidate:
@@ -178,6 +226,28 @@ class TestUpdateCandidate:
         assert "alembic" in after["proposed_revision"]["content"]
         assert len(store.load(tmp_repo)["entries"]) == 1  # routed onto the target, not appended
         assert _checkpoints(tmp_repo)[_only_checkpoint_id(tmp_repo)]["entry_id"] == entry_id
+
+    def test_an_update_applied_in_place_is_dismissed_not_left_pending(self, tmp_repo):
+        # A convention-subtyped correction is trivial to the store: it applies immediately as
+        # a new approved revision, with no proposal and nothing to review. The store's return
+        # looks identical to the proposal case, so the checkpoint status is settled from what
+        # the entry ACTUALLY shows — otherwise this evidence would be pinned forever waiting
+        # on a review nobody will ever be asked for.
+        # Both sides convention-subtyped: the store gates on the OLD subtype as well, so a
+        # convention correction to an architecture decision would still be a proposal.
+        ok, entry_id = store.update_decision(tmp_repo, STORED, SESSION, "convention",
+                                             created_by="human")
+        assert ok
+        _emit(tmp_repo, "user_directive",
+              "Postgres backs the decision store, and the commit hook now formats every "
+              "migration file.")
+        reconcile.reconcile_session(tmp_repo)
+
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert "proposed_revision" not in entry            # applied in place
+        assert store.get_pending_decisions(tmp_repo) == []  # nothing to review
+        assert _checkpoints(tmp_repo) == {}                # dismissed, so compaction took it
+        assert _unconsumed(tmp_repo) == []
 
     def test_a_second_pass_proposes_nothing_more(self, tmp_repo):
         _stored_decision(tmp_repo)
@@ -352,6 +422,43 @@ class TestFastPath:
                            "duplicates": 0, "insufficient": 0, "retire_recommendations": [],
                            "incomplete": False, "dry_run": False}
 
+    def test_a_stuck_pending_checkpoint_reads_the_store_but_never_locks_it(self, tmp_repo,
+                                                                          monkeypatch):
+        # The other branch past the fast path: no events, one checkpoint whose fate might have
+        # changed. It must READ the store (that is the whole question it is asking) and must
+        # not write, so the store lock is never taken.
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        assert next(iter(_checkpoints(tmp_repo).values()))["status"] == "pending"
+
+        loads = []
+        real_load = store.load
+        monkeypatch.setattr(store, "load", lambda *a, **k: loads.append(1) or real_load(*a, **k))
+        monkeypatch.setattr(store, "store_lock",
+                            lambda *_a, **_k: pytest.fail("nothing is written on this branch"))
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert (receipt["events_observed"], receipt["proposed"]) == (0, 0)
+        assert loads                                   # the store WAS read
+        assert next(iter(_checkpoints(tmp_repo).values()))["status"] == "pending"
+
+    def test_a_pass_that_did_nothing_appends_no_receipt_event(self, tmp_repo):
+        # Otherwise a repo with one stuck pending checkpoint appends a `session_reconcile`
+        # event at every SessionStart, PreCompact and SessionEnd, forever, filling the ledger
+        # toward eviction with news of having done nothing.
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        before = _ledger_bytes(tmp_repo)
+
+        reconcile.reconcile_session(tmp_repo)
+        reconcile.reconcile_session(tmp_repo)
+        assert _ledger_bytes(tmp_repo) == before
+
+    def test_a_pass_that_did_something_does_append_one(self, tmp_repo):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        assert [e["kind"] for e in evidence.unconsumed_events(tmp_repo)
+                if e["kind"] == "session_reconcile"] == ["session_reconcile"]
+
     def test_bookkeeping_events_do_not_keep_the_pass_awake(self, tmp_repo, monkeypatch):
         # A pass appends its own `session_reconcile` receipt. If that counted as evidence, the
         # NEXT pass would always have work to do and the fast path would never fire again.
@@ -439,11 +546,13 @@ class TestHookWiring:
         monkeypatch.setattr(reconcile, "reconcile_session", _boom)
         assert gemini.session_end(tmp_repo, "{}") == json.dumps({"suppressOutput": True})
 
-    def test_no_host_hook_command_mentions_reconciliation(self):
+    @pytest.mark.parametrize("module", [claude, codex, cursor, gemini],
+                             ids=lambda m: m.NAME)
+    def test_no_host_hook_command_mentions_reconciliation(self, module):
         # The wiring point is a Python entrypoint, so no installed hook needs rewiring — and
-        # nothing here may become a per-prompt cost.
-        source = (Path(claude.__file__).read_text(encoding="utf-8")
-                  + Path(gemini.__file__).read_text(encoding="utf-8"))
+        # nothing here may become a per-prompt cost. Checked per FILE: concatenating the four
+        # and splitting once only ever inspected the last one's tail.
+        source = Path(module.__file__).read_text(encoding="utf-8")
         assert "reconcile_session" not in source.split("def install")[-1]
 
 
@@ -505,6 +614,18 @@ class TestCliCommand:
         self._run(monkeypatch, tmp_repo, "--session", "sess-b")
         assert "evidence events observed: 0" in capsys.readouterr().out
 
+    def test_session_without_a_value_exits_1_instead_of_eating_the_next_flag(
+            self, tmp_repo, monkeypatch, capsys):
+        # `--session --dry-run` used to take the flag as the session VALUE: the pass was
+        # scoped to a session that cannot exist AND the dry run was dropped, i.e. a write
+        # where the developer asked for none.
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with pytest.raises(SystemExit) as exc:
+            self._run(monkeypatch, tmp_repo, "--session", "--dry-run")
+        assert exc.value.code == 1
+        assert "Missing value for --session" in capsys.readouterr().err
+        assert store.get_pending_decisions(tmp_repo) == []       # nothing was written
+
     def test_unknown_argument_exits_1(self, tmp_repo, monkeypatch, capsys):
         with pytest.raises(SystemExit) as exc:
             self._run(monkeypatch, tmp_repo, "--force")
@@ -521,18 +642,33 @@ class TestCliCommand:
 
 class TestReceiptRendering:
 
+    def _receipt(self, **overrides):
+        return {"events_observed": 3, "proposed": 0, "already_pending": 0, "duplicates": 0,
+                "insufficient": 0, "dry_run": False, "incomplete": False,
+                "retire_recommendations": [], **overrides}
+
     def test_a_retirement_recommendation_says_it_retired_nothing(self):
-        text = reconcile.format_receipt({
-            "events_observed": 3, "proposed": 0, "already_pending": 0, "duplicates": 0,
-            "insufficient": 0, "dry_run": False, "incomplete": False,
-            "retire_recommendations": [{"candidate_id": "c", "target_decision_id": "abcdef1234",
-                                        "title": "Stop using Postgres"}]})
+        text = reconcile.format_receipt(self._receipt(retire_recommendations=[
+            {"candidate_id": "c", "kind": "retire", "target_decision_id": "abcdef1234",
+             "replacement_decision_id": None, "title": "Stop using Postgres"}]))
         assert "retirement suggested for abcdef12: Stop using Postgres" in text
-        assert "nothing was retired" in text
+        assert "nothing was retired or replaced" in text
+
+    def test_a_replacement_is_worded_as_one_and_names_its_replacement(self):
+        # "retire X" and "replace X with Y" are different asks; rendering both as a bare
+        # retirement drops the half that says what takes its place.
+        text = reconcile.format_receipt(self._receipt(retire_recommendations=[
+            {"candidate_id": "c", "kind": "replace", "target_decision_id": "abcdef1234",
+             "replacement_decision_id": "99887766aa", "title": "Use pgbouncer instead"}]))
+        assert "replacement suggested for abcdef12 (by 99887766): Use pgbouncer instead" in text
+        assert "retirement suggested" not in text
+
+    def test_a_replacement_with_no_named_replacement_still_reads_correctly(self):
+        # V1 grouping never infers `replacement_decision_id`, so this is today's normal case.
+        text = reconcile.format_receipt(self._receipt(retire_recommendations=[
+            {"candidate_id": "c", "kind": "replace", "target_decision_id": "abcdef1234",
+             "replacement_decision_id": None, "title": "Use pgbouncer instead"}]))
+        assert "replacement suggested for abcdef12: Use pgbouncer instead" in text
 
     def test_incomplete_is_stated(self):
-        text = reconcile.format_receipt({
-            "events_observed": 0, "proposed": 0, "already_pending": 0, "duplicates": 0,
-            "insufficient": 0, "dry_run": False, "incomplete": True,
-            "retire_recommendations": []})
-        assert "incomplete" in text
+        assert "incomplete" in reconcile.format_receipt(self._receipt(incomplete=True))
