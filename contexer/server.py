@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import conflicts, store
+from contexer import conflicts, reconcile, store
 
 SESSION_ID = str(uuid.uuid4())
 
@@ -193,6 +193,32 @@ def review_pending(repo_path: str = "") -> str:
     if not resolved:
         return "No repo path detected."
     return store.format_pending_review(resolved)
+
+
+@mcp.tool()
+def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool = False) -> str:
+    """Turn this session's recorded evidence — the directives, file changes and conclusions the
+    hooks observed — into decisions awaiting the developer's review. Runs automatically at
+    session start, before compaction, and at session end; call it explicitly when the developer
+    asks what was learned this session, or before wrapping up a long piece of work.
+
+    session_id: scope to ONE host session id; omit to reconcile everything the repo's ledger
+                holds (the default, and what a session shared across git worktrees needs).
+    dry_run:    report what would be proposed and write nothing at all.
+
+    Anything proposed is pending review — NOT yet trusted, and it does not block your work.
+    Retirements are only ever recommendations here; nothing is retired or approved.
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    receipt = reconcile.reconcile_session(resolved, session_id, dry_run=dry_run)
+    text = reconcile.format_receipt(receipt)
+    if receipt["proposed"]:
+        text += ("\n\nThese are pending review — not yet trusted, and they do not block your "
+                 "work. Surface them to the developer at a natural point (review_pending lists "
+                 "each with its content); never approve them yourself.")
+    return text
 
 
 @mcp.tool()

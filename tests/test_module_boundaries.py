@@ -25,10 +25,15 @@ CALLER_ROOTS = ("contexer", "benchmarks")
 
 # Leaf modules store.py may call. A leaf never imports store back except through the module
 # object (see guard_engine.py's load-order docstring).
+#
+# `reconcile` is the one member that is NOT such a leaf: it is a coordinator ABOVE store, which
+# never calls it. It is listed anyway because both checks below are exactly what a coordinator
+# owes — it must reach store through the module object like everyone else, and store.py must
+# never grow an alias to it, which is the shape a downward dependency would take.
 LEAVES = frozenset({
     "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
-    "evidence", "candidates",
+    "evidence", "candidates", "reconcile",
 })
 
 
