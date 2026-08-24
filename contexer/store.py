@@ -2740,6 +2740,12 @@ def _load_deleted(repo_path: str) -> dict:
     return _read_deleted(repo_path)[0]
 
 
+def load_deleted(repo_path: str) -> dict:
+    """The public spelling of `_load_deleted`, for a module outside store.py that needs the
+    tombstones (reconcile.py projects them so a re-stated retired decision is surfaced fresh)."""
+    return _load_deleted(repo_path)
+
+
 def deleted_diagnostics(repo_path: str) -> dict:
     """Whether this repo's tombstone sidecar is readable: {"ok": bool, "error": str | None}.
 

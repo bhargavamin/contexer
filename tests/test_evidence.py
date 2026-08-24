@@ -229,7 +229,8 @@ def _appended(repo, n=1, **overrides):
 
 
 def _seed(repo, **overrides):
-    """Write a ledger straight to disk — the only way to stage checkpoints, which Task 5 owns."""
+    """Write a ledger straight to disk — how a test stages arbitrary ledger state, including
+    the malformed shapes `record_candidate_checkpoints` would never produce."""
     evidence._sidecar_path(repo).parent.mkdir(mode=0o700, exist_ok=True)
     ledger = {**evidence._empty_ledger(repo), **overrides}
     evidence._sidecar_path(repo).write_text(json.dumps(ledger), encoding="utf-8")
@@ -493,6 +494,101 @@ def test_compaction_with_nothing_settled_is_a_no_op(tmp_repo):
     assert evidence.compact_evidence(tmp_repo) == {
         "status": "ok", "compacted": 0, "removed_events": 0, "errors": []}
     assert [e["event_id"] for e in _ledger(tmp_repo)["events"]] == ids
+
+
+# ── checkpoints: what reconciliation reads and writes ────────────────────────
+
+def test_unconsumed_events_excludes_every_checkpointed_event(tmp_repo):
+    ids = _appended(tmp_repo, 3)
+    _seed(tmp_repo, events=_ledger(tmp_repo)["events"], candidate_checkpoints={
+        "cand-1": {"event_ids": ids[:1], "status": "pending"},
+        # A DISMISSED checkpoint consumes its events just as surely as a pending one: the
+        # candidate was settled, so re-surfacing its evidence every pass is the bug.
+        "cand-2": {"event_ids": ids[1:2], "status": "dismissed"},
+    })
+    assert [e["event_id"] for e in evidence.unconsumed_events(tmp_repo)] == ids[2:]
+
+
+def test_unconsumed_events_scopes_to_a_session_only_when_asked(tmp_repo):
+    _appended(tmp_repo, 1, session_id="s1")
+    _appended(tmp_repo, 1, session_id="s2")
+    assert len(evidence.unconsumed_events(tmp_repo)) == 2
+    assert [e["session_id"] for e in evidence.unconsumed_events(tmp_repo, "s2")] == ["s2"]
+
+
+def test_unconsumed_events_reads_the_whole_ledger_not_one_repo_key(tmp_repo):
+    """A linked worktree shares the main worktree's canonical sidecar while its own events
+    carry the physical worktree path as `repo_key`. Filtering on that would hide exactly the
+    events reconciliation exists to consume, so the LEDGER is the scope."""
+    _appended(tmp_repo, 1, repo_key=tmp_repo)
+    _appended(tmp_repo, 1, repo_key=f"{tmp_repo}/.worktrees/feature")
+    assert len({e["repo_key"] for e in evidence.unconsumed_events(tmp_repo)}) == 2
+
+
+@pytest.mark.parametrize("garbage", [b"{", b"null", b'{"events": 3}'])
+def test_checkpoint_reads_degrade_to_empty_on_an_unusable_sidecar(tmp_repo, garbage):
+    evidence._sidecar_path(tmp_repo).parent.mkdir(mode=0o700, exist_ok=True)
+    evidence._sidecar_path(tmp_repo).write_bytes(garbage)
+    assert evidence.candidate_checkpoints(tmp_repo) == {}
+    assert evidence.unconsumed_events(tmp_repo) == []
+
+
+def test_candidate_checkpoints_skips_a_hand_edited_non_object(tmp_repo):
+    _seed(tmp_repo, candidate_checkpoints={"good": {"status": "pending"}, "bad": "pending"})
+    assert list(evidence.candidate_checkpoints(tmp_repo)) == ["good"]
+
+
+def test_record_candidate_checkpoints_merges_and_keeps_the_events(tmp_repo):
+    ids = _appended(tmp_repo, 2)
+    assert evidence.record_candidate_checkpoints(tmp_repo, {
+        "cand-1": {"event_ids": ids, "status": "pending", "entry_id": "e1"}}) == {
+        "status": "ok", "recorded": 1, "errors": []}
+    assert evidence.unconsumed_events(tmp_repo) == []
+
+    # Re-recording one candidate replaces THAT candidate and leaves the rest alone: this is
+    # how a pending checkpoint learns its decision was approved.
+    evidence.record_candidate_checkpoints(tmp_repo, {"cand-2": {"event_ids": [],
+                                                                "status": "dismissed"}})
+    evidence.record_candidate_checkpoints(tmp_repo, {
+        "cand-1": {"event_ids": ids, "status": "approved", "entry_id": "e1"}})
+    checkpoints = evidence.candidate_checkpoints(tmp_repo)
+    assert checkpoints["cand-1"]["status"] == "approved"
+    assert checkpoints["cand-2"]["status"] == "dismissed"
+    assert [e["event_id"] for e in _ledger(tmp_repo)["events"]] == ids
+
+
+def test_recording_nothing_is_a_no_op_that_takes_no_lock(tmp_repo, monkeypatch):
+    monkeypatch.setattr(evidence.fcntl, "flock", _refuse_lock)
+    assert evidence.record_candidate_checkpoints(tmp_repo, {}) == {
+        "status": "ok", "recorded": 0, "errors": []}
+
+
+def test_record_refuses_when_the_lock_cannot_be_taken(tmp_repo, monkeypatch):
+    # compact_evidence's rule, same reason: this is a read-modify-write of the whole ledger,
+    # so running it unlocked would clobber a concurrent append that DID hold the lock.
+    _appended(tmp_repo, 1)
+    before = evidence._sidecar_path(tmp_repo).read_bytes()
+    monkeypatch.setattr(evidence.fcntl, "flock", _refuse_lock)
+
+    result = evidence.record_candidate_checkpoints(tmp_repo, {"c": {"event_ids": []}})
+    assert result["status"] == "error" and result["errors"]
+    assert evidence._sidecar_path(tmp_repo).read_bytes() == before
+
+
+def test_record_refuses_a_corrupt_ledger_rather_than_replacing_it(tmp_repo):
+    evidence._sidecar_path(tmp_repo).parent.mkdir(mode=0o700, exist_ok=True)
+    evidence._sidecar_path(tmp_repo).write_bytes(b"garbage")
+    assert evidence.record_candidate_checkpoints(
+        tmp_repo, {"c": {"event_ids": []}})["status"] == "error"
+    assert evidence._sidecar_path(tmp_repo).read_bytes() == b"garbage"
+
+
+def test_record_never_raises_when_the_store_dir_cannot_be_created(tmp_repo, monkeypatch):
+    blocked = evidence._sidecar_path(tmp_repo).parent.parent / "blocked-record"
+    blocked.write_text("a file, so mkdir underneath it cannot succeed")
+    monkeypatch.setattr(store, "STORE_DIR", blocked / ".contexer")
+    assert evidence.record_candidate_checkpoints(
+        tmp_repo, {"c": {"event_ids": []}})["status"] == "error"
 
 
 # ── contexer status ──────────────────────────────────────────────────────────
