@@ -75,6 +75,24 @@ def test_non_mapping_input_never_raises(bad):
     assert len(errors) == 1
 
 
+@pytest.mark.parametrize("field", sorted(GOOD))
+@pytest.mark.parametrize("value", [[1, 2], {"a": 1}, None, 3.5, b"bytes", object()],
+                         ids=["list", "dict", "none", "float", "bytes", "object"])
+def test_hostile_field_value_reports_errors_and_never_raises(field, value):
+    """The never-raises contract is module-wide, not just for a non-mapping event: a malformed
+    value in ANY field must come back as an error. `kind` was the one field that raised — its
+    membership test hashes the raw value, so an unhashable one escaped as TypeError."""
+    normalized, errors = evidence.validate_event({**GOOD, field: value})
+    assert (normalized is None) == bool(errors)
+
+
+@pytest.mark.parametrize("kind", [["file_changed"], {"kind": "file_changed"}])
+def test_unhashable_kind_is_an_error_not_a_crash(kind):
+    normalized, errors = evidence.validate_event(_event(kind=kind))
+    assert normalized is None
+    assert any("kind must be one of" in e for e in errors), errors
+
+
 def test_input_is_never_mutated():
     raw = _event(files=[f"src/f{i}.py" for i in range(25)], summary="x" * 900,
                  attributes={"a": "y" * 900})
