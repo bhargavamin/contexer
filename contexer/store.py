@@ -1356,6 +1356,13 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     return True, subtype
 
 
+# Public alias, one definition read from outside: the evidence ledger has to know whether a
+# prompt WAS a directive when capture_user_constraint raised before it could report, and a
+# second copy of this detector in another module would drift from this one. Public rather
+# than read as a private name across the boundary (CLAUDE.md, "Module boundaries" Rule 2).
+is_prescriptive_directive = _is_prescriptive_constraint
+
+
 def capture_user_constraint(
     repo_path: str, prompt: str, session_id: str,
     near_misses: list | None = None, repo_source: str = "",
@@ -4771,7 +4778,7 @@ def _edited_files_path(repo_path: str) -> Path:
     return STORE_DIR / sidecars.filename("edited_files", slug=repo_slug(repo_path))
 
 
-def record_edited_file(repo_path: str, file_path: str) -> None:
+def record_edited_file(repo_path: str, file_path: str) -> str:
     """Record file_path as edited in this repo, stamped with the current time. Dedup: a
     path already present has its timestamp refreshed in place (never duplicated). Capped at
     _EDITED_FILES_CAP entries, evicting the oldest by timestamp. Silent no-op on a falsy
@@ -4785,14 +4792,23 @@ def record_edited_file(repo_path: str, file_path: str) -> None:
     at module top, for the same load-order reason _anchor_sources does: guard_engine
     imports store at ITS top, so an eager import here would recreate that cycle.
 
-    Fail-soft: a write error must never break the calling hook."""
+    Fail-soft: a write error must never break the calling hook.
+
+    RETURNS the canonical repo-relative path for `file_path`, or "" when there is none to
+    record (falsy path, unresolvable, or outside the repo). The evidence ledger's
+    `file_changed` event names that return value rather than canonicalizing the host's raw
+    `file_path` a second time, so the event and this sidecar can only ever name the same file
+    — the caller has no second spelling to get wrong, and no reader of `_guard_relpath` is
+    added outside guard_engine. A path that resolved but whose SIDECAR WRITE then failed is
+    still returned: the edit happened, and the ledger records it independently of this file."""
     if not file_path:
-        return
+        return ""
+    relpath = ""
     try:
         from contexer import guard_engine
         relpath = guard_engine._guard_relpath(repo_path, file_path)
         if guard_engine._escapes_repo(relpath):
-            return
+            return ""
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         entries = [e for e in _load_edited_entries(repo_path) if e["path"] != relpath]
         entries.append({"path": relpath, "mtime": time.time()})
@@ -4801,6 +4817,7 @@ def record_edited_file(repo_path: str, file_path: str) -> None:
         atomic_write(_edited_files_path(repo_path), json.dumps(entries))
     except OSError:
         pass
+    return relpath
 
 
 def _load_edited_entries(repo_path: str) -> list[dict]:

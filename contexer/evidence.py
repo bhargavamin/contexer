@@ -407,6 +407,77 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
     return {"status": "stored", "errors": []}
 
 
+# ── host-hook emission ───────────────────────────────────────────────────────────
+#
+# What a host adapter calls. An adapter owns its hook's output contract and nothing else,
+# so every field a hook cannot know (ids, the clock, the defaults) is filled in here and a
+# fourth adapter emits the same normalized event as the first three instead of a fourth
+# hand-built dict.
+
+
+def emit_hook_event(repo_path: str, kind: str, *, session_id: str = "", source: str = "",
+                    summary: str = "", files=None, attributes=None) -> dict:
+    """Build one event out of what a hook knows and append it, returning `append_evidence`'s
+    result. NEVER raises: `append_evidence` already promises that, and the dict build is
+    wrapped too, so a call site inside a hook cannot fail over the ledger.
+
+    `repo_key` is the repo the CALLER already resolved for its existing work — never
+    re-resolved here. An event keyed through a different chain than the sidecar it describes
+    is exactly the writer/reader split this repo has shipped twice (post_write's slug, the
+    team-poll session id), and re-resolving inside the emitter would invite a third.
+
+    An absent host session id becomes "unknown" rather than failing validation: an event that
+    cannot be grouped by session is still evidence of the thing that happened.
+    """
+    try:
+        return append_evidence(repo_path, {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": str(uuid.uuid4()),
+            "session_id": session_id or "unknown",
+            "repo_key": repo_path,
+            "kind": kind,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "summary": summary,
+            "files": list(files) if files else [],
+            "attributes": dict(attributes) if attributes else {},
+        })
+    except Exception as exc:           # broad on purpose: the never-raises contract
+        return {"status": "dropped_error", "errors": [f"{type(exc).__name__}: {exc}"]}
+
+
+def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
+                      *, near: list | None = None, repo_source: str = "") -> tuple:
+    """`store.capture_user_constraint` plus the `user_directive` event for it — the one
+    definition every host's per-prompt constraint hook shares.
+
+    Returns and raises EXACTLY what the store call does, so no hook's existing behaviour
+    changes. Two gates, each honest about what is actually known: on the normal path the
+    event is emitted only when the store reports it stored or updated an entry (a detected
+    directive that deduped against an existing one is a no-op there and stays one here), and
+    when the store RAISES — the loss this ledger exists to record — the event is emitted only
+    if the store's own detector says the prompt was a directive, marked `unverified` because
+    no entry exists to prove it. The detector is reached through its public alias; a second
+    copy of "what counts as a directive" would drift from the first.
+    """
+    try:
+        result = store.capture_user_constraint(
+            repo_path, prompt, session_id, near, repo_source=repo_source)
+    except Exception:
+        # Suppressed, not merged into the outer handler: a failure while RECORDING the loss
+        # must not replace the exception the caller's own error path is about to see.
+        with contextlib.suppress(Exception):
+            if store.is_prescriptive_directive(prompt)[0]:
+                emit_hook_event(repo_path, "user_directive", session_id=session_id,
+                                source=source, summary=prompt,
+                                attributes={"unverified": True})
+        raise
+    if result[0] is not None:
+        emit_hook_event(repo_path, "user_directive", session_id=session_id,
+                        source=source, summary=result[1])
+    return result
+
+
 def list_session_evidence(repo_path: str, session_id: str) -> list[dict]:
     """This session's events, oldest first (append order). Lock-free: atomic writes mean a
     reader never sees a torn file. A missing or corrupt sidecar reads as [] — this is a render

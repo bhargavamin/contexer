@@ -4794,13 +4794,19 @@ class TestEditedFilesSignal:
         assert store._read_edited_files(tmp_repo) == ["src/a.py"]
 
     def test_outside_repo_path_is_dropped(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "../outside.py")
+        assert store.record_edited_file(tmp_repo, "../outside.py") == ""
         assert store._read_edited_files(tmp_repo) == []
         assert not store._edited_files_path(tmp_repo).exists()
 
     def test_empty_file_path_is_a_silent_noop(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "")
+        assert store.record_edited_file(tmp_repo, "") == ""
         assert store._read_edited_files(tmp_repo) == []
+
+    def test_returns_the_canonical_path_it_recorded(self, tmp_repo):
+        # The evidence ledger's file_changed event names THIS return rather than
+        # canonicalizing the host's raw path a second time, so the two can never disagree.
+        assert store.record_edited_file(tmp_repo, str(Path(tmp_repo) / "src" / "a.py")) \
+            == "src/a.py"
 
     def test_entry_older_than_the_freshness_window_is_not_returned(self, tmp_repo):
         store.record_edited_file(tmp_repo, "stale.py")
@@ -4830,7 +4836,10 @@ class TestEditedFilesSignal:
         def _boom(*a):
             raise OSError("disk full")
         monkeypatch.setattr(store, "atomic_write", _boom)
-        store.record_edited_file(tmp_repo, "a.py")  # must not raise
+        # Must not raise — and still names the path, since the EDIT happened even though the
+        # sidecar could not be written; the evidence ledger records it independently.
+        assert store.record_edited_file(tmp_repo, "a.py") == "a.py"
+        assert store._read_edited_files(tmp_repo) == []
 
     def test_gc_sweep_drops_stale_edited_files_sidecar(self, tmp_repo):
         store.record_edited_file(tmp_repo, "a.py")

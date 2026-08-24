@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import store
+from contexer import evidence, store
 from contexer.adapters import gemini
 
 
@@ -129,6 +129,8 @@ class TestGeminiRuntime:
         repo = str(tmp_path / "repo")
         out = json.loads(gemini.after_write(repo, "not json"))  # must not raise
         assert "hookSpecificOutput" in out
+        # Nothing was recorded, so the evidence ledger has nothing to say either.
+        assert evidence.evidence_diagnostics(repo)["events"] == 0
 
     def test_compress_flag_reloads_context_without_edit_reminder(self, home, tmp_path):
         repo = str(tmp_path / "repo")

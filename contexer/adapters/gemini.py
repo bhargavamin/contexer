@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import sidecars, store
+from contexer import evidence, sidecars, store
 from contexer.adapters import base
 
 NAME = "gemini"
@@ -176,8 +176,11 @@ def before_agent(repo_path: str, raw: str) -> str:
         # `resolve_repo` chain here (see the docstring above), and a stamp must never change
         # what it is describing.
         repo_source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
-        entry_id, content, status = store.capture_user_constraint(
-            repo, prompt, session_id, near, repo_source=repo_source)
+        # Same store call plus the shadow-mode user_directive event (see
+        # evidence.capture_directive): identical return, identical exceptions, so this
+        # hook's existing outer handler still owns what happens on failure.
+        entry_id, content, status = evidence.capture_directive(
+            repo, prompt, session_id, "gemini_prompt", near=near, repo_source=repo_source)
         if entry_id is not None:
             contexts.append(store.constraint_ack(content, status, entry_id, near))
 
@@ -217,7 +220,15 @@ def after_write(repo_path: str, raw: str) -> str:
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
             fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             if isinstance(fp, str) and fp:
-                store.record_edited_file(repo, fp)
+                # Shadow-mode evidence rides the SAME recorded path (record_edited_file's
+                # return), so this event and Claude's post_tool_use one differ only in
+                # `source`. Inside the existing handler: the reminder below is unaffected.
+                relpath = store.record_edited_file(repo, fp)
+                if relpath:
+                    evidence.emit_hook_event(
+                        repo, "file_changed",
+                        session_id=store.session_from_hook_stdin(raw),
+                        source="gemini_after_tool", files=[relpath])
     except Exception:
         pass
     return json.dumps({
