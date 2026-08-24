@@ -490,14 +490,19 @@ def list_session_evidence(repo_path: str, session_id: str) -> list[dict]:
 def _disposition_event(repo_path: str, candidate_id: str, checkpoint: Mapping) -> dict | None:
     """The one synthetic event a compacted checkpoint collapses into. Every field is built
     within its own bound, so validation here is a self-check rather than a real branch — but
-    the ledger must never carry an event the validator would refuse."""
+    the ledger must never carry an event the validator would refuse.
+
+    `repo_key` is the repo PATH, the same spelling `emit_hook_event` writes (ruling R13). It
+    used to be the slug, so one ledger could hold two spellings of one repo and anything
+    grouping by `repo_key` would read a compaction as a different repo than the hook events
+    it compacted. The agreement is the point; which of the two spellings won is not."""
     status = checkpoint.get("status")
     count = len(checkpoint.get("event_ids") or [])
     event, _errors = validate_event({
         "schema_version": SCHEMA_VERSION,
         "event_id": str(uuid.uuid4()),
         "session_id": "compaction",
-        "repo_key": _clip(store.repo_slug(repo_path), _MAX_REPO_KEY_CHARS),
+        "repo_key": _clip(repo_path, _MAX_REPO_KEY_CHARS),
         "kind": "candidate_disposition",
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         "source": "compact_evidence",
