@@ -1,0 +1,18 @@
+{
+  "event": {
+    "schema_version": 1,
+    "event_id": "not-a-uuid",
+    "session_id": "sess-7c1f",
+    "repo_key": "_Users_dev_contexer",
+    "kind": "file_changed",
+    "occurred_at": "2026-08-24T10:00:00+00:00",
+    "source": "codex_post_tool_use",
+    "summary": "Authentication middleware changed",
+    "files": [
+      "src/auth.py"
+    ],
+    "content_hash": null,
+    "attributes": {}
+  },
+  "reason_contains": "event_id"
+}

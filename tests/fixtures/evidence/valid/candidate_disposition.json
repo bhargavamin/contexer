@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "event_id": "0b7d1c2e-1111-4a2b-8c3d-000000000008",
+  "session_id": "sess-7c1f",
+  "repo_key": "_Users_dev_contexer",
+  "kind": "candidate_disposition",
+  "occurred_at": "2026-08-24T10:00:00+00:00",
+  "source": "evidence_policy",
+  "summary": "Candidate captured as a pending decision",
+  "files": [],
+  "content_hash": null,
+  "attributes": {
+    "disposition": "captured",
+    "decision_id": "9f3a1b2c"
+  }
+}
