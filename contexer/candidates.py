@@ -191,8 +191,9 @@ def _group(events):
                 leftovers.setdefault(str(event.get("session_id") or ""), []).append(event)
                 continue
             target["events"].append(event)
-            if kind in _FILE_KINDS:
-                target["files"] += [p for p in _event_files(event) if p not in target["files"]]
+            for path in _event_files(event) if kind in _FILE_KINDS else []:
+                if path not in target["files"]:
+                    target["files"].append(path)
         else:
             ignored[str(kind)] = ignored.get(str(kind), 0) + 1
     return groups, leftovers, ignored, merged
@@ -289,8 +290,8 @@ def _repeated_target(group, live_ids):
 
 def _classify(content, group, decisions) -> tuple:
     """(kind, target_decision_id, extra uncertainties) for a group that cleared the bar."""
-    live = [d for d in decisions if isinstance(d, dict) and _is_live(d)]
-    retired = [d for d in decisions if isinstance(d, dict) and not _is_live(d)]
+    live = [d for d in decisions if _is_live(d)]
+    retired = [d for d in decisions if not _is_live(d)]
     notes: list = []
 
     # A re-stated retired decision is a NEW candidate: the developer retired it once, so it is
@@ -351,10 +352,8 @@ def _leftover_candidate(session_id, events) -> dict:
     statement. It carries no content because there is none: something changed and nobody said
     why. It exists so the run REPORTS the gap instead of dropping those events silently."""
     score, signals, uncertainties = _score_group({"seed": None, "events": events})
-    files: list = []
-    for event in events:
-        if event.get("kind") in _FILE_KINDS:
-            files.extend(f for f in _event_files(event) if f not in files)
+    files = list(dict.fromkeys(f for e in events if e.get("kind") in _FILE_KINDS
+                               for f in _event_files(e)))
     uncertainties.append(
         f"files changed in session {session_id} with no stated decision to review")
     return {
@@ -390,6 +389,7 @@ def aggregate_candidates(events: list, decisions: list) -> dict:
     return {
         "candidates": candidates,
         "diagnostics": {
+            # One group per candidate: the seeded groups plus each session's leftover set.
             "groups": len(candidates),
             "seeds": sum(1 for k in kinds if k in SEED_KINDS),
             "support": sum(1 for k in kinds if k in SUPPORT_KINDS),

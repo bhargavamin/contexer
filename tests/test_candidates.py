@@ -267,6 +267,14 @@ def test_source_files_union_is_capped_at_ten():
     assert got["source_files"] == [f"f{i}.py" for i in range(10)]
 
 
+def test_a_repeated_path_is_recorded_once():
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00",
+                  files=["a.py", "a.py"]),
+              _ev("file_changed", "edit", at="2026-08-24T10:01:00+00:00",
+                  files=["a.py", "b.py", "b.py"])]
+    assert _only(candidates.aggregate_candidates(events, []))["source_files"] == ["a.py", "b.py"]
+
+
 def test_test_result_paths_do_not_become_source_files():
     """A test's own path names the test, not what was decided — anchoring a candidate to it
     would point review at the wrong file."""
