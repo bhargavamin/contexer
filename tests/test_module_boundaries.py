@@ -34,10 +34,12 @@ CALLER_ROOTS = ("contexer", "benchmarks")
 # The rule applies to ANY module that reaches the store, so the check now finds its own subjects
 # and there is no list left to drift. This is the same failure test_sidecars.py exists to
 # prevent: "Four separate declaration bugs reached review before that test existed."
+# `reconcile` is a coordinator above store rather than a leaf; it remains listed only so Rule 3
+# also rejects any future downward alias from store to that coordinator.
 LEAVES = frozenset({
     "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
-    "sidecars", "share_status", "evidence", "candidates",
+    "sidecars", "share_status", "evidence", "candidates", "reconcile",
 })
 
 

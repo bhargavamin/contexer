@@ -244,12 +244,28 @@ def after_write(repo_path: str, raw: str) -> str:
     })
 
 
+def _reconcile_evidence(repo_path: str) -> None:
+    """Materialize recorded evidence into decisions pending review, at Gemini's own two
+    checkpoint events. Fail-soft to the point of swallowing an import error, and cheap in the
+    quiet case: `reconcile_session` reads no store until it has unconsumed evidence. The twin
+    of `claude._reconcile_evidence`, which rides on `sync_memory` because Claude's three
+    checkpoints all call it — Gemini has no such shared entrypoint, so it is wired per event."""
+    try:
+        from contexer import reconcile
+        repo = store.hook_cwd_repo(repo_path)
+        if repo:
+            reconcile.reconcile_session(repo)
+    except Exception:
+        pass
+
+
 def pre_compress(repo_path: str, raw: str) -> str:
     """Defer full context reload to the first turn after compression."""
     # Fix 3: only set the reload flag here. Compression is not a file write, so
     # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
     # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
     _flag_set(store.STORE_DIR / _PENDING_RELOAD)
+    _reconcile_evidence(repo_path)
     return json.dumps({"suppressOutput": True})
 
 
@@ -261,6 +277,7 @@ def session_end(repo_path: str, raw: str) -> str:
             marker.unlink(missing_ok=True)
     except Exception:
         pass
+    _reconcile_evidence(repo_path)
     return json.dumps({"suppressOutput": True})
 
 

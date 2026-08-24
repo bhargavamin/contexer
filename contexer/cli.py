@@ -34,6 +34,10 @@ Commands:
                 (default: latest). --global pushes the cross-repo rules in _global.json.
   reconcile     Submit a corrected local decision for team review:
                 reconcile <id> [--team NAME_OR_ID] [--yes].
+  reconcile-session
+                Turn recorded session evidence into decisions pending your review:
+                reconcile-session [--session ID] [--dry-run]. Retirements are only
+                ever recommendations; nothing is retired or approved for you.
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook - see below).
@@ -1407,6 +1411,39 @@ def scope_audit_cmd(rest: list) -> None:
     print(scope_audit.format_audit(scope_audit.audit_sessions()))
 
 
+def reconcile_session_cmd(rest: list) -> None:
+    """`contexer reconcile-session [--session ID] [--dry-run]` — turn recorded evidence into
+    decisions pending review, and print the receipt.
+
+    Always exits 0: `reconcile_session` never raises and reports what it could not do as
+    `incomplete`, so a reconciliation problem is a line in the report, not a broken shell."""
+    session = ""
+    args = list(rest)
+    if "--session" in args:
+        index = args.index("--session")
+        session = args[index + 1] if index + 1 < len(args) else ""
+        if not session:
+            print("Usage: contexer reconcile-session [--session ID] [--dry-run]",
+                  file=sys.stderr)
+            sys.exit(1)
+        del args[index:index + 2]
+    dry_run = "--dry-run" in args
+    if dry_run:
+        args.remove("--dry-run")
+    if args:
+        print(f"Unknown argument: {' '.join(args)}\n"
+              "Usage: contexer reconcile-session [--session ID] [--dry-run]", file=sys.stderr)
+        sys.exit(1)
+
+    from contexer import reconcile
+    repo = _cli_repo()
+    if not repo:
+        print("No repo detected — run this inside a project directory.", file=sys.stderr)
+        return
+    _safe_print(reconcile.format_receipt(
+        reconcile.reconcile_session(repo, session, dry_run=dry_run)))
+
+
 def _guard_run(rest: list) -> None:
     """`contexer guard [path…] [--explain]` - the commit-time run path.
 
@@ -2111,6 +2148,8 @@ def main() -> None:
         guard(rest)
     elif cmd == "scope-audit":
         _run_guarded(lambda: scope_audit_cmd(rest))
+    elif cmd == "reconcile-session":
+        _run_guarded(lambda: reconcile_session_cmd(rest))
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)
