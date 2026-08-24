@@ -239,6 +239,11 @@ def _ledger(repo):
     return json.loads(evidence._sidecar_path(repo).read_text(encoding="utf-8"))
 
 
+def _refuse_lock(*_args):
+    """A `flock` that fails the way NFS does — the acquire errors, the fd stays open."""
+    raise OSError(37, "No locks available")
+
+
 def test_append_stores_a_normalized_event_in_a_0600_sidecar(tmp_repo):
     token = "github_pat_" + "A1b2C3d4E5" * 4
     result = evidence.append_evidence(tmp_repo, _event(
@@ -435,6 +440,21 @@ def test_compaction_of_a_corrupt_sidecar_reports_and_touches_nothing(tmp_repo):
     result = evidence.compact_evidence(tmp_repo)
     assert result["status"] == "error" and result["errors"]
     assert path.read_bytes() == b"garbage"
+
+
+def test_compaction_refuses_to_write_when_the_lock_cannot_be_taken(tmp_repo, monkeypatch):
+    """A blocking acquire can still fail (ENOLCK on NFS, EINTR, EDEADLK). Compaction is a
+    read-modify-write of the whole ledger, so running it unlocked would clobber a concurrent
+    append that DID hold the lock."""
+    ids = _appended(tmp_repo, 2)
+    _seed(tmp_repo, events=_ledger(tmp_repo)["events"],
+          candidate_checkpoints={"c1": {"event_ids": ids, "status": "approved"}})
+    before = evidence._sidecar_path(tmp_repo).read_bytes()
+    monkeypatch.setattr(evidence.fcntl, "flock", _refuse_lock)
+
+    result = evidence.compact_evidence(tmp_repo)
+    assert result["status"] == "error" and result["errors"]
+    assert evidence._sidecar_path(tmp_repo).read_bytes() == before
 
 
 def test_compaction_never_raises_when_the_store_dir_cannot_be_created(tmp_repo, monkeypatch):

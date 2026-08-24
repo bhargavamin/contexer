@@ -445,7 +445,14 @@ def compact_evidence(repo_path: str) -> dict:
 
     Clears the gap marker on success: maintenance is the one place that acknowledges loss."""
     try:
-        with _evidence_lock(repo_path, blocking=True):
+        with _evidence_lock(repo_path, blocking=True) as acquired:
+            # A blocking acquire still FAILS on ENOLCK/EINTR/EDEADLK, and this body is a
+            # read-modify-write of the whole ledger: running it unlocked would clobber a
+            # concurrent append that did hold the lock. Refuse instead — a compaction that
+            # did not run is simply asked for again.
+            if not acquired:
+                return {"status": "error", "compacted": 0, "removed_events": 0,
+                        "errors": ["could not acquire the evidence lock"]}
             ledger, error = _read_ledger(repo_path)
             if error:
                 return {"status": "error", "compacted": 0, "removed_events": 0,
