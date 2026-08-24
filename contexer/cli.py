@@ -1422,8 +1422,12 @@ def reconcile_session_cmd(rest: list) -> None:
     if "--session" in args:
         index = args.index("--session")
         session = args[index + 1] if index + 1 < len(args) else ""
-        if not session:
-            print("Usage: contexer reconcile-session [--session ID] [--dry-run]",
+        # A flag is never a session id: `--session --dry-run` used to swallow the flag as the
+        # VALUE, silently scoping the pass to a session that cannot exist AND dropping the
+        # dry run — a write where the developer asked for none.
+        if not session or session.startswith("-"):
+            print("Missing value for --session.\n"
+                  "Usage: contexer reconcile-session [--session ID] [--dry-run]",
                   file=sys.stderr)
             sys.exit(1)
         del args[index:index + 2]

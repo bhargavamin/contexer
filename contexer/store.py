@@ -2207,9 +2207,20 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 def update_decision_with_meta(repo_path: str, content: str, session_id: str, subtype: str = "",
                               created_by: str = "ai", replace_id: str = "", title: str = "", *,
                               source_files: list | None = None,
-                              repo_source: str = "") -> tuple[bool, str | None, dict]:
+                              repo_source: str = "",
+                              force_pending: bool = False) -> tuple[bool, str | None, dict]:
     """Store (or route) one decision, plus a `meta` dict - `{}` except on a refused proposal
     slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
+
+    `force_pending` makes a NEWLY CREATED entry land `pending_approval` whatever
+    `_classify_level` would have said. It exists for a caller whose captures are INFERRED
+    rather than stated — reconcile.py, deriving decisions from recorded evidence — where the
+    `suggested` tier is the wrong resting place: a suggested decision injects at session start
+    yet never appears in `review_pending`, so it is trusted without ever having been offered
+    for review. Bootstrap's medium-tier conventions chose `pending_approval` for exactly this
+    reason. It touches nothing else: novelty filtering, revision construction and every
+    `replace_id` route are unchanged, so an inferred CORRECTION still lands in the trust-ordered
+    proposal slot rather than being forced anywhere.
 
     `source_files` anchors a NEWLY CREATED entry to the
     repo-relative files it describes plus the current git HEAD, so later injections can flag
@@ -2382,7 +2393,9 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
             return False, None, {}
         if _is_tombstoned(repo_path, content):
             return False, None, {}          # discarded silently, like any other filtered capture
-        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
+        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by,
+                                    title=title,
+                                    status="pending_approval" if force_pending else "")
         # Which signal chose THIS store (see resolve_repo_verbose). Stamped only when the
         # caller resolved verbosely and passed it on, and only on a brand-new entry - a
         # recurrence or containment route above has already returned, and re-stamping an
