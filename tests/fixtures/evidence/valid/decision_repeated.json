@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "event_id": "0b7d1c2e-1111-4a2b-8c3d-000000000006",
+  "session_id": "sess-7c1f",
+  "repo_key": "_Users_dev_contexer",
+  "kind": "decision_repeated",
+  "occurred_at": "2026-08-24T10:00:00+00:00",
+  "source": "gemini_before_agent",
+  "summary": "Same lock-then-save ordering restated for the third session",
+  "files": [],
+  "content_hash": null,
+  "attributes": {
+    "occurrences": 3
+  }
+}
