@@ -9,9 +9,11 @@ because a verdict is only tied to its policies if the same set always hashes the
 Every bound in the module has a test here saying what it buys; a constant nobody can explain
 is a constant nobody can change.
 """
+import itertools
+
 import pytest
 
-from contexer import policy
+from contexer import guard_engine, policy
 
 
 def _rev(rev_id="rev-1", source="human"):
@@ -253,6 +255,57 @@ class TestSelectionTrustGate:
     def test_a_dangling_pointer_falls_back_to_the_last_revision(self):
         entry = _entry(revisions=[_rev("rev-9", "human")])
         assert policy.current_revision(entry)["revision_id"] == "rev-9"
+
+
+class TestTrustRuleParityWithTheGuard:
+    """`policy.is_trusted` RESTATES `guard_engine._guard_trusted` — policy.py is a leaf and
+    cannot import the guard, so the rule exists in two files and nothing but this test stops
+    them drifting apart. A drift here is not cosmetic: the two would disagree about which
+    decisions may enforce, so the same entry could block a commit and be invisible to the
+    policy plane, or the reverse.
+
+    Exhaustive rather than representative, because a mirror fails at the CORNER — the falsy
+    `source` fallback, the `approved_by` override, the missing-status legacy default — and a
+    handful of hand-picked rows is exactly what would still pass while a corner rotted.
+    """
+
+    SOURCES = ("human", "scan", "bootstrap", "plan", "ai", "memory", None, "")
+    STATUSES = ("approved", "suggested", "pending_approval", "ignored", "__missing__")
+    APPROVED_BY = ("human", None)
+    CREATED_BY = ("human", "ai", "")
+
+    def _grid(self):
+        for source, status, approved_by, created_by in itertools.product(
+                self.SOURCES, self.STATUSES, self.APPROVED_BY, self.CREATED_BY):
+            entry = _entry(source=source, created_by=created_by, approved_by=approved_by,
+                           guard_check=_armed())
+            if status == "__missing__":
+                del entry["status"]
+            else:
+                entry["status"] = status
+            yield entry, (source, status, approved_by, created_by)
+
+    def test_the_grid_covers_every_combination(self):
+        assert len(list(self._grid())) == 8 * 5 * 2 * 3
+
+    def test_is_trusted_agrees_with_the_real_guard_on_every_combination(self):
+        mismatches = [row for entry, row in self._grid()
+                      if policy.is_trusted(entry) != guard_engine._guard_trusted(entry)]
+        assert mismatches == []
+
+    def test_selection_admits_exactly_the_entries_the_guard_trusts(self):
+        # The gate, not just the predicate: an entry the guard trusts must reach the policy
+        # set, and one it does not must be absent from it entirely rather than downgraded.
+        mismatches = [row for entry, row in self._grid()
+                      if bool(policy.select_policies([entry], _request()))
+                      != guard_engine._guard_trusted(entry)]
+        assert mismatches == []
+
+    def test_no_unapproved_row_ever_selects(self):
+        selected = [row for entry, row in self._grid()
+                    if row[1] not in ("approved", "__missing__")
+                    and policy.select_policies([entry], _request())]
+        assert selected == []
 
 
 # ── selection: applicability ─────────────────────────────────────────────────────
