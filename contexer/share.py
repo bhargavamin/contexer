@@ -1,6 +1,6 @@
 """Explicit share: push a local decision up to the Teams cloud context (C4).
 
-Path B, the write counterpart to team_context.pull. Sharing is an EXPLICIT verb — never
+Path B, the write counterpart to team_context.pull. Sharing is an EXPLICIT verb - never
 auto-shares on capture. v1 syncs to your PERSONAL cloud context (push_decision auto-approves
 it); a team `shared_candidate` awaits a team-scoped push endpoint (future Track A).
 
@@ -93,7 +93,7 @@ def _wire_source(source: str | None) -> str | None:
     -32602 that silently poisons the outbox forever. `plan` (a provisional maturity marker that
     leaks from `created_by` into a revision's `source`) is accepted and PRESERVED end-to-end, so
     the provisional signal reaches the cloud intact. Any *other* off-taxonomy *string* degrades
-    to "ai" — a safe accepted value — so an unknown source can never brick the outbox. `None`
+    to "ai" - a safe accepted value - so an unknown source can never brick the outbox. `None`
     passes through unchanged: push_decision OMITS source when it is None (the cloud stores NULL =
     unknown provenance), so None must not be fabricated into a false "ai" provenance."""
     if source is None or source in _WIRE_SOURCES:
@@ -861,7 +861,7 @@ async def adrain_outbox(profile: Profile | None = None) -> int:
 
 async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
     """Async twin of :func:`drain_outbox` (awaits apush_decision so a wedged retry is
-    cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics — the only
+    cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics - the only
     difference is the awaited push; every other line is the shared local outbox logic."""
     entries = _load_outbox()
     if not entries:
@@ -960,7 +960,7 @@ async def _adrain_reconciliation_outbox_unlocked(profile: Profile) -> int:
 def _payload(dec: dict, key) -> dict:
     """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
     title so a queued offline share still sends it once drained (_entry_push_kwargs reads
-    it back off this same row). Also carries `source_files` (issue #174 Task 5) the same way —
+    it back off this same row). Also carries `source_files` (issue #174 Task 5) the same way -
     stored in the outbox regardless of the current wire gate, so `_entry_push_kwargs` +
     `remote._wire_args` decide at DRAIN time whether it actually egresses."""
     return {
@@ -1042,7 +1042,7 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
                     profile: Profile | None = None) -> str:
     """Push one local decision to your team cloud context; return a human-readable status.
 
-    Local-first: never raises for cloud problems — returns a message and leaves the local
+    Local-first: never raises for cloud problems - returns a message and leaves the local
     decision untouched. `decision_id` selects the decision (full id / 8-char prefix); omit
     to share the most recent. `profile` defaults to load_profile()."""
     profile = profile or load_profile()
@@ -1420,7 +1420,7 @@ def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
     Called when an in-loop share is CANCELLED by its deadline (server.share_decision timeout)
     before it could push or queue them itself: cancellation bypasses share_async's own
     enqueue-on-failure, so without this the tool's "the outbox retries it" message would be an
-    empty promise. Idempotent — `_enqueue` dedups by decision_id and a re-push is idempotent
+    empty promise. Idempotent - `_enqueue` dedups by decision_id and a re-push is idempotent
     server-side, so queuing a decision that may already have been sent is safe. An empty list
     queues the most recent shareable (matching `share_async('')`). Missing ids are skipped.
     Returns the count queued."""

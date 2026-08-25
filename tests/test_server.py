@@ -30,13 +30,13 @@ def test_share_decision_short_circuits_without_repo(monkeypatch):
     called = {"share": False}
     monkeypatch.setattr(share_mod, "share", lambda *a, **k: called.__setitem__("share", True))
     result = asyncio.run(server.share_decision("d", ""))
-    assert result == "Skipped — repo path not detected."
+    assert result == "Skipped - repo path not detected."
     assert called["share"] is False  # never reaches the network layer
 
 
 def test_share_decision_awaits_async_share_path_on_the_loop(monkeypatch):
     # The async share path is AWAITED on the event loop (no thread offload), and its args +
-    # return value pass through unchanged — a single id becomes a one-element selection.
+    # return value pass through unchanged - a single id becomes a one-element selection.
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
     seen = {}
 
@@ -110,7 +110,7 @@ def test_share_decision_cancels_wedged_push_on_timeout(monkeypatch):
 
 def test_share_decision_timeout_enqueues_selection_for_retry(monkeypatch):
     # Greptile #1: cancellation bypasses share_async's own enqueue, so the timeout handler
-    # must queue the selection itself — otherwise "the outbox retries it" is a false promise.
+    # must queue the selection itself - otherwise "the outbox retries it" is a false promise.
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(server, "_SHARE_TIMEOUT", 0.03)
 
@@ -190,7 +190,7 @@ def test_share_decision_previews_by_default_without_pushing(monkeypatch):
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
     assert result == "PREVIEW-TEXT"
-    assert pushed["n"] == 0  # dry run — nothing left the machine
+    assert pushed["n"] == 0  # dry run - nothing left the machine
 
 
 def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
@@ -209,7 +209,7 @@ def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
 
 
 def test_share_decision_local_mode_skips_preview(monkeypatch):
-    # #2: with no team configured, don't preview a push that would no-op — go straight to share().
+    # #2: with no team configured, don't preview a push that would no-op - go straight to share().
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     monkeypatch.setattr(_config_mod, "load_profile", lambda *a, **k: _config_mod.Profile())  # local
     previewed = {"n": 0}
@@ -275,14 +275,14 @@ def test_resolve_conflict_delegates(monkeypatch):
 
 def test_resolve_conflict_no_repo(monkeypatch):
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
-    assert server.resolve_conflict("ab12cd34", "update", "") == "Skipped — repo path not detected."
+    assert server.resolve_conflict("ab12cd34", "update", "") == "Skipped - repo path not detected."
 
 
 # ── bulk approval is refused outright ─────────────────────────────────────────
 # A blanket approve rubber-stamps whatever happens to be in the queue, and the queue is
 # exactly where mis-captured decisions land. _apply_approval stamps approved_by="human"
 # on anything it approves, which makes even an ai-sourced entry guard-trusted at commit
-# time — so a bulk gesture could silently promote a misfire to trusted standing context.
+# time - so a bulk gesture could silently promote a misfire to trusted standing context.
 # Every action is refused, not just approve: 'ignore' in bulk discards decisions the
 # developer never actually read.
 
@@ -338,7 +338,7 @@ def test_approve_decision_single_id_still_works(monkeypatch, tmp_path):
 
 
 def test_store_no_longer_exposes_bulk_approval():
-    """The bulk engine is gone, not merely unrouted — nothing can call it back into life."""
+    """The bulk engine is gone, not merely unrouted - nothing can call it back into life."""
     from contexer import store
     assert not hasattr(store, "approve_decisions")
 
@@ -346,7 +346,7 @@ def test_store_no_longer_exposes_bulk_approval():
 @pytest.mark.parametrize("target", ["all", "*", "id1,id2"])
 def test_multi_target_with_source_files_raises_not_refusal_string(monkeypatch, target):
     """A multi-target carrying source_files is caller misuse of the API, so it keeps RAISING
-    rather than returning the developer-facing bulk-refusal text — and it must never reach
+    rather than returning the developer-facing bulk-refusal text - and it must never reach
     the store."""
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
 
@@ -400,7 +400,7 @@ def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
 
 def test_get_context_logs_followup_on_matching_pointer(tmp_repo):
     # A prior pointer nudge ("db" topic) plus a matching get_context(query="db") call must
-    # log a follow-through event — proof the router's pointers actually get chased. The
+    # log a follow-through event - proof the router's pointers actually get chased. The
     # returned context itself is unaffected (log-only side effect).
     store.update_decision(
         tmp_repo, "Postgres migrations run through Alembic for the orders database",
@@ -413,7 +413,7 @@ def test_get_context_logs_followup_on_matching_pointer(tmp_repo):
     expected = store.get_context(tmp_repo, "db")
     result = server.get_context(tmp_repo, "db")
 
-    assert result == expected  # log-only side effect — the returned context is unchanged
+    assert result == expected  # log-only side effect - the returned context is unchanged
     events = [json.loads(line) for line in path.read_text().splitlines() if line]
     assert events[-1]["e"] == "followup"
     assert events[-1]["query"] == "db"
@@ -468,7 +468,7 @@ def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
 
 def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
     # The WRITE path resolves verbosely (it stamps repo_source onto the new entry), so the
-    # double has to mirror that — patching _resolve_repo alone no longer intercepts it.
+    # double has to mirror that - patching _resolve_repo alone no longer intercepts it.
     monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     narrative = ("Investigated (2026-08-05) the loader bug at length. " +
                  " ".join(["detail"] * 150))
@@ -497,7 +497,7 @@ def test_update_context_relays_the_refusal_ack(tmp_repo, monkeypatch):
 
 
 def test_update_global_context_bounce_names_itself(monkeypatch):
-    # capture_lint's shared bounce text says "call update_context again" — the global
+    # capture_lint's shared bounce text says "call update_context again" - the global
     # tool must retarget that to its own name, or a restated GLOBAL rule gets re-filed
     # repo-scoped instead of global.
     narrative = ("Investigated (2026-08-05) the loader bug at length. " +
@@ -520,7 +520,7 @@ def test_update_context_stamps_which_signal_chose_the_store(tmp_repo, monkeypatc
 def test_update_context_bounces_a_multi_section_document(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
     filler = " ".join(["detail"] * 60)
-    blob = (f"PRT-98 — why the picker never showed. WHY IT IS INVISIBLE: it is a session "
+    blob = (f"PRT-98 - why the picker never showed. WHY IT IS INVISIBLE: it is a session "
             f"task. {filler} WHAT THIS ADDS: a create dialog. {filler} "
             f"DECIDED SCOPE BOUNDARIES: sales only. {filler}")
     out = server.update_context(content=blob)

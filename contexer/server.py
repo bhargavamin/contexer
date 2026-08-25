@@ -8,13 +8,13 @@ from contexer import conflicts, store
 SESSION_ID = str(uuid.uuid4())
 
 # Bulk approval is refused rather than supported. Every approve stamps approved_by="human",
-# which makes even an ai-sourced decision guard-trusted at commit time — so one blanket
+# which makes even an ai-sourced decision guard-trusted at commit time - so one blanket
 # gesture could promote a mis-captured decision into trusted standing context that injects
 # into every future session. 'ignore' is refused for the mirror reason: it would discard
 # decisions the developer never actually read. The queue is where misfires land, so it is
 # precisely the place a shortcut must not exist.
 _BULK_REFUSAL = (
-    "Bulk actions aren't supported — act on decisions one at a time, by id.\n"
+    "Bulk actions aren't supported - act on decisions one at a time, by id.\n"
     "A blanket approve would rubber-stamp whatever is in the queue, and the queue is exactly "
     "where a mis-captured decision lands; approving one marks it developer-approved, which "
     "also makes it trusted by the commit-time guard.\n"
@@ -33,10 +33,10 @@ _INSTRUCTIONS = (
     "technology or approach chosen over alternatives (subtype=architecture), a naming/structure "
     "convention (pattern/convention), a rule like 'always X'/'never Y' (constraint), or anything that "
     "would surprise a future session. A synthesized understanding of how a subsystem works, reached "
-    "by exploring the codebase to answer a question, is capture-worthy too (subtype=architecture) — "
+    "by exploring the codebase to answer a question, is capture-worthy too (subtype=architecture) - "
     "store it the same turn, since the session may end with the answer. Pass the full reasoning, not "
     "just the conclusion, and always pass a concise, one-line, imperative title (<= 100 chars) "
-    "summarizing the decision — e.g. 'Use Postgres for decision store' — omit it only if you truly "
+    "summarizing the decision - e.g. 'Use Postgres for decision store' - omit it only if you truly "
     "can't summarize better than the store's own derivation from content. The server silently filters "
     "duplicates, so err on the side of calling it.\n"
     "MATURITY - store observations and settled or user-ratified decisions freely, but keep your OWN "
@@ -55,13 +55,13 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                    source_files: list[str] | None = None) -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
-    A synthesized understanding of how a subsystem works — produced by exploring or reading the
-    codebase to answer a question — is also capture-worthy (subtype='architecture' for subsystem
+    A synthesized understanding of how a subsystem works - produced by exploring or reading the
+    codebase to answer a question - is also capture-worthy (subtype='architecture' for subsystem
     behaviour/structure, 'pattern' for recurring code organization); store it in the SAME turn as
     the exploration, since sessions often end right after the answer and there may be no next
     prompt to catch it.
 
-    subtype: optional classification for filtered retrieval — architecture | constraint | pattern | convention
+    subtype: optional classification for filtered retrieval - architecture | constraint | pattern | convention
     created_by: 'ai' (default) | 'plan' (a decision from a just-approved plan - stored PROVISIONAL/
                 suggested until implementation validates it, then reconciled) | 'bootstrap' (when
                 storing bootstrap_context results) | 'scan' (low-insight repo facts)
@@ -76,7 +76,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 comprehension summary, pass the files it describes so future injections can
                 flag it as possibly stale once that code changes. Anchors a newly stored
                 decision, and also re-anchors a replace_id correction (fresh files + current
-                HEAD) as soon as the corrected text becomes the live, rendered content — for
+                HEAD) as soon as the corrected text becomes the live, rendered content - for
                 a trivial correction or a re-capture of still-accurate content, that's
                 immediate; for a significant correction (architecture/constraint) it happens
                 only once a developer approves the resulting Suggested Update, since until
@@ -87,16 +87,16 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 source_files on that correction leaves the old anchor in place and the note
                 keeps firing.
     title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the decision,
-           shown when it's listed/injected — e.g. 'Use Postgres for decision store'. Only omit it
+           shown when it's listed/injected - e.g. 'Use Postgres for decision store'. Only omit it
            when you can't summarize better than the content itself; the store then derives one
            from `content`.
 
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
-    does not block your work — keep going. Surface it to the developer for approval at a natural
+    does not block your work - keep going. Surface it to the developer for approval at a natural
     point (call approve_decision when they respond, or they can run `contexer review`); never
     discard it silently. Use review_pending to list everything awaiting review with its content.
     If instead this returns a 'Correction NOT stored' notice, a higher-trust update already holds
-    the decision's one proposal slot — do not retry the call; relay both versions to the developer
+    the decision's one proposal slot - do not retry the call; relay both versions to the developer
     that turn so they can review with full context.
     """
     # Verbose resolve on the WRITE path only: the branch that chose this store is stamped
@@ -104,7 +104,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     # the fact instead of indistinguishable. Read tools keep the plain resolve_repo.
     resolved, repo_source = store.resolve_repo_verbose(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     lint = store.capture_lint(content, created_by=created_by, replace_id=replace_id)
     if lint:
         return lint
@@ -113,7 +113,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
         replace_id=replace_id, title=title, source_files=source_files,
         repo_source=repo_source)
     if not stored:
-        return "Filtered — did not meet storage criteria."
+        return "Filtered - did not meet storage criteria."
     if meta.get("refusal_ack"):
         return meta["refusal_ack"]
     prompt = store.get_pending_approval_prompt(resolved, entry_id)
@@ -125,11 +125,11 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 @mcp.tool()
 def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "",
                      source_files: list[str] | None = None) -> str:
-    """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review — or
+    """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review - or
     retire an already-trusted (approved/suggested) decision with 'ignore'.
 
     entry_id: ONE decision id (full or 8-char prefix). Bulk targets are deliberately not
-              supported — no "all", no "*", no comma-separated list. Each decision must be
+              supported - no "all", no "*", no comma-separated list. Each decision must be
               read and acted on individually: approving in bulk rubber-stamps whatever is in
               the queue, and the queue is exactly where a mis-captured decision lands. Call
               review_pending, surface each decision to the developer, and act on their answer
@@ -138,16 +138,16 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
             | 'edit' - correct and approve | 'skip' - keep pending for later
             | 'dismiss' - discard a Suggested Update, keep the current revision
             | 'ignore' - suppress a new decision permanently, OR retire an already-trusted
-              decision (e.g. to consolidate an overlap-report cluster — full history is kept,
+              decision (e.g. to consolidate an overlap-report cluster - full history is kept,
               only status flips to 'ignored'). 'approve'/'edit'/'dismiss'/'skip' remain
               pending-only: an already-approved decision cannot be re-approved.
-    content: required when action='edit' — the corrected decision text (single decision only)
-    source_files: repo-relative files this decision describes — anchors it for staleness
+    content: required when action='edit' - the corrected decision text (single decision only)
+    source_files: repo-relative files this decision describes - anchors it for staleness
                   tracking and the commit-time guard; single-id approvals only.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     target = entry_id.strip()
     # Kept as a raise (not the refusal string below): passing source_files with a multi-target
     # is caller misuse of the API, not a developer gesture to talk out of.
@@ -167,26 +167,26 @@ def resolve_conflict(entry_id: str, choice: str, repo_path: str = "") -> str:
     and its unreviewed Suggested Update, as shown in a labeled conflict render (both versions,
     with dates). Call this ONLY when the developer themselves stated the pick in a genuine user
     turn in this conversation. NEVER call it from your own inference, codebase exploration, or
-    judgment about which version looks correct — if the developer hasn't said, ask them. This
+    judgment about which version looks correct - if the developer hasn't said, ask them. This
     approves nothing: the update stays pending formal review (review_pending / `contexer
     review`); a later explicit statement from the developer outranks the memo.
 
-    entry_id: the decision's id exactly as rendered, e.g. (id=6fb28fd9) — at least 8 chars.
+    entry_id: the decision's id exactly as rendered, e.g. (id=6fb28fd9) - at least 8 chars.
     choice:   'standing' (steer by the current approved version) or 'update' (steer by the
-              unreviewed proposal — its content becomes operative but the approved version
+              unreviewed proposal - its content becomes operative but the approved version
               still renders as a demoted continuation line, since only a review action fully
               hides reviewed content).
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     return conflicts.record_conflict_memo(resolved, entry_id, choice, session_id=SESSION_ID)[1]
 
 
 @mcp.tool()
 def review_pending(repo_path: str = "") -> str:
-    """List decisions awaiting the developer's review — brand-new pending-approval decisions and
-    suggested updates — each with its id and full content, so you can surface them conversationally
+    """List decisions awaiting the developer's review - brand-new pending-approval decisions and
+    suggested updates - each with its id and full content, so you can surface them conversationally
     and approve via approve_decision. The in-session equivalent of the `contexer review` terminal
     command. Call this when the developer asks to review, or when SessionStart reported items pending."""
     resolved = store.resolve_repo(repo_path)
@@ -199,7 +199,7 @@ def review_pending(repo_path: str = "") -> str:
 def list_shareable(repo_path: str = "") -> str:
     """List decisions available to push to your personal cloud, each with its id and content, so
     the developer can pick which to share. Use this when the developer wants to share but hasn't
-    named a decision — show the list, let them choose, then call share_decision with the chosen
+    named a decision - show the list, let them choose, then call share_decision with the chosen
     id(s) (comma-separated for a multi-select)."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
@@ -213,9 +213,9 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
     """Returns stored context for the current repository. Call this when the task requires project context.
 
     query: optional keyword filter (case-insensitive substring match against decision content).
-    entry_type: optional subtype filter — architecture | constraint | pattern | convention
+    entry_type: optional subtype filter - architecture | constraint | pattern | convention
     limit: max decisions to return (0 = auto: 25 for filtered queries, 10 for unfiltered overview).
-    files: repo-relative files you are about to work on — returns the decisions that govern
+    files: repo-relative files you are about to work on - returns the decisions that govern
     them (anchors + content references).
     """
     resolved = store.resolve_repo(repo_path)
@@ -224,7 +224,7 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
     result = store.get_context(resolved, query, entry_type, limit, files)
     # Follow-through log (Retrieval V1 Part B): if a recent pointer nudge for this repo
     # matches this query's topic AND this call actually found decisions, record it. Log-only
-    # — never changes the result above.
+    # - never changes the result above.
     found = "No matching decisions" not in result and "No context stored" not in result
     store.log_followup_if_matching(resolved, query, found)
     return result
@@ -235,7 +235,7 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
 # remote that holds the connection open past its own timeout must not hang the tool call. On
 # timeout the awaited push is CANCELLED (the socket closes), so nothing lingers. Set well above
 # the healthy worst case so a legitimately slow (but working) push never false-trips; a false
-# trip is harmless anyway — share is local-first and idempotent, so the outbox retries it.
+# trip is harmless anyway - share is local-first and idempotent, so the outbox retries it.
 _SHARE_TIMEOUT = 30.0
 
 
@@ -243,24 +243,24 @@ _SHARE_TIMEOUT = 30.0
 async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bool = False) -> str:
     """Explicitly push a local decision up to your team cloud context (never auto-shares).
 
-    decision_id: the decision(s) to share — a full id / 8-char prefix, or a comma-separated
+    decision_id: the decision(s) to share - a full id / 8-char prefix, or a comma-separated
     selection ("ab12cd34,ef56gh78") to share several at once; omit to share the most recent.
     Use list_shareable first when the developer hasn't named which decision. Syncs to your
     PERSONAL cloud context today; true team review arrives with a team-scoped push endpoint.
     confirm: safety gate. When false (default) this PREVIEWS what would be sent and does NOT
-    push — show the preview to the developer and call again with confirm=true to actually send.
+    push - show the preview to the developer and call again with confirm=true to actually send.
     Pushing is an outward action (leaves the machine), so it is confirmed by default; a developer
     who set skip_confirm in config.toml bypasses the preview."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     from contexer import config as _config
 
     profile = _config.load_profile()  # preview state only; the push reloads under the outbox lock
     from contexer.remote import RemoteStore
 
     # Safe-by-default: a personal-cloud push is OUTWARD (the decision leaves the machine and may
-    # be cached/indexed even if later deleted). Preview only when a push could ACTUALLY happen —
+    # be cached/indexed even if later deleted). Preview only when a push could ACTUALLY happen -
     # the SAME configured/authenticated check as the push path (team mode + endpoint + a resolvable
     # token), so we never advertise a push that would no-op. Otherwise share() reports the
     # not-configured result itself. This pushes nothing; from_profile may refresh an expired token
@@ -282,7 +282,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     # push is AWAITED (not offloaded to an un-cancellable worker thread), wait_for CANCELS it
     # on timeout: the cancellation propagates into the async transport and closes the socket,
     # so nothing lingers in the background (#108). share_ids_async is local-first + outbox-
-    # backed, so a false trip is harmless — the decision is saved and the outbox retries it.
+    # backed, so a false trip is harmless - the decision is saved and the outbox retries it.
     try:
         return await asyncio.wait_for(
             _share.share_ids_async(resolved, ids),
@@ -316,7 +316,7 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
 
 @mcp.tool()
 def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True) -> str:
-    """Detected facts and measured conventions are stored automatically (idempotent —
+    """Detected facts and measured conventions are stored automatically (idempotent -
     re-calls skip already-known items); the result carries 'stored'/'pending'/'skipped'
     counts plus any residual gap questions ('pending' items await `contexer review`).
     Set apply=false for a read-only preview that stores nothing.
@@ -324,18 +324,18 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
     Scans a repo for inferable decisions and gap questions, filtered by how much
     insight the user has into the repo.
 
-    insight: 'high' — user wrote or maintains the repo: confirm inferred items with
+    insight: 'high' - user wrote or maintains the repo: confirm inferred items with
     them, then ask the intent gap questions.
-    'medium' — user works with the repo but didn't build it: store inferred facts
+    'medium' - user works with the repo but didn't build it: store inferred facts
     directly, ask only purpose and the user's goal.
-    'low' — user is seeing the repo for the first time: store inferred facts directly,
+    'low' - user is seeing the repo for the first time: store inferred facts directly,
     read README/docs for purpose, ask only what the user plans to do here.
-    Empty — auto-detect from git history. The result includes 'insight' and 'decisive';
+    Empty - auto-detect from git history. The result includes 'insight' and 'decisive';
     if decisive is false, ask the user how well they know the repo, then re-call
     with their answer."""
     # Verbose resolve: bootstrap is the largest bulk write in the system (one consolidated
     # Stack entry plus every mined convention, in a single save), so a misroute here plants
-    # the most content in the wrong store — the write that most needs its branch recorded.
+    # the most content in the wrong store - the write that most needs its branch recorded.
     resolved, repo_source = store.resolve_repo_verbose(repo_path)
     if not resolved:
         return json.dumps({"error": "repo path not detected"})
@@ -367,7 +367,7 @@ def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
 def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
     """Auto-called by UserPromptSubmit hook on every prompt. Detects rationale/decision
     questions (why, reason, rationale, decided...) and injects matching stored decisions
-    as additionalContext. Returns empty string for non-rationale prompts — silent no-op."""
+    as additionalContext. Returns empty string for non-rationale prompts - silent no-op."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return ""
@@ -376,11 +376,11 @@ def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
 
 @mcp.tool()
 def update_global_context(content: str, subtype: str = "", title: str = "") -> str:
-    """Stores a cross-cutting rule in the global store — applies to ALL repos.
+    """Stores a cross-cutting rule in the global store - applies to ALL repos.
 
     Use this only for constraints or conventions that genuinely apply everywhere:
     e.g. "always use conventional commits", "never commit untested code".
-    Do NOT use for repo-specific decisions — use update_context instead.
+    Do NOT use for repo-specific decisions - use update_context instead.
 
     subtype: constraint | convention (defaults to convention if omitted)
     title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the rule.
@@ -389,18 +389,18 @@ def update_global_context(content: str, subtype: str = "", title: str = "") -> s
     """
     lint = store.capture_lint(content, created_by="ai", replace_id="")
     if lint:
-        # capture_lint's bounce text names update_context (the common case) — retarget it
+        # capture_lint's bounce text names update_context (the common case) - retarget it
         # here so a restated GLOBAL rule gets re-submitted globally, not filed repo-scoped.
         return lint.replace("update_context", "update_global_context")
     stored, entry_id = store.update_global_decision(content, SESSION_ID, subtype, title=title)
     if stored:
         return f"Stored globally. id={entry_id}"
-    return "Filtered — must be a novel constraint or convention (architecture/pattern are always repo-specific)."
+    return "Filtered - must be a novel constraint or convention (architecture/pattern are always repo-specific)."
 
 
 @mcp.tool()
 def get_global_context(query: str = "", entry_type: str = "", limit: int = 0) -> str:
-    """Returns stored global context — constraints and conventions that apply across all repos.
+    """Returns stored global context - constraints and conventions that apply across all repos.
 
     query: optional keyword filter (case-insensitive substring match).
     entry_type: constraint | convention

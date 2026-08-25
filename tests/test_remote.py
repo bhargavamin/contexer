@@ -24,7 +24,7 @@ from contexer.remote import (
 
 
 def _result(*, content=None, structured=None, is_error=False):
-    """A fake CallToolResult — RemoteStore only reads these three attributes."""
+    """A fake CallToolResult - RemoteStore only reads these three attributes."""
     return types.SimpleNamespace(content=content or [], structuredContent=structured, isError=is_error)
 
 
@@ -160,7 +160,7 @@ def test_push_decisions_serializes_batch_and_parses_ids(monkeypatch):
 
 
 def test_push_decisions_batch_threads_title_per_row(monkeypatch):
-    # The batch path spreads **kw into _wire_args per row — a "title" key in the kwargs
+    # The batch path spreads **kw into _wire_args per row - a "title" key in the kwargs
     # dict must flow onto the wire like any other optional.
     captured = {}
     monkeypatch.setattr(remote, "_acall_tool", _aseam(
@@ -367,7 +367,7 @@ def test_invoke_reraises_typed_error_unwrapped(monkeypatch):
 ])
 def test_authz_tool_error_maps_to_auth_error(monkeypatch, message):
     """A reachable-but-refusing cloud (insufficient scope / permission) is an auth failure,
-    NOT a transport outage — so it must raise RemoteAuthError, never a bare RemoteStoreError."""
+    NOT a transport outage - so it must raise RemoteAuthError, never a bare RemoteStoreError."""
     monkeypatch.setattr(
         remote, "_acall_tool",
         lambda *a, **k: _result(content=[_text(message)], is_error=True),
@@ -403,7 +403,7 @@ def test_scope_mentioning_validation_error_is_not_auth_error(monkeypatch):
 
 def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
     """End-to-end for Bug 2: a missing-write-scope push, run through with_local_fallback, warns
-    the user to re-authenticate — instead of the misleading 'endpoint unreachable' message."""
+    the user to re-authenticate - instead of the misleading 'endpoint unreachable' message."""
     monkeypatch.setattr(
         remote, "_acall_tool",
         lambda *a, **k: _result(
@@ -475,7 +475,7 @@ def test_401_without_profile_does_not_retry(monkeypatch):
 
 
 def test_401_refresh_yields_no_new_token_surfaces(monkeypatch):
-    """If refresh can't produce a *new* token (same/None), surface the auth error — no retry."""
+    """If refresh can't produce a *new* token (same/None), surface the auth error - no retry."""
     fake = _seq_call(_http_error(401))
     monkeypatch.setattr(remote, "_acall_tool", fake)
     monkeypatch.setattr("contexer.auth.refresh_now", lambda p: None)
@@ -495,7 +495,7 @@ def test_401_retry_still_401_surfaces(monkeypatch):
 
 
 def test_authz_tool_error_is_not_reactively_refreshed(monkeypatch):
-    """A server-side authz/scope denial (isError result) is NOT a transport 401 — a refresh can't
+    """A server-side authz/scope denial (isError result) is NOT a transport 401 - a refresh can't
     fix it, so refresh_now must never be called for it."""
     monkeypatch.setattr(
         remote, "_acall_tool",
@@ -741,7 +741,7 @@ def test_submit_decision_to_team_can_strip_evidence(monkeypatch):
 
 
 def test_sync_push_decision_is_thin_shim_over_async_core(monkeypatch):
-    """The sync shim drives the SAME async seam via asyncio.run — one network core, no
+    """The sync shim drives the SAME async seam via asyncio.run - one network core, no
     duplicated logic. Off-loop callers (CLI, hooks) keep working unchanged."""
     monkeypatch.setattr(remote, "_acall_tool", _aseam(
         lambda *a: _result(content=[_text("Saved decision d-1 to your personal context.")])))
@@ -757,7 +757,7 @@ def test_sync_get_context_is_thin_shim_over_async_core(monkeypatch):
 
 
 def test_async_push_cancellation_tears_down_transport(monkeypatch):
-    """THE #108 fix. A wedged push, once its deadline fires, is CANCELLED — and the
+    """THE #108 fix. A wedged push, once its deadline fires, is CANCELLED - and the
     cancellation reaches INTO the transport so its async context managers close the
     connection. Asserts the transport's teardown actually ran (socket reclaimed), not
     merely that the caller returned while a thread ran on."""
@@ -779,12 +779,12 @@ def test_async_push_cancellation_tears_down_transport(monkeypatch):
 
     with pytest.raises(TimeoutError):
         asyncio.run(driver())
-    assert torn_down["v"] is True  # cancellation propagated to the transport — reclaimed, not leaked
+    assert torn_down["v"] is True  # cancellation propagated to the transport - reclaimed, not leaked
 
 
 def test_ainvoke_does_not_swallow_cancellation(monkeypatch):
     """`_ainvoke`'s broad `except Exception` must NEVER catch a CancelledError (it is a
-    BaseException) and misclassify it as an unreachable-endpoint error — that would defeat
+    BaseException) and misclassify it as an unreachable-endpoint error - that would defeat
     the whole cancellable-transport fix."""
     async def wedged(*a, **k):
         await asyncio.sleep(3600)
@@ -810,13 +810,13 @@ def test_async_connection_error_maps_to_unavailable(monkeypatch):
 
 
 def test_async_core_surfaces_401_without_refreshing(monkeypatch):
-    """#108: the async core does NO reactive refresh — it surfaces the transport 401 as a
+    """#108: the async core does NO reactive refresh - it surfaces the transport 401 as a
     RemoteAuthError so it stays fully cancellable (no uncancellable refresh thread). Reactive
     refresh is the sync shim's job. So `contexer.auth.refresh_now` must never be called here."""
     fake = _seq_call(_http_error(401), _result(structured={"result": []}))
     monkeypatch.setattr(remote, "_acall_tool", fake)
     monkeypatch.setattr("contexer.auth.refresh_now",
-                        lambda p: pytest.fail("async core must not refresh — that spawns a thread"))
+                        lambda p: pytest.fail("async core must not refresh - that spawns a thread"))
     store = _team_store()
     with pytest.raises(RemoteAuthError):
         asyncio.run(store.aget_context())
@@ -825,7 +825,7 @@ def test_async_core_surfaces_401_without_refreshing(monkeypatch):
 
 def test_sync_shim_reactive_refresh_only_for_transport_auth(monkeypatch):
     """The sync shim refreshes on a transport 401 (tagged) but NOT on a server-side authz
-    denial (untagged RemoteAuthError from _classify_tool_error) — a refresh can't fix scope."""
+    denial (untagged RemoteAuthError from _classify_tool_error) - a refresh can't fix scope."""
     # authz denial: isError result -> RemoteAuthError WITHOUT _transport_auth -> no refresh
     monkeypatch.setattr(remote, "_acall_tool", lambda *a, **k: _result(
         content=[_text("This token lacks the 'write' scope required.")], is_error=True))
@@ -835,7 +835,7 @@ def test_sync_shim_reactive_refresh_only_for_transport_auth(monkeypatch):
         _team_store().push_decision(type="constraint", content="c", repo=None)
 
 
-# ── outbound secret redaction (remote._wire_args — the hard egress guarantee) ──
+# ── outbound secret redaction (remote._wire_args - the hard egress guarantee) ──
 
 _WIRE_AWS = "AKIAIOSFODNN7EXAMPLE"
 _WIRE_GH = "ghp_" + "b" * 36
@@ -857,7 +857,7 @@ def test_wire_args_redacts_content_evidence_rationale():
 
 def test_wire_args_redacts_legacy_content_bypassing_capture():
     # A decision stored before redaction shipped: raw secret arrives at the wire and
-    # must still be scrubbed — this is the only protection for legacy on-disk secrets.
+    # must still be scrubbed - this is the only protection for legacy on-disk secrets.
     args = remote._wire_args(type="constraint", content=f"legacy key {_WIRE_AWS}")
     assert _WIRE_AWS not in args["content"]
 
@@ -886,7 +886,7 @@ def test_wire_args_includes_title_when_given():
 
 
 def test_wire_args_redacts_title_secret():
-    # SECURITY: a title is derived from content and can carry the same secrets — this is
+    # SECURITY: a title is derived from content and can carry the same secrets - this is
     # the last-mile chokepoint, independent of any scrubbing already done upstream (e.g.
     # store._share_projection).
     args = remote._wire_args(type="architecture", content="plain body",
@@ -1014,7 +1014,7 @@ def test_push_decision_includes_source_files_when_gate_explicitly_on(monkeypatch
 
 
 def test_wire_args_never_leaks_guard_check_or_anchor_fields():
-    # source_files becomes a deliberate, tested inclusion — guard_check/anchor_candidates/
+    # source_files becomes a deliberate, tested inclusion - guard_check/anchor_candidates/
     # anchor_commit remain never-egress: _wire_args has no parameter for any of them, so a
     # caller literally cannot put them on the wire through this function.
     params = inspect.signature(remote._wire_args).parameters
@@ -1025,7 +1025,7 @@ def test_wire_args_never_leaks_guard_check_or_anchor_fields():
 
 def test_wire_honors_store_profile_over_global(monkeypatch):
     # A RemoteStore built from a profile with redaction ON must redact even when the GLOBAL
-    # config says OFF — otherwise an explicit opt-in caller silently leaks raw secrets.
+    # config says OFF - otherwise an explicit opt-in caller silently leaks raw secrets.
     monkeypatch.setattr(remote, "_redaction_enabled", lambda: False)  # global OFF
     captured = {}
     monkeypatch.setattr(remote, "_acall_tool",

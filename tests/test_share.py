@@ -826,7 +826,7 @@ def test_drain_outbox_concurrent_enqueue_survives_final_save(tmp_repo, monkeypat
 
 def test_drain_outbox_sends_title_on_retry(tmp_repo, monkeypatch):
     # A queued offline share (carrying its title in the outbox row) must send that title
-    # when a later drain succeeds — the round-trip this task guarantees. An entry queued
+    # when a later drain succeeds - the round-trip this task guarantees. An entry queued
     # before this feature (no "title" key) must still drain fine (backward compatible).
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
                     "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
@@ -849,7 +849,7 @@ def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monke
     explicitly rather than leaning on the shipped default, so this keeps testing the drain-time
     read no matter which way the constant ships. Uses the real RemoteStore (network seam
     `remote._acall_tool` mocked, like test_remote.py) rather than _FakeRS, so the real
-    _wire_args gate check is actually exercised — _FakeRS bypasses it entirely."""
+    _wire_args gate check is actually exercised - _FakeRS bypasses it entirely."""
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
                     "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
                     "source": "ai", "title": None, "source_files": ["auth/jwt.py"],
@@ -871,7 +871,7 @@ def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monke
     assert "source_files" not in captured["args"]["decisions"][0]
 
     # Re-queue the identical entry and flip the gate ON before draining again: now it must
-    # reach the wire, scrubbed — proving the gate is read fresh at drain, never cached from
+    # reach the wire, scrubbed - proving the gate is read fresh at drain, never cached from
     # queue time.
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
                     "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
@@ -1508,7 +1508,7 @@ def test_cli_share_picker_page_size_is_ten(monkeypatch, capsys):
 
 
 class TestParseSelection:
-    """`_parse_selection` — single numbers and inclusive ranges, order preserved, deduped."""
+    """`_parse_selection` - single numbers and inclusive ranges, order preserved, deduped."""
 
     def test_single_numbers(self):
         from contexer import cli
@@ -1617,7 +1617,7 @@ def test_cli_share_no_repo_exits(monkeypatch):
 # ── wire-source normalization ──────────────────────────────────────────────────────
 # The cloud's push_decision accepts a CLOSED source allowlist (ai|human|scan|bootstrap|
 # memory|plan) and rejects anything else with a hard -32602 that silently poisons the
-# outbox. `plan` (OSS provisional provenance — created_by leaks into revision.source) is
+# outbox. `plan` (OSS provisional provenance - created_by leaks into revision.source) is
 # accepted and PRESERVED end-to-end since contexer-teams#91; only a genuinely-unknown
 # source degrades to "ai" so it can never brick the outbox.
 
@@ -1640,7 +1640,7 @@ def test_wire_source_coerces_unknown_string_to_ai():
 
 def test_wire_source_passes_none_through():
     # None = genuinely-unknown provenance. push_decision OMITS source when it is None (the
-    # cloud stores NULL), so None must NOT be fabricated into "ai" — that mislabels a
+    # cloud stores NULL), so None must NOT be fabricated into "ai" - that mislabels a
     # decision of unknown origin as AI-authored.
     assert share._wire_source(None) is None
 
