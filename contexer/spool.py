@@ -551,17 +551,27 @@ def _sweep_temp(root: Path) -> int:
 
 
 def _sweep_orphan_holds(repo_path: str) -> list:
-    """Settle every held candidate whose decision is no longer in the store.
+    """Settle every held candidate whose decision exists NOWHERE any more.
 
     Its events would otherwise be held forever: nothing re-aggregates them (they are out of
     `pending/`) and nothing will ever finalize them (the decision they were reviewed as is
     gone). Deliberately NO store lock — a stale read costs one deferred sweep, never
     correctness, and a candidate whose meta names no entry is left alone rather than guessed
     at, which is what keeps "held is exempt while unsettled" true.
+
+    A TOMBSTONED decision is not gone, and the distinction is ruling R25's: a retired decision
+    is exactly the outcome a lifecycle candidate PROPOSED, so reconciliation settles that hold
+    `approved` and writes the summary onto the tombstone. This sweep can only ever say
+    `dismissed`, and it writes no summary at all — so treating a tombstoned entry as an orphan
+    would race reconciliation for the one disposition the lifecycle lane exists to record and
+    destroy it. Left held; the next reconciliation pass settles it properly. Once the tombstone
+    itself is evicted, the decision really is gone and the hold is swept then.
     """
     try:
         live = {str(e.get("id") or "") for e in store.load(repo_path).get("entries", [])
                 if isinstance(e, dict)}
+        live |= {str(e.get("id") or "") for e in store.load_deleted(repo_path).get("entries", [])
+                 if isinstance(e, dict)}
     except Exception:                   # broad on purpose: a sweep never breaks its caller
         return []
     finalized = []

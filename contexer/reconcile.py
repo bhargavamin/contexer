@@ -31,7 +31,11 @@ Two properties are load-bearing, and both come from the deterministic candidate 
   directory itself is the record that this candidate is already awaiting review. The novelty
   filter is only the backstop for a hold that failed to complete.
 * **`dry_run` writes NOTHING anywhere** — no store write, no hold, no finalize, no retention,
-  no receipt event, no disposition. It reads the store and reports what a real pass would do.
+  no receipt line, no disposition. It reads the store and reports what a real pass would do.
+
+The receipt of a pass is LOGGED, never spooled (ruling R34): `.reconcile_<slug>.jsonl`, the
+`.retrieval_<slug>.jsonl` precedent. Bookkeeping in the evidence spool is bookkeeping that
+retention eventually reports as lost evidence — see `_log_receipt`.
 
 ORDER MATTERS on the way in (revised plan B3 step 8): materialize FIRST, then move. A crash
 between the two leaves a candidate whose decision exists and whose events are split across
@@ -40,15 +44,19 @@ between the two leaves a candidate whose decision exists and whose events are sp
 second candidate under a different id.
 """
 
-from contexer import candidates, evidence, lifecycle, spool, store
+import json
+from datetime import datetime, timezone
+
+from contexer import candidates, lifecycle, spool, store
 
 # Kinds a candidate can be built out of. The rest of `evidence.EVENT_KINDS` is bookkeeping
-# ABOUT candidates (`session_reconcile`, `policy_evaluation`), which never groups into one —
-# and filtering it out here is what stops this function's OWN receipt event from making the
-# next pass look like it has work to do, forever. That receipt is never held, so it sits in
-# `pending/` until retention ages it out; the filter is the only thing keeping the fast path
-# alive on a repo that has reconciled at least once.
+# ABOUT candidates (`policy_evaluation`, `session_reconcile`), which never groups into one, so
+# a spooled one must never make the next pass look like it has work to do.
 _EVIDENCE_KINDS = candidates.SEED_KINDS | candidates.SUPPORT_KINDS
+
+# Tail cap on the reconciliation log, matching `store._RETRIEVAL_LOG_CAP` — the same kind of
+# record, kept for the same reason, so it is bounded the same way.
+_RECEIPT_LOG_CAP = 200
 
 # Candidate kinds that materialize into the LIFECYCLE lane rather than the content one. Both
 # spell the same transition — "this decision should stop being live" — and `replace` differs
@@ -137,8 +145,25 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
     by_id = {str(e.get("id") or ""): e for e in entries}
     flips = {}
     for candidate_id, meta in sorted(held.items()):
+        settled = str(meta.get("status") or "")
+        if settled and settled != "pending":
+            # This candidate was ALREADY settled when it was held — a duplicate, or an update
+            # the store applied in place — and only the finalize that would have removed the
+            # directory is missing. Its disposition is what it was decided to be, not what the
+            # rules below would infer: without this, a crash between the hold and the finalize
+            # left a duplicate carrying an `entry_id` and no `lane`, and the last rule below
+            # read its target's `approved_by == "human"` as an APPROVAL of a candidate that was
+            # dismissed on arrival — the fabricated-approval class this whole function guards.
+            flips[candidate_id] = settled
+            continue
         entry_id = str(meta.get("entry_id") or "")
         if not entry_id:
+            # ponytail: no `entry_id` means the meta was never written or cannot be read, so
+            # nothing can judge this candidate and its directory keeps the candidate id
+            # occupied — the same evidence re-aggregates to the same id and reads as
+            # `already_pending` forever. Accepted rather than guessed at: the only honest
+            # signal is `evidence_diagnostics`' `held_unattributed` count, surfaced by
+            # `contexer status`. A real fix needs the hold to be atomic with its meta.
             continue
         # Named `lifecycle_lane`, never `lifecycle`: that name is the imported MODULE here.
         lifecycle_lane = meta.get("lane") == "lifecycle"
@@ -349,11 +374,16 @@ def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str
 
 
 def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
-    """Hold every materialized candidate's events, and finalize the ones already settled."""
+    """Hold every materialized candidate's events, and finalize the ones already settled.
+
+    The record is written to the hold's `candidate.json` WHOLE, `status` included: a candidate
+    that is settled on arrival (a duplicate, or an update the store applied in place) is
+    finalized on the next line, and if that never happens the recorded status is the only thing
+    that tells a resumed pass what this hold already was. See `_dispositions`' first rule.
+    """
     for candidate_id, record in sorted(writes.items()):
-        meta = {key: value for key, value in record.items() if key != "status"}
         if spool.hold_candidate_evidence(repo_path, candidate_id, record["event_ids"],
-                                         meta=meta)["status"] != "ok":
+                                         meta=record)["status"] != "ok":
             # The decision is stored but some of its evidence still reads as pending. Say so:
             # the next pass finishes the move (`_finish_interrupted_holds`) rather than
             # proposing it again, but this pass did not do everything it set out to.
@@ -361,6 +391,32 @@ def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
         if record["status"] != "pending":
             _finalize(repo_path, candidate_id, record["status"],
                       str(record.get("entry_id") or ""), receipt)
+
+
+def _log_receipt(repo_path: str, session_id: str, receipt: dict) -> None:
+    """Append one JSON line to this repo's reconciliation log, tail-capped. Fail-soft.
+
+    A receipt is BOOKKEEPING about the pipeline, not evidence for a decision, and ruling R34
+    is that it must not live in the evidence spool: nothing reads the `session_reconcile` kind,
+    yet a receipt spooled into `pending/` was never held, so it aged out through retention —
+    which counts every drop in `.gap`, making `contexer status` report "N events lost" on a
+    repo that lost nothing, in the one surface built to be honest about loss. It also spent the
+    pending budget that real evidence needs. Filtering the kind inside retention was rejected:
+    retention must never parse event content.
+
+    So it goes where this repo already puts log-only records — the `.retrieval_<slug>.jsonl`
+    precedent: never user-facing, tail-capped, and fail-soft including the read-back, since a
+    log that picked up non-UTF-8 bytes must not break a session start over a bookkeeping file.
+    """
+    path = store.STORE_DIR / f".reconcile_{store.repo_slug(repo_path)}.jsonl"
+    try:
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        lines.append(json.dumps({**receipt, "session_id": session_id or _FALLBACK_SESSION,
+                                 "at": datetime.now(timezone.utc).isoformat()}))
+        store.atomic_write(path, "\n".join(lines[-_RECEIPT_LOG_CAP:]) + "\n")
+    except (OSError, ValueError):       # ValueError covers UnicodeDecodeError and json both
+        pass
 
 
 def _write_session(event_ids: list, sessions: dict) -> str:
@@ -387,6 +443,12 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
         # every session start.
         return receipt
     events = _finish_interrupted_holds(repo_path, events, held, dry_run, receipt)
+    # ponytail: counted AFTER the recovery strips events an existing candidate already claims,
+    # so `events_observed` means "events this pass aggregated", not "files in pending/". The
+    # checkpoint era's number was the same thing by a different route (a consumed event never
+    # reached the reader at all); recovering a half-done hold is the only case where the two
+    # spellings could differ, and reporting the leftovers as observed would double-count the
+    # evidence of a candidate that is already awaiting review.
     receipt["events_observed"] = len(events)
 
     entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
@@ -419,25 +481,12 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
                   str(held[candidate_id].get("entry_id") or ""), receipt)
     spool.run_retention(repo_path)
     if not (writes or flips):
-        # Nothing happened, so nothing is recorded. A pass that appended its receipt
-        # unconditionally would write one event per SessionStart, PreCompact and SessionEnd
-        # forever on any repo holding a single stuck held candidate — filling the spool
-        # toward retention with news of having done nothing.
+        # Nothing happened, so nothing is recorded. A pass that logged its receipt
+        # unconditionally would write one line per SessionStart, PreCompact and SessionEnd
+        # forever on any repo holding a single stuck held candidate — news of having done
+        # nothing, crowding the tail cap that holds the passes that did something.
         return receipt
-    evidence.emit_hook_event(
-        repo_path, "session_reconcile", session_id=session_id or _FALLBACK_SESSION,
-        source="reconcile_session",
-        summary=(f"reconciled {receipt['events_observed']} evidence event(s): "
-                 f"{receipt['proposed']} proposed, {receipt['duplicates']} duplicate, "
-                 f"{receipt['insufficient']} insufficient, "
-                 f"{receipt['lifecycle_proposed']} retirement(s) proposed"),
-        attributes={"events_observed": receipt["events_observed"],
-                    "proposed": receipt["proposed"],
-                    "lifecycle_proposed": receipt["lifecycle_proposed"],
-                    "already_pending": receipt["already_pending"],
-                    "duplicates": receipt["duplicates"],
-                    "insufficient": receipt["insufficient"],
-                    "incomplete": receipt["incomplete"]})
+    _log_receipt(repo_path, session_id, receipt)
     return receipt
 
 
