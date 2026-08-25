@@ -181,17 +181,17 @@ class TestValidateRequest:
         assert errors == ["unknown artifact key: 'encoding'"]
 
     def test_an_artifact_over_2_mib_is_an_error_because_half_a_diff_reads_as_clean(self):
-        assert policy._MAX_ARTIFACT_BYTES == 2 * 1024 * 1024
+        assert policy.MAX_ARTIFACT_BYTES == 2 * 1024 * 1024
         ok, errors = policy.validate_request(
-            _request(artifact={"kind": "diff", "content": "x" * policy._MAX_ARTIFACT_BYTES}))
+            _request(artifact={"kind": "diff", "content": "x" * policy.MAX_ARTIFACT_BYTES}))
         assert errors == [] and ok is not None
         _, errors = policy.validate_request(
-            _request(artifact={"kind": "diff", "content": "x" * (policy._MAX_ARTIFACT_BYTES + 1)}))
+            _request(artifact={"kind": "diff", "content": "x" * (policy.MAX_ARTIFACT_BYTES + 1)}))
         assert errors == ["artifact.content exceeds 2097152 bytes (2097153)"]
 
     def test_the_artifact_cap_counts_utf8_bytes_not_characters(self):
         # One emoji is 4 bytes: a character cap would let a 4x-oversized artifact through.
-        oversize = "🙂" * (policy._MAX_ARTIFACT_BYTES // 4 + 1)
+        oversize = "🙂" * (policy.MAX_ARTIFACT_BYTES // 4 + 1)
         _, errors = policy.validate_request(_request(artifact={"kind": "diff",
                                                                "content": oversize}))
         assert errors and "exceeds 2097152 bytes" in errors[0]

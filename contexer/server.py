@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import conflicts, lifecycle, reconcile, store
+from contexer import conflicts, lifecycle, policy_api, reconcile, store
 
 SESSION_ID = str(uuid.uuid4())
 
@@ -312,6 +312,38 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
                  "its full content; surface them to the developer at a natural point and let "
                  "them answer. Never approve them yourself.")
     return text
+
+
+@mcp.tool()
+def evaluate_policy(repo_path: str = "", intent: str = "", operation: str = "",
+                    files: list[str] | None = None, artifact_kind: str = "",
+                    artifact: str = "") -> str:
+    """Check an operation you are about to perform against the developer's approved decisions,
+    and report what they say about it.
+
+    This is ADVISORY and nothing here enforces anything. A `block` verdict does not refuse or
+    stop anything — it means an approved, armed decision objects, and your job is to SURFACE
+    that to the developer and let them decide, not to act as if the operation were forbidden.
+    An `allow` verdict is equally not permission: it means no stored decision objected, never
+    that the developer would agree, so it is never a reason to skip asking them. Read
+    `evaluation_status` beside the verdict — `partial`/`error` means part of the request was
+    never judged, and the `unchecked` list names what, with the reason. A check that did not
+    happen is not a check that found nothing.
+
+    operation:     read_files | write_files | shell | commit | merge | deploy | api_request
+    intent:        one line on what you are trying to do (<= 300 chars)
+    files:         repo-relative paths the operation touches (<= 100, <= 300 chars each)
+    artifact_kind: diff | file_content | command | request | deployment — the shape of what
+                   you are handing over for checking. Omit BOTH this and `artifact` when the
+                   operation carries nothing to inspect; every armed rule is then reported as
+                   `omitted` rather than passing clean.
+    artifact:      the bytes themselves (<= 2 MiB). Pass them verbatim — a redacted or
+                   truncated artifact makes a secret check find nothing.
+    """
+    result = policy_api.evaluate_operation(
+        repo_path, intent=intent, operation=operation, files=list(files or []),
+        artifact_kind=artifact_kind, artifact=artifact)
+    return policy_api.format_result(result, artifact)
 
 
 @mcp.tool()
