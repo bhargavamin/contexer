@@ -146,7 +146,10 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
     flips = {}
     for candidate_id, meta in sorted(held.items()):
         settled = str(meta.get("status") or "")
-        if settled and settled != "pending":
+        # Tested against the spool's own vocabulary, not merely `!= "pending"`: a hand-edited
+        # `candidate.json` would otherwise reach `finalize_candidate_evidence` with a status it
+        # rejects, and that ValueError aborts the WHOLE pass — on every run, for good.
+        if settled in spool.DISPOSITIONS:
             # This candidate was ALREADY settled when it was held — a duplicate, or an update
             # the store applied in place — and only the finalize that would have removed the
             # directory is missing. Its disposition is what it was decided to be, not what the
