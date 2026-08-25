@@ -46,9 +46,9 @@ def _entry(did="d1", *, status="approved", source="human", created_by="",
     return entry
 
 
-def _armed(paths="", pattern="TODO"):
+def _armed(paths="", pattern="TODO", kind="regex"):
     """The shape `guard_engine.arm_guard` writes onto an entry."""
-    return {"type": "regex", "pattern": pattern, "flags": "", "paths": paths,
+    return {"type": kind, "pattern": pattern, "flags": "", "paths": paths,
             "message": "", "armed_at": "2026-08-24T10:00:00+00:00"}
 
 
@@ -720,6 +720,309 @@ class TestEvaluatePolicies:
 
     def test_junk_in_the_policy_list_is_skipped_not_raised_on(self):
         assert policy.evaluate_policies(["nonsense", None], _request())["verdict"] == "allow"
+
+
+# ── judging: which bytes a scoped rule may see ───────────────────────────────────
+
+_TWO_FILE_DIFF = """diff --git a/src/auth.py b/src/auth.py
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -1,2 +1,3 @@
+ def login():
++    return True
+diff --git a/docs/example.md b/docs/example.md
+--- a/docs/example.md
++++ b/docs/example.md
+@@ -1,1 +1,2 @@
+ hi
++set DEBUG=1 to trace
+"""
+
+_FAKE_HEADER_DIFF = ("--- a/doc.md\n+++ b/doc.md\n@@ -1,2 +1,3 @@\n intro\n"
+                     "--- separator\n+++ separator\n+AKIAIOSFODNN7EXAMPLE\n"
+                     "--- a/other.md\n+++ b/other.md\n@@ -1 +1 @@\n-old\n+new\n")
+"""A plain `diff -u` whose hunk content wears a file header's shape: doc.md's own hunk
+deletes `-- separator` and adds `++ separator`, which render as a `---`/`+++` pair.
+
+The counts are honest (`-1,2 +1,3` over one context line, one deletion and two additions)
+because the split is decided by counting them; a diff whose header lies about its own body is
+`unattributable`, which `TestDiffSections` pins separately."""
+
+_COINCIDENT_HUNK_DIFF = ("--- a/real.py\n+++ b/real.py\n@@ -1,3 +1,4 @@\n context\n"
+                         "--- separator\n+++ separator\n@@ -10,2 +11,3 @@\n more context\n"
+                         "+AKIAIOSFODNN7EXAMPLE\n")
+"""The re-reviewer's construction, verbatim. real.py's first hunk ends on a forged
+`---`/`+++` pair and its own SECOND, genuine hunk header sits directly behind it, so the
+three-line `---`/`+++`/`@@` shape is satisfied by pure coincidence and a lookahead splits
+real.py in two. Its declared counts do not match its body (`-1,3` over two old lines), which
+is what makes the verbatim text unattributable rather than merely mis-split."""
+
+_COINCIDENT_HUNK_DIFF_WELL_FORMED = (
+    "--- a/real.py\n+++ b/real.py\n@@ -1,2 +1,2 @@\n context\n"
+    "--- separator\n+++ separator\n@@ -10,1 +11,2 @@\n more context\n"
+    "+AKIAIOSFODNN7EXAMPLE\n")
+"""The same construction with counts that match its body, so the attack stands on its own
+rather than on a malformed header: both hunks belong to real.py and the secret is real.py's."""
+
+_SHORTHAND_TRAP_DIFF = ("--- a/svc.py\n+++ b/svc.py\n@@ -5 +5 @@\n--- separator\n"
+                        "+++ separator\n@@ -20,2 +20,3 @@\n keep\n-drop\n"
+                        "+AKIAIOSFODNN7EXAMPLE\n+tail\n")
+"""The same coincidence again, this time over a hunk whose header omits both counts (`-5 +5`,
+meaning one line each). Getting the implicit 1 wrong is the only way to mis-place this
+boundary, so it breaks the counting rather than the pattern-matching."""
+
+
+class TestPathScopedAttribution:
+    """A `paths` glob scopes a rule to files, so it must scope the BYTES the rule is judged
+    against too. Selection already recorded which files the glob picked; judging used to run
+    the pattern over the whole artifact anyway, so a hit anywhere in a multi-file diff blocked
+    in the name of a decision scoped away from it."""
+
+    def _selected(self, paths, pattern="DEBUG"):
+        entries = [_entry(guard_check=_armed(paths=paths, pattern=pattern))]
+        return policy.select_policies(
+            entries, _request(files=["src/auth.py", "docs/example.md"]))
+
+    def test_a_scoped_rule_does_not_block_on_a_match_in_another_file_s_section(self):
+        # The reported bug: `DEBUG` appears only in docs/example.md, and the rule governs
+        # src/auth.py. Judging the combined diff attributed that line to this decision and
+        # blocked the commit on a rule that never covered the file the match came from.
+        selected = self._selected("src/auth.py")
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py", "docs/example.md"],
+                               artifact=_diff(_TWO_FILE_DIFF)))
+        assert result["verdict"] == "allow"
+        assert result["matches"] == [] and result["unchecked"] == []
+        assert result["evaluation_status"] == "complete"
+
+    def test_a_scoped_rule_still_blocks_on_a_match_inside_its_own_section(self):
+        # The other half, and the one that says the fix scoped the check rather than
+        # weakening it. `login` sits in src/auth.py's own section; the reported line is the
+        # line in the ARTIFACT, not in the section, so a caller quoting it still quotes the
+        # right text.
+        selected = self._selected("src/auth.py", pattern="def login")
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py", "docs/example.md"],
+                               artifact=_diff(_TWO_FILE_DIFF)))
+        assert result["verdict"] == "block"
+        assert [m["line"] for m in result["matches"]] == [5]
+        assert _TWO_FILE_DIFF.splitlines()[4].strip() == "def login():"
+
+    def test_an_unscoped_rule_still_sees_the_whole_artifact(self):
+        # No glob means the rule was never scoped, so nothing about attribution applies to it
+        # and the common case is untouched: it still matches the docs section.
+        selected = self._selected("")
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py", "docs/example.md"],
+                               artifact=_diff(_TWO_FILE_DIFF)))
+        assert result["verdict"] == "block"
+        assert [m["line"] for m in result["matches"]] == [12]
+
+    def test_a_repo_wide_request_naming_no_files_still_sees_the_whole_artifact(self):
+        # Selection's own rule: a glob-scoped rule governs a commit that names nothing to
+        # filter by. This is also the shape `guard_engine._evaluate_rules` sends - one staged
+        # file's content, no `files` - so scoping must not silently disarm Tier 2.
+        entries = [_entry(guard_check=_armed(paths="src/*.py", pattern="DEBUG"))]
+        selected = policy.select_policies(entries, _request(files=[]))
+        result = policy.evaluate_policies(
+            selected, _request(files=[], artifact={"kind": "file_content",
+                                                   "content": "x\nDEBUG\n"}))
+        assert result["verdict"] == "block" and [m["line"] for m in result["matches"]] == [2]
+
+    def test_one_named_file_means_the_whole_artifact_is_that_file_s(self):
+        entries = [_entry(guard_check=_armed(paths="src/*.py", pattern="DEBUG"))]
+        selected = policy.select_policies(entries, _request(files=["src/auth.py"]))
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py"],
+                               artifact={"kind": "file_content", "content": "DEBUG\n"}))
+        assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
+
+    def test_several_files_with_nothing_to_split_on_is_unchecked_never_judged_whole(self):
+        # The reviewer's own guidance: when attribution is unavailable, report the gap. A
+        # concatenation of two files carries nothing saying which bytes are whose, so judging
+        # it would block on a match that might belong to the file the glob excluded.
+        selected = self._selected("src/auth.py")
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py", "docs/example.md"],
+                               artifact={"kind": "file_content", "content": "DEBUG\n"}))
+        assert result["verdict"] == "allow" and result["evaluation_status"] == "partial"
+        assert result["unchecked"] == [{"reason": "unattributable", "decision_id": "d1"}]
+
+    def test_a_diff_kind_artifact_with_no_file_headers_is_unchecked_too(self):
+        selected = self._selected("src/auth.py")
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py", "docs/example.md"],
+                               artifact=_diff("just some DEBUG text\n")))
+        assert result["unchecked"] == [{"reason": "unattributable", "decision_id": "d1"}]
+
+    def test_a_glob_selecting_no_section_of_the_diff_is_unchecked_not_clean(self):
+        # The request named a file this rule governs and the artifact carries no bytes for
+        # it: the two disagree, and "found nothing" about bytes that were never there is the
+        # false clean verdict the unchecked list exists to prevent.
+        entries = [_entry(guard_check=_armed(paths="src/other.py", pattern="DEBUG"))]
+        request = _request(files=["src/other.py", "docs/example.md"])
+        selected = policy.select_policies(entries, request)
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/other.py", "docs/example.md"],
+                               artifact=_diff(_TWO_FILE_DIFF)))
+        assert result["unchecked"] == [{"reason": "unattributable", "decision_id": "d1"}]
+        assert result["verdict"] == "allow" and result["evaluation_status"] == "partial"
+
+    def test_a_secret_in_the_scoped_file_is_not_lost_to_a_phantom_section(self):
+        # The one way scoping could fail UNSAFELY. Splitting on a `---`/`+++` pair alone
+        # invents a `separator` section starting inside doc.md's hunk, so the AWS key - which
+        # is genuinely doc.md's - lands in bytes no glob selects and the whole run comes back
+        # `allow`/`complete` with an empty `unchecked`: a check that never happened reading as
+        # a check that found nothing, on a secret scan.
+        entries = [_entry(guard_check=_armed(paths="doc.md", kind="secret", pattern=""))]
+        request = _request(files=["doc.md", "other.md"])
+        selected = policy.select_policies(entries, request)
+        result = policy.evaluate_policies(
+            selected, _request(files=["doc.md", "other.md"],
+                               artifact=_diff(_FAKE_HEADER_DIFF)))
+        assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
+        assert [m["line"] for m in result["matches"]] == [7]
+        assert _FAKE_HEADER_DIFF.splitlines()[6] == "+AKIAIOSFODNN7EXAMPLE"
+
+    def _secret_run(self, content, paths, files):
+        entries = [_entry(guard_check=_armed(paths=paths, kind="secret", pattern=""))]
+        selected = policy.select_policies(entries, _request(files=files))
+        return policy.evaluate_policies(
+            selected, _request(files=files, artifact=_diff(content)))
+
+    def test_a_second_hunk_of_the_same_file_behind_a_forged_pair_stays_that_file_s(self):
+        # The re-reviewer's case, well-formed: real.py's first hunk ends on `--- separator` /
+        # `+++ separator` and real.py's own next genuine `@@` follows, so the three-line
+        # lookahead the previous round added is satisfied by coincidence and the file splits
+        # in two. Counting the hunk out of its own declared size cannot be fooled that way -
+        # the forged pair is INSIDE a counted body, so it is never looked at.
+        result = self._secret_run(_COINCIDENT_HUNK_DIFF_WELL_FORMED, "real.py",
+                                  ["real.py", "other.py"])
+        assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
+        assert [m["line"] for m in result["matches"]] == [9]
+        assert _COINCIDENT_HUNK_DIFF_WELL_FORMED.splitlines()[8] == "+AKIAIOSFODNN7EXAMPLE"
+
+    def test_the_verbatim_coincidence_diff_is_unchecked_never_a_clean_allow(self):
+        # The same text as the re-reviewer wrote it, whose header claims more lines than its
+        # body holds. The walk refuses it rather than guessing where the hunk stopped, and
+        # the run says so: a gap, not the `allow`/`complete` a phantom section produced.
+        result = self._secret_run(_COINCIDENT_HUNK_DIFF, "real.py", ["real.py", "other.py"])
+        assert result["evaluation_status"] == "partial"
+        assert result["unchecked"] == [{"reason": "unattributable", "decision_id": "d1"}]
+        assert result["matches"] == []
+
+    def test_a_hunk_header_omitting_its_counts_still_places_the_boundary(self):
+        # `@@ -5 +5 @@` declares one line each. Read as zero, the body ends before the forged
+        # pair and svc.py splits; read as more, the walk runs into the next header and the
+        # whole diff comes back unattributable. Only the implicit 1 keeps both hunks svc.py's.
+        result = self._secret_run(_SHORTHAND_TRAP_DIFF, "svc.py", ["svc.py", "other.py"])
+        assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
+        assert [m["line"] for m in result["matches"]] == [9]
+        assert _SHORTHAND_TRAP_DIFF.splitlines()[8] == "+AKIAIOSFODNN7EXAMPLE"
+
+    def test_a_no_newline_note_trailing_a_later_file_does_not_blind_an_earlier_scoped_match(self):
+        # A file with no trailing newline is ordinary, not adversarial - y.py's hunk ending in
+        # `\ No newline at end of file` must not stop x.py's own genuine, in-scope secret from
+        # being found. Before the fix this made the whole plain diff unattributable.
+        content = ("--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n a\n+AKIAIOSFODNN7EXAMPLE\n"
+                   "--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-c\n+d\n\\ No newline at end of file\n")
+        result = self._secret_run(content, "x.py", ["x.py", "y.py"])
+        assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
+        assert [m["line"] for m in result["matches"]] == [5]
+
+    def test_unattributable_is_its_own_reason_rather_than_overloading_another(self):
+        assert "unattributable" in policy.UNCHECKED_REASONS
+
+    def test_an_advisory_policy_is_untouched_by_scoping(self):
+        # Prose is judged on applicability, not on bytes, so there is nothing to attribute.
+        selected = policy.select_policies([_entry(source_files=["docs/example.md"])],
+                                          _request(files=["src/auth.py", "docs/example.md"]))
+        result = policy.evaluate_policies(
+            selected, _request(files=["src/auth.py", "docs/example.md"],
+                               artifact=_diff(_TWO_FILE_DIFF)))
+        assert result["verdict"] == "warn" and result["evaluation_status"] == "complete"
+
+
+class TestDiffSections:
+    """The split itself. It is all-or-nothing on purpose: a diff one of whose sections names
+    no file comes back empty, because judging the sections that did parse while staying silent
+    about the one that did not is the half-answer this module refuses everywhere else."""
+
+    def test_it_names_each_file_and_where_its_section_starts(self):
+        assert [(p, n) for p, n, _ in policy._diff_sections(_TWO_FILE_DIFF)] == [
+            ("src/auth.py", 1), ("docs/example.md", 7)]
+
+    def test_text_with_no_file_headers_at_all_splits_into_nothing(self):
+        assert policy._diff_sections("just some text\n+added\n") == []
+
+    def test_a_plain_unprefixed_diff_still_splits(self):
+        content = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+        assert [p for p, _, _ in policy._diff_sections(content)] == ["x.py"]
+
+    def test_hunk_content_shaped_like_a_plain_header_does_not_split(self):
+        # A deleted `-- separator` renders as `--- separator` and an added `++ separator` as
+        # `+++ separator`, so the pair alone reads as a file header from inside a hunk. Counting
+        # each hunk's own declared body size is what tells them apart: the forged pair is
+        # consumed as ordinary body content on the way to the hunk's real end, never looked at
+        # as a candidate boundary.
+        assert [(p, n) for p, n, _ in policy._diff_sections(_FAKE_HEADER_DIFF)] == [
+            ("doc.md", 1), ("other.md", 8)]
+
+    def test_a_forged_pair_followed_by_a_real_hunk_header_does_not_split(self):
+        # What the three-line lookahead could not tell apart: `---`/`+++`/`@@` produced by a
+        # file's own hunk content sitting in front of its own next hunk. Counting settles it
+        # without reading either.
+        assert [(p, n) for p, n, _ in
+                policy._diff_sections(_COINCIDENT_HUNK_DIFF_WELL_FORMED)] == [("real.py", 1)]
+
+    def test_a_hunk_whose_header_lies_about_its_body_is_unattributable(self):
+        # Fail safe: the walk cannot say where this hunk stops, so it declines rather than
+        # splitting on the shape it happens to see.
+        assert policy._diff_sections(_COINCIDENT_HUNK_DIFF) == []
+
+    def test_a_truncated_hunk_body_is_unattributable(self):
+        assert policy._diff_sections("--- a/t.py\n+++ b/t.py\n@@ -1,5 +1,5 @@\n a\n") == []
+
+    def test_an_unreadable_hunk_header_is_unattributable(self):
+        assert policy._diff_sections("--- a/t.py\n+++ b/t.py\n@@ nonsense @@\n a\n") == []
+
+    def test_omitted_hunk_counts_mean_one_line(self):
+        assert [(p, n) for p, n, _ in policy._diff_sections(_SHORTHAND_TRAP_DIFF)] == [
+            ("svc.py", 1)]
+
+    def test_the_no_newline_note_spends_neither_budget(self):
+        # `\\ No newline at end of file` is a note about the line above, not a line of either
+        # file. Charging it to a budget ends the hunk one line early, which lands the next
+        # section's start inside this one.
+        content = ("--- a/n.py\n+++ b/n.py\n@@ -3 +3 @@\n-a\n\\ No newline at end of file\n"
+                   "+b\n--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@\n-c\n+d\n")
+        assert [(p, n) for p, n, _ in policy._diff_sections(content)] == [
+            ("n.py", 1), ("m.py", 7)]
+
+    def test_a_no_newline_note_trailing_an_already_finished_hunk_does_not_blind_the_walk(self):
+        # The note can sit right after a hunk's LAST body line even though both budgets already
+        # hit zero on that line - `_hunk_end` returns before ever looking at the note, so it is
+        # left sitting where the walk next expects either another "@@" or the next section's
+        # "--- " header. Skipping it there is what keeps an ordinary no-trailing-newline file
+        # from making the rest of the diff unattributable.
+        content = ("--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n a\n+AKIAIOSFODNN7EXAMPLE\n"
+                   "--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-c\n+d\n\\ No newline at end of file\n")
+        assert [(p, n) for p, n, _ in policy._diff_sections(content)] == [
+            ("x.py", 1), ("y.py", 6)]
+
+    def test_a_deletion_is_named_by_its_pre_image_not_by_dev_null(self):
+        content = ("diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n"
+                   "@@ -1 +0,0 @@\n-x\n")
+        assert [p for p, _, _ in policy._diff_sections(content)] == ["gone.py"]
+
+    def test_a_header_only_section_falls_back_to_the_git_header(self):
+        content = ("diff --git a/old.py b/new.py\nsimilarity index 100%\n"
+                   "rename from old.py\nrename to new.py\n")
+        assert [p for p, _, _ in policy._diff_sections(content)] == ["new.py"]
+
+    def test_one_unnamed_section_makes_the_whole_diff_unattributable(self):
+        content = _TWO_FILE_DIFF + "diff --git nonsense\n@@ -1 +1 @@\n+DEBUG\n"
+        assert policy._diff_sections(content) == []
 
 
 class TestLeafPurity:
