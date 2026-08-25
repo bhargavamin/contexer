@@ -1473,18 +1473,17 @@ def _print_guard_unchecked(unchecked: list) -> None:
     dead = [u for u in unchecked if not u.get("file")]
     if files:
         _safe_print(f"contexer guard: {len(files)} staged file(s) not checked by armed "
-                    f"rules: {_guard_gap_names(files, lambda u: str(u.get('file')))}",
-                    file=sys.stderr)
+                    f"rules: {_guard_gap_names(files, 'file')}", file=sys.stderr)
     if dead:
         _safe_print(f"contexer guard: {len(dead)} armed rule(s) could not run: "
-                    f"{_guard_gap_names(dead, lambda u: str(u.get('decision_id'))[:8])}",
-                    file=sys.stderr)
+                    f"{_guard_gap_names(dead, 'decision_id', width=8)}", file=sys.stderr)
 
 
-def _guard_gap_names(rows: list, name) -> str:
-    """`a.py (too-large), b.py (budget), +2 more` — capped at _GUARD_UNCHECKED_SHOWN."""
+def _guard_gap_names(rows: list, key: str, width: int | None = None) -> str:
+    """`a.py (too-large), b.py (budget), +2 more` — capped at _GUARD_UNCHECKED_SHOWN.
+    `width` clips the name (decision ids render at 8 chars everywhere else)."""
     shown = rows[:_GUARD_UNCHECKED_SHOWN]
-    names = ", ".join(f"{name(u)} ({u.get('reason')})" for u in shown)
+    names = ", ".join(f"{str(u.get(key))[:width]} ({u.get('reason')})" for u in shown)
     return names + (f", +{len(rows) - len(shown)} more" if len(rows) > len(shown) else "")
 
 
