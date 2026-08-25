@@ -24,10 +24,20 @@ REPO = SRC.parent
 CALLER_ROOTS = ("contexer", "benchmarks")
 
 # Leaf modules store.py may call. A leaf never imports store back except through the module
-# object (see guard_engine.py's load-order docstring).
+# object (see guard_engine.py's load-order docstring). Kept for the Rule 3 alias scan below,
+# which needs the set of modules store.py is allowed to reach for.
+#
+# It is deliberately NOT the gate for the module-object rule any more. That check read
+# `if path.stem not in LEAVES: continue`, so a module absent from this hand-kept list was skipped
+# and passed unconditionally - and four were absent (`config`, `repo_key`, `share_status`,
+# `sidecars`), two of them added by the very changes that wrote "a pure leaf" into CLAUDE.md.
+# The rule applies to ANY module that reaches the store, so the check now finds its own subjects
+# and there is no list left to drift. This is the same failure test_sidecars.py exists to
+# prevent: "Four separate declaration bugs reached review before that test existed."
 LEAVES = frozenset({
     "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
+    "sidecars", "share_status",
 })
 
 
@@ -231,15 +241,27 @@ class TestRuleThreeNoLeafReExportsAnotherLeaf:
                 offenders.append(f"store.py:{node.lineno} {ast.unparse(node)}")
         assert offenders == [], offenders
 
-    def test_no_leaf_imports_store_with_from_imports(self):
-        # A leaf must import the store MODULE OBJECT, so a value patched on contexer.store is
-        # still seen at call time and store.py never needs the leaf at import time.
+    def test_no_module_imports_store_with_from_imports(self):
+        # Any module that reaches the store must import the MODULE OBJECT, so a value patched on
+        # contexer.store is still seen at call time and store.py never needs it at import time.
+        #
+        # Scoped to every caller tree rather than to a hand-kept list of leaves. The list version
+        # skipped any module not named in it, which made this check silently inert for four
+        # modules - including two that CLAUDE.md calls leaves. A check whose subjects are declared
+        # by hand fails open exactly when a new module arrives, which is when it is needed most.
         offenders = []
-        for path, tree in _py_files():
-            if path.stem not in LEAVES:
-                continue
+        for path, tree in _py_files(CALLER_ROOTS):
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module == "contexer.store":
                     names = ", ".join(a.name for a in node.names)
-                    offenders.append(f"{path.name}:{node.lineno} from contexer.store import {names}")
+                    offenders.append(
+                        f"{path}:{node.lineno} from contexer.store import {names}")
         assert offenders == [], offenders
+
+    def test_every_package_module_is_covered_by_the_module_object_check(self):
+        # The companion to the check above: prove its reach rather than assume it. If _py_files
+        # ever stops finding a module, this fails instead of the check quietly passing.
+        scanned = {path.stem for path, _ in _py_files(CALLER_ROOTS)}
+        on_disk = {p.stem for p in (SRC).glob("*.py") if p.stem != "__init__"}
+        missing = sorted(on_disk - scanned)
+        assert missing == [], f"not scanned by the module-object check: {missing}"
