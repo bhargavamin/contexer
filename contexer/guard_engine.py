@@ -715,7 +715,7 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
 #   MANAGEMENT (arm_guard / disarm_guard): under store_lock, WRITES the store,
 #   and MAY raise ValueError — arming/disarming is a deliberate developer act, so
 #   a malformed request should fail loudly, not degrade silently.
-#   RUN (_armed_rules / _rule_violations, and guard_staged's violations half):
+#   RUN (_armed_rules / _evaluate_rules, and guard_staged's violations half):
 #   store-READ-ONLY and fail-soft, exactly like the Tier-1 engine above — rule
 #   evaluation must never raise out of guard_staged and never block a commit on
 #   its own failure (see _GUARD_TIME_BUDGET below: a catastrophic regex fails
@@ -823,8 +823,9 @@ def _rule_selects(rule: dict, path: str) -> bool:
     one definition of it.
 
     Kept as a named function because BOTH of this module's callers want it entry-shaped:
-    `_rule_violations` uses it to decide what to scan, and `_guard_violations` uses it to
-    decide whether an unscannable file is worth REPORTING as unchecked. Without it there, a
+    `_evaluate_rules` uses it to decide what to offer the evaluator, and `_guard_violations`
+    uses it to decide whether an unscannable file is worth REPORTING as unchecked, and to
+    settle scope once per file before the file is read. Without it there, a
     rule armed `--paths "src/**/*.py"` made a staged 4MB `data/dump.json` print a "not checked
     by armed rules" line on every commit, naming a gap that does not exist because no armed
     rule would ever have been run against that file."""
@@ -906,13 +907,6 @@ def _evaluate_rules(rules: list[dict], path: str,
     return hits, dead
 
 
-def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
-    """The violation rows alone, for callers that don't report dead rules (see
-    `_evaluate_rules`, which is what `_guard_violations` uses). Each hit:
-    {path, line, decision_id, title, message}."""
-    return _evaluate_rules(rules, path, content)[0]
-
-
 def _guard_violations(repo: str, staged: list[str],
                       deadline: float) -> tuple[list[dict], list[dict], bool]:
     """Run every armed rule (repo + global stores) against every staged file,
@@ -972,7 +966,7 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
             return [], [], True
         # Scope is decided ONCE, here, before the file is read or charged to the budget,
         # and the rest of the loop trusts it. Applicability used to be settled inside
-        # `_rule_violations` instead, which meant a file no rule selects was still
+        # the per-rule judging instead, which meant a file no rule selects was still
         # `git show`n and still charged to the budget before being scanned against nothing.
         # That is a security bug, not just waste: arm one rule `--paths "src/*.py"`, stage
         # a few MB of `data/*.json` next to one `src/app.py` holding a secret, and the

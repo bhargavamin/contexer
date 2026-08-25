@@ -16,8 +16,8 @@ Parity matrix — where each scenario is pinned. Rows already covered are NOT du
                                test_source_files_pair_surfaces_advisory
     armed regex blocks ........ test_guard_engine TestGuardStagedViolations::
                                test_regex_violation_surfaces
-    armed secret blocks ....... HERE (the existing suite pins the secret check only at
-                               `_rule_violations`, never end to end through guard_staged)
+    armed secret blocks ....... HERE (the existing suite pinned the secret check only
+                               below guard_staged, never end to end through it)
     over-cap file unchecked ... test_guard_engine TestUncheckedIsReported::
                                test_over_cap_file_is_reported_not_silently_passed
     budget overrun reported,
@@ -28,15 +28,10 @@ Parity matrix — where each scenario is pinned. Rows already covered are NOT du
     dead armed rule ........... HERE (new behaviour)
 """
 from contexer import cli, guard_engine, policy, store
-from tests.test_guard_engine import _git, _seed_entry, _write, git_repo  # noqa: F401
-from tests.test_guard_engine import repo as _repo_fixture
+from tests.conftest import _git, _seed_entry, _write
 
-# Re-bound rather than imported under its own name. pytest resolves a fixture by the name
-# bound in this module, so the name has to be `repo` either way — but as an IMPORT, every test
-# method taking a `repo` parameter reads to ruff as redefining it (F811, nine times over,
-# leaving CI's lint job red). An assignment is a plain module global, which a parameter is
-# allowed to shadow.
-repo = _repo_fixture
+# `repo` and `git_repo` are conftest fixtures, so pytest resolves them by name with no
+# import here at all — which is what retired the re-binding this file used to carry.
 
 
 def _arm_raw(repo_dir, entry, check):
@@ -121,8 +116,8 @@ class TestSecretCheckBlocksEndToEnd:
 
 class TestDeadArmedRuleIsSurfaced:
     """A rule the evaluator cannot run at all used to be indistinguishable from a rule that
-    ran and found nothing: `_rule_violations` collapsed both into one `continue`. That is
-    the failure a developer is least able to notice — the rule is armed, the commit passes,
+    ran and found nothing: the pre-evaluator judging collapsed both into one `continue`. That
+    is the failure a developer is least able to notice — the rule is armed, the commit passes,
     and nothing ever says the check did not happen."""
 
     def test_unparseable_pattern_is_reported_with_its_decision_id(self, repo):

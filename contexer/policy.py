@@ -7,7 +7,7 @@ whether an applicable one is actually violated, how to name the exact policy set
 answered, and how to shape the answer.
 
 Judging lives here and ONLY here. `guard_engine` owned it first, against staged git files; it
-now delegates (`_rule_violations`, `_rule_selects`, `arm_guard`'s validation) so the armed
+now delegates (`_evaluate_rules`, `_rule_selects`, `arm_guard`'s validation) so the armed
 regex, the `i` flag, the glob and the secret scan each exist once. A second copy of "what
 counts as a violation" is the drift this split exists to prevent, so the guard keeps only what
 is I/O-shaped — enumerating staged paths, reading them, the throttle sidecars, the wall-clock
