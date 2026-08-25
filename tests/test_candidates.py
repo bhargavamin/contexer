@@ -97,14 +97,26 @@ def test_same_events_in_any_order_produce_byte_identical_output():
             json.dumps(baseline)
 
 
-def test_candidate_id_is_uuid5_over_the_sorted_contributing_event_ids():
+def test_candidate_id_is_uuid5_over_the_kind_target_and_sorted_event_ids():
     a = _ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00", files=["db/migrate.py"])
     b = _ev("file_changed", "migration touched", at="2026-08-24T10:01:00+00:00",
             files=["db/migrate.py"])
     got = _only(candidates.aggregate_candidates([a, b], []))
-    expected = uuid.uuid5(candidates._CANDIDATE_NAMESPACE,
-                          ",".join(sorted([a["event_id"], b["event_id"]])))
+    expected = uuid.uuid5(candidates._CANDIDATE_NAMESPACE, "\n".join(
+        ["new", "", ",".join(sorted([a["event_id"], b["event_id"]]))]))
     assert got["candidate_id"] == str(expected)
+
+
+def test_the_same_events_read_as_a_different_proposal_get_a_different_id():
+    """The id names what is PROPOSED, not just what was observed. `held/<candidate-id>/` is the
+    storage layer's "already pending" record, and an update and a retirement built from one
+    event set are two different proposals that must not share one directory."""
+    stored = _decision("dec-1", _SEED)
+    seed = _ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00")
+    duplicate = _only(candidates.aggregate_candidates([seed], [stored]))
+    fresh = _only(candidates.aggregate_candidates([seed], []))
+    assert (duplicate["kind"], fresh["kind"]) == ("duplicate", "new")
+    assert duplicate["candidate_id"] != fresh["candidate_id"]
 
 
 def test_candidates_are_sorted_by_score_then_id():
@@ -404,7 +416,10 @@ def test_support_events_with_no_seed_yield_one_insufficient_candidate_per_sessio
         assert got["kind"] == "insufficient"
         assert got["content"] == ""
         assert any("no stated decision" in u for u in got["uncertainties"])
-    assert result["candidates"][0]["source_files"] == ["a.py", "b.py"]
+    # Which of the two equal-scoring candidates sorts first is decided by the candidate id, so
+    # the per-session grouping is asserted as a SET of file lists rather than by position.
+    assert sorted(tuple(c["source_files"]) for c in result["candidates"]) == \
+        [("a.py", "b.py"), ("c.py",)]
 
 
 def test_tombstoned_and_ignored_decisions_never_match_but_are_noted():

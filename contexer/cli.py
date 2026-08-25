@@ -627,28 +627,53 @@ def reinstall() -> None:
     print("run `uv tool install --reinstall contexer`, then restart your AI assistant.")
 
 
+def _gap_phrase(gap: dict) -> str:
+    """`.gap` rendered as the CUMULATIVE loss ledger it is (ruling R28), never as a live alarm.
+
+    Nothing clears it, so "3 events lost, last <date>" is the honest reading — a count of what
+    this spool has dropped since it existed, not a condition to resolve. A damaged marker says
+    so rather than reporting a number it cannot stand behind, and `prior_drops_unknown` (the
+    count restarted over a damaged marker) is stated because it makes the figure a lower bound.
+    """
+    if gap.get("unreadable"):
+        return "loss ledger unreadable"
+    drops = gap.get("drops")
+    drops = drops if isinstance(drops, int) and not isinstance(drops, bool) else 0
+    phrase = f"{drops} event{'' if drops == 1 else 's'} lost"
+    if gap.get("prior_drops_unknown"):
+        phrase += " since the ledger was damaged (earlier losses uncounted)"
+    last = str(gap.get("last_at") or "")
+    return f"{phrase}, last {last[:19]}" if last else phrase
+
+
 def _evidence_status_lines(repos) -> list[str]:
-    """One `evidence:` line per repo carrying an evidence ledger or a gap marker.
+    """One `evidence:` line per repo whose spool holds something or has recorded a loss.
 
     Silent for a repo with neither — which is every repo until a host adapter starts emitting
-    events, so this adds nothing to today's output. An unreadable sidecar says so rather than
+    events, so this adds nothing to today's output. An unreadable spool says so rather than
     reporting zero events: the diagnostics' `readable` flag exists for exactly that."""
-    from contexer import evidence
+    from contexer import spool
 
     lines = []
     for repo in sorted(repos):
-        diag = evidence.evidence_diagnostics(repo)
-        # `readable` is False only for a sidecar that EXISTS and could not be parsed, which is
-        # why it is part of the exists test: a truncated (zero-byte) ledger has no bytes to
-        # count and would otherwise be reported as no ledger at all.
-        if not diag["bytes"] and not diag["gap"] and diag["readable"]:
+        diag = spool.evidence_diagnostics(repo)
+        if not any((diag["pending"], diag["held"], diag["quarantine"])) and not diag["gap"] \
+                and diag["readable"]:
             continue
-        parts = [f"{diag['events']} events" if diag["readable"] else "unreadable sidecar"]
-        gap = diag["gap"]
-        if gap:
-            drops = gap.get("drops", 0)
-            parts.append(f"{drops} gap{'' if drops == 1 else 's'} "
-                         f"(last: {gap.get('last_reason', '?')})")
+        if diag["readable"]:
+            parts = [f"{diag['pending']} pending"]
+            if diag["held"]:
+                parts.append(f"{diag['held']} held ({diag['held_events']} events)")
+            if diag["held_unattributed"]:
+                # Held with no recorded decision: nothing will ever settle it (see
+                # spool._sweep_orphan_holds), so it is named rather than folded into the count.
+                parts.append(f"{diag['held_unattributed']} unattributed")
+            if diag["quarantine"]:
+                parts.append(f"{diag['quarantine']} quarantined")
+        else:
+            parts = ["spool unreadable"]
+        if diag["gap"]:
+            parts.append(_gap_phrase(diag["gap"]))
         lines.append(f"  evidence:     {repo}: {', '.join(parts)}")
     return lines
 
@@ -718,7 +743,7 @@ def status(rest: list | None = None) -> None:
             print("  current repo: (unreadable)")
 
     # Every repo status already knows about, plus the one this shell is in: a repo can carry
-    # evidence with no decisions stored yet, and a ledger records loss the stores never see.
+    # evidence with no decisions stored yet, and a spool records loss the stores never see.
     repos = {r for r in (_load_safe(p).get("repo_path") for p in stores)
              if isinstance(r, str) and r}
     if current_repo:

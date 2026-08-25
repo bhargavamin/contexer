@@ -1,9 +1,9 @@
 """Turn unconsumed evidence into decisions a developer REVIEWS.
 
-The one coordinator in the evidence pipeline: it reads the ledger (`evidence`), scores what
-it finds (`candidates`, pure), and materializes the result through the store's ordinary
-capture path. Nothing here approves, retires, or trusts anything, and every decision it
-creates is REVIEWABLE by construction:
+The one coordinator in the evidence pipeline: it reads the spool (`spool`), scores what it
+finds (`candidates`, pure), and materializes the result through the store's ordinary capture
+path. Nothing here approves, retires, or trusts anything, and every decision it creates is
+REVIEWABLE by construction:
 
 * a new candidate lands `pending_approval` — `force_pending`, never the `suggested` tier an
   ai capture would otherwise get, because `suggested` injects at session start yet never
@@ -13,11 +13,11 @@ creates is REVIEWABLE by construction:
   separate lifecycle lane, which retires nothing: only an explicit `lifecycle.retire_decision` by a
   human moves a decision out of active context.
 
-The same discipline governs the way back out: a checkpoint is only ever marked `approved`
+The same discipline governs the way back out: a candidate is only ever settled `approved`
 against real review evidence — a human ratification stamp, a content proposal whose revision
 actually advanced, or a decision genuinely retired into the tombstone sidecar — never inferred
 from an entry merely having stopped being pending, and never from a revision advance the
-checkpoint's own lane cannot be caused by.
+candidate's own lane cannot be caused by.
 
 Above store rather than beside it: `store.py` never imports this module, and store-owned
 helpers are read through the store MODULE OBJECT at call time — the load-order discipline
@@ -26,19 +26,28 @@ helpers are read through the store MODULE OBJECT at call time — the load-order
 Two properties are load-bearing, and both come from the deterministic candidate id:
 
 * **Idempotency.** A second pass over the same events proposes nothing. The mechanism is the
-  checkpoint, not the store's novelty filter: every materialized candidate records the event
-  ids it consumed, and a consumed event never reaches the aggregator again. The novelty filter
-  is only the backstop for a checkpoint that failed to write.
-* **`dry_run` writes NOTHING anywhere** — no store write, no checkpoint, no compaction, no
-  receipt event, no disposition flip. It reads the store and reports what a real pass would do.
+  HOLD, not the store's novelty filter: a materialized candidate's events are moved out of
+  `pending/` into `held/<candidate-id>/`, so they never reach the aggregator again, and the
+  directory itself is the record that this candidate is already awaiting review. The novelty
+  filter is only the backstop for a hold that failed to complete.
+* **`dry_run` writes NOTHING anywhere** — no store write, no hold, no finalize, no retention,
+  no receipt event, no disposition. It reads the store and reports what a real pass would do.
+
+ORDER MATTERS on the way in (revised plan B3 step 8): materialize FIRST, then move. A crash
+between the two leaves a candidate whose decision exists and whose events are split across
+`pending/` and `held/`; the next pass finishes the move from the candidate's own recorded
+`event_ids` (`_finish_interrupted_holds`) rather than re-aggregating the remainder into a
+second candidate under a different id.
 """
 
-from contexer import candidates, evidence, lifecycle, store
+from contexer import candidates, evidence, lifecycle, spool, store
 
 # Kinds a candidate can be built out of. The rest of `evidence.EVENT_KINDS` is bookkeeping
-# ABOUT candidates (`session_reconcile`, `candidate_disposition`, `policy_evaluation`), which
-# never groups into one — and filtering it out here is what stops this function's OWN receipt
-# event from making the next pass look like it has work to do, forever.
+# ABOUT candidates (`session_reconcile`, `policy_evaluation`), which never groups into one —
+# and filtering it out here is what stops this function's OWN receipt event from making the
+# next pass look like it has work to do, forever. That receipt is never held, so it sits in
+# `pending/` until retention ages it out; the filter is the only thing keeping the fast path
+# alive on a repo that has reconciled at least once.
 _EVIDENCE_KINDS = candidates.SEED_KINDS | candidates.SUPPORT_KINDS
 
 # Candidate kinds that materialize into the LIFECYCLE lane rather than the content one. Both
@@ -89,16 +98,19 @@ def _retired_ids(tombstones: list) -> set:
                    for record in (e.get("lifecycle") or []))}
 
 
-def _dispositions(checkpoints: dict, entries: list, retired_ids: set) -> dict:
-    """The status flips a pending checkpoint has earned since the last pass.
+def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
+    """The disposition each held candidate has earned since the last pass,
+    `{candidate_id: "approved"|"dismissed"}`.
 
-    Lazy on purpose: nothing hooks `approve_decision` or `retire_decision`, so a checkpoint
-    learns its decision's fate the next time reconciliation runs. The rules, in the order they
-    are tried:
+    The INPUT is the held directories and their `candidate.json` bookkeeping; a held directory
+    IS the pending state, so there is no status to filter on — a settled candidate's directory
+    is gone. The RULES are unchanged, and lazy on purpose: nothing hooks `approve_decision` or
+    `retire_decision`, so a candidate learns its decision's fate the next time reconciliation
+    runs. In the order they are tried:
 
     * the target was RETIRED — it is in the tombstone sidecar carrying a retirement record. For
-      a lifecycle checkpoint that is precisely the outcome it proposed, so it reads `approved`;
-      for a content checkpoint the decision left before anyone reviewed its wording, so it
+      a lifecycle candidate that is precisely the outcome it proposed, so it reads `approved`;
+      for a content candidate the decision left before anyone reviewed its wording, so it
       reads `dismissed`.
     * the entry is otherwise gone (evicted, or a legacy tombstone with no record) or `ignored`:
       `dismissed`, because nothing was reviewed.
@@ -108,8 +120,8 @@ def _dispositions(checkpoints: dict, entries: list, retired_ids: set) -> dict:
       content edit that happens to advance HEAD would otherwise record a retirement that never
       occurred — the same fabricated-approval class the `approved_by` rule below exists to
       prevent, and it would pollute the very disposition signal this pipeline measures.
-    * CONTENT lane, checkpoint carrying a `revision_id` (it materialized as a PROPOSAL): while
-      the proposal sits, stay pending. Once it is gone the revision answers what became of it —
+    * CONTENT lane, meta carrying a `revision_id` (it materialized as a PROPOSAL): while
+      the proposal sits, stay held. Once it is gone the revision answers what became of it —
       HEAD advanced means promoted (approved), HEAD unchanged means it died unapproved
       (dismissed). Sound here precisely because promotion IS the revision advance, which is what
       makes the same test unsound for a lifecycle proposal.
@@ -117,17 +129,19 @@ def _dispositions(checkpoints: dict, entries: list, retired_ids: set) -> dict:
       (`approved_by == "human"`, written by `_apply_approval`'s approve/edit paths) counts —
       approving one blesses revision 1 IN PLACE, so the revision rule above cannot see it.
 
-    Anything else stays pending, which is also what keeps its evidence pinned against eviction
-    until somebody actually reviews it.
+    Anything else stays held, which is also what keeps its evidence exempt from retention until
+    somebody actually reviews it. A candidate whose meta records no `entry_id` is left held
+    too: there is nothing to judge it against, and guessing is what
+    `spool.evidence_diagnostics`' `held_unattributed` counter exists to surface instead.
     """
     by_id = {str(e.get("id") or ""): e for e in entries}
     flips = {}
-    for candidate_id, checkpoint in sorted(checkpoints.items()):
-        if checkpoint.get("status") != "pending":
+    for candidate_id, meta in sorted(held.items()):
+        entry_id = str(meta.get("entry_id") or "")
+        if not entry_id:
             continue
-        entry_id = str(checkpoint.get("entry_id") or "")
         # Named `lifecycle_lane`, never `lifecycle`: that name is the imported MODULE here.
-        lifecycle_lane = checkpoint.get("lane") == "lifecycle"
+        lifecycle_lane = meta.get("lane") == "lifecycle"
         entry = by_id.get(entry_id)
         if entry_id in retired_ids:
             status = "approved" if lifecycle_lane else "dismissed"
@@ -137,29 +151,35 @@ def _dispositions(checkpoints: dict, entries: list, retired_ids: set) -> dict:
             if entry.get("proposed_lifecycle"):
                 continue
             status = "dismissed"
-        elif checkpoint.get("revision_id"):
+        elif meta.get("revision_id"):
             if entry.get("proposed_revision"):
                 continue
             status = ("approved"
-                      if (entry.get("current_revision_id") or "") != checkpoint["revision_id"]
+                      if (entry.get("current_revision_id") or "") != meta["revision_id"]
                       else "dismissed")
         elif entry.get("approved_by") == "human" and not entry.get("proposed_revision"):
             status = "approved"
         else:
             continue
-        flips[candidate_id] = {**checkpoint, "status": status}
+        flips[candidate_id] = status
     return flips
 
 
 def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
                  receipt: dict, writes: dict) -> None:
-    """Route ONE candidate: count it, recommend it, or store it. Fills `receipt`/`writes`."""
+    """Route ONE candidate: count it, recommend it, or store it. Fills `receipt`/`writes`.
+
+    A `writes` entry is the candidate's intended bookkeeping — `event_ids`, the `status` it
+    settles at (`pending` = awaiting review, anything else = settled in this same run), the
+    `entry_id` it belongs to, and the lane/revision the disposition rules read. `_commit_writes`
+    is what turns it into a held directory, so nothing here touches the spool.
+    """
     kind = candidate.get("kind")
     candidate_id = candidate["candidate_id"]
     event_ids = [str(s.get("event_id") or "") for s in candidate.get("signals") or []]
 
     if kind == "insufficient":
-        # No checkpoint: more evidence may still arrive for the same statement, and a
+        # No hold: more evidence may still arrive for the same statement, and a
         # dismissal here would consume the events that would have completed it.
         receipt["insufficient"] += 1
         return
@@ -182,18 +202,22 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
                                     "entry_id": target}
             return
         receipt["lifecycle_proposed"] += 1
-        # `lane` is what `_dispositions` reads to tell an approved retirement (the target is
-        # tombstoned with a retirement record) from a dismissed one, without ever inferring
-        # either. Deliberately NO `revision_id`: a revision advance is not an approval signal
-        # for this lane (ruling R25), so storing one would only invite a reader to use it.
+        # `lane` is what `_dispositions` reads (off the held dir's `candidate.json`) to tell an
+        # approved retirement (the target is tombstoned with a retirement record) from a
+        # dismissed one, without ever inferring either. Deliberately NO `revision_id`: a
+        # revision advance is not an approval signal for this lane (ruling R25), so storing one
+        # would only invite a reader to use it.
         writes[candidate_id] = {"event_ids": event_ids, "status": "pending", "entry_id": target,
                                 "lane": "lifecycle"}
         return
     if kind == "duplicate":
-        # The store already holds this decision, so there is nothing to review — but the
-        # events ARE settled, and a checkpoint is what stops them resurfacing every pass.
-        # (No dry_run guard: `_reconcile` discards `writes` wholesale on a dry run, which is
-        # the single gate — a second one here would be a second place to get it wrong.)
+        # The store already holds this decision, so there is nothing to review — but the events
+        # ARE settled, so they are held and finalized in this SAME run (red-team mitigation 2),
+        # with the summary attached to the decision they matched. Leaving them in `pending/`
+        # would re-aggregate this duplicate at every checkpoint forever and permanently defeat
+        # the fast path. (No dry_run guard: `_reconcile` discards `writes` wholesale on a dry
+        # run, which is the single gate — a second one here would be a second place to get it
+        # wrong.)
         receipt["duplicates"] += 1
         writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
                                 "entry_id": str(candidate.get("target_decision_id") or "")}
@@ -222,7 +246,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # a higher-trust proposal in the entry's single slot (`meta["refusal_ack"]`, #202): the
         # decision IS awaiting review, just not on this candidate's wording, and re-proposing
         # it every pass would be the worse answer. The receipt has no truer slot for it.
-        # The checkpoint STATUS, though, is settled from what the store actually did rather
+        # The recorded STATUS, though, is settled from what the store actually did rather
         # than from this optimism — see `_settle_write_statuses`.
         receipt["proposed"] += 1
         writes[candidate_id] = {"event_ids": event_ids, "status": "pending",
@@ -235,35 +259,108 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
 
 
 def _settle_write_statuses(repo_path: str, writes: dict) -> None:
-    """Downgrade to `dismissed` every checkpoint whose entry is NOT actually awaiting review.
+    """Downgrade to `dismissed` every record whose entry is NOT actually awaiting review.
 
     The store's return says a write happened, not what kind. `update_decision_with_meta`
     answers `(True, entry_id, {})` identically for a brand-new pending entry, an attached
     `proposed_revision`, and a trivial correction it applied in place as a new approved
-    revision — and only the first two leave anything for the developer to look at. A
-    checkpoint claiming `pending` over the third would pin its evidence forever waiting on a
-    review that will never be asked for. One re-read of the store settles it for the whole
-    batch, which is also why this is not done per candidate inside the loop.
+    revision — and only the first two leave anything for the developer to look at. A record
+    claiming `pending` over the third would hold its evidence forever waiting on a review that
+    will never be asked for. One re-read of the store settles it for the whole batch, which is
+    also why this is not done per candidate inside the loop.
 
-    The same read stamps `revision_id` on every CONTENT checkpoint that left a proposal behind,
+    The same read stamps `revision_id` on every CONTENT record that left a proposal behind,
     so a later pass can tell a promoted proposal (HEAD advanced) from a dismissed one (HEAD
-    unchanged) — see `_dispositions`. Lifecycle checkpoints are skipped outright: their proposal
+    unchanged) — see `_dispositions`. Lifecycle records are skipped outright: their proposal
     is already attached (`propose_lifecycle` returning ok is what says so), and their lane
     settles on the tombstone, never on a revision.
     """
-    pending_ids = {cid for cid, cp in writes.items()
-                   if cp.get("status") == "pending" and cp.get("lane") != "lifecycle"}
+    pending_ids = {cid for cid, record in writes.items()
+                   if record.get("status") == "pending" and record.get("lane") != "lifecycle"}
     if not pending_ids:
         return
     by_id = {str(e.get("id") or ""): e for e in store.load(repo_path).get("entries", [])
              if isinstance(e, dict)}
     for candidate_id in pending_ids:
-        checkpoint = writes[candidate_id]
-        entry = by_id.get(str(checkpoint.get("entry_id") or ""))
+        record = writes[candidate_id]
+        entry = by_id.get(str(record.get("entry_id") or ""))
         if entry is not None and entry.get("proposed_revision"):
-            checkpoint["revision_id"] = entry.get("current_revision_id") or ""
+            record["revision_id"] = entry.get("current_revision_id") or ""
         elif entry is None or store.entry_status(entry) != "pending_approval":
-            checkpoint["status"] = "dismissed"
+            record["status"] = "dismissed"
+
+
+def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run: bool,
+                              receipt: dict) -> list:
+    """Drop every event an existing candidate already claims, finishing a half-done hold.
+
+    Materializing before moving (B3 step 8) means a crash between the two leaves a candidate
+    whose decision exists and whose events are split across `pending/` and `held/`. Aggregating
+    the remainder would mint a DIFFERENT candidate id — the seed is the sorted event ids — and
+    propose the same decision a second time, so the leftovers are recognized by the held
+    candidate's own recorded `event_ids` and moved into the directory that already claims them.
+
+    A dry run excludes them from aggregation exactly the same way (that is what a real pass
+    would do) but moves nothing, because a dry run writes nothing anywhere.
+
+    Scoped to the events this pass can see: a claimed event belonging to a session this pass
+    filtered out is finished by the pass that does see it. It is excluded from nothing in the
+    meantime, because it is not in this pass's listing to begin with.
+    """
+    claimed = {str(event_id): candidate_id
+               for candidate_id, meta in sorted(held.items())
+               for event_id in (meta.get("event_ids") or [])}
+    if not claimed:
+        return events
+    kept, stray = [], {}
+    for event in events:
+        candidate_id = claimed.get(str(event.get("event_id") or ""))
+        if candidate_id is None:
+            kept.append(event)
+        else:
+            stray.setdefault(candidate_id, []).append(str(event.get("event_id") or ""))
+    for candidate_id, event_ids in sorted(stray.items()):
+        # No `meta`: the directory already describes this candidate, and rewriting the
+        # bookkeeping from a recovery pass could only ever replace it with less.
+        if not dry_run and spool.hold_candidate_evidence(
+                repo_path, candidate_id, event_ids)["status"] != "ok":
+            receipt["incomplete"] = True
+    return kept
+
+
+def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str,
+              receipt: dict) -> None:
+    """Settle one candidate: delete its held events and preserve the summary on its decision.
+
+    The summary is the whole point of finalizing rather than deleting — once the raw events are
+    gone, the decision's own `evidence_summary` history is where the disposition lives. A
+    candidate with no entry (the store's novelty filter rejected it, naming nothing) still
+    finalizes: its events are settled either way, there is simply nowhere to file the receipt.
+    """
+    summary = spool.finalize_candidate_evidence(repo_path, candidate_id, disposition)
+    if not entry_id:
+        return
+    try:
+        store.record_evidence_summary(repo_path, entry_id, summary)
+    except Exception:
+        # The candidate is settled and its events are already gone; only the receipt was lost,
+        # and one entry's failure must not abandon the rest of the batch mid-loop.
+        receipt["incomplete"] = True
+
+
+def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
+    """Hold every materialized candidate's events, and finalize the ones already settled."""
+    for candidate_id, record in sorted(writes.items()):
+        meta = {key: value for key, value in record.items() if key != "status"}
+        if spool.hold_candidate_evidence(repo_path, candidate_id, record["event_ids"],
+                                         meta=meta)["status"] != "ok":
+            # The decision is stored but some of its evidence still reads as pending. Say so:
+            # the next pass finishes the move (`_finish_interrupted_holds`) rather than
+            # proposing it again, but this pass did not do everything it set out to.
+            receipt["incomplete"] = True
+        if record["status"] != "pending":
+            _finalize(repo_path, candidate_id, record["status"],
+                      str(record.get("entry_id") or ""), receipt)
 
 
 def _write_session(event_ids: list, sessions: dict) -> str:
@@ -276,27 +373,28 @@ def _write_session(event_ids: list, sessions: dict) -> str:
 
 
 def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> dict:
-    if not evidence.evidence_diagnostics(repo_path)["readable"]:
-        # An unreadable ledger is not an empty one: propose nothing rather than re-propose
-        # everything the checkpoints it holds have already settled.
-        receipt["incomplete"] = True
-        return receipt
-
-    checkpoints = evidence.candidate_checkpoints(repo_path)
-    events = [e for e in evidence.unconsumed_events(repo_path, session_id)
+    # No readability gate any more, and none is needed: settling a candidate MOVES its events
+    # out of `pending/`, so a spool that reads as empty can no longer cause the failure the old
+    # ledger's gate existed for (re-proposing everything its checkpoints had already settled).
+    # An unreadable spool is reported where a developer can act on it — `contexer status`, off
+    # `spool.evidence_diagnostics`' own `readable` flag — rather than costing a pass here.
+    events = [e for e in spool.list_pending_evidence(repo_path, session_id)
               if e.get("kind") in _EVIDENCE_KINDS]
-    receipt["events_observed"] = len(events)
-    if not events and not any(cp.get("status") == "pending" for cp in checkpoints.values()):
-        # Fast path: nothing to aggregate and no checkpoint whose fate could have changed.
-        # The store is not read at all, let alone locked — this runs at every session start.
+    held = spool.held_candidates(repo_path)
+    if not events and not held:
+        # Fast path: nothing to aggregate and no held candidate whose fate could have changed.
+        # Two directory listings; the store is not read at all, let alone locked — this runs at
+        # every session start.
         return receipt
+    events = _finish_interrupted_holds(repo_path, events, held, dry_run, receipt)
+    receipt["events_observed"] = len(events)
 
     entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
     # `type == "decision"` on BOTH sides: the store holds tasks too, and a deleted task is no
     # more a decision to classify against than a live one is.
     tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
                   if isinstance(e, dict) and e.get("type") == "decision"]
-    flips = {} if dry_run else _dispositions(checkpoints, entries, _retired_ids(tombstones))
+    flips = {} if dry_run else _dispositions(held, entries, _retired_ids(tombstones))
 
     projection = [_projected(e, False) for e in entries if e.get("type") == "decision"]
     projection += [_projected(e, True) for e in tombstones]  # already decision-filtered above
@@ -304,10 +402,10 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
 
     writes: dict = {}
     for candidate in candidates.aggregate_candidates(events, projection)["candidates"]:
-        if candidate["candidate_id"] in checkpoints:
-            # Already settled (or already awaiting review) under its deterministic id. Belt to
-            # the consumed-events braces: it also covers a checkpoint written by a pass whose
-            # compaction never ran.
+        if candidate["candidate_id"] in held:
+            # Already awaiting review under its deterministic id. Belt to the held-events
+            # braces: it also covers a candidate whose directory exists but whose bookkeeping
+            # never recorded the event ids `_finish_interrupted_holds` matches on.
             receipt["already_pending"] += 1
             continue
         _materialize(repo_path, candidate, sessions, dry_run, receipt, writes)
@@ -315,16 +413,16 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
     if dry_run:
         return receipt
     _settle_write_statuses(repo_path, writes)
-    if evidence.record_candidate_checkpoints(repo_path, {**flips, **writes})["status"] != "ok":
-        # The decisions are stored but their evidence still reads as unconsumed. Say so: the
-        # next pass re-proposes and the store's novelty filter absorbs it.
-        receipt["incomplete"] = True
-    compacted = evidence.compact_evidence(repo_path)["compacted"]
-    if not (writes or flips or compacted):
+    _commit_writes(repo_path, writes, receipt)
+    for candidate_id, disposition in sorted(flips.items()):
+        _finalize(repo_path, candidate_id, disposition,
+                  str(held[candidate_id].get("entry_id") or ""), receipt)
+    spool.run_retention(repo_path)
+    if not (writes or flips):
         # Nothing happened, so nothing is recorded. A pass that appended its receipt
         # unconditionally would write one event per SessionStart, PreCompact and SessionEnd
-        # forever on any repo holding a single stuck pending checkpoint — filling the ledger
-        # toward eviction with news of having done nothing.
+        # forever on any repo holding a single stuck held candidate — filling the spool
+        # toward retention with news of having done nothing.
         return receipt
     evidence.emit_hook_event(
         repo_path, "session_reconcile", session_id=session_id or _FALLBACK_SESSION,
@@ -346,8 +444,8 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
 def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = False) -> dict:
     """Materialize this repo's unconsumed evidence as decisions pending review.
 
-    `session_id` scopes which events participate (`""` = the whole ledger, which is what a
-    worktree-shared sidecar needs). Returns the receipt:
+    `session_id` scopes which events participate (`""` = the whole spool, which is what a
+    worktree-shared spool needs). Returns the receipt:
 
         {"events_observed", "proposed", "lifecycle_proposed", "already_pending", "duplicates",
          "insufficient", "incomplete", "dry_run"}
@@ -381,5 +479,5 @@ def format_receipt(receipt: dict) -> str:
         lines.append("  (proposals only — nothing was retired. `contexer review` shows each "
                      "one; retiring is an explicit `contexer retire <id>`.)")
     if receipt["incomplete"]:
-        lines.append("  incomplete: the evidence ledger could not be fully read or updated.")
+        lines.append("  incomplete: the evidence spool could not be fully read or updated.")
     return "\n".join(lines)

@@ -48,6 +48,9 @@ from contexer import evidence, store
 _MAX_PENDING_EVENTS = 1000
 _MAX_PENDING_AGE_DAYS = 30
 _MAX_TEMP_AGE_SECONDS = 3600
+# How often the session-start maintenance pass may scan. 24h, mirroring every other periodic
+# sweep keyed off a mtime stamp (`store._MINER_VERIFY_TTL`, `anchors._ANCHOR_VERIFY_TTL`).
+_MAINTENANCE_TTL = 86400
 
 _DIR_MODE = 0o700
 # Every spool file is created by `tempfile.mkstemp`, which is 0600 umask-independently, and
@@ -596,3 +599,44 @@ def run_retention(repo_path: str) -> dict:
     if dropped:
         _bump_gap(repo_path, "retention", dropped)
     return report
+
+
+def _maintenance_stamp(repo_path: str) -> Path:
+    """Same key as every other periodic-sweep stamp here: `store.repo_slug` over the repo the
+    caller already resolved, so writer and reader agree without either re-resolving (see
+    `anchors._anchor_verify_stamp_path`)."""
+    return store.STORE_DIR / f".spool_maintained_{store.repo_slug(repo_path)}"
+
+
+def maintain_spool(repo_path: str, force: bool = False) -> dict:
+    """Retention for a host that never reconciles. The retention report, or `{}` when the run
+    was skipped. NEVER raises.
+
+    An emit-only host — Codex reaches no reconciliation entrypoint, Cursor emits directives
+    only — would otherwise grow `pending/` for good, since `run_retention`'s only other caller
+    is reconciliation. Session start is not an editor hook, so the never-scan-in-a-hook rule
+    holds; but it IS every session, so the scan is gated twice: nothing happens at all until a
+    spool directory exists, and after that at most once per `_MAINTENANCE_TTL`.
+
+    The TTL is not only about cost. `_sweep_orphan_holds` judges a held candidate against the
+    LIVE store, where a retired decision is absent — which reconciliation reads as its
+    lifecycle candidate being approved and this sweep would settle as dismissed. Reconciliation
+    settles its own holds first on every pass it runs, so keeping this sweep to once a day is
+    what keeps it the safety net it is meant to be rather than a racing second judge.
+    """
+    try:
+        if not _repo_dir(repo_path).is_dir():
+            return {}
+        stamp = _maintenance_stamp(repo_path)
+        if not force:
+            mtime = store.file_mtime(stamp)
+            if mtime is not None and time.time() - mtime < _MAINTENANCE_TTL:
+                return {}
+        try:
+            store.STORE_DIR.mkdir(mode=_DIR_MODE, exist_ok=True)
+            stamp.touch()
+        except OSError:
+            pass                        # an unwritable stamp costs a re-scan, never the sweep
+        return run_retention(repo_path)
+    except Exception:                   # broad on purpose: never breaks a session start
+        return {}
