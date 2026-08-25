@@ -465,3 +465,78 @@ def test_title_is_the_seeds_first_sentence_clipped_to_a_hundred_chars():
         [_ev("user_directive", "Ship it. And explain why later.")], []))
     assert short["title"] == "Ship it."
     assert short["content"] == "Ship it. And explain why later."
+
+
+# ── support attaching to a seed that names no files ──────────────────────────────
+
+def test_a_file_change_corroborates_a_directive_that_names_no_files():
+    """The reviewer's reproduction: a real `user_directive` carries no `files` at all, so a
+    rule requiring a shared path could never let anything attach to it - the directive and the
+    edit it prompted came back as two candidates, `new(score=50, files=[])` plus a useless
+    `insufficient(score=10)`. Same session and inside the proximity window is the signal that
+    replaces the file overlap a fileless seed can never have."""
+    directive = _ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00")
+    edit = _ev("file_changed", "auth rewritten", at="2026-08-24T10:05:00+00:00",
+               files=["src/auth.py"])
+    result = candidates.aggregate_candidates([directive, edit], [])
+    got = _only(result)
+    assert got["score"] == 50 + candidates._SCORES["files_changed"]
+    assert got["source_files"] == ["src/auth.py"]
+    assert result["diagnostics"]["insufficient"] == 0
+
+
+def test_a_fileless_seed_keeps_taking_edits_for_the_whole_window():
+    """The first edit gives the GROUP files, but the SEED still names none - so a second edit
+    to an unrelated path in the same window still corroborates the same directive rather than
+    opening its own leftover."""
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
+              _ev("file_changed", "auth", at="2026-08-24T10:05:00+00:00",
+                  files=["src/auth.py"]),
+              _ev("file_changed", "session store", at="2026-08-24T10:20:00+00:00",
+                  files=["src/session.py"])]
+    got = _only(candidates.aggregate_candidates(events, []))
+    assert got["source_files"] == ["src/auth.py", "src/session.py"]
+    assert got["score"] == 60, "files_changed still counts once per group"
+
+
+def test_proximity_attachment_is_bounded_by_the_window():
+    """The guard against one directive swallowing every edit in a long session: past
+    `_PROXIMITY_SECONDS` from the seed, an unrelated edit is a leftover again."""
+    assert candidates._PROXIMITY_SECONDS == 1800
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
+              _ev("file_changed", "much later", at="2026-08-24T11:00:00+00:00",
+                  files=["src/auth.py"])]
+    result = candidates.aggregate_candidates(events, [])
+    directive = next(c for c in result["candidates"] if c["score"] == 50)
+    assert directive["source_files"] == []
+    assert result["diagnostics"]["insufficient"] == 1
+
+
+def test_the_nearest_preceding_fileless_seed_takes_the_edit():
+    """Two fileless directives inside one window: the edit corroborates the one it actually
+    followed, not whichever group happens to sit first in the list."""
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
+              _ev("user_directive", _UNRELATED, at="2026-08-24T10:01:00+00:00"),
+              _ev("file_changed", "resolver edit", at="2026-08-24T10:02:00+00:00",
+                  files=["web/resolvers.ts"])]
+    result = candidates.aggregate_candidates(events, [])
+    by_content = {c["content"]: c for c in result["candidates"]}
+    assert by_content[_UNRELATED]["source_files"] == ["web/resolvers.ts"]
+    assert by_content[_SEED]["source_files"] == []
+
+
+def test_proximity_attachment_survives_a_shuffled_input_order():
+    """Determinism is what makes `held/<candidate-id>/` the already-pending record, and the
+    new fallback picks a group by scanning the list - so it must be pinned against order."""
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
+              _ev("user_directive", _UNRELATED, at="2026-08-24T10:01:00+00:00"),
+              _ev("file_changed", "resolver edit", at="2026-08-24T10:02:00+00:00",
+                  files=["web/resolvers.ts"]),
+              _ev("file_changed", "auth edit", at="2026-08-24T10:03:00+00:00",
+                  files=["src/auth.py"])]
+    baseline = candidates.aggregate_candidates(events, [])
+    shuffled = list(events)
+    for seed in range(5):
+        random.Random(seed).shuffle(shuffled)
+        assert json.dumps(candidates.aggregate_candidates(shuffled, [])) == \
+            json.dumps(baseline)

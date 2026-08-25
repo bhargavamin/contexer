@@ -20,6 +20,7 @@ byte-identical output. A `uuid4` in this module is a defect.
 
 import re
 import uuid
+from datetime import datetime
 
 from contexer import retrieval
 
@@ -57,6 +58,12 @@ _UPDATE_OVERLAP = 0.3           # candidate revises a stored decision
 
 _MAX_SOURCE_FILES = 10          # the store's own anchor cap; a candidate must not exceed it
 _MAX_TITLE_CHARS = 100
+
+# How long after a seed that names NO files a support event still corroborates it. The number
+# is the store's own `_EDITED_FILES_WINDOW` (30 minutes), which already answers this exact
+# question for capture-time anchor accrual: which of this session's edits relate to what was
+# just said. Restated rather than imported - this module cannot reach `store`.
+_PROXIMITY_SECONDS = 1800
 
 _NEGATION_RE = re.compile(r"\b(?:not|never|don't|stop|instead of|no longer)\b")
 # Deterministic keyword proxies for `subtype`. Both are PROXIES, not classifiers: they pick a
@@ -160,23 +167,59 @@ def _merge_target(seed, groups):
     return fallback
 
 
+def _within_proximity(seed, event) -> bool:
+    """Whether `event` falls inside `_PROXIMITY_SECONDS` AFTER `seed`. Reads only the events'
+    own `occurred_at` - this module owns no clock - and is fail-soft: a timestamp that will
+    not parse, or a naive one that cannot be subtracted from an aware one, corroborates
+    nothing rather than raising out of a pure function."""
+    try:
+        elapsed = (datetime.fromisoformat(str(event.get("occurred_at") or ""))
+                   - datetime.fromisoformat(str(seed.get("occurred_at") or ""))).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return 0 <= elapsed <= _PROXIMITY_SECONDS
+
+
 def _attach_target(event, groups):
     """The group this support event corroborates, or None if it corroborates nothing.
 
-    Same session AND (a file in common with the group's files so far, OR the group has no
-    files yet and this is a test result). Consequence, stated rather than worked around: the
-    seed is always the group's earliest event, so a file change recorded BEFORE the statement
-    it belongs to attaches to nothing and lands in the leftover set - which is exactly the
-    plan's "only a file changed, with no semantic statement" row.
+    Always the same session, and then one of three signals, in priority order: a file in
+    common with the group's files so far; the group has no files yet and this is a test
+    result; or the group's SEED names no files at all and this event is inside
+    `_PROXIMITY_SECONDS` of it.
+
+    That third rule is what makes a real session aggregate. A `user_directive` - the strongest
+    seed there is - never carries `files`, because a directive is about the work rather than a
+    path, so a shared-file rule could NEVER let anything attach to one: the directive and the
+    edits it prompted came back as a thin `new` candidate beside a useless `insufficient` one,
+    which is the opposite of the accumulation this pipeline exists for. The bound is the SEED's
+    own files, not the group's, so the window stays open once the first edit has given the
+    group files; and it is measured from the seed rather than from the last attachment, so a
+    chain of edits cannot slide the window forward and swallow a whole long session.
+
+    The first two signals return immediately, matching what they have always done. The
+    proximity rule is a FALLBACK that keeps scanning, so the LAST (most recent) qualifying
+    seed takes the event - an edit corroborates what was just said, not the oldest thing said
+    in the window. Group order is seed order, which `_ordered` fixes, so this stays
+    deterministic under any input order.
+
+    Consequence, stated rather than worked around: the seed is always the group's earliest
+    event, so a file change recorded BEFORE the statement it belongs to attaches to nothing
+    and lands in the leftover set - which is exactly the plan's "only a file changed, with no
+    semantic statement" row.
     """
     files = _event_files(event)
+    fallback = None
     for group in groups:
-        if group["seed"].get("session_id") != event.get("session_id"):
+        seed = group["seed"]
+        if seed.get("session_id") != event.get("session_id"):
             continue
         if any(f in group["files"] for f in files) \
                 or (not group["files"] and event.get("kind") == "test_result"):
             return group
-    return None
+        if not _event_files(seed) and _within_proximity(seed, event):
+            fallback = group
+    return fallback
 
 
 def _group(events):
