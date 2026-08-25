@@ -188,6 +188,24 @@ class RemoteUnavailableError(RemoteStoreError):
     """The Teams endpoint was unreachable (network error, timeout, 5xx)."""
 
 
+class RemoteRateLimitError(RemoteStoreError):
+    """The Teams endpoint was reached and refused this call for RATE LIMITING.
+
+    Its own class because callers act on it: a rate limit is transient, so a confirmed write
+    stays queued for automatic retry, while every other refusal is terminal and must stop being
+    retried. `share.py` decided that by matching the words "rate" and "limit" in the error text,
+    at three separate call sites - so the retry-versus-drop choice for a confirmed team write
+    depended on wording this client does not own, and one server-side rephrase would have made a
+    queued submission look terminal. Recognising the shape HERE, next to `_AUTHZ_ERROR_RE` which
+    already classifies a refusal by its text for the same reason, leaves exactly one definition
+    and makes every decision site structural. When the service grows a real error code, this
+    module changes and no caller does.
+
+    Deliberately NOT a subclass of `RemoteUnavailableError`: the endpoint answered, so an
+    "unreachable" verdict would be untrue, and `_warn_degrade` would tell the developer to check
+    a network that is fine."""
+
+
 @dataclass(frozen=True)
 class RemoteDecision:
     """One row from the Teams merged context. ``scope`` is provenance (personal|team).
@@ -761,6 +779,11 @@ def _classify(exc: BaseException) -> RemoteStoreError:
         err = RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
         err._transport_auth = True
         return err
+    if status == 429:
+        # Reached and throttled, not unreachable. This used to fall through to the line below,
+        # so a 429 read as a network outage; both verdicts keep a confirmed write queued, so the
+        # ACTION is unchanged and only the reason reported gets truer.
+        return RemoteRateLimitError(f"Teams refused the request (HTTP {status}: rate limited).")
     return RemoteUnavailableError(f"Teams endpoint unreachable: {exc}")
 
 
@@ -778,14 +801,38 @@ _AUTHZ_ERROR_RE = re.compile(
 )
 
 
+# A tool call that returns isError matching this is a RATE LIMIT: the cloud was reached and
+# answered, and the refusal is TRANSIENT, so a confirmed write stays queued for automatic retry
+# instead of being dropped as terminal. Sits beside _AUTHZ_ERROR_RE because it does the same job -
+# classify a server refusal by the only signal the service currently sends, its own words.
+_RATE_LIMIT_RE = re.compile(r"rate[\s_-]*limit|ratelimit|too many requests|\b429\b", re.I)
+
+
+def _is_rate_limit_message(message: str) -> bool:
+    """True when a server refusal reads as rate limiting.
+
+    A deliberate SUPERSET of the `"rate" in m and "limit" in m` test this replaces, which lived
+    (copied) at three `share.py` decision sites. The two ways of being wrong are not symmetric,
+    and that sets the direction: a false NEGATIVE drops a confirmed team write that would have
+    succeeded on retry, while a false POSITIVE only retries a terminal refusal, which the outbox
+    already bounds by `_OUTBOX_CAP` and records in each entry's `attempts`. So the loose original
+    arm is kept rather than tightened away, and the explicit markers are added on top."""
+    folded = message.casefold()
+    return bool(_RATE_LIMIT_RE.search(message)) or ("rate" in folded and "limit" in folded)
+
+
 def _classify_tool_error(message: str) -> RemoteStoreError:
     """Map a server-returned tool error (an isError result's text) to a typed RemoteStoreError.
 
     An insufficient-scope / permission message is an authorization failure (RemoteAuthError), not
     a transport outage - so with_local_fallback tells the user to re-authenticate instead of
-    misreporting a reachable-but-refusing cloud as unreachable."""
+    misreporting a reachable-but-refusing cloud as unreachable. A rate limit is its own transient
+    category (RemoteRateLimitError). Authorization is tested FIRST, preserving the precedence the
+    callers already had: a RemoteAuthError was treated as retryable before this class existed."""
     if _AUTHZ_ERROR_RE.search(message):
         return RemoteAuthError(message)
+    if _is_rate_limit_message(message):
+        return RemoteRateLimitError(message)
     return RemoteStoreError(message)
 
 

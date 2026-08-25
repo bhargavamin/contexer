@@ -17,6 +17,7 @@ from contexer.remote import (
     RemoteAuthError,
     RemoteContext,
     RemoteDecision,
+    RemoteRateLimitError,
     RemoteStore,
     RemoteStoreError,
     RemoteUnavailableError,
@@ -399,6 +400,72 @@ def test_scope_mentioning_validation_error_is_not_auth_error(monkeypatch):
     with pytest.raises(RemoteStoreError) as exc:
         RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
     assert not isinstance(exc.value, RemoteAuthError)
+
+
+# ── rate limiting is its own transient category ────────────────────────────────
+# `share.py` chose retry-versus-drop for a CONFIRMED team write by matching "rate" and "limit"
+# in the error text, at three copied call sites. That decision is structural now
+# (isinstance(exc, RemoteRateLimitError)) and the wording heuristic lives here only.
+
+def test_http_429_maps_to_rate_limit_not_unavailable(monkeypatch):
+    """A 429 means the endpoint ANSWERED and throttled us, so calling it unreachable is untrue
+    (and sends the developer to check a healthy network). Both verdicts keep a confirmed write
+    queued, so only the reported reason changes."""
+    monkeypatch.setattr(
+        remote, "_acall_tool", lambda *a, **k: (_ for _ in ()).throw(_http_error(429)))
+    with pytest.raises(RemoteRateLimitError) as exc:
+        RemoteStore("https://t/mcp", "tok").get_context()
+    assert not isinstance(exc.value, RemoteUnavailableError)
+
+
+@pytest.mark.parametrize("message", [
+    "Rate limit exceeded - retry in 12s",
+    "rate_limit_exceeded",
+    "RATELIMIT",
+    "Too Many Requests",
+    "Refused with 429",
+    "the limit on rate of change was hit",   # the loose original arm, kept on purpose
+])
+def test_rate_limit_tool_error_maps_to_rate_limit_error(monkeypatch, message):
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda *a, **k: _result(content=[_text(message)], is_error=True),
+    )
+    with pytest.raises(RemoteRateLimitError):
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+
+
+def test_rate_limit_classifier_is_a_superset_of_the_test_it_replaced():
+    """The direction is set by asymmetry, so this is pinned rather than left to the regex: a false
+    negative drops a confirmed team write, a false positive only retries a terminal refusal (which
+    _OUTBOX_CAP bounds). Every message the old `"rate" in m and "limit" in m` test caught must
+    still classify as a rate limit."""
+    for message in ("Rate limit exceeded", "rate limited", "LIMIT on the RATE",
+                    "quota: limit reached for this rate window"):
+        assert remote._is_rate_limit_message(message), message
+
+
+def test_generic_tool_error_is_not_a_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda *a, **k: _result(content=[_text("invalid input: content too long")], is_error=True),
+    )
+    with pytest.raises(RemoteStoreError) as exc:
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
+    assert not isinstance(exc.value, RemoteRateLimitError)
+
+
+def test_authorization_wins_over_rate_limit_wording(monkeypatch):
+    """Precedence is preserved deliberately: before RemoteRateLimitError existed, a
+    RemoteAuthError was already treated as retryable by every caller, so classifying an
+    authorization denial first changes no behaviour."""
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda *a, **k: _result(
+            content=[_text("Forbidden: rate limit policy denies this token")], is_error=True),
+    )
+    with pytest.raises(RemoteAuthError):
+        RemoteStore("https://t/mcp", "tok").push_decision(type="constraint", content="c", repo=None)
 
 
 def test_scope_error_degrades_via_auth_branch(monkeypatch, capsys):
