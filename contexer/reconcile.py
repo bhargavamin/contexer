@@ -31,7 +31,11 @@ Two properties are load-bearing, and both come from the deterministic candidate 
   directory itself is the record that this candidate is already awaiting review. The novelty
   filter is only the backstop for a hold that failed to complete.
 * **`dry_run` writes NOTHING anywhere** - no store write, no hold, no finalize, no retention,
-  no receipt line, no disposition. It reads the store and reports what a real pass would do.
+  no receipt line, no disposition. It reads the store and reports what a real pass would do,
+  with one honest exception: a candidate that duplicates a decision still `pending_approval`
+  previews as `duplicates` (it never reaches `_settle_write_statuses`, which is what turns that
+  case into `already_pending` on a real pass) - the preview undercounts that one field rather
+  than running the write-adjacent recheck just to report it.
 
 The receipt of a pass is LOGGED, never spooled (ruling R34): `.reconcile_<slug>.jsonl`, the
 `.retrieval_<slug>.jsonl` precedent. Bookkeeping in the evidence spool is bookkeeping that
@@ -42,6 +46,21 @@ between the two leaves a candidate whose decision exists and whose events are sp
 `pending/` and `held/`; the next pass finishes the move from the candidate's own recorded
 `event_ids` (`_finish_interrupted_holds`) rather than re-aggregating the remainder into a
 second candidate under a different id.
+
+That order leaves ONE window those recorded `event_ids` cannot cover: a crash before the hold
+exists at all. The decision is stored and every event is still in `pending/`, so the next pass
+re-aggregates them, the aggregator matches them against the decision they just became, and the
+candidate comes back as a `duplicate`. Settling that would file a `dismissed` receipt against a
+decision still awaiting review and delete the only evidence for it. So a duplicate of a decision
+that is ITSELF still awaiting review is HELD against that decision instead
+(`_settle_write_statuses`), and its disposition becomes whatever the developer's review turns out
+to be. Closing the window outright means writing the candidate id onto the entry in the SAME store
+call that creates it, which needs a store change this module cannot make on its own; holding
+rather than dismissing is what keeps the evidence and the decision connected until then.
+
+ORDER MATTERS on the way out too: the compact summary is recorded on the decision BEFORE the raw
+held events are deleted (`_finalize`). The other way round, one failed store write lost the
+evidence and the receipt for it together, permanently.
 """
 
 import fcntl
@@ -202,9 +221,10 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
       HEAD advanced means promoted (approved), HEAD unchanged means it died unapproved
       (dismissed). Sound here precisely because promotion IS the revision advance, which is what
       makes the same test unsound for a lifecycle proposal.
-    * otherwise it is a brand-new pending entry, and only a real ratification stamp
-      (`approved_by == "human"`, written by `_apply_approval`'s approve/edit paths) counts -
-      approving one blesses revision 1 IN PLACE, so the revision rule above cannot see it.
+    * otherwise it is a brand-new pending entry - or a duplicate held against one, which is the
+      same question - and only a real ratification stamp (`approved_by == "human"`, written by
+      `_apply_approval`'s approve/edit paths) counts - approving one blesses revision 1 IN
+      PLACE, so the revision rule above cannot see it.
 
     Anything else stays held, which is also what keeps its evidence exempt from retention until
     somebody actually reviews it. A candidate whose meta records no `entry_id` is left held
@@ -308,18 +328,23 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
                                 "lane": "lifecycle"}
         return
     if kind == "duplicate":
-        # The store already holds this decision, so there is nothing to review - but the events
-        # ARE settled, so they are held and finalized in this SAME run (red-team mitigation 2),
-        # with the summary attached to the decision they matched. Leaving them in `pending/`
-        # would re-aggregate this duplicate at every checkpoint forever and permanently defeat
-        # the fast path. (No dry_run guard needed HERE: this branch only fills `writes`, and
+        # The store already holds this decision, so there is nothing to review - provided that
+        # decision is itself settled. Then the events ARE settled too, so they are held and
+        # finalized in this SAME run (red-team mitigation 2), with the summary attached to the
+        # decision they matched. Leaving them in `pending/` would re-aggregate this duplicate
+        # at every checkpoint forever and permanently defeat
+        # the fast path. The recorded status is `pending` rather than `dismissed` because only
+        # a re-read of the store can tell whether the decision this duplicates is settled or is
+        # ITSELF still awaiting review - `_settle_write_statuses` decides, and corrects the
+        # receipt's duplicate count when it turns out not to be a settled duplicate after all.
+        # (No dry_run guard needed HERE: this branch only fills `writes`, and
         # `_reconcile` discards that wholesale on a dry run - a second check would be a second
         # place to get it wrong. The lifecycle branch above is the one that must guard itself,
         # because `propose_lifecycle` writes the store DIRECTLY rather than through `writes`,
         # so the wholesale discard cannot reach it. Any future lane that writes outside
         # `writes` inherits that obligation.)
         receipt["duplicates"] += 1
-        writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
+        writes[candidate_id] = {"event_ids": event_ids, "status": "pending", "duplicate": True,
                                 "entry_id": str(candidate.get("target_decision_id") or "")}
         return
     if dry_run:
@@ -358,7 +383,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
     writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed", "entry_id": ""}
 
 
-def _settle_write_statuses(repo_path: str, writes: dict) -> None:
+def _settle_write_statuses(repo_path: str, writes: dict, receipt: dict) -> None:
     """Downgrade to `dismissed` every record whose entry is NOT actually awaiting review.
 
     The store's return says a write happened, not what kind. `update_decision_with_meta`
@@ -374,6 +399,16 @@ def _settle_write_statuses(repo_path: str, writes: dict) -> None:
     unchanged) - see `_dispositions`. Lifecycle records are skipped outright: their proposal
     is already attached (`propose_lifecycle` returning ok is what says so), and their lane
     settles on the tombstone, never on a revision.
+
+    A DUPLICATE record is the same question asked the other way round, and it is what closes the
+    materialize-before-hold crash window: a duplicate of a SETTLED decision is settled itself and
+    is dismissed here exactly as it always was, but a duplicate of a decision that is still
+    `pending_approval` is evidence FOR a review that has not happened yet - most often the very
+    evidence that decision was materialized from, re-read after a crash before its hold existed.
+    Dismissing it would delete that evidence and file a receipt saying it was settled, against a
+    decision nobody has looked at. It stays held instead, and `_dispositions` settles it on the
+    review itself. The receipt is corrected here too: it was counted as a duplicate at
+    materialize time, and it is not one.
     """
     pending_ids = {cid for cid, record in writes.items()
                    if record.get("status") == "pending" and record.get("lane") != "lifecycle"}
@@ -381,12 +416,23 @@ def _settle_write_statuses(repo_path: str, writes: dict) -> None:
         return
     by_id = {str(e.get("id") or ""): e for e in store.load(repo_path).get("entries", [])
              if isinstance(e, dict)}
-    for candidate_id in pending_ids:
+    for candidate_id in sorted(pending_ids):
         record = writes[candidate_id]
         entry = by_id.get(str(record.get("entry_id") or ""))
-        if entry is not None and entry.get("proposed_revision"):
+        awaiting_review = entry is not None and store.entry_status(entry) == "pending_approval"
+        if record.get("duplicate"):
+            # Deliberately NOT the `proposed_revision` test below: a duplicate never proposed
+            # that revision, so settling on somebody else's proposal would record an outcome
+            # its own evidence never earned - and a target that is approved but carries a
+            # proposal would be left held with no rule able to settle it at all.
+            if awaiting_review:
+                receipt["duplicates"] -= 1
+                receipt["already_pending"] += 1
+            else:
+                record["status"] = "dismissed"
+        elif entry is not None and entry.get("proposed_revision"):
             record["revision_id"] = entry.get("current_revision_id") or ""
-        elif entry is None or store.entry_status(entry) != "pending_approval":
+        elif not awaiting_review:
             record["status"] = "dismissed"
 
 
@@ -427,27 +473,68 @@ def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run:
     return kept
 
 
-def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str,
-              receipt: dict) -> None:
-    """Settle one candidate: delete its held events and preserve the summary on its decision.
+def _recorded_summaries(entries: list) -> set:
+    """`(entry_id, candidate_id)` for every disposition already filed on a decision's history.
 
-    The summary is the whole point of finalizing rather than deleting - once the raw events are
-    gone, the decision's own `evidence_summary` history is where the disposition lives. A
-    candidate with no entry (the store's novelty filter rejected it, naming nothing) still
-    finalizes: its events are settled either way, there is simply nowhere to file the receipt.
+    What makes `_finalize` IDEMPOTENT. The summary is written before the held events are
+    deleted, so a failure between the two leaves a candidate that still holds its evidence and
+    still settles to the same disposition on the next pass - and re-recording it would file the
+    same receipt twice on the same decision.
     """
-    summary = spool.finalize_candidate_evidence(repo_path, candidate_id, disposition)
-    if not entry_id:
-        return
-    try:
-        store.record_evidence_summary(repo_path, entry_id, summary)
-    except Exception:
-        # The candidate is settled and its events are already gone; only the receipt was lost,
-        # and one entry's failure must not abandon the rest of the batch mid-loop.
-        receipt["incomplete"] = True
+    pairs = set()
+    for entry in entries:
+        entry_id = str(entry.get("id") or "")
+        for row in entry.get("evidence_summary") or []:
+            if isinstance(row, dict) and row.get("candidate_id"):
+                pairs.add((entry_id, str(row["candidate_id"])))
+    return pairs
 
 
-def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
+def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str,
+              event_ids: list, recorded: set, receipt: dict) -> None:
+    """Settle one candidate: preserve the summary on its decision, and only THEN delete the raw
+    held events.
+
+    The summary is the whole point of finalizing rather than deleting - once the events are
+    gone, the decision's own `evidence_summary` history is the only place the disposition lives.
+    So the durable order is the one written here. The other way round - delete, then record -
+    one transient store failure lost BOTH the raw evidence and its summary, and a `False` return
+    (the store saying it filed nothing) was dropped on the floor entirely. Now a summary that did
+    not land leaves the held directory exactly where it is, marks the pass `incomplete` the way
+    every other partial result here does, and the next pass settles the candidate again from the
+    status recorded on its own hold (`_dispositions`' first rule). One entry's failure still
+    never abandons the rest of the batch mid-loop.
+
+    A candidate with no entry to file against still finalizes: the decision was evicted before
+    anyone reviewed it, or the store's own novelty filter matched the restatement onto an
+    existing entry as a recurrence rather than letting it land as a fresh `duplicate` classification -
+    including, by a known and accepted gap, a RETIRED or IGNORED decision, since `_find_match`
+    and `_is_tombstoned` are status-blind. `candidates.py` deliberately classifies a restatement
+    of a retired/ignored decision as `new` so a developer sees it fresh rather than silently
+    reabsorbed, but the store's own dedup can still eat it first on the ordinary capture path,
+    which both drops the receipt AND destroys the raw evidence the aggregator wanted reviewed.
+    See OUTSTANDING-ISSUES.md - it is pre-existing, orthogonal to the crash-window fix this
+    module carries, and needs a cross-module decision (reconcile/candidates/store) rather than
+    a local patch. Either way, once an event set is unfilable, withholding the delete would
+    retry a write that can never succeed, on every pass, forever - which is why the caller
+    blanks an `entry_id` that no longer resolves rather than letting a `False` return stand in
+    for it.
+    """
+    if entry_id and (entry_id, candidate_id) not in recorded:
+        summary = {"candidate_id": candidate_id, "disposition": disposition,
+                   "event_ids": list(event_ids),
+                   "occurred_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            landed = store.record_evidence_summary(repo_path, entry_id, summary)
+        except Exception:
+            landed = False
+        if not landed:
+            receipt["incomplete"] = True
+            return
+    spool.finalize_candidate_evidence(repo_path, candidate_id, disposition)
+
+
+def _commit_writes(repo_path: str, writes: dict, recorded: set, filable: set, receipt: dict) -> None:
     """Hold every materialized candidate's events, and finalize the ones already settled.
 
     The record is written to the hold's `candidate.json` WHOLE, `status` included: a candidate
@@ -461,6 +548,11 @@ def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
     they are - so a clean disposition over them is a receipt for something that did not happen.
     The recorded status stays on the hold, and `_dispositions`' first rule settles it on a
     later pass, when the events can actually be accounted for.
+
+    `filable` is the same `_run_pass`-computed set the `flips` loop guards its own `entry_id`
+    with (live decisions and tombstoned ones, tasks excluded on both sides): a decision materialized
+    earlier in this very pass can still be evicted by a later write in the same batch, so the
+    guard applies here too rather than only on the flips side.
     """
     for candidate_id, record in sorted(writes.items()):
         complete = _hold(repo_path, candidate_id, record["event_ids"], meta=record)
@@ -471,8 +563,10 @@ def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
             # not do everything it set out to.
             receipt["incomplete"] = True
         if record["status"] != "pending" and complete:
+            entry_id = str(record.get("entry_id") or "")
             _finalize(repo_path, candidate_id, record["status"],
-                      str(record.get("entry_id") or ""), receipt)
+                      entry_id if entry_id in filable else "",
+                      record["event_ids"], recorded, receipt)
 
 
 def _log_receipt(repo_path: str, session_id: str, receipt: dict) -> None:
@@ -578,9 +672,17 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
                   if isinstance(e, dict) and e.get("type") == "decision"]
     flips = {} if dry_run else _dispositions(held, entries, _retired_ids(tombstones))
 
-    projection = [_projected(e, False) for e in entries if e.get("type") == "decision"]
+    decisions = [e for e in entries if e.get("type") == "decision"]
+    projection = [_projected(e, False) for e in decisions]
     projection += [_projected(e, True) for e in tombstones]  # already decision-filtered above
     sessions = {str(e.get("event_id") or ""): str(e.get("session_id") or "") for e in events}
+    # Read once for the whole pass, off entries this pass already loaded. `filable` is the set
+    # `store.record_evidence_summary` can actually write to (live decisions and tombstoned ones,
+    # tasks excluded on both sides exactly as it excludes them); an `entry_id` outside it names
+    # a decision that is simply gone, which is a receipt with nowhere to go rather than a store
+    # failure to retry - see `_finalize`.
+    recorded = _recorded_summaries(decisions + tombstones)
+    filable = {str(e.get("id") or "") for e in decisions + tombstones}
 
     writes: dict = {}
     for candidate in candidates.aggregate_candidates(events, projection)["candidates"]:
@@ -594,11 +696,14 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
 
     if dry_run:
         return receipt
-    _settle_write_statuses(repo_path, writes)
-    _commit_writes(repo_path, writes, receipt)
+    _settle_write_statuses(repo_path, writes, receipt)
+    _commit_writes(repo_path, writes, recorded, filable, receipt)
     for candidate_id, disposition in sorted(flips.items()):
+        meta = held[candidate_id]
+        entry_id = str(meta.get("entry_id") or "")
         _finalize(repo_path, candidate_id, disposition,
-                  str(held[candidate_id].get("entry_id") or ""), receipt)
+                  entry_id if entry_id in filable else "",
+                  meta.get("event_ids") or [], recorded, receipt)
     spool.run_retention(repo_path)
     if not (writes or flips):
         # Nothing happened, so nothing is recorded. A pass that logged its receipt
@@ -618,6 +723,11 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
 
         {"events_observed", "proposed", "lifecycle_proposed", "already_pending", "duplicates",
          "insufficient", "incomplete", "skipped", "dry_run"}
+
+    `already_pending` counts both shapes of "this is already waiting on the developer": a
+    candidate whose own held directory exists, and a duplicate of a decision that is itself
+    still awaiting review (held against it rather than settled - see `_settle_write_statuses`).
+    Both mean the same thing to a reader: nothing new to look at, and nothing thrown away.
 
     One pass at a time per repo (`_reconcile_lock`, taken only once there is work to do):
     finding another pass already running means this one does NOTHING and says so (`skipped`),

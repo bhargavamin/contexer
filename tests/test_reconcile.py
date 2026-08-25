@@ -553,9 +553,13 @@ class TestProjectionIsDecisionsOnly:
 class TestDuplicateCandidate:
 
     def test_duplicate_is_held_and_finalized_in_the_same_run(self, tmp_repo):
-        """Red-team mitigation 2. A duplicate leaves nothing to review, so if its events stayed
-        in `pending/` they would re-aggregate into the same duplicate at every checkpoint
-        forever - permanently defeating the fast path. Held AND finalized in one pass."""
+        """Red-team mitigation 2. A duplicate of a SETTLED decision leaves nothing to review, so
+        if its events stayed in `pending/` they would re-aggregate into the same duplicate at
+        every checkpoint forever - permanently defeating the fast path. Held AND finalized in
+        one pass. (The other side of that rule - a duplicate of a decision still AWAITING
+        review, which is held rather than settled over - is
+        `TestIdempotency.test_a_crash_before_the_hold_exists_never_dismisses_what_it_just_created`.)
+        """
         target_id = _stored_decision(tmp_repo)
         _emit(tmp_repo, "user_directive", DUPLICATES)
         before = _store_bytes(tmp_repo)
@@ -736,17 +740,26 @@ class TestIdempotency:
     def test_an_unrecorded_hold_is_absorbed_as_a_duplicate_not_proposed_twice(self, tmp_repo):
         """The novelty filter as the backstop. A brand-new candidate whose hold left no record
         re-aggregates against a store that now HOLDS that decision, so the second pass reads it
-        as a duplicate of what the first pass created - never as a second decision."""
+        as a duplicate of what the first pass created - never as a second decision.
+
+        And it is NOT settled over: the decision it duplicates is still awaiting review, so the
+        events are held against it rather than deleted with a `dismissed` receipt filed on a
+        decision nobody has looked at.
+        """
         _emit(tmp_repo, "user_directive", UNRELATED)
         reconcile.reconcile_session(tmp_repo)
         (created,) = store.get_pending_decisions(tmp_repo)
         self._forget_the_event_ids(tmp_repo)
 
         receipt = reconcile.reconcile_session(tmp_repo)
-        assert (receipt["duplicates"], receipt["proposed"]) == (1, 0)
+        assert (receipt["duplicates"], receipt["proposed"]) == (0, 0)
+        assert receipt["already_pending"] == 1
         assert len(store.load(tmp_repo)["entries"]) == 1
         assert _pending(tmp_repo) == []
-        assert (created["id"], "dismissed") in _dispositions_of(tmp_repo)
+        assert _dispositions_of(tmp_repo) == []
+        # Two holds now name the one decision - the record-less original and the duplicate the
+        # second pass held against it - and neither settles anything until the review does.
+        assert {meta["entry_id"] for meta in _held(tmp_repo).values()} == {created["id"]}
 
     def test_two_concurrent_passes_converge_on_one_decision(self, tmp_repo, monkeypatch):
         """Red-team mitigation 4. `_reconcile_lock` now stops two passes overlapping in the
@@ -778,15 +791,23 @@ class TestIdempotency:
         assert sorted(meta["event_ids"]) == sorted(e["event_id"] for e in pre_hold)
         # The loser's own hold is left UNFINALIZED, and that is the point: its events are in
         # the winner's directory, so `hold_candidate_evidence` reported them `missing` and no
-        # disposition may be recorded over evidence this pass never verified. It carries the
-        # status it settled at, so the next ordinary pass finalizes it away.
+        # disposition may be recorded over evidence this pass never verified.
         assert receipt["incomplete"] is True
         # Restore just these two - `monkeypatch.undo()` would also undo the fixture's STORE_DIR
         # patch and run the next pass against the developer's real store.
         monkeypatch.setattr(spool, "list_pending_evidence", real_list)
         monkeypatch.setattr(spool, "held_candidates", real_held)
         reconcile.reconcile_session(tmp_repo)
-        assert [d.name for d in spool._held_root(tmp_repo).iterdir()] == [winner]
+        # The loser read its events as a duplicate of the decision the winner had just created,
+        # which is still awaiting review - so its (empty) hold waits for that review rather
+        # than being settled over. No disposition is invented in the meantime, and the winner's
+        # hold and events are untouched either way.
+        assert _dispositions_of(tmp_repo) == []
+        assert winner in [d.name for d in spool._held_root(tmp_repo).iterdir()]
+        assert [p.name for p in _held_events(tmp_repo, winner)] == held_files
+        assert store.approve_decision(tmp_repo, created["id"], "approve")[0] is True
+        reconcile.reconcile_session(tmp_repo)
+        assert _held(tmp_repo) == {}                          # both settle on the one review
 
     def test_an_interrupted_duplicate_settles_as_the_dismissal_it_always_was(self, tmp_repo):
         """The second crash window. A duplicate is held and finalized in one run; a crash in
@@ -802,14 +823,59 @@ class TestIdempotency:
             assert reconcile.reconcile_session(tmp_repo)["duplicates"] == 1
         candidate_id, meta = _only_held(tmp_repo)
         assert (meta["status"], meta["entry_id"]) == ("dismissed", target_id)
-        assert _dispositions_of(tmp_repo) == []             # nothing recorded yet
+        # The summary is written BEFORE the events are deleted, so the crash lands the other
+        # way round now: the disposition is recorded and the raw evidence is still there.
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
 
         assert spool.finalize_candidate_evidence is real_finalize
         reconcile.reconcile_session(tmp_repo)
 
         assert _held(tmp_repo) == {}
+        # ONE row, not two: the retry replays a disposition that is already on the decision,
+        # and `_recorded_summaries` is what keeps re-recording it a no-op.
         assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
         assert not spool._held_dir(tmp_repo, candidate_id).exists()
+
+    def test_a_crash_before_the_hold_exists_never_dismisses_what_it_just_created(self,
+                                                                                 tmp_repo):
+        """The THIRD crash window, and the one the recorded `event_ids` cannot cover.
+
+        Materialize-then-move means a crash before the hold exists AT ALL leaves the decision
+        stored, `pending/` untouched, and nothing on disk connecting the two. The next pass
+        re-aggregates the same events, the aggregator matches them against the decision they
+        just became, and the candidate comes back as a `duplicate` - which used to delete the
+        only evidence for a decision still awaiting review and file a `dismissed` receipt on
+        it (reproduced by an external reviewer as `duplicates=1`, no held evidence, a dismissed
+        summary, and the decision still pending). A duplicate of a decision that is itself
+        awaiting review is held against it instead, and settles on the review.
+        """
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with pytest.MonkeyPatch.context() as patch:      # the crash: the hold never happens
+            patch.setattr(reconcile, "_commit_writes", _boom)
+            assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+        (created,) = store.get_pending_decisions(tmp_repo)
+        assert _held(tmp_repo) == {}                     # nothing records the connection
+        assert len(_pending(tmp_repo)) == 1
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["duplicates"], receipt["proposed"]) == (0, 0)
+        assert receipt["already_pending"] == 1
+        assert _dispositions_of(tmp_repo) == []          # nothing settled over a live review
+        candidate_id, meta = _only_held(tmp_repo)        # the evidence is connected instead
+        assert (meta["status"], meta["entry_id"]) == ("pending", created["id"])
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _pending(tmp_repo) == []
+        assert [store.entry_status(e) for e in store.load(tmp_repo)["entries"]] \
+            == ["pending_approval"]
+
+        # The developer's review is what settles it - the ordinary path, unchanged.
+        assert store.approve_decision(tmp_repo, created["id"], "approve")[0] is True
+        reconcile.reconcile_session(tmp_repo)
+        assert _held(tmp_repo) == {}
+        assert _dispositions_of(tmp_repo) == [(created["id"], "approved")]
+        assert len(store.load(tmp_repo)["entries"]) == 1
 
     def test_a_crash_between_materializing_and_moving_finishes_the_move(self, tmp_repo):
         """Revised plan B3 step 8. Materialize FIRST, then move - so a crash in between leaves
@@ -1068,18 +1134,63 @@ class TestDamagedEvidence:
         assert _held(tmp_repo) == {}
         assert [kind for _id, kind in _dispositions_of(tmp_repo)] == ["dismissed"]
 
-    def test_a_failed_summary_write_costs_the_receipt_not_the_batch(self, tmp_repo,
-                                                                    monkeypatch):
-        # Finalizing already deleted the events, so a store failure here loses only the record
-        # of the disposition - it must not abandon the remaining candidates mid-loop.
+    def test_a_failed_summary_write_keeps_the_evidence_for_the_next_pass(self, tmp_repo,
+                                                                        monkeypatch):
+        """Finalizing DELETES the raw events, and the summary on the decision is the only place
+        the disposition survives them - so the summary goes first and the events are deleted
+        only once it has landed. Deleting first meant one transient store failure lost BOTH,
+        permanently, and `record_evidence_summary` returning False - the store saying it filed
+        nothing - was dropped on the floor besides."""
+        target_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        real_record = store.record_evidence_summary
+        monkeypatch.setattr(store, "record_evidence_summary", lambda *_a, **_k: False)
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert (receipt["duplicates"], receipt["incomplete"]) == (1, True)
+        candidate_id, meta = _only_held(tmp_repo)           # nothing was deleted
+        assert (meta["status"], meta["entry_id"]) == ("dismissed", target_id)
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _dispositions_of(tmp_repo) == []
+
+        # And the retry costs nothing but a pass: the status recorded on the hold is what
+        # settles it, exactly as it does after any other interrupted finalize.
+        monkeypatch.setattr(store, "record_evidence_summary", real_record)
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert receipt["incomplete"] is False
+        assert _held(tmp_repo) == {}
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+        assert not spool._held_dir(tmp_repo, candidate_id).exists()
+
+    def test_a_raising_summary_write_is_answered_the_same_way(self, tmp_repo, monkeypatch):
+        """The other half of the same failure - `record_evidence_summary` raises on a store
+        write and returns False when it filed nothing. Neither may cost the evidence, and one
+        entry's failure still never abandons the rest of the batch mid-loop."""
         _stored_decision(tmp_repo)
         _emit(tmp_repo, "user_directive", DUPLICATES)
         monkeypatch.setattr(store, "record_evidence_summary", _boom)
 
         receipt = reconcile.reconcile_session(tmp_repo)
         assert (receipt["duplicates"], receipt["incomplete"]) == (1, True)
-        assert _held(tmp_repo) == {}                        # still settled
+        assert len(_held(tmp_repo)) == 1
         assert _dispositions_of(tmp_repo) == []
+
+    def test_a_hold_whose_decision_is_gone_settles_rather_than_retrying_forever(self,
+                                                                               tmp_repo):
+        """`record_evidence_summary` returns False for a decision that no longer exists, and
+        that is not a failure to retry: there is nowhere to file the receipt, so withholding
+        the delete would replay a write that can never succeed on every pass, forever."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        candidate_id, _meta = _only_held(tmp_repo)
+        data = store.load(tmp_repo)                     # the decision is deleted out of band
+        data["entries"] = []
+        store.save(tmp_repo, data)
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert receipt["incomplete"] is False
+        assert _held(tmp_repo) == {}
+        assert not spool._held_dir(tmp_repo, candidate_id).exists()
 
     def test_an_unexpected_failure_never_raises_out(self, tmp_repo, monkeypatch):
         _emit(tmp_repo, "user_directive", UNRELATED)
@@ -1116,13 +1227,15 @@ class TestRetentionWiring:
             os.utime(path, (old, old))
 
     def test_reconciliation_runs_retention(self, tmp_repo):
-        _emit(tmp_repo, "user_directive", UNRELATED)
+        # A lone support event: no seed to attach to, so it corroborates nothing
+        # (`insufficient`), nothing holds it, and retention is what finally bounds it. It used
+        # to be emitted beside a directive, which only stayed insufficient because a
+        # file_changed event could not attach to a fileless seed - that is now fixed, so the
+        # fixture has to be genuinely uncorroborated rather than accidentally so.
         _emit(tmp_repo, "file_changed", "unrelated edit", files=["src/z.py"])
         self._age_pending(tmp_repo, spool._MAX_PENDING_AGE_DAYS + 1)
 
         reconcile.reconcile_session(tmp_repo)
-        # The aged file event corroborated nothing (`insufficient`), so nothing held it and
-        # retention is what finally bounds it.
         assert _pending(tmp_repo) == []
         gap = spool.evidence_diagnostics(tmp_repo)["gap"]
         assert gap["expired"] >= 1 and gap["drops"] == 0
