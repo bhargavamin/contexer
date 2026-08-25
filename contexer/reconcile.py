@@ -14,9 +14,10 @@ creates is REVIEWABLE by construction:
   human moves a decision out of active context.
 
 The same discipline governs the way back out: a checkpoint is only ever marked `approved`
-against real review evidence — a human ratification stamp, a revision that actually advanced,
-or the decision having been tombstoned — never inferred from an entry merely having stopped
-being pending.
+against real review evidence — a human ratification stamp, a content proposal whose revision
+actually advanced, or a decision genuinely retired into the tombstone sidecar — never inferred
+from an entry merely having stopped being pending, and never from a revision advance the
+checkpoint's own lane cannot be caused by.
 
 Above store rather than beside it: `store.py` never imports this module, and store-owned
 helpers are read through the store MODULE OBJECT at call time — the load-order discipline
@@ -46,6 +47,11 @@ _EVIDENCE_KINDS = candidates.SEED_KINDS | candidates.SUPPORT_KINDS
 # eventual lifecycle record read "superseded" instead of "retired").
 _LIFECYCLE_KINDS = frozenset({"retire", "replace"})
 
+# Lifecycle record kinds that mean "this decision was retired" (`lifecycle.lifecycle_record`).
+# `restored` is deliberately absent: a restored decision is back in the live store, so it is
+# not in the tombstone list `_retired_ids` reads at all.
+_RETIRED_KINDS = frozenset({"retired", "superseded"})
+
 # The session stamped on a materialized decision when its evidence names none. Real evidence
 # carries the session that produced it, and that is what the entry records — this is only the
 # fallback spelling for an event whose session was already "unknown".
@@ -71,21 +77,42 @@ def _projected(entry: dict, tombstoned: bool) -> dict:
     }
 
 
-def _dispositions(checkpoints: dict, entries: list, tombstoned_ids: set) -> dict:
+def _retired_ids(tombstones: list) -> set:
+    """Ids of tombstoned decisions that carry a real RETIREMENT record.
+
+    Presence in the sidecar is deliberately not enough. A tombstone written before lifecycle
+    history existed records nothing about why the decision left, and only an actual retirement
+    is a lifecycle proposal's approval — so the record, not the file, is the signal.
+    """
+    return {str(e.get("id") or "") for e in tombstones
+            if any(isinstance(record, dict) and record.get("kind") in _RETIRED_KINDS
+                   for record in (e.get("lifecycle") or []))}
+
+
+def _dispositions(checkpoints: dict, entries: list, retired_ids: set) -> dict:
     """The status flips a pending checkpoint has earned since the last pass.
 
-    Lazy on purpose: nothing hooks `approve_decision`, so a checkpoint learns its decision's
-    fate the next time reconciliation runs. Three rules, in the order they are tried:
+    Lazy on purpose: nothing hooks `approve_decision` or `retire_decision`, so a checkpoint
+    learns its decision's fate the next time reconciliation runs. The rules, in the order they
+    are tried:
 
-    * the entry is GONE from the live store. For a lifecycle checkpoint that is the outcome it
-      proposed, so a tombstoned target reads as `approved`; anything else — an evicted entry, a
-      content checkpoint whose decision was deleted — is `dismissed`, because nothing was
-      reviewed. An `ignored` entry is `dismissed` the same way.
-    * the checkpoint carries a `revision_id`, i.e. it materialized as a PROPOSAL. While that
-      proposal still sits, the review has not happened. Once it is gone the revision answers
-      what became of it: HEAD advanced means the proposal was promoted (approved), HEAD
-      unchanged means it died unapproved (dismissed). Neither reads approval out of absence,
-      which is what previously left every dismissed proposal pinned forever.
+    * the target was RETIRED — it is in the tombstone sidecar carrying a retirement record. For
+      a lifecycle checkpoint that is precisely the outcome it proposed, so it reads `approved`;
+      for a content checkpoint the decision left before anyone reviewed its wording, so it
+      reads `dismissed`.
+    * the entry is otherwise gone (evicted, or a legacy tombstone with no record) or `ignored`:
+      `dismissed`, because nothing was reviewed.
+    * LIFECYCLE lane: while the proposal still sits, the review has not happened; once it is
+      gone from a still-live decision, it died unapproved — `dismissed`. **A revision advance is
+      never an approval signal here** (ruling R25): retirement is a MOVE, so an unrelated
+      content edit that happens to advance HEAD would otherwise record a retirement that never
+      occurred — the same fabricated-approval class the `approved_by` rule below exists to
+      prevent, and it would pollute the very disposition signal this pipeline measures.
+    * CONTENT lane, checkpoint carrying a `revision_id` (it materialized as a PROPOSAL): while
+      the proposal sits, stay pending. Once it is gone the revision answers what became of it —
+      HEAD advanced means promoted (approved), HEAD unchanged means it died unapproved
+      (dismissed). Sound here precisely because promotion IS the revision advance, which is what
+      makes the same test unsound for a lifecycle proposal.
     * otherwise it is a brand-new pending entry, and only a real ratification stamp
       (`approved_by == "human"`, written by `_apply_approval`'s approve/edit paths) counts —
       approving one blesses revision 1 IN PLACE, so the revision rule above cannot see it.
@@ -99,14 +126,19 @@ def _dispositions(checkpoints: dict, entries: list, tombstoned_ids: set) -> dict
         if checkpoint.get("status") != "pending":
             continue
         entry_id = str(checkpoint.get("entry_id") or "")
-        lifecycle = checkpoint.get("lane") == "lifecycle"
+        # Named `lifecycle_lane`, never `lifecycle`: that name is the imported MODULE here.
+        lifecycle_lane = checkpoint.get("lane") == "lifecycle"
         entry = by_id.get(entry_id)
-        if entry is None:
-            status = "approved" if lifecycle and entry_id in tombstoned_ids else "dismissed"
-        elif store.entry_status(entry) == "ignored":
+        if entry_id in retired_ids:
+            status = "approved" if lifecycle_lane else "dismissed"
+        elif entry is None or store.entry_status(entry) == "ignored":
+            status = "dismissed"
+        elif lifecycle_lane:
+            if entry.get("proposed_lifecycle"):
+                continue
             status = "dismissed"
         elif checkpoint.get("revision_id"):
-            if entry.get("proposed_lifecycle" if lifecycle else "proposed_revision"):
+            if entry.get("proposed_revision"):
                 continue
             status = ("approved"
                       if (entry.get("current_revision_id") or "") != checkpoint["revision_id"]
@@ -150,11 +182,12 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
                                     "entry_id": target}
             return
         receipt["lifecycle_proposed"] += 1
-        # `lane` + `revision_id` are what `_dispositions` reads to tell an approved retirement
-        # (the entry is tombstoned) from a dismissed one, without ever inferring either.
+        # `lane` is what `_dispositions` reads to tell an approved retirement (the target is
+        # tombstoned with a retirement record) from a dismissed one, without ever inferring
+        # either. Deliberately NO `revision_id`: a revision advance is not an approval signal
+        # for this lane (ruling R25), so storing one would only invite a reader to use it.
         writes[candidate_id] = {"event_ids": event_ids, "status": "pending", "entry_id": target,
-                                "lane": "lifecycle",
-                                "revision_id": result["proposal"]["basis_revision_id"]}
+                                "lane": "lifecycle"}
         return
     if kind == "duplicate":
         # The store already holds this decision, so there is nothing to review — but the
@@ -212,10 +245,11 @@ def _settle_write_statuses(repo_path: str, writes: dict) -> None:
     review that will never be asked for. One re-read of the store settles it for the whole
     batch, which is also why this is not done per candidate inside the loop.
 
-    The same read stamps `revision_id` on every checkpoint that DID leave a proposal behind, so
-    a later pass can tell a promoted proposal (HEAD advanced) from a dismissed one (HEAD
-    unchanged) — see `_dispositions`. Lifecycle checkpoints already carry theirs from
-    `lifecycle.propose_lifecycle`'s own return and are skipped here.
+    The same read stamps `revision_id` on every CONTENT checkpoint that left a proposal behind,
+    so a later pass can tell a promoted proposal (HEAD advanced) from a dismissed one (HEAD
+    unchanged) — see `_dispositions`. Lifecycle checkpoints are skipped outright: their proposal
+    is already attached (`propose_lifecycle` returning ok is what says so), and their lane
+    settles on the tombstone, never on a revision.
     """
     pending_ids = {cid for cid, cp in writes.items()
                    if cp.get("status") == "pending" and cp.get("lane") != "lifecycle"}
@@ -262,8 +296,7 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
     # more a decision to classify against than a live one is.
     tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
                   if isinstance(e, dict) and e.get("type") == "decision"]
-    flips = {} if dry_run else _dispositions(
-        checkpoints, entries, {str(e.get("id") or "") for e in tombstones})
+    flips = {} if dry_run else _dispositions(checkpoints, entries, _retired_ids(tombstones))
 
     projection = [_projected(e, False) for e in entries if e.get("type") == "decision"]
     projection += [_projected(e, True) for e in tombstones]  # already decision-filtered above
