@@ -10,8 +10,8 @@ Two properties carry this module and are asserted from several angles rather tha
   gap marker are compared before and after.
 
 Everything reconciliation proposes is unreviewed by construction, so the retire path is
-asserted the other way round: the receipt names the recommendation and the store is byte-for-byte
-untouched.
+asserted the other way round: the proposal lands in the separate lifecycle lane and the
+decision itself — content, revisions, status — is untouched until a human retires it.
 """
 import json
 from pathlib import Path
@@ -260,29 +260,89 @@ class TestUpdateCandidate:
 
 
 class TestRetireCandidate:
-    """Phase 2's exit gate: a retirement is a RECOMMENDATION. Nothing is written, and the
-    evidence stays unconsumed so the lifecycle work can still act on it."""
+    """Phase 3: a retirement candidate materializes as a `proposed_lifecycle` on its target —
+    a proposal in the separate lane. The decision stays live and its content is untouched;
+    only an explicit human `retire_decision` moves it out."""
 
-    def test_retire_is_reported_and_writes_nothing(self, tmp_repo):
+    def test_retire_proposes_retirement_without_touching_the_decision(self, tmp_repo):
         entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert (receipt["proposed"], receipt["lifecycle_proposed"]) == (0, 1)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        proposal = entry["proposed_lifecycle"]
+        assert proposal["action"] == "retire"
+        assert proposal["source"] == "ai"
+        assert "Stop using Postgres" in proposal["reason"]
+        assert proposal["basis_revision_id"] == entry["current_revision_id"]
+        assert entry["content"] == STORED                     # content lane untouched
+        assert entry.get("proposed_revision") is None
+        assert store.entry_status(entry) == "approved"        # still live
+        assert store._pending_review_flag(tmp_repo).exists()  # nudge armed
+
+    def test_its_evidence_is_pinned_and_the_next_pass_proposes_nothing(self, tmp_repo):
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+
+        (checkpoint,) = _checkpoints(tmp_repo).values()
+        assert checkpoint["status"] == "pending"      # pending => its events stay pinned
+        assert checkpoint["lane"] == "lifecycle"
+        assert checkpoint["entry_id"] == entry_id
+        assert _unconsumed(tmp_repo) == []
+        second = reconcile.reconcile_session(tmp_repo)
+        assert (second["lifecycle_proposed"], second["proposed"]) == (0, 0)
+
+    def test_retiring_the_target_settles_the_checkpoint_as_approved(self, tmp_repo):
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert store.retire_decision(tmp_repo, entry_id, "the developer said so")[0]
+        reconcile.reconcile_session(tmp_repo)
+        # Settled checkpoints are compacted away, so the proof is that its events are gone
+        # and a disposition event records the outcome.
+        assert _checkpoints(tmp_repo) == {}
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "approved"
+
+    def test_dismissing_the_proposal_settles_the_checkpoint_as_dismissed(self, tmp_repo):
+        # The Task 5 residual: a proposal that died unapproved must unpin its evidence rather
+        # than sit pending forever — and it must never read as approval.
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert store.dismiss_lifecycle(tmp_repo, entry_id)[0]
+        reconcile.reconcile_session(tmp_repo)
+        assert _checkpoints(tmp_repo) == {}
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "dismissed"
+
+    def test_a_dry_run_proposes_no_retirement_and_writes_nothing(self, tmp_repo):
+        _stored_decision(tmp_repo)
         _emit(tmp_repo, "user_directive", RETIRES)
         before = _store_bytes(tmp_repo)
 
-        receipt = reconcile.reconcile_session(tmp_repo)
-        assert receipt["proposed"] == 0
-        (recommendation,) = receipt["retire_recommendations"]
-        assert recommendation["target_decision_id"] == entry_id
-        assert recommendation["title"].startswith("Stop using Postgres")
+        receipt = reconcile.reconcile_session(tmp_repo, dry_run=True)
+        assert receipt["lifecycle_proposed"] == 1
         assert _store_bytes(tmp_repo) == before
         assert _checkpoints(tmp_repo) == {}
-        assert [e["kind"] for e in _unconsumed(tmp_repo)] == ["user_directive"]
 
-    def test_it_is_recommended_again_on_the_next_pass(self, tmp_repo):
-        # Unconsumed means unconsumed: nothing was decided, so the next pass must see it.
-        _stored_decision(tmp_repo)
+    def test_a_refused_proposal_settles_its_events_rather_than_retrying_forever(self, tmp_repo):
+        entry_id = _stored_decision(tmp_repo)
+        assert store.propose_lifecycle(tmp_repo, entry_id, "retire", "I said so",
+                                       source="human")["ok"]
         _emit(tmp_repo, "user_directive", RETIRES)
-        reconcile.reconcile_session(tmp_repo)
-        assert len(reconcile.reconcile_session(tmp_repo)["retire_recommendations"]) == 1
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert receipt["lifecycle_proposed"] == 0
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["proposed_lifecycle"]["reason"] == "I said so"   # human keeps the slot
+        assert _unconsumed(tmp_repo) == []
 
 
 class TestDuplicateCandidate:
@@ -418,8 +478,8 @@ class TestFastPath:
         monkeypatch.setattr(store, "load", _no)
         monkeypatch.setattr(store, "store_lock", _no)
         receipt = reconcile.reconcile_session(tmp_repo)
-        assert receipt == {"events_observed": 0, "proposed": 0, "already_pending": 0,
-                           "duplicates": 0, "insufficient": 0, "retire_recommendations": [],
+        assert receipt == {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0,
+                           "already_pending": 0, "duplicates": 0, "insufficient": 0,
                            "incomplete": False, "dry_run": False}
 
     def test_a_stuck_pending_checkpoint_reads_the_store_but_never_locks_it(self, tmp_repo,
@@ -643,32 +703,17 @@ class TestCliCommand:
 class TestReceiptRendering:
 
     def _receipt(self, **overrides):
-        return {"events_observed": 3, "proposed": 0, "already_pending": 0, "duplicates": 0,
-                "insufficient": 0, "dry_run": False, "incomplete": False,
-                "retire_recommendations": [], **overrides}
+        return {"events_observed": 3, "proposed": 0, "lifecycle_proposed": 0,
+                "already_pending": 0, "duplicates": 0, "insufficient": 0, "dry_run": False,
+                "incomplete": False, **overrides}
 
-    def test_a_retirement_recommendation_says_it_retired_nothing(self):
-        text = reconcile.format_receipt(self._receipt(retire_recommendations=[
-            {"candidate_id": "c", "kind": "retire", "target_decision_id": "abcdef1234",
-             "replacement_decision_id": None, "title": "Stop using Postgres"}]))
-        assert "retirement suggested for abcdef12: Stop using Postgres" in text
-        assert "nothing was retired or replaced" in text
+    def test_a_proposed_retirement_says_it_retired_nothing(self):
+        text = reconcile.format_receipt(self._receipt(lifecycle_proposed=2))
+        assert "retirements proposed:     2" in text
+        assert "nothing was retired" in text
 
-    def test_a_replacement_is_worded_as_one_and_names_its_replacement(self):
-        # "retire X" and "replace X with Y" are different asks; rendering both as a bare
-        # retirement drops the half that says what takes its place.
-        text = reconcile.format_receipt(self._receipt(retire_recommendations=[
-            {"candidate_id": "c", "kind": "replace", "target_decision_id": "abcdef1234",
-             "replacement_decision_id": "99887766aa", "title": "Use pgbouncer instead"}]))
-        assert "replacement suggested for abcdef12 (by 99887766): Use pgbouncer instead" in text
-        assert "retirement suggested" not in text
-
-    def test_a_replacement_with_no_named_replacement_still_reads_correctly(self):
-        # V1 grouping never infers `replacement_decision_id`, so this is today's normal case.
-        text = reconcile.format_receipt(self._receipt(retire_recommendations=[
-            {"candidate_id": "c", "kind": "replace", "target_decision_id": "abcdef1234",
-             "replacement_decision_id": None, "title": "Use pgbouncer instead"}]))
-        assert "replacement suggested for abcdef12: Use pgbouncer instead" in text
+    def test_no_retirement_says_nothing_about_retiring(self):
+        assert "nothing was retired" not in reconcile.format_receipt(self._receipt())
 
     def test_incomplete_is_stated(self):
         assert "incomplete" in reconcile.format_receipt(self._receipt(incomplete=True))

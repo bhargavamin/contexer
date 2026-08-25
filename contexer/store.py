@@ -1870,7 +1870,13 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     otherwise the entry would re-qualify as an anchor-decay participant on the very next
     TTL cycle and stack a second withdrawal clause onto the content this approval just
     wrote. An explicit stashed marker, not a wording/content heuristic, so this never
-    misfires on an ordinary proposal that happens to mention missing files."""
+    misfires on an ordinary proposal that happens to mention missing files.
+
+    LEGACY, and staying: `anchors.py` no longer CREATES `clear_anchors` proposals — anchor-loss
+    withdrawal moved to the `proposed_lifecycle` lane, where approving retires the decision
+    outright instead of keeping it live with a withdrawal clause. This branch remains because a
+    store written before that move can still hold one pending, and a proposal that stopped
+    being promotable would be a proposal the developer can neither approve nor understand."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -2636,14 +2642,42 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
 
 
 def get_pending_decisions(repo_path: str) -> list[dict]:
-    """Returns all decisions awaiting the developer: brand-new pending_approval entries
-    AND live decisions carrying a Suggested Update (proposed_revision)."""
+    """Returns all decisions awaiting the developer: brand-new pending_approval entries, live
+    decisions carrying a Suggested Update (proposed_revision), and live decisions carrying a
+    retirement proposal (proposed_lifecycle). An entry carrying both proposals appears once."""
     data = load(repo_path)
     return [
         e for e in data.get("entries", [])
         if e.get("type") == "decision"
-        and (entry_status(e) == "pending_approval" or e.get("proposed_revision"))
+        and (entry_status(e) == "pending_approval" or e.get("proposed_revision")
+             or e.get("proposed_lifecycle"))
     ]
+
+
+def _lifecycle_review_lines(entry: dict, eid: str) -> list[str]:
+    """The labeled retirement block a lifecycle proposal adds to a review surface: who proposed
+    it, why, whether it is stale, and what each answer actually does. Its own block, never
+    folded into the content-proposal render — approving a Suggested Update and retiring the
+    decision are different answers to different questions."""
+    life = entry.get("proposed_lifecycle") or {}
+    lines = [f'    retirement proposed (source={life.get("source") or "unknown"}): '
+             f'"{_clip_body(life.get("reason") or "")}"']
+    replacement = (life.get("replacement_decision_id") or "")[:8]
+    if replacement:
+        lines.append(f"    replaced by: {replacement}")
+    if lifecycle_proposal_stale(entry):
+        lines.append("    STALE — this was proposed against an earlier revision and the decision "
+                     "has changed since; retire_decision is refused until it is re-proposed "
+                     "against the current version. dismiss_lifecycle still works.")
+        lines.append(f'    dismiss_lifecycle(entry_id="{eid}")')
+    else:
+        lines.append("    retiring moves it out of active context (retrieval, session start and "
+                     "the commit-time guard all stop seeing it) and keeps its history; "
+                     "dismissing keeps the decision live and unchanged.")
+        lines.append(f'    retire_decision(entry_id="{eid}", reason="<the developer\'s reason>")'
+                     f' | dismiss_lifecycle(entry_id="{eid}")')
+    lines.append("    Ask the developer — never retire a decision on your own judgment.")
+    return lines
 
 
 def format_pending_review(repo_path: str) -> str:
@@ -2667,6 +2701,7 @@ def format_pending_review(repo_path: str) -> str:
         eid = (d.get("id") or "")[:8]
         st = d.get("subtype") or "decision"
         prop = d.get("proposed_revision")
+        life = d.get("proposed_lifecycle")
         if prop:
             raw_current = revisions.current_content(d)
             raw_detected = prop.get("content", "")
@@ -2691,7 +2726,13 @@ def format_pending_review(repo_path: str) -> str:
                 lines.append(f'    "{clipped_body}"')
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
-            lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
+            if not life:
+                # A live decision whose only pending item is a retirement is already approved —
+                # offering to approve it again would be the one action approve_decision rejects.
+                lines.append(
+                    f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
+        if life:
+            lines.extend(_lifecycle_review_lines(d, eid))
     lines.append("\nReview each one with the developer before approving, and act on their "
                  "answer ONE id at a time - there is no bulk approve, and approving a "
                  "mis-captured decision makes it trusted standing context in every future "
@@ -2820,8 +2861,147 @@ def _keep_recent_tombstones(entries: list) -> list:
     return ordered[-MAX_TOMBSTONES:]
 
 
-def delete_decision(repo_path: str, entry_id: str, actor: str = "ui") -> tuple[bool, str]:
-    """Move a decision out of the live store into the tombstone sidecar. Returns (ok, message).
+# ── Decision lifecycle: the proposed_lifecycle lane, retirement, restoration ────
+#
+# A SECOND, independent proposal slot beside `proposed_revision` (plan C2). A content
+# correction says "this decision should read differently"; a lifecycle proposal says "this
+# decision should stop being live". They are different state transitions, so sharing one slot
+# would let either silently drop the other — the two lanes coexist and never displace one
+# another, and resolving one leaves the other exactly where it was.
+#
+# Within the lane the order is only human-over-automated. `ai` and `scan` are both machine
+# guesses at the same transition and ranking them against each other would let one automated
+# proposal quietly overwrite another's reason; a developer's proposal outranks both, and its
+# displaced predecessor is archived to `superseded_lifecycle` (the shape `superseded_proposals`
+# already has) rather than dropped.
+
+LIFECYCLE_ACTIONS = ("retire",)
+# V1 has one action. A replacement is not a second action but a field on this one: retiring a
+# decision *because another supersedes it* is still a retirement, recorded as lifecycle kind
+# "superseded". "replacement_linked" stays reserved vocabulary with no writer.
+_LIFECYCLE_ACTIVE_STATUSES = ("approved", "suggested")
+_CONSOLE_DELETE_REASON = "deleted via console"
+
+
+def _lifecycle_record(kind: str, *, reason: str, revision_id: str, at: str,
+                      replacement_id: str | None = None, actor: str = "human") -> dict:
+    """One versioned entry in a decision's `lifecycle` history (plan C1).
+
+    `revision_id` is captured AT THE TRANSITION by the caller and never re-derived later: the
+    entry-level `approved_by` stamp is popped whenever a non-human revision lands
+    (`revisions.append_revision`), so history that trusted entry-level state would misreport
+    which version of the decision was actually retired."""
+    return {
+        "event_id": str(uuid.uuid4()),
+        "kind": kind,
+        "occurred_at": at,
+        "actor": actor,
+        "reason": reason,
+        "revision_id": revision_id,
+        "replacement_decision_id": replacement_id or None,
+    }
+
+
+def attach_lifecycle_proposal(entry: dict, action: str, reason: str, *, source: str,
+                              replacement_id: str | None = None, now: str = "") -> dict | None:
+    """Claim the entry's ONE `proposed_lifecycle` slot IN MEMORY, returning the proposal or
+    None when a sitting proposal keeps it. Persistence is the caller's (`propose_lifecycle`
+    does load/lock/save; `anchors.verify_anchors` already holds the lock and saves once for a
+    whole run, which is why this half is separated out at all — calling the locking entrypoint
+    from inside that lock would deadlock on the same flock).
+
+    `proposed_revision` is neither read nor written here: the lanes are independent."""
+    now = now or datetime.now(timezone.utc).isoformat()
+    sitting = entry.get("proposed_lifecycle")
+    if sitting and not (source == "human" and sitting.get("source") != "human"):
+        return None
+    if sitting:
+        entry.setdefault("superseded_lifecycle", []).append({**sitting, "superseded_at": now})
+    proposal = {
+        "proposal_id": str(uuid.uuid4()),
+        "action": action,
+        "reason": reason,
+        "replacement_decision_id": replacement_id or None,
+        # Bound to the revision it was judged against: if HEAD moves the proposal is stale and
+        # must be re-reviewed rather than applied to a decision nobody read in this form.
+        "basis_revision_id": entry.get("current_revision_id") or "",
+        "source": source,
+        "created_at": now,
+    }
+    entry["proposed_lifecycle"] = proposal
+    return proposal
+
+
+def lifecycle_proposal_stale(entry: dict) -> bool:
+    """True when the entry's lifecycle proposal was judged against a revision that is no longer
+    HEAD. Retirement is refused while stale (the developer must re-propose against what the
+    decision says NOW); dismissal stays available, since dropping a proposal needs no basis."""
+    prop = entry.get("proposed_lifecycle") or {}
+    return bool(prop) and prop.get("basis_revision_id") != (entry.get("current_revision_id") or "")
+
+
+def propose_lifecycle(repo_path: str, entry_id: str, action: str, reason: str, *,
+                      source: str, replacement_id: str | None = None) -> dict:
+    """Attach a lifecycle proposal to a LIVE decision. `{"ok", "message", "proposal"}`.
+
+    Proposing is not retiring: the decision keeps rendering exactly as it did until a human
+    calls `retire_decision`. A `pending_approval` entry is refused — it is not live yet, and
+    `approve_decision(action="ignore")` is the existing way to drop one."""
+    if action not in LIFECYCLE_ACTIONS:
+        return {"ok": False, "proposal": None,
+                "message": f"Unsupported lifecycle action {action!r}. Use: "
+                           f"{', '.join(LIFECYCLE_ACTIONS)}."}
+    if not (reason or "").strip():
+        return {"ok": False, "proposal": None,
+                "message": "A lifecycle proposal needs a reason — it becomes permanent history."}
+    with store_lock(repo_slug(repo_path)):
+        data = load(repo_path)
+        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
+                            entry_id)
+        if entry is None:
+            return {"ok": False, "proposal": None, "message": f"Decision {entry_id!r} not found."}
+        status = entry_status(entry)
+        if status not in _LIFECYCLE_ACTIVE_STATUSES:
+            return {"ok": False, "proposal": None,
+                    "message": f"Decision {entry['id'][:8]} is {status}, not live — there is "
+                               "nothing to retire."}
+        proposal = attach_lifecycle_proposal(entry, action, reason.strip(), source=source,
+                                             replacement_id=replacement_id)
+        if proposal is None:
+            return {"ok": False, "proposal": None,
+                    "message": f"Decision {entry['id'][:8]} already carries a developer's "
+                               "retirement proposal — it keeps the slot."}
+        save(repo_path, data)
+        _touch_pending_review(repo_path)     # a lifecycle proposal now awaits review
+        return {"ok": True, "proposal": proposal,
+                "message": f"Retirement proposed for {entry['id'][:8]} — pending the "
+                           "developer's review; the decision stays live until they retire it."}
+
+
+def dismiss_lifecycle(repo_path: str, entry_id: str) -> tuple[bool, str]:
+    """Drop a decision's lifecycle proposal, keeping the decision exactly as it is.
+
+    Dismiss means "not now", not "never ask again": an evidence-driven proposer (anchors.py's
+    anchor-loss withdrawal) re-proposes on its next TTL cycle, which is the same semantics its
+    `proposed_revision` dismissal had."""
+    with store_lock(repo_slug(repo_path)):
+        data = load(repo_path)
+        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
+                            entry_id)
+        if entry is None:
+            return False, f"Decision {entry_id!r} not found."
+        if not entry.get("proposed_lifecycle"):
+            return False, f"Decision {entry['id'][:8]} has no retirement proposal to dismiss."
+        entry.pop("proposed_lifecycle", None)
+        save(repo_path, data)
+        return True, (f"Dismissed the retirement proposal for {entry['id'][:8]} — the decision "
+                      "stays live and unchanged.")
+
+
+def _retire_locked(repo_path: str, entry_id: str, *, reason: str, replacement_id: str | None,
+                   deleted_by: str, stale_guard: bool) -> tuple[bool, str, dict | None]:
+    """Move ONE live decision into the tombstone sidecar with a lifecycle record.
+    Returns (ok, error message, tombstoned entry) — the caller words its own success message.
 
     Both files are written inside ONE lock, sidecar FIRST: a crash between the two writes
     leaves the entry in both places (visible and restorable) rather than in neither.
@@ -2831,29 +3011,90 @@ def delete_decision(repo_path: str, entry_id: str, actor: str = "ui") -> tuple[b
 
     Refuses outright when the sidecar cannot be parsed: writing a fresh graveyard over it would
     destroy every tombstone already in it, and un-block every one of those decisions for
-    re-capture. A refusal is recoverable; that is not."""
+    re-capture. A refusal is recoverable; that is not.
+
+    An unresolved `proposed_revision` is ARCHIVED onto the tombstone rather than dropped: it is
+    unreviewed content nobody ever ruled on, and a retirement is not a ruling on it."""
     with store_lock(repo_slug(repo_path)):
         data = load(repo_path)
         entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
-                             entry_id)
+                            entry_id)
         if entry is None:
-            return False, f"Decision {entry_id!r} not found."
+            return False, f"Decision {entry_id!r} not found.", None
+        if stale_guard and lifecycle_proposal_stale(entry):
+            return False, (
+                f"Cannot retire {entry['id'][:8]}: the retirement proposal was made against an "
+                "earlier revision and the decision has changed since. Re-review it against what "
+                "the decision says now — dismiss_lifecycle drops the stale proposal, and a fresh "
+                "one can be proposed against the current revision."), None
         graveyard, error = _read_deleted(repo_path)
         if error is not None:
-            return False, (f"Cannot delete {entry['id'][:8]}: {_deleted_path(repo_path).name} is "
+            return False, (f"Cannot retire {entry['id'][:8]}: {_deleted_path(repo_path).name} is "
                            f"unreadable ({error}), and overwriting it would discard every "
-                           "tombstone already in it. Move that file aside, then retry.")
-        entry["deleted_at"] = datetime.now(timezone.utc).isoformat()
-        entry["deleted_by"] = actor
+                           "tombstone already in it. Move that file aside, then retry."), None
+        now = datetime.now(timezone.utc).isoformat()
+        entry.pop("proposed_lifecycle", None)       # satisfied by this very retirement
+        unreviewed = entry.pop("proposed_revision", None)
+        if unreviewed:
+            entry["unreviewed_proposal_at_retirement"] = unreviewed
+        entry.pop("conflict_memo", None)            # the pair it resolved no longer exists
+        entry.setdefault("lifecycle", []).append(_lifecycle_record(
+            "superseded" if replacement_id else "retired", reason=reason, at=now,
+            revision_id=entry.get("current_revision_id") or "",
+            replacement_id=replacement_id))
+        entry["deleted_at"] = now
+        entry["deleted_by"] = deleted_by
         graveyard["repo_path"] = repo_path
         graveyard["entries"] = _keep_recent_tombstones(graveyard["entries"] + [entry])
         _save_deleted(repo_path, graveyard)
         data["entries"] = [e for e in data["entries"] if e is not entry]
         save(repo_path, data)
-        return True, f"Deleted {entry['id'][:8]}. It can be restored from the Deleted view."
+        return True, "", entry
 
 
-def restore_decision(repo_path: str, entry_id: str) -> tuple[bool, str]:
+def retire_decision(repo_path: str, entry_id: str, reason: str,
+                    replacement_id: str | None = None) -> tuple[bool, str]:
+    """Retire a live decision: it leaves active context for the tombstone sidecar, keeping its
+    full revision and lifecycle history. Returns (ok, message).
+
+    This is also the APPROVAL path for an ai/scan-proposed retirement — a human calling it IS
+    the explicit human action, so the lifecycle actor is "human" either way. A proposal made
+    against a superseded revision is refused here rather than applied blind (see
+    `lifecycle_proposal_stale`); a direct retirement with no sitting proposal has no staleness
+    question to answer."""
+    if not (reason or "").strip():
+        return False, ("A retirement needs a reason — it is recorded permanently as the "
+                       "decision's lifecycle history.")
+    replacement_id = (replacement_id or "").strip() or None
+    ok, message, entry = _retire_locked(
+        repo_path, entry_id, reason=reason.strip(), replacement_id=replacement_id,
+        deleted_by="human", stale_guard=True)
+    if not ok:
+        return False, message
+    what = "Superseded" if replacement_id else "Retired"
+    tail = f" (replaced by {replacement_id[:8]})" if replacement_id else ""
+    return True, (f"{what} {entry['id'][:8]}{tail}. It no longer appears in retrieval, session "
+                  "context, or the commit-time guard; its history is kept and "
+                  "restore_decision brings it back.")
+
+
+def delete_decision(repo_path: str, entry_id: str, actor: str = "ui") -> tuple[bool, str]:
+    """The console's delete: a retirement under the console's own vocabulary. Returns
+    (ok, message).
+
+    Shares `_retire_locked` with `retire_decision` so tombstone history is uniform however a
+    decision left the live store — but it never refuses on a stale lifecycle proposal, because
+    a developer clicking Delete is not resolving anyone's proposal. The UI wording is
+    deliberately unchanged: terminology moves to lifecycle language on the CLI/MCP surfaces
+    first."""
+    ok, message, entry = _retire_locked(repo_path, entry_id, reason=_CONSOLE_DELETE_REASON,
+                                        replacement_id=None, deleted_by=actor, stale_guard=False)
+    if not ok:
+        return False, message.replace("Cannot retire", "Cannot delete")
+    return True, f"Deleted {entry['id'][:8]}. It can be restored from the Deleted view."
+
+
+def restore_decision(repo_path: str, entry_id: str, reason: str = "") -> tuple[bool, str]:
     """Move a tombstoned decision back into the live store. Returns (ok, message).
 
     Write order MIRRORS delete_decision instead of repeating it: the live store goes first
@@ -2868,7 +3109,10 @@ def restore_decision(repo_path: str, entry_id: str) -> tuple[bool, str]:
     Refuses when the live store is at capacity rather than evicting to make room: the old
     `_keep_top(..., pin_last=True)` pinned the RESTORED entry, so it dropped some other
     decision - and unlike a delete, that one got no tombstone. An action the console frames as
-    non-destructive must not destroy anything."""
+    non-destructive must not destroy anything.
+
+    The entry comes back with its prior status and its whole `lifecycle` list, one "restored"
+    record longer - history accumulates rather than being rewound."""
     with store_lock(repo_slug(repo_path)):
         graveyard = _load_deleted(repo_path)
         entry = entry_by_id(graveyard["entries"], entry_id)
@@ -2888,6 +3132,10 @@ def restore_decision(repo_path: str, entry_id: str) -> tuple[bool, str]:
                            "decision with no tombstone - delete one yourself first.")
         entry.pop("deleted_at", None)
         entry.pop("deleted_by", None)
+        entry.setdefault("lifecycle", []).append(_lifecycle_record(
+            "restored", reason=(reason or "").strip(),
+            at=datetime.now(timezone.utc).isoformat(),
+            revision_id=entry.get("current_revision_id") or ""))
         data["entries"].append(entry)
         save(repo_path, data)
         graveyard["repo_path"] = repo_path
@@ -4246,7 +4494,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # be explicitly approved before becoming trusted engineering knowledge.
     pending = [d for d in decisions if entry_status(d) == "pending_approval"]
     with_proposals = [d for d in decisions
-                      if d.get("proposed_revision") and entry_status(d) != "pending_approval"]
+                      if (d.get("proposed_revision") or d.get("proposed_lifecycle"))
+                      and entry_status(d) != "pending_approval"]
     trusted = [d for d in decisions if entry_status(d) in ("approved", "suggested")]
     pre_loaded = [d for d in trusted if d.get("subtype") in ("convention", "constraint", "pattern")]
     deferred_count = len(trusted) - len(pre_loaded)
