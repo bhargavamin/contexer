@@ -11,10 +11,11 @@ a user directive means "a developer said this out loud, put it near the top of t
 queue" — not "this is 50% likely to be correct". Nothing here approves, enforces, retires or
 materializes anything: the review flow is the only gate.
 
-Idempotency is the load-bearing property. `candidate_id` is a uuid5 over the sorted
-contributing event ids, events are ordered by (occurred_at, event_id) before anything reads
-them, and candidates come back sorted by (-score, candidate_id). The same event set in ANY
-input order therefore produces byte-identical output. A `uuid4` in this module is a defect.
+Idempotency is the load-bearing property. `candidate_id` is a uuid5 over the candidate's kind,
+its target decision when it names one, and the sorted contributing event ids; events are
+ordered by (occurred_at, event_id) before anything reads them, and candidates come back sorted
+by (-score, candidate_id). The same event set in ANY input order therefore produces
+byte-identical output. A `uuid4` in this module is a defect.
 """
 
 import re
@@ -315,9 +316,21 @@ def _classify(content, group, decisions) -> tuple:
 
 # ── assembly ─────────────────────────────────────────────────────────────────────
 
-def _candidate_id(events) -> str:
-    return str(uuid.uuid5(_CANDIDATE_NAMESPACE,
-                          ",".join(sorted(str(e.get("event_id") or "") for e in events))))
+def _candidate_id(kind, target_decision_id, events) -> str:
+    """The candidate's identity: its kind, the decision it acts on when it names one, and the
+    sorted ids of the events it is built from.
+
+    Deterministic by construction, which is what the storage layer leans on: `held/<id>/` IS
+    the "already pending" record, so two passes over the same evidence must name the same
+    directory. The kind and target join the seed because they are what the candidate PROPOSES
+    — the same events read as `update the auth decision` and as `retire it` are two different
+    proposals, and one directory could only ever hold one of them.
+    """
+    return str(uuid.uuid5(_CANDIDATE_NAMESPACE, "\n".join([
+        str(kind or ""),
+        str(target_decision_id or ""),
+        ",".join(sorted(str(e.get("event_id") or "") for e in events)),
+    ])))
 
 
 def _seeded_candidate(group, decisions) -> dict:
@@ -331,7 +344,7 @@ def _seeded_candidate(group, decisions) -> dict:
         kind, target, notes = _classify(content, group, decisions)
         uncertainties.extend(notes)
     return {
-        "candidate_id": _candidate_id(group["events"]),
+        "candidate_id": _candidate_id(kind, target, group["events"]),
         "kind": kind,
         "title": _first_sentence(content),
         "content": content,
@@ -357,7 +370,7 @@ def _leftover_candidate(session_id, events) -> dict:
     uncertainties.append(
         f"files changed in session {session_id} with no stated decision to review")
     return {
-        "candidate_id": _candidate_id(events),
+        "candidate_id": _candidate_id("insufficient", None, events),
         "kind": "insufficient",
         "title": "Files changed with no stated decision",
         "content": "",

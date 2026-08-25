@@ -1945,6 +1945,35 @@ def touch_pending_review(repo_path: str) -> None:
         pass
 
 
+def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> bool:
+    """Append one settled-candidate summary to a decision's own history. Returns whether it
+    landed.
+
+    ADDITIVE and nothing else: the entry grows an `evidence_summary` list, no existing key is
+    read or rewritten, so a store written before this key existed loads and renders unchanged.
+
+    This is where a disposition LIVES once reconciliation deletes the raw events it settled
+    (`spool.finalize_candidate_evidence` returns the summary, this preserves it) — the decision
+    keeps the receipt for the evidence it came from. A missing entry returns False rather than
+    raising: the candidate is settled either way, and only the receipt is lost.
+    """
+    if not entry_id or not isinstance(summary, dict):
+        return False
+    with store_lock(repo_slug(repo_path)):
+        data = load(repo_path)
+        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
+                            entry_id)
+        if entry is None:
+            return False
+        history = entry.get("evidence_summary")
+        # Rebuilt rather than appended to: a hand-edited non-list would otherwise raise here,
+        # and this is bookkeeping — it must never be the thing that breaks a store write.
+        entry["evidence_summary"] = (history if isinstance(history, list) else []) + \
+            [dict(summary)]
+        save(repo_path, data)
+    return True
+
+
 def pending_review_nudge(repo_path: str) -> str | None:
     """Per-prompt consumer for the pending-review flag. Returns the one-time nudge text (and
     clears the flag) ONLY when THIS repo has a freshly-set flag AND still has decisions awaiting
@@ -4052,6 +4081,16 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # fresh one. Fail-soft end to end (log write included), and a no-op read when the index
     # is healthy — no guard needed here.
     ensure_retrieval_index(repo_path)
+    # Bound the evidence spool on hosts that never reconcile (Codex reaches no reconciliation
+    # entrypoint, Cursor emits directives only): this is the one store-side path EVERY host
+    # traverses at session start, and session start is not an editor hook, so the spool's
+    # never-scan-in-a-hook rule holds. Positioned with `ensure_retrieval_index` and for the
+    # same reason — unconditional on `source`, ahead of the `resume` early-return, since a
+    # resumed session's spool grows exactly like a fresh one's. `maintain_spool` is
+    # self-gating (no spool dir / inside its TTL = no work) and never raises, so the call
+    # site is deliberately unguarded on the strength of that promise.
+    from contexer import spool         # function-level: spool imports store at ITS top
+    spool.maintain_spool(repo_path)
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
