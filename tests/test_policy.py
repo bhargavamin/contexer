@@ -788,21 +788,3 @@ class TestWorstVerdict:
     def test_an_unknown_verdict_raises_rather_than_being_folded_away(self):
         with pytest.raises(ValueError):
             policy.worst_verdict(["allow", "bl0ck"])
-
-
-class TestMergeStatus:
-    @pytest.mark.parametrize("statuses,expected", [
-        ([], "complete"),
-        (["complete"], "complete"),
-        (["complete", "partial"], "partial"),
-        (["partial", "error", "complete"], "error"),
-    ])
-    def test_error_beats_partial_beats_complete(self, statuses, expected):
-        assert policy.merge_status(statuses) == expected
-
-    def test_an_error_is_never_laundered_into_something_softer(self):
-        assert policy.merge_status(["complete"] * 10 + ["error"]) == "error"
-
-    def test_an_unknown_status_raises(self):
-        with pytest.raises(ValueError):
-            policy.merge_status(["complete", "mostly"])

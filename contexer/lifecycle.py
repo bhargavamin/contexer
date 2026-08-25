@@ -51,15 +51,29 @@ LIFECYCLE_ACTIONS = ("retire",)
 _ACTIVE_STATUSES = ("approved", "suggested")
 CONSOLE_DELETE_REASON = "deleted via console"
 
+# THE kind vocabulary for a COMPLETED lifecycle record, owned here because this module is the
+# only writer of one (`lifecycle_record`, which rejects anything else). Readers derive rather
+# than respell: `reconcile._RETIRED_KINDS` is `RETIRED_KINDS`, so a rename here cannot leave a
+# reader matching on a spelling nothing writes any more while its own tests still pass.
+# `restored` is a record but not a retirement — the decision is back in the live store.
+RETIRED_KINDS = frozenset({"retired", "superseded"})
+RECORD_KINDS = RETIRED_KINDS | {"restored"}
+
 
 def lifecycle_record(kind: str, *, reason: str, revision_id: str, at: str,
                      replacement_id: str | None = None, actor: str = "human") -> dict:
     """One versioned entry in a decision's `lifecycle` history (plan C1).
 
+    `kind` must be one of `RECORD_KINDS`: this is the one writer, so validating here is what
+    makes that vocabulary real rather than a comment. A caller bug raises — the callers are
+    both in this module, and neither is on a hook path.
+
     `revision_id` is captured AT THE TRANSITION by the caller and never re-derived later: the
     entry-level `approved_by` stamp is popped whenever a non-human revision lands
     (`revisions.append_revision`), so history that trusted entry-level state would misreport
     which version of the decision was actually retired."""
+    if kind not in RECORD_KINDS:
+        raise ValueError(f"kind must be one of {sorted(RECORD_KINDS)}, got {kind!r}")
     return {
         "event_id": str(uuid.uuid4()),
         "kind": kind,

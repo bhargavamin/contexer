@@ -436,7 +436,10 @@ def test_retention_drops_past_the_count_cap_oldest_first(tmp_repo, monkeypatch):
     assert report["dropped_pending"] == 2
     assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["day 3", "day 2"]
     gap = spool.evidence_diagnostics(tmp_repo)["gap"]
-    assert gap["drops"] == 2 and gap["last_reason"] == "retention"
+    # Aged out of `pending/` unconsumed is NOT the same fact as evidence we failed to record,
+    # so it lands in its own counter and `drops` stays clean — see the A3 test below.
+    assert gap["expired"] == 2 and gap["drops"] == 0
+    assert gap["last_reason"] == "retention_unconsumed"
 
 
 def test_the_count_cap_evicts_by_arrival_not_by_the_events_own_stamp(tmp_repo, monkeypatch):
@@ -548,6 +551,8 @@ def test_quarantine_is_capped_and_aged_like_pending(tmp_repo):
 
     assert report["dropped_quarantine"] == 1
     assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
+    # A quarantined event is one we could not read: dropping it IS loss, unlike a pending event
+    # that merely aged out unconsumed.
     assert spool.evidence_diagnostics(tmp_repo)["gap"]["drops"] == 1
 
 
@@ -752,3 +757,34 @@ def test_status_says_a_spool_is_unreadable_rather_than_empty(tmp_repo, monkeypat
     spool.append_evidence(tmp_repo, _event())
     monkeypatch.setattr(Path, "is_dir", _refuse_spool_dirs)
     assert _status_line(tmp_repo).endswith("spool unreadable")
+
+
+def test_status_tells_evidence_that_aged_out_from_evidence_that_was_lost(tmp_repo):
+    """The two are different news. Pending events age out unconsumed on a host that never
+    reconciles (Codex, Cursor) — that is the queue working as designed, and reporting it as
+    "lost" both accused a healthy spool of failing and buried the real failures beside it."""
+    spool.append_evidence(tmp_repo, _event())
+    spool._bump_gap(tmp_repo, "retention_unconsumed", 4, field="expired")
+    rendered = _status_line(tmp_repo)
+    assert "4 events aged out unreconciled" in rendered
+    assert "lost" not in rendered
+
+    spool._bump_gap(tmp_repo, "write_error")
+    rendered = _status_line(tmp_repo)
+    assert "1 event lost" in rendered and "4 events aged out unreconciled" in rendered
+
+
+def test_status_reports_a_spool_no_store_file_names(tmp_repo):
+    """A repo whose evidence never produced a store entry — every candidate insufficient, or
+    duplicates before any entry existed — is not in the store-file set `contexer status` builds
+    its repo list from, so its pending count and its `.gap` were invisible in the one surface
+    meant to report them. Listed by slug, which is all there is: a slug does not reverse."""
+    from contexer import cli
+
+    spool.append_evidence(tmp_repo, _event())
+    slug = store.repo_slug(tmp_repo)
+
+    lines = cli._evidence_status_lines([])              # no store file names this repo
+    assert lines == [f"  evidence:     {slug}: 1 pending"]
+    # Named by path, not slug, as soon as anything DOES know the path.
+    assert cli._evidence_status_lines([tmp_repo]) == [f"  evidence:     {tmp_repo}: 1 pending"]

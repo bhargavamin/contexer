@@ -641,29 +641,57 @@ def _gap_phrase(gap: dict) -> str:
     this spool has dropped since it existed, not a condition to resolve. A damaged marker says
     so rather than reporting a number it cannot stand behind, and `prior_drops_unknown` (the
     count restarted over a damaged marker) is stated because it makes the figure a lower bound.
+
+    LOST and EXPIRED are rendered as the different facts they are. Evidence that aged out of
+    `pending/` unconsumed is what the queue does on a host that never reconciles (Codex,
+    Cursor) — calling that "lost" told a developer their spool was failing when it was working
+    exactly as designed, and buried the failures that ARE worth acting on in the same number.
     """
     if gap.get("unreadable"):
         return "loss ledger unreadable"
-    drops = gap.get("drops")
-    drops = drops if isinstance(drops, int) and not isinstance(drops, bool) else 0
-    phrase = f"{drops} event{'' if drops == 1 else 's'} lost"
+    drops, expired = _gap_count(gap, "drops"), _gap_count(gap, "expired")
+    parts = []
+    if drops or not expired:
+        parts.append(f"{drops} event{'' if drops == 1 else 's'} lost")
+    if expired:
+        parts.append(f"{expired} event{'' if expired == 1 else 's'} aged out unreconciled")
+    phrase = ", ".join(parts)
     if gap.get("prior_drops_unknown"):
         phrase += " since the ledger was damaged (earlier losses uncounted)"
     last = str(gap.get("last_at") or "")
     return f"{phrase}, last {last[:19]}" if last else phrase
 
 
-def _evidence_status_lines(repos) -> list[str]:
-    """One `evidence:` line per repo whose spool holds something or has recorded a loss.
+def _gap_count(gap: dict, key: str) -> int:
+    value = gap.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
-    Silent for a repo with neither — which is every repo until a host adapter starts emitting
+
+def _evidence_status_lines(repos) -> list[str]:
+    """One `evidence:` line per spool that holds something or has recorded a loss.
+
+    Silent for a spool with neither — which is every repo until a host adapter starts emitting
     events, so this adds nothing to today's output. An unreadable spool says so rather than
-    reporting zero events: the diagnostics' `readable` flag exists for exactly that."""
-    from contexer import spool
+    reporting zero events: the diagnostics' `readable` flag exists for exactly that.
+
+    The repo set is the caller's (store files plus the current-repo pointer) PLUS every spool
+    directory on disk, because those two do not agree: a repo whose evidence never produced a
+    store entry — every candidate insufficient, or duplicates before any entry existed — has no
+    store file to be found by, and its pending count and `.gap` were invisible in the one
+    surface that reports them. Such a spool is listed by its slug, which is all there is: the
+    slug does not reverse into a path."""
+    from contexer import spool, store
+
+    known = {}
+    for repo in sorted(repos):
+        known[store.repo_slug(repo)] = repo
+    targets = [(known[slug], slug) for slug in sorted(known)]
+    # `(slug, slug)`: the label IS the slug for a spool no store file names.
+    targets += [(slug, slug) for slug in spool.spool_slugs() if slug not in known]
 
     lines = []
-    for repo in sorted(repos):
-        diag = spool.evidence_diagnostics(repo)
+    for label, slug in targets:
+        diag = spool.evidence_diagnostics("", slug=slug)
         if not any((diag["pending"], diag["held"], diag["quarantine"])) and not diag["gap"] \
                 and diag["readable"]:
             continue
@@ -681,7 +709,7 @@ def _evidence_status_lines(repos) -> list[str]:
             parts = ["spool unreadable"]
         if diag["gap"]:
             parts.append(_gap_phrase(diag["gap"]))
-        lines.append(f"  evidence:     {repo}: {', '.join(parts)}")
+        lines.append(f"  evidence:     {label}: {', '.join(parts)}")
     return lines
 
 

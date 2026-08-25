@@ -122,6 +122,13 @@ _WIRE_LIFECYCLE = False
 # vocabularies checked against these tuples rather than passed through: an unknown enum value is
 # the `source="plan"` failure in miniature, and an actor is supposed to be a CATEGORY, so an
 # unrecognized one must never egress as free text that could carry a name or an address.
+#
+# DELIBERATELY NOT `lifecycle.RECORD_KINDS`, even though the three spellings match today. That
+# constant is the LOCAL vocabulary, owned by the module that writes the records; this tuple is
+# a GUESS at the SERVER's enum (see item 4 above), and the two only happen to agree. Deriving
+# one from the other would make a local rename silently change what goes over the wire — the
+# `source="plan"` failure exactly, where a value the server's enum rejects poisons the outbox
+# with a permanent -32602. They stay independent until someone reads the server's schema.
 _WIRE_LIFECYCLE_KINDS = ("retired", "restored", "superseded")
 _WIRE_LIFECYCLE_ACTORS = ("human", "ai", "scan", "plan", "bootstrap", "memory")
 _WIRE_LIFECYCLE_MAX_EVENTS = 20
