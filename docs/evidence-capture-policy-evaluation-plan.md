@@ -4,10 +4,10 @@ Status: Proposed implementation plan, revised after code validation
 
 Companion plan: [Contexer Teams implementation](../../contexer-teams/docs/evidence-capture-policy-enforcement-plan.md)
 
-Revision note: the validated plan deliberately avoids the main decision-store lock on editor hook
-paths, does not restore Stop hooks, models host capabilities explicitly, preserves pending-decision
-retrieval, defers event kinds that have no emitter, and gives lifecycle proposals a separate review
-lane from content revisions.
+Revision note: the validated plan uses one atomic JSON file per raw event instead of a shared
+growing ledger file, avoids locks on editor hook paths, does not restore Stop hooks, models host
+capabilities explicitly, preserves pending-decision retrieval, defers event kinds that have no
+emitter, and gives lifecycle proposals a separate review lane from content revisions.
 
 ## Summary
 
@@ -63,7 +63,7 @@ The implementation should extend these existing seams:
 
 | Concern | Existing implementation | Planned use |
 | --- | --- | --- |
-| Atomic local writes | `store._atomic_write` | Evidence sidecars and candidate checkpoints |
+| Atomic local writes | `store._atomic_write` | One-file-per-event evidence spool |
 | Decision-store serialization | `store._store_lock` | Decision mutations only; never an editor-hook evidence dependency |
 | Decision capture | `store.update_decision_with_meta` | Materialize reviewed candidates through the current write path |
 | Review | `review_pending` and `approve_decision` | Human ratification of inferred candidates |
@@ -148,48 +148,52 @@ Do not store full source contents or full model transcripts in the ledger. The f
 store bounded summaries, repo-relative paths, hashes, counts, decision IDs, and small redacted
 snippets only when needed to render a candidate.
 
-### A2. Sidecar layout and durability
+### A2. Per-event JSON spool and durability
 
-Use one sidecar per repository rather than one file per session:
+Use one small JSON file per raw event. The evidence sidecar is a directory tree, not one growing
+JSON document:
 
 ```text
-~/.contexer/.evidence_<repo-slug>.json
+~/.contexer/evidence/<repo-slug>/
+├── pending/
+│   ├── <utc-stamp>-<event-id>.json
+│   └── <utc-stamp>-<event-id>.json
+├── held/
+│   └── <candidate-id>/
+│       ├── <utc-stamp>-<event-id>.json
+│       └── <utc-stamp>-<event-id>.json
+├── quarantine/
+└── .gap
 ```
 
-Suggested top-level shape:
+`pending/` contains raw events awaiting reconciliation. `held/<candidate-id>/` retains the events
+that support a candidate until that candidate receives a final disposition. `quarantine/` isolates
+malformed events without making the rest of the spool unreadable. `.gap` means at least one event
+could not be recorded or an overflow forced evidence loss.
 
-```json
-{
-  "schema_version": 1,
-  "repo_path": "/canonical/path",
-  "events": [],
-  "candidate_checkpoints": {},
-  "compacted_through": null
-}
-```
+Hook write requirements:
 
-Requirements:
+- derive the repo slug through the same hook-cwd resolution path used by the reader;
+- create the repository and spool directories with mode `0700`;
+- validate, bound, and redact the event before persistence;
+- cap one serialized event at 8 KiB in V1;
+- give every event a UUID and a filename that cannot collide;
+- write a temporary file with mode `0600`, then `os.replace` it into `pending/` on the same
+  filesystem;
+- never acquire `_store_lock` or any shared evidence lock;
+- never read, count, parse, or rewrite older events from the hook;
+- never scan Git, aggregate candidates, or call a model from the hook;
+- on any write failure, best-effort touch `.gap` and return without breaking the host operation.
 
-- use a dedicated per-repository evidence lock, never the decision store's `_store_lock`;
-- acquire the evidence lock non-blocking (`LOCK_EX | LOCK_NB`) from editor hooks;
-- if the lock is busy, drop that event, set a small `.evidence_gap_<repo-slug>` diagnostic marker,
-  and return immediately;
-- write with `_atomic_write` and mode `0600`;
-- reject writes over an unreadable sidecar instead of replacing it;
-- cap event count and total serialized bytes;
-- preserve events referenced by a pending candidate during compaction;
-- compact approved or dismissed groups into one disposition event;
-- expose diagnostics in the local UI and `contexer status`;
-- never load the evidence sidecar during ordinary prompt injection.
+Unique target filenames remove writer contention: concurrent editor windows never mutate the same
+file. The cost of capturing event N is independent of events 1 through N-1. A crash exposes either
+one complete event or no event, and one corrupt event cannot corrupt the rest of the spool.
 
-The evidence lock may be acquired normally by explicit CLI maintenance, but a hook must never wait
-for it. Reconciliation snapshots events while holding the lock, releases it before grouping,
-scoring, Git inspection, or decision-store work, and reacquires it briefly only to checkpoint the
-event IDs it consumed. No whole-repository scan or model call may run under either the evidence
-lock or the decision-store lock as part of this feature.
-
-Start with conservative bounds such as 1,000 events or 2 MiB per repository. Treat these as
-measured implementation constants, not product promises. Add a benchmark before changing them.
+Retention runs during reconciliation or explicit maintenance, never during an editor hook. Start
+with measured bounds of approximately 1,000 pending events, 30 days pending age, and 8 KiB per
+event. Retain held events while their candidate awaits review. After approval, edit, dismissal, or
+ignore, preserve a compact evidence summary and event IDs in decision history, then remove the raw
+held files. If retention drops events, set `.gap` and report the dropped count.
 
 ### A3. Evidence ingestion API
 
@@ -197,15 +201,22 @@ Add internal functions:
 
 ```python
 append_evidence(repo_path: str, event: Mapping) -> EvidenceWriteResult
-list_session_evidence(repo_path: str, session_id: str) -> list[dict]
-compact_evidence(repo_path: str) -> EvidenceCompactionResult
+list_pending_evidence(repo_path: str, session_id: str = "") -> list[EvidenceFile]
+hold_candidate_evidence(repo_path: str, candidate_id: str,
+                        event_ids: Sequence[str]) -> EvidenceMoveResult
+finalize_candidate_evidence(repo_path: str, candidate_id: str,
+                            disposition: str) -> EvidenceCompactionResult
 evidence_diagnostics(repo_path: str) -> dict
 ```
 
 `append_evidence` should be fail-soft for host hooks. A failed evidence write must not break the
-developer's editor operation. A busy lock or failed write leaves a diagnostic marker so loss is
-visible. The result should distinguish `stored`, `dropped_busy`, `dropped_error`, and
-`rejected_invalid` so tests and status reporting do not treat every loss as the same failure.
+developer's editor operation. A failed write leaves `.gap` so loss is visible. The result should
+distinguish `stored`, `dropped_error`, and `rejected_invalid` so tests and status reporting do not
+treat every loss as the same failure.
+
+`append_evidence` writes exactly one file and does not list the spool directory. Reconciliation is
+the only normal reader. Invalid files move to `quarantine/`; one invalid event never makes the
+whole repository evidence history unreadable.
 
 ### A4. Upgrade host adapters
 
@@ -297,10 +308,18 @@ Add a coordinator in `store.py` or a focused facade module that:
 6. maps `retire` and `replace` candidates into the separate `proposed_lifecycle` lane defined in
    C2, never into or through `proposed_revision`;
 7. records candidate-to-event references;
-8. emits a reconciliation receipt.
+8. materializes the candidate before moving its supporting files from `pending/` to
+   `held/<candidate-id>/`;
+9. emits a reconciliation receipt.
 
 Never call a low-level store mutation that bypasses current similarity filtering, revision
 construction, approval invalidation, or capacity limits.
+
+Candidate identity must be deterministic from the candidate kind, target decision ID when any,
+and sorted supporting event IDs. Store the supporting event IDs on the pending candidate. If a
+crash occurs after candidate materialization but before every file moves to `held/`, the next run
+recognizes those event IDs as already referenced, finishes the moves, and does not create a second
+candidate.
 
 ### B4. Session reconciliation surface
 
@@ -318,7 +337,7 @@ The result must distinguish:
 - candidates already pending;
 - duplicates;
 - insufficient groups;
-- evaluation incomplete because a sidecar or diff was unreadable.
+- evaluation incomplete because events, the `.gap` marker, or a diff indicated missing evidence.
 
 Never run it from Stop hooks. Stop fires at every turn end and Contexer deliberately removes its
 old Stop hooks because their latency and token cost added no functional value.
@@ -570,8 +589,12 @@ remote policy-set cursor independently from the local evidence checkpoint.
 
 ### Unit tests
 
-- event validation, redaction, bounds, and serialization;
-- atomic sidecar diagnostics and corruption refusal;
+- event validation, redaction, 8 KiB bound, and serialization;
+- unique filenames, mode `0600`, temporary-write plus atomic-rename behavior;
+- one corrupt event is quarantined without hiding valid siblings;
+- `.gap` diagnostics and retention-overflow reporting;
+- deterministic candidate identity from sorted event IDs;
+- crash recovery when only some supporting files reached `held/<candidate-id>/`;
 - deterministic grouping and scoring;
 - candidate idempotency over repeated reconciliation;
 - candidate classification for new, update, replacement, retirement, duplicate, and insufficient;
@@ -587,7 +610,8 @@ remote policy-set cursor independently from the local evidence checkpoint.
 - Claude, Codex, and Gemini map their write hooks to the same normalized file-change schema;
 - Cursor produces prompt/directive evidence but no Contexer-owned file-change event;
 - a failed hook loses one signal but other signals still produce a candidate;
-- a busy evidence lock returns immediately, drops the event, and leaves a gap diagnostic;
+- concurrent hook writers create independent event files without locking or lost updates;
+- a failed event write returns immediately and leaves a gap diagnostic;
 - SessionEnd, pre-compaction, next-prompt, and next-session recovery are tested per host capability;
 - installers continue removing old Stop hooks rather than restoring them;
 - existing `.pending_capture` behavior remains during migration;
@@ -604,8 +628,8 @@ remote policy-set cursor independently from the local evidence checkpoint.
 
 ### Benchmarks
 
-- evidence append latency under concurrent host events;
-- reconciliation latency at sidecar bounds;
+- per-event atomic spool-write latency under concurrent host events;
+- reconciliation and directory-listing latency at spool bounds;
 - prompt-start overhead remains unchanged because evidence is not loaded there;
 - candidate precision and recall on labeled session fixtures;
 - policy selection and deterministic evaluation under the 500-decision store cap.
@@ -669,7 +693,7 @@ agent instruction.
 ## Suggested pull-request breakdown
 
 1. Event schemas, golden fixtures, and pure validation.
-2. Atomic evidence sidecar, diagnostics, bounds, and compaction.
+2. Atomic per-event JSON spool, diagnostics, bounds, holding, and compaction.
 3. Host adapters in shadow mode with a capability matrix and no Stop hook.
 4. Pure candidate grouping and scoring.
 5. Session reconciliation and existing-review integration.
@@ -700,12 +724,13 @@ working.
 
 | Risk | Mitigation |
 | --- | --- |
-| Evidence becomes a second noisy memory store | Bounded sidecar, compaction, and no prompt injection |
+| Evidence becomes a second noisy memory store | Bounded spool, held-event compaction, and no prompt injection |
 | File edits create false decision candidates | File changes alone remain insufficient |
 | Agent-authored summaries fabricate rationale | Preserve source event references and require review |
 | Candidate scoring looks like truth confidence | Label it aggregation score and render contributing signals |
-| Corrupt evidence blocks development | Hook writes fail soft; diagnostics make loss visible |
-| Evidence hook waits behind long store maintenance | Dedicated non-blocking evidence lock; drop and diagnose contention |
+| Corrupt evidence blocks development | Quarantine one event; hook writes fail soft; diagnostics make loss visible |
+| Evidence hook waits behind store maintenance | Unique per-event files require no decision-store or evidence lock |
+| Per-event files grow without bound | Reconciliation owns age/count retention; hooks never scan to enforce it |
 | Evaluation error becomes accidental allow | Separate verdict from evaluation status |
 | Free-form prose becomes an unsafe local blocker | Block only explicitly armed deterministic checks |
 | Retirement destroys institutional history | Move out of active store but retain tombstone and lifecycle |
@@ -715,7 +740,8 @@ working.
 ## Definition of done
 
 - Missing any single hook cannot erase all evidence that a decision occurred.
-- No evidence hook waits for the decision-store lock or performs expensive reconciliation inline.
+- No evidence hook waits for any shared lock, reads historical evidence, or performs expensive
+  reconciliation inline.
 - Every inferred decision is explainable by stored signal references.
 - No inferred architecture or constraint becomes active without review.
 - Policy evaluation is callable without constructing prompt text.
