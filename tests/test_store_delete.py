@@ -407,7 +407,12 @@ class TestRestore:
 
         after = store.load(tmp_repo)["entries"]
         assert len(after) == 1
-        assert json.dumps(after[0], sort_keys=True) == before
+        # Everything but the lifecycle history round-trips byte-for-byte. The history is the
+        # one thing that deliberately accumulates: a delete and a restore are events, and
+        # rewinding them would leave no record that either ever happened.
+        restored = {k: v for k, v in after[0].items() if k != "lifecycle"}
+        assert json.dumps(restored, sort_keys=True) == before
+        assert [r["kind"] for r in after[0]["lifecycle"]] == ["retired", "restored"]
         assert "deleted_at" not in after[0]
         assert "deleted_by" not in after[0]
         assert store.list_deleted(tmp_repo) == []

@@ -9,11 +9,14 @@ creates is REVIEWABLE by construction:
   ai capture would otherwise get, because `suggested` injects at session start yet never
   appears in `review_pending`: trusted without ever having been offered for review;
 * an update lands as a `proposed_revision` on its target, HEAD unmoved until approval;
-* a retirement or replacement is a READ-ONLY recommendation in the receipt, never a write.
+* a retirement or replacement lands as a `proposed_lifecycle` on its target — a proposal in the
+  separate lifecycle lane, which retires nothing: only an explicit `store.retire_decision` by a
+  human moves a decision out of active context.
 
 The same discipline governs the way back out: a checkpoint is only ever marked `approved`
-against real review evidence (`approved_by == "human"`), never inferred from an entry merely
-having stopped being pending.
+against real review evidence — a human ratification stamp, a revision that actually advanced,
+or the decision having been tombstoned — never inferred from an entry merely having stopped
+being pending.
 
 Above store rather than beside it: `store.py` never imports this module, and store-owned
 helpers are read through the store MODULE OBJECT at call time — the load-order discipline
@@ -37,9 +40,11 @@ from contexer import candidates, evidence, store
 # event from making the next pass look like it has work to do, forever.
 _EVIDENCE_KINDS = candidates.SEED_KINDS | candidates.SUPPORT_KINDS
 
-# Candidate kinds that stay read-only recommendations (the plan's Phase 2 exit gate). Their
-# events stay UNCONSUMED: nothing was decided about them, so a later pass must see them again.
-_RECOMMEND_ONLY = frozenset({"retire", "replace"})
+# Candidate kinds that materialize into the LIFECYCLE lane rather than the content one. Both
+# spell the same transition — "this decision should stop being live" — and `replace` differs
+# only by naming what takes over, which rides along as `replacement_decision_id` (and makes the
+# eventual lifecycle record read "superseded" instead of "retired").
+_LIFECYCLE_KINDS = frozenset({"retire", "replace"})
 
 # The session stamped on a materialized decision when its evidence names none. Real evidence
 # carries the session that produced it, and that is what the entry records — this is only the
@@ -48,9 +53,8 @@ _FALLBACK_SESSION = "reconcile"
 
 
 def _receipt(dry_run: bool) -> dict:
-    return {"events_observed": 0, "proposed": 0, "already_pending": 0, "duplicates": 0,
-            "insufficient": 0, "retire_recommendations": [], "incomplete": False,
-            "dry_run": bool(dry_run)}
+    return {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0, "already_pending": 0,
+            "duplicates": 0, "insufficient": 0, "incomplete": False, "dry_run": bool(dry_run)}
 
 
 def _projected(entry: dict, tombstoned: bool) -> dict:
@@ -67,29 +71,46 @@ def _projected(entry: dict, tombstoned: bool) -> dict:
     }
 
 
-def _dispositions(checkpoints: dict, entries: list) -> dict:
+def _dispositions(checkpoints: dict, entries: list, tombstoned_ids: set) -> dict:
     """The status flips a pending checkpoint has earned since the last pass.
 
     Lazy on purpose: nothing hooks `approve_decision`, so a checkpoint learns its decision's
-    fate the next time reconciliation runs. Two flips, and only two:
+    fate the next time reconciliation runs. Three rules, in the order they are tried:
 
-    * `approved` requires REAL review evidence — `approved_by == "human"`, which only
-      `_apply_approval`'s approve/edit paths stamp. Approval is never INFERRED from the
-      absence of something ("not pending and no proposal" would read an auto-settled or
-      dismissed entry as reviewed, which is the whole failure this pipeline must not have).
-    * `dismissed` when the entry is gone from the live store, or `ignored`.
+    * the entry is GONE from the live store. For a lifecycle checkpoint that is the outcome it
+      proposed, so a tombstoned target reads as `approved`; anything else — an evicted entry, a
+      content checkpoint whose decision was deleted — is `dismissed`, because nothing was
+      reviewed. An `ignored` entry is `dismissed` the same way.
+    * the checkpoint carries a `revision_id`, i.e. it materialized as a PROPOSAL. While that
+      proposal still sits, the review has not happened. Once it is gone the revision answers
+      what became of it: HEAD advanced means the proposal was promoted (approved), HEAD
+      unchanged means it died unapproved (dismissed). Neither reads approval out of absence,
+      which is what previously left every dismissed proposal pinned forever.
+    * otherwise it is a brand-new pending entry, and only a real ratification stamp
+      (`approved_by == "human"`, written by `_apply_approval`'s approve/edit paths) counts —
+      approving one blesses revision 1 IN PLACE, so the revision rule above cannot see it.
 
-    Anything else stays pending — which is also what keeps its evidence pinned against
-    eviction until somebody actually reviews it.
+    Anything else stays pending, which is also what keeps its evidence pinned against eviction
+    until somebody actually reviews it.
     """
     by_id = {str(e.get("id") or ""): e for e in entries}
     flips = {}
     for candidate_id, checkpoint in sorted(checkpoints.items()):
         if checkpoint.get("status") != "pending":
             continue
-        entry = by_id.get(str(checkpoint.get("entry_id") or ""))
-        if entry is None or store.entry_status(entry) == "ignored":
+        entry_id = str(checkpoint.get("entry_id") or "")
+        lifecycle = checkpoint.get("lane") == "lifecycle"
+        entry = by_id.get(entry_id)
+        if entry is None:
+            status = "approved" if lifecycle and entry_id in tombstoned_ids else "dismissed"
+        elif store.entry_status(entry) == "ignored":
             status = "dismissed"
+        elif checkpoint.get("revision_id"):
+            if entry.get("proposed_lifecycle" if lifecycle else "proposed_revision"):
+                continue
+            status = ("approved"
+                      if (entry.get("current_revision_id") or "") != checkpoint["revision_id"]
+                      else "dismissed")
         elif entry.get("approved_by") == "human" and not entry.get("proposed_revision"):
             status = "approved"
         else:
@@ -110,17 +131,30 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # dismissal here would consume the events that would have completed it.
         receipt["insufficient"] += 1
         return
-    if kind in _RECOMMEND_ONLY:
-        # `kind` rides along so the receipt can say REPLACE where a replacement was named:
-        # "retire decision X" and "replace X with Y" are different asks of the developer, and
-        # rendering both as a bare retirement drops the half that says what takes its place.
-        receipt["retire_recommendations"].append({
-            "candidate_id": candidate_id,
-            "kind": kind,
-            "target_decision_id": candidate.get("target_decision_id"),
-            "replacement_decision_id": candidate.get("replacement_decision_id"),
-            "title": candidate.get("title") or "",
-        })
+    if kind in _LIFECYCLE_KINDS:
+        if dry_run:
+            receipt["lifecycle_proposed"] += 1
+            return
+        target = str(candidate.get("target_decision_id") or "")
+        result = store.propose_lifecycle(
+            repo_path, target, "retire",
+            f"inferred from session evidence: {candidate.get('title') or ''}".strip(),
+            source="ai", replacement_id=candidate.get("replacement_decision_id"))
+        if not result["ok"]:
+            # Refused — the target is gone, no longer live, or a developer's own retirement
+            # proposal holds the slot. Nothing awaits review, so the events are settled rather
+            # than re-aggregated into the same refusal on every future pass. Deliberately
+            # uncounted: no receipt line claims a proposal that does not exist, and inventing
+            # a "refused" counter for a case the developer cannot act on would be noise.
+            writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
+                                    "entry_id": target}
+            return
+        receipt["lifecycle_proposed"] += 1
+        # `lane` + `revision_id` are what `_dispositions` reads to tell an approved retirement
+        # (the entry is tombstoned) from a dismissed one, without ever inferring either.
+        writes[candidate_id] = {"event_ids": event_ids, "status": "pending", "entry_id": target,
+                                "lane": "lifecycle",
+                                "revision_id": result["proposal"]["basis_revision_id"]}
         return
     if kind == "duplicate":
         # The store already holds this decision, so there is nothing to review — but the
@@ -177,18 +211,25 @@ def _settle_write_statuses(repo_path: str, writes: dict) -> None:
     checkpoint claiming `pending` over the third would pin its evidence forever waiting on a
     review that will never be asked for. One re-read of the store settles it for the whole
     batch, which is also why this is not done per candidate inside the loop.
+
+    The same read stamps `revision_id` on every checkpoint that DID leave a proposal behind, so
+    a later pass can tell a promoted proposal (HEAD advanced) from a dismissed one (HEAD
+    unchanged) — see `_dispositions`. Lifecycle checkpoints already carry theirs from
+    `store.propose_lifecycle`'s own return and are skipped here.
     """
-    pending_ids = {cid for cid, cp in writes.items() if cp.get("status") == "pending"}
+    pending_ids = {cid for cid, cp in writes.items()
+                   if cp.get("status") == "pending" and cp.get("lane") != "lifecycle"}
     if not pending_ids:
         return
     by_id = {str(e.get("id") or ""): e for e in store.load(repo_path).get("entries", [])
              if isinstance(e, dict)}
     for candidate_id in pending_ids:
-        entry = by_id.get(str(writes[candidate_id].get("entry_id") or ""))
-        awaiting = entry is not None and (entry.get("proposed_revision")
-                                          or store.entry_status(entry) == "pending_approval")
-        if not awaiting:
-            writes[candidate_id]["status"] = "dismissed"
+        checkpoint = writes[candidate_id]
+        entry = by_id.get(str(checkpoint.get("entry_id") or ""))
+        if entry is not None and entry.get("proposed_revision"):
+            checkpoint["revision_id"] = entry.get("current_revision_id") or ""
+        elif entry is None or store.entry_status(entry) != "pending_approval":
+            checkpoint["status"] = "dismissed"
 
 
 def _write_session(event_ids: list, sessions: dict) -> str:
@@ -221,7 +262,8 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
     # more a decision to classify against than a live one is.
     tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
                   if isinstance(e, dict) and e.get("type") == "decision"]
-    flips = {} if dry_run else _dispositions(checkpoints, entries)
+    flips = {} if dry_run else _dispositions(
+        checkpoints, entries, {str(e.get("id") or "") for e in tombstones})
 
     projection = [_projected(e, False) for e in entries if e.get("type") == "decision"]
     projection += [_projected(e, True) for e in tombstones]  # already decision-filtered above
@@ -257,13 +299,13 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
         summary=(f"reconciled {receipt['events_observed']} evidence event(s): "
                  f"{receipt['proposed']} proposed, {receipt['duplicates']} duplicate, "
                  f"{receipt['insufficient']} insufficient, "
-                 f"{len(receipt['retire_recommendations'])} retirement recommendation(s)"),
+                 f"{receipt['lifecycle_proposed']} retirement(s) proposed"),
         attributes={"events_observed": receipt["events_observed"],
                     "proposed": receipt["proposed"],
+                    "lifecycle_proposed": receipt["lifecycle_proposed"],
                     "already_pending": receipt["already_pending"],
                     "duplicates": receipt["duplicates"],
                     "insufficient": receipt["insufficient"],
-                    "retire_recommendations": len(receipt["retire_recommendations"]),
                     "incomplete": receipt["incomplete"]})
     return receipt
 
@@ -274,9 +316,8 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
     `session_id` scopes which events participate (`""` = the whole ledger, which is what a
     worktree-shared sidecar needs). Returns the receipt:
 
-        {"events_observed", "proposed", "already_pending", "duplicates", "insufficient",
-         "retire_recommendations": [{"candidate_id", "target_decision_id", "title"}, ...],
-         "incomplete", "dry_run"}
+        {"events_observed", "proposed", "lifecycle_proposed", "already_pending", "duplicates",
+         "insufficient", "incomplete", "dry_run"}
 
     NEVER raises: every caller is a host hook or a report surface, and a reconciliation that
     could not finish is a receipt marked `incomplete`, never a broken session start.
@@ -298,22 +339,14 @@ def format_receipt(receipt: dict) -> str:
         f"{head}:",
         f"  evidence events observed: {receipt['events_observed']}",
         f"  proposed for review:      {receipt['proposed']}",
+        f"  retirements proposed:     {receipt['lifecycle_proposed']}",
         f"  already pending:          {receipt['already_pending']}",
         f"  duplicates:               {receipt['duplicates']}",
         f"  insufficient evidence:    {receipt['insufficient']}",
     ]
-    for recommendation in receipt["retire_recommendations"]:
-        target = (recommendation.get("target_decision_id") or "")[:8]
-        replacement = (recommendation.get("replacement_decision_id") or "")[:8]
-        if recommendation.get("kind") == "replace":
-            what = f"replacement suggested for {target}"
-            if replacement:
-                what += f" (by {replacement})"
-        else:
-            what = f"retirement suggested for {target}"
-        lines.append(f"  {what}: {recommendation.get('title', '')}")
-    if receipt["retire_recommendations"]:
-        lines.append("  (recommendations only — nothing was retired or replaced.)")
+    if receipt["lifecycle_proposed"]:
+        lines.append("  (proposals only — nothing was retired. `contexer review` shows each "
+                     "one; retiring is an explicit `contexer retire <id>`.)")
     if receipt["incomplete"]:
         lines.append("  incomplete: the evidence ledger could not be fully read or updated.")
     return "\n".join(lines)
