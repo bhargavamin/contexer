@@ -300,6 +300,9 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
     (its `entry_id`, lane, revision id). It is what makes a held dir self-describing, which is
     what lets `run_retention` tell an unsettled candidate from an orphaned one.
     """
+    # Shape-checked BEFORE the try, so a bad id is a raised caller bug rather than one more
+    # soft error line — everything inside the try is I/O, which is what degrades.
+    _checked_id(candidate_id, "candidate_id")
     ids = [_checked_id(event_id, "event_id") for event_id in event_ids]
     result = {"status": "ok", "moved": 0, "already_held": 0, "missing": [], "errors": []}
     try:
@@ -317,7 +320,7 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
                 continue
             os.replace(source, held / source.name)
             result["moved"] += 1
-    except OSError as exc:              # a report, not a traceback: the caller is a pass
+    except (OSError, TypeError, ValueError) as exc:   # incl. an unserializable `meta`
         result["status"] = "error"
         result["errors"].append(f"{type(exc).__name__}: {exc}")
     return result
@@ -353,7 +356,11 @@ def finalize_candidate_evidence(repo_path: str, candidate_id: str, disposition: 
                          f"got {disposition!r}")
     held = _held_dir(repo_path, candidate_id)
     event_ids = []
-    for path in _event_files(held):
+    try:
+        held_files = _event_files(held)
+    except OSError:                     # unreadable: settle anyway, with what is known
+        held_files = []
+    for path in held_files:
         match = _EVENT_ID_IN_NAME.search(path.name)
         if match:
             event_ids.append(match.group(1))
