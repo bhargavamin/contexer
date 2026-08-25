@@ -80,7 +80,12 @@ _MAX_PATH_CHARS = 300
 # 2 MiB: a diff or file this size is already past what any deterministic scan is useful on,
 # and the cap is what keeps one request bounded in memory. An oversized artifact is an ERROR,
 # never a truncation — judging half a diff would report "clean" about bytes nobody read.
-_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+#
+# The one PUBLIC bound, because it is the one with a second reader: a caller reading an
+# artifact off disk (`contexer policy evaluate --diff-file`) has to stop before the bytes are
+# in memory, so it cannot wait for validation here to tell it. It reads this constant rather
+# than restating the number — two spellings of one bound drift, and the drift is silent.
+MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 
 _KEYS = frozenset({"intent", "operation", "files", "artifact", "repo_key"})
 _ARTIFACT_KEYS = frozenset({"kind", "content"})
@@ -137,8 +142,8 @@ def _normalized_artifact(request: Mapping, errors: list[str]) -> dict | None:
         errors.append("artifact.content must be a string")
         return None
     size = len(content.encode("utf-8"))
-    if size > _MAX_ARTIFACT_BYTES:
-        errors.append(f"artifact.content exceeds {_MAX_ARTIFACT_BYTES} bytes ({size})")
+    if size > MAX_ARTIFACT_BYTES:
+        errors.append(f"artifact.content exceeds {MAX_ARTIFACT_BYTES} bytes ({size})")
     return {"kind": kind, "content": content}
 
 

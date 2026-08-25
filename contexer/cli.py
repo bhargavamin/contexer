@@ -44,6 +44,11 @@ Commands:
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook - see below).
+  policy        Report what your approved decisions say about one operation:
+                 policy evaluate --operation commit --diff-file <path|-> [--intent TEXT]
+                 [--file PATH ...] [--json] [--exit-code]. A REPORTER, not a gate: even a
+                 `block` verdict exits 0 unless you opt in with --exit-code. Only an adapter
+                 inside the system performing the operation ever enforces anything.
   scope-audit   Read-only: find decisions saved into the wrong repo's store (a session
                 whose decisions are split across two or more stores). Changes nothing.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -1519,6 +1524,118 @@ def _cli_repo() -> str:
     return store.git_root(os.getcwd()) or store.resolve_repo("")
 
 
+_POLICY_USAGE = ("Usage: contexer policy evaluate --operation <op> [--diff-file PATH|-] "
+                 "[--intent TEXT] [--file PATH ...] [--json] [--exit-code]")
+
+
+def _policy_fail(message: str) -> None:
+    print(f"{message}\n{_POLICY_USAGE}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _read_diff_artifact(path: str) -> tuple[str, list]:
+    """`(content, gaps)` for `--diff-file` — `-` reads stdin.
+
+    Exactly one side is meaningful. A gap is a `policy.UNCHECKED_REASONS` row naming why the
+    bytes could not be handed over, and the caller must then evaluate with NO artifact: an
+    unreadable file passed along as empty content is a policy set judged clean about bytes
+    nobody read, which is the `_staged_content` lesson the guard already paid for.
+
+    The read is bounded at `policy.MAX_ARTIFACT_BYTES + 1` rather than slurping the file and
+    letting validation object afterwards — the point of a cap is to not have the bytes in
+    memory. One byte over is enough to know, and reuses the evaluator's own constant rather
+    than restating the number."""
+    from contexer import policy
+
+    cap = policy.MAX_ARTIFACT_BYTES
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read(cap + 1)
+        else:
+            with open(path, "rb") as handle:
+                raw = handle.read(cap + 1)
+    except OSError:
+        return "", [{"reason": "unreadable", "file": path}]
+    if len(raw) > cap:
+        return "", [{"reason": "too-large", "file": path}]
+    try:
+        return raw.decode("utf-8"), []
+    except UnicodeDecodeError:
+        return "", [{"reason": "binary", "file": path}]
+
+
+def _policy_evaluate(rest: list) -> None:
+    """`contexer policy evaluate` — report what the approved decisions say about one
+    operation. A REPORTER: `--exit-code` is the only way a `block` verdict changes the exit
+    status, because nothing this command does enforces anything."""
+    from contexer import policy_api
+
+    operation = intent = diff_file = ""
+    files: list = []
+    as_json = want_exit_code = False
+    valued = {"--operation", "--diff-file", "--intent", "--file"}
+
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--exit-code":
+            want_exit_code = True
+        elif arg in valued:
+            if i + 1 >= len(rest):
+                _policy_fail(f"contexer policy evaluate: {arg} needs a value.")
+            value = rest[i + 1]
+            i += 1
+            if arg == "--operation":
+                operation = value
+            elif arg == "--diff-file":
+                diff_file = value
+            elif arg == "--intent":
+                intent = value
+            else:
+                files.append(value)
+        else:
+            _policy_fail(f"contexer policy evaluate: unknown argument: {arg}")
+        i += 1
+
+    gaps: list = []
+    content = ""
+    if diff_file:
+        content, gaps = _read_diff_artifact(diff_file)
+
+    result = policy_api.evaluate_operation(
+        _cli_repo(), intent=intent, operation=operation, files=files,
+        # A gap means the artifact was NOT handed over, so no kind is named either — the
+        # armed policies then report `omitted` beside the gap instead of judging "".
+        artifact_kind="diff" if (diff_file and not gaps) else "",
+        artifact=content, unchecked=gaps)
+
+    if result["errors"]:
+        print(policy_api.format_result(result), file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        # Scrubbed at the dump, not in the structure: the `[REDACTED:kind]` placeholder is
+        # plain text inside an already-encoded JSON string, so the document stays valid.
+        from contexer import redact
+        print(redact.scrub_text(json.dumps(result, indent=2, sort_keys=True)))
+    else:
+        print(policy_api.format_result(result, content))
+
+    if want_exit_code and result["verdict"] == "block":
+        sys.exit(1)
+
+
+def policy_cmd(rest: list) -> None:
+    """`contexer policy evaluate ...`. Any other subcommand exits 1 rather than being
+    ignored — the `guard anchors` rule, so a mistyped word can never read as consent to
+    something this command does not do."""
+    if not rest or rest[0] != "evaluate":
+        _policy_fail(f"Unknown policy subcommand: {' '.join(rest) or '(none)'}")
+    _policy_evaluate(rest[1:])
+
+
 def scope_audit_cmd(rest: list) -> None:
     """`contexer scope-audit` - report decisions that landed in the wrong repo's store.
 
@@ -2321,6 +2438,8 @@ def main() -> None:
         _run_guarded(lambda: logout_cmd(rest))
     elif cmd == "guard":
         guard(rest)
+    elif cmd == "policy":
+        _run_guarded(lambda: policy_cmd(rest))
     elif cmd == "scope-audit":
         _run_guarded(lambda: scope_audit_cmd(rest))
     elif cmd == "reconcile-session":
