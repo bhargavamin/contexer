@@ -1483,9 +1483,18 @@ def _print_guard_unchecked(unchecked: list) -> None:
 
 def _guard_gap_names(rows: list, key: str, width: int | None = None) -> str:
     """`a.py (too-large), b.py (budget), +2 more` — capped at _GUARD_UNCHECKED_SHOWN.
-    `width` clips the name (decision ids render at 8 chars everywhere else)."""
+    `width` clips the name (decision ids render at 8 chars everywhere else).
+
+    A row missing its name renders as the reason alone. Only a malformed row can get here,
+    but the caller's partition is an ELSE bucket — a file row whose `file` is empty falls
+    into the rule line — and `str(None)` would print a literal `None (too-large)` there."""
+    def _one(row) -> str:
+        label = str(row.get(key) or "")[:width]
+        reason = f"({row.get('reason')})"
+        return f"{label} {reason}" if label else reason
+
     shown = rows[:_GUARD_UNCHECKED_SHOWN]
-    names = ", ".join(f"{str(u.get(key))[:width]} ({u.get('reason')})" for u in shown)
+    names = ", ".join(_one(u) for u in shown)
     return names + (f", +{len(rows) - len(shown)} more" if len(rows) > len(shown) else "")
 
 
