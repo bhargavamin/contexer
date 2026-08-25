@@ -84,9 +84,34 @@ _WIRE_SOURCE_FILES_MAX_LEN = 300
 #     mixes conventions (`decisionId` camelCase beside `source_files` snake_case), so the name
 #     is not derivable from the ones already on the wire.
 # Getting the second one wrong is not a failed test, it is a permanently stuck outbox row — so
-# the names below (`lifecycle`, `revision_id`) are UNVERIFIED and this constant keeps them off
-# the wire until someone confirms them the way `_WIRE_SOURCE_FILES` was confirmed. Everything
-# else in the negotiation is live: discovery parses, the projection bounds, the outbox carries.
+# everything this gate covers is UNVERIFIED and stays off the wire. Everything else in the
+# negotiation is live: discovery parses, the projection bounds, the outbox carries.
+#
+# PRE-FLIP CHECKLIST — all five, in order, before this becomes True. Stated in full here rather
+# than as "confirm it the way `_WIRE_SOURCE_FILES` was confirmed", because this gate covers a
+# strictly BIGGER set of unknowns than that one did (three guessed names and two closed
+# vocabularies, against one name there) and a maintainer who greps `_WIRE_LIFECYCLE` must be
+# able to decide safely from this comment alone:
+#   1. The record-list field name. Guessed `lifecycle` (see `_wire_args`), by analogy with
+#      `source_files`, the most recently added field.
+#   2. The revision-identity field name. Guessed `revision_id` — and this is the WEAKEST of the
+#      three, because the counter-evidence is in this very file: `asubmit_team_decision` spells
+#      the same conceptual field `"revisionId"` (grep it, ~line 665). If only one name gets
+#      confirmed, confirm this one.
+#   3. The record's OWN key names: `event_id` / `kind` / `occurred_at` / `actor` / `reason` /
+#      `revision_id` / `replacement_decision_id` (see `bound_lifecycle`), guessed by mirroring
+#      the local `lifecycle.lifecycle_record` shape.
+#   4. Both CLOSED VOCABULARIES against the server's real enums — `_WIRE_LIFECYCLE_KINDS` and
+#      `_WIRE_LIFECYCLE_ACTORS`. A value the server's enum rejects is a -32602 exactly like a
+#      bad field name; `source="plan"` was a rejected VALUE, not a rejected key.
+#   5. The server's own `INPUT_LIMITS` for event count, reason length and id length. The
+#      numbers below were invented by analogy with `INPUT_LIMITS.sourceFiles` (10 x 300) and
+#      match nothing anyone has read.
+# Then repeat the identical live validation `source_files` got: same client, same decision,
+# pushed with this gate off and then on against a real endpoint, confirming no -32602 on EITHER
+# the singular `push_decision` or the batch `push_decisions`, and that the data actually lands
+# and renders rather than storing NULL.
+#
 # Flipping this is a one-line change, and deliberately NOT a config toggle — a toggle can be
 # flipped on against a server that rejects the field, which is the failure mode itself.
 _WIRE_LIFECYCLE = False
@@ -249,8 +274,13 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
             args["source_files"] = bounded
     if _WIRE_LIFECYCLE and lifecycle_caps is not None:
         if lifecycle_caps.revisions and revision_id:
+            # UNVERIFIED spelling, and the weakest of the three guesses: `asubmit_team_decision`
+            # below spells the same conceptual field `"revisionId"` (camelCase) at its own tool
+            # top level, so this could as easily be that. Item 2 of the `_WIRE_LIFECYCLE`
+            # pre-flip checklist — confirm this one first.
             args["revision_id"] = revision_id
         if lifecycle_caps.tombstones and lifecycle:
+            # UNVERIFIED spelling — item 1 of the `_WIRE_LIFECYCLE` pre-flip checklist.
             events = bound_lifecycle(lifecycle, reasons=lifecycle_caps.retirement_reasons,
                                      redact_on=scrub)
             if events:   # an all-unknown-kind list omits the key, never sends []
