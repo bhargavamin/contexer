@@ -1,5 +1,6 @@
 """Tests for the contexer CLI management commands: version, status, reinstall,
 uninstall --purge, help, and the main() dispatch."""
+import io
 import json
 import os
 import subprocess
@@ -1883,3 +1884,163 @@ class TestReviewOneViewAccuracy:
         monkeypatch.setattr("builtins.input", lambda *_a: "S")
         cli.review()
         assert "shared repo pointer" not in capsys.readouterr().out
+
+
+class TestPolicyEvaluateCommand:
+    """`contexer policy evaluate` — a REPORTER over the policy plane.
+
+    Two properties are the whole command. It never changes an exit code on its own judgement
+    (only an adapter inside the system performing an operation enforces anything, so a
+    developer must opt in with --exit-code), and an artifact it could not hand over is
+    REPORTED, never turned into a clean-looking pass.
+    """
+
+    def _armed(self, tmp_repo, monkeypatch, *, check="regex", **kw):
+        from tests.test_policy_api import _arm, _seed
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        entry = _seed(tmp_repo, "Never commit TODO markers", title="No TODOs")
+        _arm(tmp_repo, entry["id"], check, **kw)
+        return entry
+
+    def _diff(self, tmp_path, text="+ # TODO fix this\n"):
+        path = tmp_path / "change.diff"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_block_verdict_still_exits_zero_by_default(self, tmp_repo, tmp_path,
+                                                       monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", self._diff(tmp_path))
+        out = capsys.readouterr().out
+        assert "verdict: block" in out and "No TODOs" in out
+
+    def test_exit_code_opt_in_turns_a_block_into_exit_1(self, tmp_repo, tmp_path,
+                                                        monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                      "--diff-file", self._diff(tmp_path), "--exit-code")
+        assert exc.value.code == 1
+        assert "verdict: block" in capsys.readouterr().out
+
+    def test_exit_code_leaves_a_clean_run_at_zero(self, tmp_repo, tmp_path,
+                                                  monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--exit-code", "--diff-file", self._diff(tmp_path, "+ all fine\n"))
+        assert "verdict: allow" in capsys.readouterr().out
+
+    def test_diff_from_stdin(self, tmp_repo, monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        monkeypatch.setattr(cli.sys, "stdin",
+                            type("S", (), {"buffer": io.BytesIO(b"+ # TODO fix\n")})())
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", "-")
+        assert "verdict: block" in capsys.readouterr().out
+
+    def test_over_cap_diff_is_reported_unchecked_not_passed_clean(self, tmp_repo, tmp_path,
+                                                                  monkeypatch, capsys):
+        """The `_staged_content` lesson: an artifact the command could not hand over must
+        never read as one that was checked and found nothing."""
+        from contexer import policy
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        huge = tmp_path / "huge.diff"
+        huge.write_bytes(b"TODO\n" + b"x" * policy.MAX_ARTIFACT_BYTES)
+
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", str(huge))
+        out = capsys.readouterr().out
+        assert "too-large" in out and "NOT judged" in out
+        # The armed rule is reported as unjudged too, and the run says so.
+        assert "evaluation_status: partial" in out
+        assert "omitted" in out
+
+    def test_unreadable_diff_is_reported_not_passed_clean(self, tmp_repo, tmp_path,
+                                                          monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", str(tmp_path / "nope.diff"))
+        assert "unreadable" in capsys.readouterr().out
+
+    def test_binary_diff_is_reported_not_passed_clean(self, tmp_repo, tmp_path,
+                                                      monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        binary = tmp_path / "b.diff"
+        binary.write_bytes(b"\xff\xfe\x00binary")
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", str(binary))
+        assert "binary" in capsys.readouterr().out
+
+    def test_json_emits_the_structured_result(self, tmp_repo, tmp_path, monkeypatch, capsys):
+        from contexer import policy_api
+        entry = self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        diff = self._diff(tmp_path)
+
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", diff, "--json")
+        emitted = json.loads(capsys.readouterr().out)
+        direct = policy_api.evaluate_operation(tmp_repo, operation="commit",
+                                               artifact_kind="diff",
+                                               artifact=Path(diff).read_text())
+        assert emitted == direct
+        assert emitted["matches"][0]["decision_id"] == entry["id"]
+
+    def test_a_secret_in_the_diff_never_reaches_the_output(self, tmp_repo, tmp_path,
+                                                           monkeypatch, capsys):
+        """Egress-only redaction, both halves: the secret check fires on the real bytes, and
+        the key itself is gone from what is printed."""
+        from tests.test_policy_api import AWS_KEY
+        self._armed(tmp_repo, monkeypatch, check="secret")
+        diff = self._diff(tmp_path, f"+AWS_ACCESS_KEY_ID={AWS_KEY}\n")
+
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", diff)
+        out = capsys.readouterr().out
+        assert "verdict: block" in out
+        assert AWS_KEY not in out
+
+    def test_a_secret_never_reaches_the_json_output_either(self, tmp_repo, tmp_path,
+                                                           monkeypatch, capsys):
+        from tests.test_policy_api import AWS_KEY
+        self._armed(tmp_repo, monkeypatch, check="secret",
+                    message=f"rotate {AWS_KEY} before committing")
+        diff = self._diff(tmp_path, f"+key={AWS_KEY}\n")
+
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", diff, "--json")
+        out = capsys.readouterr().out
+        assert AWS_KEY not in out
+        assert json.loads(out)["verdict"] == "block"   # still valid JSON after scrubbing
+
+    def test_unknown_argument_exits_1_instead_of_running(self, tmp_repo, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit", "--fix")
+        assert exc.value.code == 1
+        assert "unknown argument" in capsys.readouterr().err
+
+    def test_unknown_subcommand_exits_1(self, tmp_repo, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "enforce")
+        assert exc.value.code == 1
+        assert "Unknown policy subcommand" in capsys.readouterr().err
+
+    def test_a_flag_missing_its_value_exits_1(self, tmp_repo, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation")
+        assert exc.value.code == 1
+        assert "needs a value" in capsys.readouterr().err
+
+    def test_a_malformed_request_exits_1_with_the_errors(self, tmp_repo, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation", "rm-rf")
+        assert exc.value.code == 1
+        assert "operation must be one of" in capsys.readouterr().err
+
+    def test_help_states_that_it_reports_rather_than_enforces(self, monkeypatch, capsys):
+        _run_main(monkeypatch, "help")
+        out = capsys.readouterr().out
+        assert "policy evaluate" in out and "--exit-code" in out
+        assert "REPORTER" in out

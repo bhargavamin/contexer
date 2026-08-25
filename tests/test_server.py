@@ -526,3 +526,79 @@ def test_update_context_bounces_a_multi_section_document(tmp_repo, monkeypatch):
     out = server.update_context(content=blob)
     assert "multi-section document" in out
     assert store.load(tmp_repo)["entries"] == []      # nothing written
+
+
+# ── evaluate_policy ──────────────────────────────────────────────────────────────
+# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing — a `block` is a
+# sentence for the model to relay to the developer, not a refusal, and an `allow` is not
+# permission to stop asking them.
+
+
+def _armed_secret_rule(tmp_repo):
+    from tests.test_policy_api import _arm, _seed
+    entry = _seed(tmp_repo, "Never commit credentials", title="No secrets")
+    _arm(tmp_repo, entry["id"], "secret")
+    return entry
+
+
+def test_evaluate_policy_reports_a_block_as_text_and_refuses_nothing(tmp_repo, monkeypatch):
+    from tests.test_policy_api import AWS_KEY
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    entry = _armed_secret_rule(tmp_repo)
+    before = store.load(tmp_repo)
+
+    out = server.evaluate_policy(tmp_repo, operation="commit", artifact_kind="diff",
+                                 artifact=f"+key={AWS_KEY}\n")
+
+    assert isinstance(out, str) and "verdict: block" in out
+    assert entry["id"] in out                       # names which decision objected
+    assert store.load(tmp_repo) == before           # a read tool: nothing written
+
+
+def test_evaluate_policy_redacts_the_artifact_out_of_what_it_returns(tmp_repo, monkeypatch):
+    from tests.test_policy_api import AWS_KEY
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    _armed_secret_rule(tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="commit", artifact_kind="diff",
+                                 artifact=f"+AWS_ACCESS_KEY_ID={AWS_KEY}\n")
+    assert "verdict: block" in out and AWS_KEY not in out
+
+
+def test_evaluate_policy_returns_errors_instead_of_raising(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="rm-rf")
+    assert "Not evaluated" in out and "operation must be one of" in out
+
+
+def test_evaluate_policy_reports_gaps_rather_than_a_clean_pass(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    _armed_secret_rule(tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="commit")   # no artifact at all
+    assert "evaluation_status: partial" in out and "omitted" in out
+
+
+def test_evaluate_policy_delegates_to_the_shared_facade(tmp_repo, monkeypatch):
+    # The tool must stay a wrapper: no policy logic of its own, no second selection path.
+    seen = {}
+
+    def fake(repo_path, **kw):
+        seen["repo_path"] = repo_path
+        seen.update(kw)
+        return {"verdict": "allow", "evaluation_status": "complete", "basis": "deterministic",
+                "matches": [], "unchecked": [], "policy_set_version": "sha256:x",
+                "repo_path": repo_path, "errors": []}
+
+    monkeypatch.setattr(server.policy_api, "evaluate_operation", fake)
+    server.evaluate_policy("/repo/x", intent="ship it", operation="deploy",
+                           files=["a.py"], artifact_kind="deployment", artifact="plan")
+    assert seen == {"repo_path": "/repo/x", "intent": "ship it", "operation": "deploy",
+                    "files": ["a.py"], "artifact_kind": "deployment", "artifact": "plan"}
+
+
+def test_evaluate_policy_docstring_is_self_approval_proofed():
+    """The one guardrail a tool docstring can carry: the model must not read `block` as a
+    refusal it should obey silently, nor `allow` as the developer's agreement."""
+    doc = server.evaluate_policy.__doc__
+    assert "ADVISORY" in doc
+    assert "does not refuse" in doc
+    assert "not permission" in doc
