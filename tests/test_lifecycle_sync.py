@@ -425,6 +425,28 @@ def test_a_row_queued_before_discovery_drains_under_current_knowledge(tmp_repo, 
     assert seen["pushes"][0]["decisions"][0]["lifecycle"][0]["kind"] == "retired"
 
 
+def test_the_queued_row_is_already_bounded_and_scrubbed(tmp_repo):
+    # The projection half of the two-layer bound: the durable outbox must hold exactly what a
+    # drain will send, not the raw on-disk record. `_wire_args` bounds again as the guarantee,
+    # but a row that sat in the outbox with an unscrubbed secret in it was already a leak of a
+    # different kind — the outbox is a file, and it outlives the push.
+    did = _seed(tmp_repo)
+    data = store.load(tmp_repo)
+    entry = next(e for e in data["entries"] if e["id"] == did)
+    entry["lifecycle"] = [{"event_id": f"ev-{i}", "kind": "retired", "actor": "human",
+                           "occurred_at": "2026-08-01T00:00:00+00:00",
+                           "reason": "rotated AKIAIOSFODNN7EXAMPLE " + "x" * 900,
+                           "session_id": "SESSIONLEAK"} for i in range(40)]
+    store.save(tmp_repo, data)
+    share._enqueue(share._payload(store.get_shareable(tmp_repo, did), "github.com/a/b"))
+
+    events = share._load_outbox()[0]["lifecycle"]
+    assert len(events) == remote._WIRE_LIFECYCLE_MAX_EVENTS
+    assert len(events[0]["reason"]) == remote._WIRE_LIFECYCLE_MAX_REASON
+    assert "AKIAIOSFODNN7EXAMPLE" not in repr(events)
+    assert "SESSIONLEAK" not in repr(events)
+
+
 def test_the_same_queued_row_stays_legacy_against_an_old_server(tmp_repo, monkeypatch):
     did = _seed(tmp_repo)
     store.approve_decision(tmp_repo, did, "approve")
