@@ -849,13 +849,17 @@ def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
     for rule in rules:
         if not _rule_selects(rule, path):
             continue
-        lines, reason = policy.rule_matches(rule.get("guard_check") or {}, content)
-        if reason is not None:
+        gc = rule.get("guard_check") or {}
+        lines, reason = policy.rule_matches(gc, content)
+        if reason is not None or not lines:
+            # A rule that could not run, or one that ran clean: either way nothing to shape,
+            # and the clean case is the common one, so the title derivation below (which
+            # resolves the entry's current revision) never runs on it.
             continue
         title = rule.get("title") or revisions.derive_title(revisions.current_content(rule))
+        message = gc.get("message") or ""
         out.extend({"path": path, "line": lineno, "decision_id": rule.get("id", ""),
-                    "title": title, "message": (rule.get("guard_check") or {}).get("message") or ""}
-                   for lineno in lines)
+                    "title": title, "message": message} for lineno in lines)
     return out
 
 

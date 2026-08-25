@@ -501,10 +501,19 @@ class TestRuleMatches:
         assert policy.rule_matches(rule, "# TODO fix\n")[0] == [1]
         assert policy.rule_matches({**rule, "flags": ""}, "# TODO fix\n")[0] == []
 
-    def test_an_unparseable_pattern_is_unchecked_not_clean(self):
+    @pytest.mark.parametrize("pattern", ["([oops", None, 7])
+    def test_an_unparseable_pattern_is_unchecked_not_clean(self, pattern):
         # Defensive — `validate_check` refuses one at arm time — but a store is a JSON file a
-        # human can edit, and a rule that silently never fires is the worst of both worlds.
-        assert policy.rule_matches({"type": "regex", "pattern": "([oops"}, "x") == ([], "bad-pattern")
+        # human can edit, and a rule that silently never fires is the worst of both worlds. A
+        # JSON `null` is the non-string case: letting its TypeError escape would take down the
+        # caller's whole run over one corrupt rule.
+        rule = {"type": "regex", "pattern": pattern}
+        assert policy.rule_matches(rule, "x") == ([], "bad-pattern")
+
+    def test_an_absent_pattern_keeps_the_guard_s_long_standing_match_everything(self):
+        # Not a design choice being made here, just one being preserved: `validate_check` is
+        # what stops an empty rule being armed, and this reads a rule that got past it.
+        assert policy.rule_matches({"type": "regex"}, "a\nb\n") == ([1, 2], None)
 
     def test_an_unknown_check_type_is_unchecked_not_clean(self):
         assert policy.rule_matches({"type": "vibes"}, "x") == ([], "unsupported-check")
