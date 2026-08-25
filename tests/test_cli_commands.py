@@ -1939,6 +1939,19 @@ class TestPolicyEvaluateCommand:
                   "--diff-file", "-")
         assert "verdict: block" in capsys.readouterr().out
 
+    def test_stdin_on_a_terminal_is_refused_rather_than_blocking(self, tmp_repo, monkeypatch,
+                                                                 capsys):
+        """`read()` on a TTY blocks with no prompt and no output until the developer works out
+        that the command is waiting on them. Refusing and naming both spellings is the
+        `guard anchors` precedent: a read-only-sounding invocation never silently hangs."""
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        monkeypatch.setattr(cli.sys, "stdin", type("S", (), {"isatty": lambda self: True})())
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                      "--diff-file", "-")
+        assert exc.value.code == 1
+        assert "stdin is a terminal" in capsys.readouterr().err
+
     def test_over_cap_diff_is_reported_unchecked_not_passed_clean(self, tmp_repo, tmp_path,
                                                                   monkeypatch, capsys):
         """The `_staged_content` lesson: an artifact the command could not hand over must
