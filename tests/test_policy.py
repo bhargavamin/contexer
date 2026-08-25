@@ -57,6 +57,13 @@ def _diff(content):
     return {"kind": "diff", "content": content}
 
 
+def _broken(did="d1"):
+    """A selected policy whose `rule` is not a mapping at all — the shape a hand-corrupted
+    store produces, and the one thing that makes the evaluator break mid-set."""
+    return {"decision_id": did, "revision_id": "r1", "kind": "armed", "title": "",
+            "rule": "not a mapping", "matched_files": []}
+
+
 def _request(**over):
     base = {"operation": "commit", "files": [], "repo_key": "/repo"}
     base.update(over)
@@ -659,20 +666,57 @@ class TestEvaluatePolicies:
         with pytest.raises(ValueError, match="reason must be one of"):
             policy.evaluate_policies([], _request(), unchecked=[{"reason": "too_large"}])
 
+    @pytest.mark.parametrize("row", ["big.bin", None, ["big.bin", "unreadable"]])
+    def test_a_malformed_gap_row_raises_rather_than_vanishing(self, row):
+        # Dropping it would silently turn the caller's bug into a clean verdict: they reported
+        # a gap and the result would say `complete`. Same answer as a typo'd reason gets.
+        with pytest.raises(ValueError, match="must be a mapping"):
+            policy.evaluate_policies([], _request(), unchecked=[row])
+
+    def test_one_malformed_row_raises_even_beside_well_formed_ones(self):
+        with pytest.raises(ValueError, match="must be a mapping"):
+            policy.evaluate_policies([], _request(),
+                                     unchecked=[{"reason": "binary", "file": "a.png"}, "oops"])
+
     def test_an_internal_failure_is_an_error_and_is_never_laundered_into_complete(self):
         # A rule that is not a mapping at all: the evaluator breaks rather than guessing.
-        broken = [{"decision_id": "d1", "revision_id": "r1", "kind": "armed",
-                   "title": "", "rule": "not a mapping", "matched_files": []}]
-        result = policy.evaluate_policies(broken, _request(artifact=_diff("x")))
+        result = policy.evaluate_policies([_broken("d1")], _request(artifact=_diff("x")))
         assert result["evaluation_status"] == "error"
 
     def test_an_error_keeps_the_matches_already_found_rather_than_allowing(self):
         good = policy.select_policies([_entry("d1", guard_check=_armed(pattern="TODO"))],
                                       _request())
-        broken = [{"decision_id": "d2", "revision_id": "r2", "kind": "armed",
-                   "title": "", "rule": "not a mapping", "matched_files": []}]
+        broken = [_broken("d2")]
         result = policy.evaluate_policies(good + broken, _request(artifact=_diff("# TODO\n")))
         assert result["evaluation_status"] == "error" and result["verdict"] == "block"
+
+    def test_an_error_lists_the_policy_it_broke_on_and_every_one_after_it(self):
+        # `error` says only THAT the run broke. Without these rows a caller reading `unchecked`
+        # to learn what it got no answer about sees an empty list — a gap reading as clean.
+        after = policy.select_policies([_entry("d3", guard_check=_armed(pattern="TODO"))],
+                                       _request())
+        result = policy.evaluate_policies([_broken("d2")] + after,
+                                          _request(artifact=_diff("# TODO\n")))
+        assert result["evaluation_status"] == "error"
+        assert result["unchecked"] == [{"reason": "evaluator-error", "decision_id": "d2"},
+                                       {"reason": "evaluator-error", "decision_id": "d3"}]
+        # d3 never ran, so its rule never matched: it is listed as unjudged, not as clean.
+        assert result["matches"] == []
+
+    def test_the_policies_judged_before_the_break_are_not_listed_as_unreached(self):
+        good = policy.select_policies([_entry("d1", guard_check=_armed(pattern="nope"))],
+                                      _request())
+        result = policy.evaluate_policies(good + [_broken("d2")], _request(artifact=_diff("x")))
+        assert [r["decision_id"] for r in result["unchecked"]] == ["d2"]
+
+    def test_a_caller_s_own_gaps_survive_alongside_the_unreached_ones(self):
+        result = policy.evaluate_policies([_broken("d2")], _request(artifact=_diff("x")),
+                                          unchecked=[{"reason": "binary", "file": "a.png"}])
+        assert result["unchecked"] == [{"reason": "binary", "file": "a.png"},
+                                       {"reason": "evaluator-error", "decision_id": "d2"}]
+
+    def test_evaluator_error_is_in_the_vocabulary_rather_than_overloading_another_reason(self):
+        assert "evaluator-error" in policy.UNCHECKED_REASONS
 
     def test_junk_in_the_policy_list_is_skipped_not_raised_on(self):
         assert policy.evaluate_policies(["nonsense", None], _request())["verdict"] == "allow"

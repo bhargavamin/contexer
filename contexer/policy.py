@@ -48,10 +48,17 @@ CHECK_TYPES = frozenset({"regex", "secret"})
 # all; `truncated`/`unreadable`/`binary`/`too-large`/`budget` are the CALLER's reasons for
 # handing over bytes it could not supply (the guard's `_staged_content` vocabulary, kept
 # spelling-for-spelling so one token means one thing on both sides of the boundary);
-# `bad-pattern` and `unsupported-check` are the evaluator's own. Every one of them means a
-# check that DID NOT HAPPEN, which must never read as a check that found nothing.
+# `bad-pattern`, `unsupported-check` and `evaluator-error` are the evaluator's own. Every one
+# of them means a check that DID NOT HAPPEN, which must never read as a check that found
+# nothing.
+#
+# `evaluator-error` is the one that is not about the artifact at all: the evaluator itself
+# broke partway through the set, so the policy it was on and every one after it were never
+# reached. It exists rather than being folded into an existing reason because `error` in the
+# status says only THAT the run broke, and a caller reading `unchecked` to learn what it did
+# not get an answer about would otherwise see an empty list beside it.
 UNCHECKED_REASONS = ("omitted", "truncated", "unreadable", "binary", "too-large", "budget",
-                     "bad-pattern", "unsupported-check")
+                     "bad-pattern", "unsupported-check", "evaluator-error")
 
 # The most severe verdict each kind of policy may reach. An armed rule is machine-checked, so
 # it may block; advisory prose can only ever warn, because nothing here can machine-check a
@@ -414,6 +421,22 @@ def _unchecked(reason: str, **fields) -> dict:
     return {"reason": _checked(reason, UNCHECKED_REASONS, "reason"), **fields}
 
 
+def _caller_gap(row) -> dict:
+    """One gap the CALLER reported, validated rather than filtered.
+
+    A row that is not a mapping is a bug in the caller, and dropping it silently would turn
+    that bug into a false clean verdict — the same defect this whole list exists to prevent,
+    and inconsistent with the typo'd reason beside it, which raises. So this raises too.
+    """
+    if not isinstance(row, Mapping):
+        raise ValueError(f"an unchecked row must be a mapping, got {type(row).__name__}")
+    return _unchecked(row.get("reason"), **{k: v for k, v in row.items() if k != "reason"})
+
+
+def _decision_id(applicable) -> str:
+    return str(applicable.get("decision_id") or "") if isinstance(applicable, Mapping) else ""
+
+
 def evaluate_policies(policies: list, request: Mapping, unchecked: list | None = None) -> dict:
     """Judge every selected policy against one request's artifact. Pure: no filesystem, no
     subprocess, no store, no git, no clock.
@@ -423,28 +446,36 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
     on applicability alone — there is nothing further to check about a sentence.
 
     `unchecked` is the caller's list of artifacts it could not hand over (see
-    `UNCHECKED_REASONS`); rows it supplies are validated and passed through beside the
-    evaluator's own. An armed policy facing a request with NO artifact is `omitted` rather
-    than passing — that is the whole discipline the guard learned the hard way, where an
-    unreadable staged file read as a clean result.
+    `UNCHECKED_REASONS`); rows it supplies are validated — a malformed one RAISES, exactly as
+    a typo'd reason does, because swallowing a caller's broken gap report would convert their
+    bug into a false clean verdict — and passed through beside the evaluator's own. An armed
+    policy facing a request with NO artifact is `omitted` rather than passing: that is the
+    whole discipline the guard learned the hard way, where an unreadable staged file read as
+    a clean result.
 
     Status follows from that list: `complete` when nothing went unjudged, `partial` when
     something did, `error` on an internal failure. An `error` is never converted to `allow`:
     the verdict still reports the matches actually found, and the status still says the
-    evaluation broke. Whether that should fail open or closed is the caller's call — this
-    module owns no budget and no exit behaviour.
+    evaluation broke. On that failure the policy being judged and every one after it are
+    listed as `evaluator-error`, so `unchecked` stays an honest coverage report rather than
+    an empty list beside a broken run. Whether a `partial`/`error` should fail open or closed
+    is the caller's call — this module owns no budget and no exit behaviour.
     """
-    skipped = [_unchecked(r.get("reason"), **{k: v for k, v in r.items() if k != "reason"})
-               for r in (unchecked or []) if isinstance(r, Mapping)]
+    skipped = [_caller_gap(r) for r in (unchecked or [])]
     version = policy_set_version(policies)
     artifact = request.get("artifact") if isinstance(request, Mapping) else None
     # None means "no artifact at all", which is different from an artifact that is legitimately
     # empty: the first cannot be judged, the second was judged and found nothing.
     content = artifact.get("content") or "" if isinstance(artifact, Mapping) else None
     matches: list[dict] = []
+    # Bound before the try so the handler can name what went unreached even if materializing
+    # the list is itself what failed (in which case there is nothing to name, and it says so).
+    pending: list = []
+    reached = 0
 
     try:
-        for applicable in policies or []:
+        pending = list(policies or [])
+        for reached, applicable in enumerate(pending):
             if not isinstance(applicable, Mapping):
                 continue
             if applicable.get("kind") != "armed":
@@ -461,6 +492,10 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
             matches.extend(_match(applicable, "block", line) for line in lines)
     except Exception:
         status = "error"
+        # `reached` is the policy that raised, so the slice starts AT it: it was not judged
+        # either, and a report that skipped it would be the same silent gap one line smaller.
+        skipped.extend(_unchecked("evaluator-error", decision_id=_decision_id(p))
+                       for p in pending[reached:])
     else:
         status = "partial" if skipped else "complete"
 
