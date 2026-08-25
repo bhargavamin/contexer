@@ -33,7 +33,7 @@ CALLER_ROOTS = ("contexer", "benchmarks")
 LEAVES = frozenset({
     "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
-    "evidence", "spool", "candidates", "reconcile", "lifecycle",
+    "evidence", "spool", "candidates", "reconcile", "lifecycle", "policy",
 })
 
 
