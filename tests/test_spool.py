@@ -212,6 +212,21 @@ def test_temp_files_are_never_listed_or_quarantined(tmp_repo):
     assert stray.exists() and spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
 
 
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_an_unreadable_spool_reports_unreadable_not_empty(tmp_repo):
+    """"Nothing spooled" and "could not read the spool" are different facts, and a caller that
+    treats the second as the first re-proposes everything the first would have settled."""
+    spool.append_evidence(tmp_repo, _event())
+    pending = _pending(tmp_repo)
+    pending.chmod(0o000)
+    try:
+        assert spool.evidence_diagnostics(tmp_repo)["readable"] is False
+        assert spool.list_pending_evidence(tmp_repo) == []
+    finally:
+        pending.chmod(0o700)
+
+
 def test_missing_spool_reads_as_empty_and_readable(tmp_repo):
     assert spool.list_pending_evidence(tmp_repo) == []
     diagnostics = spool.evidence_diagnostics(tmp_repo)
@@ -348,11 +363,14 @@ def test_a_file_that_cannot_be_stat_ed_is_kept(tmp_repo, monkeypatch):
     spool.append_evidence(tmp_repo, _event())
     event_file = next(iter(_pending(tmp_repo).iterdir()))
     _age(event_file, spool._MAX_PENDING_AGE_DAYS + 1)
-    real_stat = Path.stat
+    real_stat, seen = Path.stat, set()
 
     def flaky(self, *args, **kwargs):
-        if self.suffix == ".json" and self.parent.name == "pending":
+        # Fail only the AGE read. The listing stats each file once to classify it, and a file
+        # that failed THAT stat would never be listed at all — a different branch entirely.
+        if self.suffix == ".json" and self.parent.name == "pending" and self in seen:
             raise OSError("no stat")
+        seen.add(self)
         return real_stat(self, *args, **kwargs)
 
     with monkeypatch.context() as patched:
@@ -427,6 +445,24 @@ def test_a_held_candidate_with_no_recorded_entry_is_left_alone(tmp_repo):
     candidate = str(uuid.uuid4())
     spool.hold_candidate_evidence(tmp_repo, candidate, _spool_two(tmp_repo))
     assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
+    assert list(spool.held_candidates(tmp_repo)) == [candidate]
+
+
+def test_an_unreadable_store_defers_the_orphan_sweep_rather_than_failing(tmp_repo, monkeypatch):
+    """The sweep asks the store who is still live and takes no lock to do it — so a store it
+    cannot read costs one deferred sweep, never a held candidate finalized on a guess."""
+    candidate = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, candidate, _spool_two(tmp_repo),
+                                  meta={"entry_id": "who-knows"})
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("store is gone")
+
+    monkeypatch.setattr(store, "load", unreadable)
+
+    assert spool.run_retention(tmp_repo) == {
+        "dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
+        "finalized_orphans": [], "errors": []}
     assert list(spool.held_candidates(tmp_repo)) == [candidate]
 
 
