@@ -71,6 +71,38 @@ _WIRE_SOURCE_FILES = True
 _WIRE_SOURCE_FILES_MAX_ITEMS = 10
 _WIRE_SOURCE_FILES_MAX_LEN = 300
 
+# GATE (plan E1/E2): the same shape as `_WIRE_SOURCE_FILES` above, and it ships CLOSED for the
+# same reason that one did — `source_files` stayed local until the server had accepted the field
+# and a human had verified it end to end against a live endpoint.
+#
+# Two DIFFERENT risks gate lifecycle egress, and neither one covers the other:
+#   * does this server support it at all — answered at runtime by capability discovery
+#     (`decisionLifecycle`, below). An old server never advertises, so it never receives.
+#   * do we know the field SPELLING the advertising server expects — answered only by a human
+#     who has read the server's schema. Nothing in this repo can answer it: the contexer-teams
+#     push schema is server-controlled and not vendored here, and the existing wire already
+#     mixes conventions (`decisionId` camelCase beside `source_files` snake_case), so the name
+#     is not derivable from the ones already on the wire.
+# Getting the second one wrong is not a failed test, it is a permanently stuck outbox row — so
+# the names below (`lifecycle`, `revision_id`) are UNVERIFIED and this constant keeps them off
+# the wire until someone confirms them the way `_WIRE_SOURCE_FILES` was confirmed. Everything
+# else in the negotiation is live: discovery parses, the projection bounds, the outbox carries.
+# Flipping this is a one-line change, and deliberately NOT a config toggle — a toggle can be
+# flipped on against a server that rejects the field, which is the failure mode itself.
+_WIRE_LIFECYCLE = False
+
+# Wire bounds for the lifecycle record list. `reason` is free human prose (scrubbed, then
+# truncated rather than dropped — dropping the whole record over a long reason would lose the
+# event, and dropping just the reason would lose the why). `kind` and `actor` are CLOSED
+# vocabularies checked against these tuples rather than passed through: an unknown enum value is
+# the `source="plan"` failure in miniature, and an actor is supposed to be a CATEGORY, so an
+# unrecognized one must never egress as free text that could carry a name or an address.
+_WIRE_LIFECYCLE_KINDS = ("retired", "restored", "superseded")
+_WIRE_LIFECYCLE_ACTORS = ("human", "ai", "scan", "plan", "bootstrap", "memory")
+_WIRE_LIFECYCLE_MAX_EVENTS = 20
+_WIRE_LIFECYCLE_MAX_REASON = 300
+_WIRE_LIFECYCLE_MAX_ID = 200
+
 
 def bound_source_files(source_files: list[str]) -> list[str]:
     """Apply the wire bounds above. ONE definition, deliberately called from BOTH layers, the
@@ -87,12 +119,67 @@ def bound_source_files(source_files: list[str]) -> list[str]:
             if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
 
 
+def _bounded_id(value) -> str:
+    """One lifecycle id field, or "" when it is missing or implausibly long. An over-long id is
+    corrupt data rather than a long name, so it is dropped rather than truncated — a truncated
+    id would still LOOK like an id and silently point at nothing."""
+    text = str(value or "")
+    return text if 0 < len(text) <= _WIRE_LIFECYCLE_MAX_ID else ""
+
+
+def bound_lifecycle(records: list, *, reasons: bool = True,
+                    redact_on: bool = False) -> list[dict]:
+    """Project a decision's COMPLETED lifecycle history onto the wire shape, whitelist-first.
+
+    ONE definition called from BOTH layers, the same two-layer shape `bound_source_files` and
+    redaction already have: `store._share_projection` applies it so the durable outbox carries
+    exactly what a later drain will send, and `_wire_args` applies it again as the hard
+    guarantee, because it is the only chokepoint every push funnels through — a row queued
+    before this existed never passed through a projection at all.
+
+    Whitelist-first is the privacy boundary, not tidiness: this builds a NEW dict out of six
+    known keys instead of copying and deleting, so a field added to the local record later (a
+    proposal id, an evidence reference, a session id) cannot egress by default. `reason` is the
+    only free text and it is scrubbed before being measured, since redaction can lengthen a
+    string. `reasons=False` is the `retirementReasons` sub-capability being absent: the events
+    still go, without their prose.
+
+    Only records the local lifecycle actually completes are representable — `proposed_lifecycle`
+    is a different key on the entry and is never read here or anywhere on the wire path."""
+    out: list[dict] = []
+    for rec in records or []:
+        if not isinstance(rec, dict) or rec.get("kind") not in _WIRE_LIFECYCLE_KINDS:
+            continue
+        row: dict = {"kind": rec["kind"]}
+        for key in ("event_id", "revision_id", "replacement_decision_id"):
+            bounded = _bounded_id(rec.get(key))
+            if bounded:
+                row[key] = bounded
+        occurred = _bounded_id(rec.get("occurred_at"))
+        if occurred:
+            row["occurred_at"] = occurred
+        if rec.get("actor") in _WIRE_LIFECYCLE_ACTORS:
+            row["actor"] = rec["actor"]
+        if reasons:
+            reason = str(rec.get("reason") or "")
+            if redact_on:
+                reason = redact.scrub_text(reason)
+            if reason:
+                row["reason"] = reason[:_WIRE_LIFECYCLE_MAX_REASON]
+        out.append(row)
+    # The MOST RECENT events, not the first: a decision with a long history is most usefully
+    # described by how it ended, and the oldest records are the ones a reader can live without.
+    return out[-_WIRE_LIFECYCLE_MAX_EVENTS:]
+
+
 def _wire_args(*, type: str, content: str, repo: str | None = None,
                rationale: str | None = None, agent: str | None = None,
                confidence: int | None = None, evidence: list[str] | None = None,
                source: str | None = None, decision_id: str | None = None,
                title: str | None = None, source_files: list[str] | None = None,
-               redact_on: bool | None = None) -> dict:
+               redact_on: bool | None = None, revision_id: str | None = None,
+               lifecycle: list | None = None,
+               lifecycle_caps: "DecisionLifecycleCapabilities | None" = None) -> dict:
     """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
     reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
     wire-serialization, shared by apush_decision (one) and apush_decisions (batch).
@@ -114,7 +201,18 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     where bounding at each capture site would be a promise several writers have to keep.
 
     `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
-    config.toml per row); None means resolve it here for a lone call."""
+    config.toml per row); None means resolve it here for a lone call.
+
+    `revision_id` and `lifecycle` (plan E1/E2) egress only when BOTH the `_WIRE_LIFECYCLE`
+    constant above is open AND `lifecycle_caps` says this server advertised the matching
+    sub-capability, and each sub-capability is honoured on its own — `tombstones` without
+    `retirementReasons` sends the events with their prose stripped. Like `source_files`, the
+    decision is made HERE, at call time, never captured by a caller: `lifecycle_caps` is
+    resolved by the pushing store immediately before the call, so an outbox row queued before
+    this client had ever spoken to the server drains under whatever is known AT DRAIN TIME, in
+    both directions. `lifecycle_caps=None` means "not supported / not discovered / discovery
+    failed", and all three land in the same place, which is the old shape — an unknown server
+    is an old server."""
     scrub = _redaction_enabled() if redact_on is None else redact_on
     if scrub:
         content = redact.scrub_text(content)
@@ -151,6 +249,14 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
         bounded = bound_source_files(source_files)
         if bounded:
             args["source_files"] = bounded
+    if _WIRE_LIFECYCLE and lifecycle_caps is not None:
+        if lifecycle_caps.revisions and revision_id:
+            args["revision_id"] = revision_id
+        if lifecycle_caps.tombstones and lifecycle:
+            events = bound_lifecycle(lifecycle, reasons=lifecycle_caps.retirement_reasons,
+                                     redact_on=scrub)
+            if events:   # an all-unknown-kind list omits the key, never sends []
+                args["lifecycle"] = events
     return args
 
 
@@ -168,6 +274,14 @@ def _reconciliation_wire_body(*, type: str, content: str, repo: str | None = Non
         type=type, content=content, repo=repo, rationale=rationale, agent=agent,
         confidence=confidence, evidence=evidence, source=source, title=title,
         source_files=source_files, redact_on=redact_on)
+
+
+def _caps_version(raw: dict) -> int:
+    """A capability block's advertised version, 0 when it is missing or unparseable."""
+    try:
+        return int(raw.get("version", 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 class RemoteStoreError(Exception):
@@ -266,8 +380,27 @@ class DecisionReconciliationCapabilities:
 
 
 @dataclass(frozen=True)
+class DecisionLifecycleCapabilities:
+    """What an advertising server accepts of a decision's lifecycle (plan E1).
+
+    The three flags are INDEPENDENT and are read independently at the wire: `revisions` gates
+    the immutable revision identity, `tombstones` gates the completed lifecycle records, and
+    `retirementReasons` gates only the human prose inside those records. Treating the block as
+    all-or-nothing would mean a server that accepts events but not reasons receives neither,
+    which is strictly less than it asked for."""
+
+    version: int
+    revisions: bool
+    tombstones: bool
+    retirement_reasons: bool
+
+
+@dataclass(frozen=True)
 class ServerCapabilities:
     decision_reconciliation: DecisionReconciliationCapabilities | None
+    # Defaulted so every existing construction site (tests, share.py's fallbacks) keeps working
+    # and lands on "not advertised" — which is the same place discovery failure lands.
+    decision_lifecycle: DecisionLifecycleCapabilities | None = None
 
 
 @dataclass(frozen=True)
@@ -301,6 +434,9 @@ class TeamSubmissionResult:
     team: RemoteTeam
 
 
+_UNDISCOVERED = object()   # "we have not asked this server yet", as opposed to "it said no"
+
+
 class RemoteStore:
     """MCP client to the Teams sync endpoint. Construct directly or via ``from_profile``."""
 
@@ -312,6 +448,9 @@ class RemoteStore:
         # Carried only when built via from_profile - the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
+        # Distinct from None, which is a REAL answer here ("this server does not do lifecycle").
+        # Without the sentinel a not-advertising server would be re-probed on every push.
+        self._lifecycle_caps: "DecisionLifecycleCapabilities | None | object" = _UNDISCOVERED
 
     @classmethod
     def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
@@ -349,12 +488,17 @@ class RemoteStore:
                              confidence: int | None = None, evidence: list[str] | None = None,
                              source: str | None = None, decision_id: str | None = None,
                              title: str | None = None,
-                             source_files: list[str] | None = None) -> str:
+                             source_files: list[str] | None = None,
+                             revision_id: str | None = None,
+                             lifecycle: list | None = None) -> str:
         """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
+        caps = await self._alifecycle_caps(
+            [{"lifecycle": lifecycle, "revision_id": revision_id}])
         result = await self._ainvoke("push_decision", _wire_args(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title, source_files=source_files, redact_on=self._redact_on()))
+            title=title, source_files=source_files, redact_on=self._redact_on(),
+            revision_id=revision_id, lifecycle=lifecycle, lifecycle_caps=caps))
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
@@ -373,9 +517,11 @@ class RemoteStore:
         skipped, never sinking the batch. Raises RemoteStoreError if the response omits a submitted
         decisionId - an unconfirmed row must not be treated as done, so it stays queued."""
         redact_on = self._redact_on()  # resolved once for the whole batch (honors this store's profile)
+        caps = await self._alifecycle_caps(kwargs_list)  # one discovery for the whole batch
         result = await self._ainvoke(
             "push_decisions",
-            {"decisions": [_wire_args(**kw, redact_on=redact_on) for kw in kwargs_list]})
+            {"decisions": [_wire_args(**kw, redact_on=redact_on, lifecycle_caps=caps)
+                           for kw in kwargs_list]})
         structured = getattr(result, "structuredContent", None) or {}
         results = structured.get("results") or []
         skipped_rows = structured.get("skipped") or []
@@ -439,22 +585,55 @@ class RemoteStore:
         ]
 
     async def aget_capabilities(self) -> ServerCapabilities:
-        """Discover optional server protocols before creating durable operations."""
+        """Discover optional server protocols before creating durable operations.
+
+        Each block is parsed independently: a server advertising one and not the other must not
+        lose the one it does advertise. An absent or non-dict block is None — never a
+        default-True shape, since an unknown server is an old server."""
         result = await self._ainvoke("get_capabilities", {})
         structured = getattr(result, "structuredContent", None) or {}
-        raw = (structured.get("capabilities") or {}).get("decisionReconciliation")
-        if not isinstance(raw, dict):
-            return ServerCapabilities(decision_reconciliation=None)
-        try:
-            version = int(raw.get("version", 0))
-        except (TypeError, ValueError):
-            version = 0
-        return ServerCapabilities(decision_reconciliation=DecisionReconciliationCapabilities(
-            version=version,
-            atomic_submit=raw.get("atomicSubmit") is True,
-            preview=raw.get("preview") is True,
-            three_way_merge=raw.get("threeWayMerge") is True,
-        ))
+        advertised = structured.get("capabilities") or {}
+        raw = advertised.get("decisionReconciliation")
+        reconciliation = None
+        if isinstance(raw, dict):
+            reconciliation = DecisionReconciliationCapabilities(
+                version=_caps_version(raw),
+                atomic_submit=raw.get("atomicSubmit") is True,
+                preview=raw.get("preview") is True,
+                three_way_merge=raw.get("threeWayMerge") is True,
+            )
+        raw = advertised.get("decisionLifecycle")
+        lifecycle = None
+        if isinstance(raw, dict):
+            lifecycle = DecisionLifecycleCapabilities(
+                version=_caps_version(raw),
+                revisions=raw.get("revisions") is True,
+                tombstones=raw.get("tombstones") is True,
+                retirement_reasons=raw.get("retirementReasons") is True,
+            )
+        return ServerCapabilities(decision_reconciliation=reconciliation,
+                                  decision_lifecycle=lifecycle)
+
+    async def _alifecycle_caps(self, rows: list[dict]) -> DecisionLifecycleCapabilities | None:
+        """The lifecycle capability governing THIS push, discovered lazily and memoized.
+
+        Discovery costs a round trip, so it is skipped entirely unless a row actually carries
+        something the capability would gate — the overwhelmingly common push (a live decision
+        with no lifecycle history) stays exactly as cheap as it was, and with the gate constant
+        closed nothing here ever runs at all.
+
+        Any failure — an old server with no `get_capabilities` tool, a timeout, a rejected
+        token — resolves to None, i.e. the old shape. That direction is the whole rule: a push
+        must never be upgraded by a discovery attempt that did not actually succeed."""
+        if not _WIRE_LIFECYCLE or not any(r.get("lifecycle") or r.get("revision_id")
+                                          for r in rows):
+            return None
+        if self._lifecycle_caps is _UNDISCOVERED:
+            try:
+                self._lifecycle_caps = (await self.aget_capabilities()).decision_lifecycle
+            except RemoteStoreError:
+                self._lifecycle_caps = None
+        return self._lifecycle_caps
 
     async def apreview_decision_reconciliation(
             self, decision_id: str, team_id: str, *, type: str, content: str,
@@ -549,7 +728,9 @@ class RemoteStore:
                       confidence: int | None = None, evidence: list[str] | None = None,
                       source: str | None = None, decision_id: str | None = None,
                       title: str | None = None,
-                      source_files: list[str] | None = None) -> str:
+                      source_files: list[str] | None = None,
+                      revision_id: str | None = None,
+                      lifecycle: list | None = None) -> str:
         """Push one local decision to the caller's personal Teams context (sync shim).
 
         Returns the server decision id (best-effort; ``""`` if the response carries none).
@@ -559,7 +740,8 @@ class RemoteStore:
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title, source_files=source_files)))
+            title=title, source_files=source_files, revision_id=revision_id,
+            lifecycle=lifecycle)))
 
     def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
         """Batch-push decisions in ONE call (sync shim over :meth:`apush_decisions`). Off-loop

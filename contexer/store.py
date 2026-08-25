@@ -3180,9 +3180,18 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     # through the same "sending N of M" line that capture-time truncation already uses rather
     # than needing a second notice.
     wire_total = len(source_files)
-    if source_files:
+    lifecycle = entry.get("lifecycle")
+    if source_files or lifecycle:
         from contexer import remote
-        source_files = remote.bound_source_files(source_files)
+        source_files = remote.bound_source_files(source_files) if source_files else source_files
+        # COMPLETED lifecycle events only (plan E2): `lifecycle` is written solely by
+        # lifecycle.tombstone_entry / restore_decision, i.e. only once a human has actually
+        # retired or restored the decision. `proposed_lifecycle` is a different key, is not read
+        # here, and has no wire parameter at all — an unreviewed retirement stays home. Bounded
+        # and scrubbed at this layer so the durable outbox carries exactly what a later drain
+        # sends; `remote._wire_args` bounds again as the chokepoint guarantee, and decides there
+        # whether the server ever sees it.
+        lifecycle = remote.bound_lifecycle(lifecycle or [], redact_on=bool(redact_on))
     return {
         "id": entry.get("id", ""),
         # Stable local revision identity used by atomic team submission/idempotency. Extra key for
@@ -3204,6 +3213,10 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
         "source_files": source_files,
         "source_files_unconfirmed": unconfirmed,
+        # Reaches the wire subject to remote._WIRE_LIFECYCLE *and* the server having advertised
+        # `decisionLifecycle.tombstones` — see that constant. `[]` for the ordinary decision
+        # that has never been retired or restored, so downstream builders read it uniformly.
+        "lifecycle": lifecycle or [],
         # How many files this decision really governs, when fewer are being sent: either
         # _anchor_sources truncated at capture, or the wire bounds dropped an over-long path
         # just above. Extra key like `redacted`/`status`: read by the preview, never by a
