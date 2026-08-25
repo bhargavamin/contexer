@@ -137,14 +137,19 @@ def _event_files(directory: Path) -> list[Path]:
     Temp files are skipped rather than read (a rename may be in flight) and so is a held
     dir's `candidate.json`. Anything else is INCLUDED even if its name is odd: a listing
     that silently ignored junk would leave it invisible to quarantine and to retention both.
+
+    An ABSENT directory is an empty listing; any other listing failure is raised. The two are
+    not the same fact, and a caller that must tell "nothing spooled" from "could not read the
+    spool" — `evidence_diagnostics` — can only do so if this does not collapse them.
     """
     try:
-        return sorted((p for p in directory.iterdir()
-                       if p.is_file() and p.name != _META_NAME
-                       and not p.name.startswith(_TEMP_PREFIX)),
-                      key=lambda p: p.name)
-    except OSError:
+        entries = list(directory.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
         return []
+    return sorted((p for p in entries
+                   if p.is_file() and p.name != _META_NAME
+                   and not p.name.startswith(_TEMP_PREFIX)),
+                  key=lambda p: p.name)
 
 
 def _write_json(directory: Path, name: str, payload) -> None:
@@ -249,9 +254,17 @@ def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
     Filtered by the event's own `session_id` and never by `repo_key`: a linked worktree
     shares the main worktree's canonical spool while its events carry the physical worktree
     path, so a repo_key filter would hide exactly what reconciliation exists to consume.
+
+    An unreadable spool reads as empty HERE, deliberately: this is the consume path, and it
+    is `evidence_diagnostics(...)["readable"]` — not a silent empty list — that a caller asks
+    before treating "no events" as "nothing happened".
     """
     events = []
-    for path in _event_files(_pending_dir(repo_path)):
+    try:
+        paths = _event_files(_pending_dir(repo_path))
+    except OSError:
+        return []
+    for path in paths:
         event = _read_event(path)
         if event is None:
             _quarantine(repo_path, path)
@@ -405,12 +418,16 @@ def _unlink(path: Path) -> int:
 
 
 def _sweep_events(directory: Path) -> int:
-    """Drop events past the age cap, then past the count cap, oldest first. Returns the count.
+    """Drop events past the age cap, then past the count cap. Returns how many went.
 
-    Age is read from the file's MTIME, never from the timestamp in its own filename: the
+    AGE is read from the file's MTIME, never from the timestamp in its own filename: the
     filename comes from the event's `occurred_at`, which the event itself supplies, and an
     event must not get to decide how long it is kept. A file that cannot be stat-ed is KEPT —
     fail-soft means never dropping evidence over a failure to measure it.
+
+    The COUNT cap evicts in the reader's own order (by filename, i.e. by event time) rather
+    than by mtime: over-capacity is about which events reconciliation would consume first, and
+    an eviction order that disagreed with the listing order would drop from the middle.
     """
     if not directory.is_dir():
         return 0
