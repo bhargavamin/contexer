@@ -2,7 +2,7 @@
 
 Shadow mode means one thing above all: nothing a host already did changes. Every test here
 therefore asserts the hook's pre-existing visible output alongside the new event, and the
-failure cases (the store raising, the ledger unwritable, garbage stdin) assert that output
+failure cases (the store raising, the spool unwritable, garbage stdin) assert that output
 and nothing else.
 
 The other property under test is that the four hosts emit ONE schema rather than four:
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import evidence, store
+from contexer import evidence, spool, store
 from contexer.adapters import claude, codex, cursor, gemini
 
 # The keys that legitimately differ between two hosts observing the same edit.
@@ -39,8 +39,8 @@ class TestFileChangedIsOneSchemaAcrossHosts:
         claude.post_write(tmp_repo, _write_payload(tmp_repo, "s-claude"))
         gemini.after_write(tmp_repo, _write_payload(tmp_repo, "s-gemini"))
 
-        (c,) = evidence.list_session_evidence(tmp_repo, "s-claude")
-        (g,) = evidence.list_session_evidence(tmp_repo, "s-gemini")
+        (c,) = spool.list_pending_evidence(tmp_repo, "s-claude")
+        (g,) = spool.list_pending_evidence(tmp_repo, "s-gemini")
         assert c.keys() == g.keys()
         assert {k: v for k, v in c.items() if k not in _PER_HOST} == \
                {k: v for k, v in g.items() if k not in _PER_HOST}
@@ -52,7 +52,7 @@ class TestFileChangedIsOneSchemaAcrossHosts:
         # Identity agreement: the event carries record_edited_file's OWN return, so an
         # absolute host path and the repo-relative sidecar entry can never disagree.
         claude.post_write(tmp_repo, _write_payload(tmp_repo, "s1"))
-        (event,) = evidence.list_session_evidence(tmp_repo, "s1")
+        (event,) = spool.list_pending_evidence(tmp_repo, "s1")
         assert event["files"] == store._read_edited_files(tmp_repo) == ["src/a.py"]
         assert event["repo_key"] == tmp_repo
 
@@ -62,12 +62,12 @@ class TestFileChangedIsOneSchemaAcrossHosts:
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "../outside.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"
         assert store._read_edited_files(tmp_repo) == []
-        assert evidence.evidence_diagnostics(tmp_repo)["events"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
 
     def test_missing_session_id_still_emits_under_unknown(self, tmp_repo):
         raw = _json.dumps({"tool_input": {"file_path": "a.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"
-        (event,) = evidence.list_session_evidence(tmp_repo, "unknown")
+        (event,) = spool.list_pending_evidence(tmp_repo, "unknown")
         assert event["files"] == ["a.py"]
 
 
@@ -84,7 +84,7 @@ class TestCodexSharesClaudesEntrypoint:
 
     def test_the_shared_entrypoint_emits(self, tmp_repo):
         claude.post_write(tmp_repo, _write_payload(tmp_repo, "codex-session"))
-        (event,) = evidence.list_session_evidence(tmp_repo, "codex-session")
+        (event,) = spool.list_pending_evidence(tmp_repo, "codex-session")
         # Host-neutral source (controller ruling R9): the entrypoint cannot tell which host
         # is calling it, so it must not claim to.
         assert event["source"] == "post_tool_use"
@@ -95,7 +95,7 @@ class TestUserDirectiveEmission:
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         out = _json.loads(claude.capture_constraint(tmp_repo, raw))
         assert "additionalContext" in out["hookSpecificOutput"]        # unchanged ack
-        (event,) = evidence.list_session_evidence(tmp_repo, "s1")
+        (event,) = spool.list_pending_evidence(tmp_repo, "s1")
         assert event["kind"] == "user_directive"
         assert event["source"] == "claude_prompt"
         assert "conventional commits" in event["summary"]
@@ -104,21 +104,21 @@ class TestUserDirectiveEmission:
     def test_plain_prompt_emits_nothing(self, tmp_repo):
         raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"
-        assert evidence.evidence_diagnostics(tmp_repo)["events"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
 
     def test_gemini_prompt_path_emits_with_its_own_source(self, tmp_repo):
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         out = _json.loads(gemini.before_agent(tmp_repo, raw))
         assert "constraint" in out["hookSpecificOutput"]["additionalContext"].lower()
         kinds = [(e["kind"], e["source"])
-                 for e in evidence.list_session_evidence(tmp_repo, "s1")]
+                 for e in spool.list_pending_evidence(tmp_repo, "s1")]
         assert kinds == [("user_directive", "gemini_prompt")]
 
     def test_cursor_emits_user_directive_and_nothing_else(self, tmp_repo):
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1",
                            "workspace_roots": [tmp_repo]})
         assert _json.loads(cursor.capture_constraint("", raw)) == {"continue": True}
-        events = evidence.list_session_evidence(tmp_repo, "s1")
+        events = spool.list_pending_evidence(tmp_repo, "s1")
         assert [(e["kind"], e["source"]) for e in events] == [("user_directive", "cursor_prompt")]
 
     def test_cursor_never_emits_a_file_change(self):
@@ -132,14 +132,14 @@ class TestUserDirectiveEmission:
 
 
 class TestStoreFailureIsRecordedNotSwallowed:
-    """The loss case the ledger exists for: capture raised, so no entry proves the directive
+    """The loss case the spool exists for: capture raised, so no entry proves the directive
     — the event is still written, flagged `unverified`, and the hook behaves exactly as before."""
 
     def test_claude_hook_output_unchanged_and_event_flagged(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "capture_user_constraint", _boom)
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"   # pre-existing: swallowed
-        (event,) = evidence.list_session_evidence(tmp_repo, "s1")
+        (event,) = spool.list_pending_evidence(tmp_repo, "s1")
         assert event["kind"] == "user_directive"
         assert event["attributes"] == {"unverified": True}
         assert store.load(tmp_repo)["entries"] == []               # nothing was stored
@@ -149,17 +149,17 @@ class TestStoreFailureIsRecordedNotSwallowed:
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1",
                            "workspace_roots": [tmp_repo]})
         assert _json.loads(cursor.capture_constraint("", raw)) == {"continue": True}
-        (event,) = evidence.list_session_evidence(tmp_repo, "s1")
+        (event,) = spool.list_pending_evidence(tmp_repo, "s1")
         assert event["attributes"] == {"unverified": True}
 
     def test_a_non_directive_prompt_records_nothing_when_the_store_fails(self, tmp_repo,
                                                                         monkeypatch):
         # Gated on the store's OWN detector: a failure while handling an ordinary prompt is
-        # not evidence of a directive, and guessing would poison the ledger on every crash.
+        # not evidence of a directive, and guessing would poison the spool on every crash.
         monkeypatch.setattr(store, "capture_user_constraint", _boom)
         raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"
-        assert evidence.evidence_diagnostics(tmp_repo)["events"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
 
     def test_a_failing_detector_does_not_mask_the_original_error(self, tmp_repo, monkeypatch):
         # capture_directive re-raises what the store raised; a second failure while RECORDING
@@ -171,35 +171,35 @@ class TestStoreFailureIsRecordedNotSwallowed:
             evidence.capture_directive(tmp_repo, "always squash", "s1", "claude_prompt")
 
 
-class TestLedgerFailureNeverReachesTheHost:
+class TestSpoolFailureNeverReachesTheHost:
     @pytest.fixture(params=["raises", "dropped_error"])
-    def broken_ledger(self, request, monkeypatch):
+    def broken_spool(self, request, monkeypatch):
         if request.param == "raises":
-            monkeypatch.setattr(evidence, "append_evidence", _boom)
+            monkeypatch.setattr(spool, "append_evidence", _boom)
         else:
-            monkeypatch.setattr(evidence, "append_evidence",
+            monkeypatch.setattr(spool, "append_evidence",
                                 lambda *_a, **_k: {"status": "dropped_error", "errors": ["x"]})
         return request.param
 
-    def test_post_write_keeps_both_existing_signals(self, tmp_repo, broken_ledger):
+    def test_post_write_keeps_both_existing_signals(self, tmp_repo, broken_spool):
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"
         assert store._read_edited_files(tmp_repo) == ["a.py"]
         assert (store.STORE_DIR / ".pending_capture").exists()
 
-    def test_gemini_after_write_keeps_its_reminder(self, tmp_repo, broken_ledger):
+    def test_gemini_after_write_keeps_its_reminder(self, tmp_repo, broken_spool):
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
         out = _json.loads(gemini.after_write(tmp_repo, raw))
         assert "update_context" in out["hookSpecificOutput"]["additionalContext"]
         assert store._read_edited_files(tmp_repo) == ["a.py"]
 
-    def test_capture_constraint_still_acks_and_stores(self, tmp_repo, broken_ledger):
+    def test_capture_constraint_still_acks_and_stores(self, tmp_repo, broken_spool):
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         out = _json.loads(claude.capture_constraint(tmp_repo, raw))
         assert "additionalContext" in out["hookSpecificOutput"]
         assert [e["type"] for e in store.load(tmp_repo)["entries"]] == ["decision"]
 
-    def test_cursor_still_passes_the_prompt_through(self, tmp_repo, broken_ledger):
+    def test_cursor_still_passes_the_prompt_through(self, tmp_repo, broken_spool):
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1",
                            "workspace_roots": [tmp_repo]})
         assert _json.loads(cursor.capture_constraint("", raw)) == {"continue": True}
@@ -210,7 +210,7 @@ class TestEmitHookEvent:
         result = evidence.emit_hook_event(tmp_repo, "file_changed", source="post_tool_use",
                                           files=["a.py"])
         assert result["status"] == "stored"
-        (event,) = evidence.list_session_evidence(tmp_repo, "unknown")
+        (event,) = spool.list_pending_evidence(tmp_repo, "unknown")
         assert event["schema_version"] == evidence.SCHEMA_VERSION
         assert event["repo_key"] == tmp_repo
         assert event["occurred_at"].endswith("+00:00")
@@ -223,4 +223,4 @@ class TestEmitHookEvent:
     def test_an_invalid_kind_is_rejected_not_stored(self, tmp_repo):
         result = evidence.emit_hook_event(tmp_repo, "not_a_kind", source="post_tool_use")
         assert result["status"] == "rejected_invalid"
-        assert evidence.evidence_diagnostics(tmp_repo)["events"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
