@@ -170,24 +170,50 @@ def _write_json(directory: Path, name: str, payload) -> None:
 # ── the gap marker ───────────────────────────────────────────────────────────────
 
 def _read_gap(repo_path: str) -> dict | None:
+    """The gap marker, `None` if there has never been one, `{"unreadable": True}` if there is
+    one that cannot be read.
+
+    The three-way answer is the point (ruling R28): `.gap` is a CUMULATIVE loss ledger, not a
+    resettable alarm, so collapsing "no loss ever recorded" into "the record of the loss is
+    damaged" would let a reader report a clean spool over a marker that says otherwise — and
+    would let the next bump restart the count from one. Same degrade-but-report split
+    `store._read_global` carries, and the same one `_event_files` draws for a directory.
+    """
     try:
-        gap = json.loads(_gap_path(repo_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):       # ValueError covers JSON and UnicodeDecodeError both
+        raw = _gap_path(repo_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    return gap if isinstance(gap, dict) else None
+    except OSError:
+        return {"unreadable": True}
+    try:
+        gap = json.loads(raw)
+    except ValueError:                  # covers JSON and UnicodeDecodeError both
+        return {"unreadable": True}
+    return gap if isinstance(gap, dict) else {"unreadable": True}
 
 
 def _bump_gap(repo_path: str, reason: str, drops: int = 1) -> None:
     """Record that `drops` events were lost. Best-effort: failing to record a gap must never
-    be the thing that raises into a host hook."""
+    be the thing that raises into a host hook.
+
+    A DAMAGED marker is never overwritten with a fresh count of one. The drops it recorded are
+    unrecoverable, so the count restarts — but `prior_drops_unknown` is stamped and carried
+    forward for good, which keeps the ledger honest about being a lower bound instead of
+    quietly reporting `drops: 1` over a marker that had said 47.
+    """
     try:
         _ensure_dir(_repo_dir(repo_path))
-        previous = (_read_gap(repo_path) or {}).get("drops")
-        store.atomic_write(_gap_path(repo_path), json.dumps({
-            "drops": (previous if isinstance(previous, int) else 0) + drops,
+        previous = _read_gap(repo_path) or {}
+        count = previous.get("drops")
+        marker = {
+            "drops": (count if isinstance(count, int) and not isinstance(count, bool)
+                      else 0) + drops,
             "last_at": _now().isoformat(),
             "last_reason": reason,
-        }))
+        }
+        if previous.get("unreadable") or previous.get("prior_drops_unknown"):
+            marker["prior_drops_unknown"] = True
+        store.atomic_write(_gap_path(repo_path), json.dumps(marker))
     except (OSError, ValueError, TypeError):
         pass
 
@@ -278,11 +304,21 @@ def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
 # ── hold / finalize (the candidate lifecycle) ────────────────────────────────────
 
 def _read_meta(held: Path) -> dict:
+    """A held candidate's bookkeeping. `{}` when it was never written, `{"unreadable": True}`
+    when it was written and cannot be read — the same three-way split `_read_gap` draws, and
+    for the same reason: neither shape carries an `entry_id`, so the sweep skips both, and
+    only the count in `evidence_diagnostics` tells the developer which one it is."""
     try:
-        meta = json.loads((held / _META_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = (held / _META_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
-    return meta if isinstance(meta, dict) else {}
+    except OSError:
+        return {"unreadable": True}
+    try:
+        meta = json.loads(raw)
+    except ValueError:
+        return {"unreadable": True}
+    return meta if isinstance(meta, dict) else {"unreadable": True}
 
 
 def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
@@ -290,11 +326,17 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
     """Move the named pending events into `held/<candidate-id>/`, so they stop re-aggregating
     while the candidate awaits review.
 
-    `{"status": "ok"|"error", "moved": N, "already_held": N, "missing": [...], "errors": [...]}`.
+    `{"status": "ok"|"error", "moved": N, "already_held": N, "missing": [...], "failed": [...],
+    "errors": [...]}`.
     A source that is already gone while the target exists counts as ALREADY MOVED rather than
     an error: that is exactly the state a crash between two `os.replace` calls leaves, and the
     next run finishing the moves is the recovery. A source gone with no target is REPORTED,
     never raised — the event was evicted or never spooled, and the caller decides.
+
+    Each event is attempted INDEPENDENTLY: a transient failure on one move must not leave the
+    events behind it unattempted, which would silently shrink the batch to whatever preceded
+    the first bad file. A failed id lands in `failed` with its own `errors` line, so a retry
+    knows exactly which events still need moving.
 
     `meta` is written beside the events as `candidate.json`: the candidate's own bookkeeping
     (its `entry_id`, lane, revision id). It is what makes a held dir self-describing, which is
@@ -304,13 +346,21 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
     # soft error line — everything inside the try is I/O, which is what degrades.
     _checked_id(candidate_id, "candidate_id")
     ids = [_checked_id(event_id, "event_id") for event_id in event_ids]
-    result = {"status": "ok", "moved": 0, "already_held": 0, "missing": [], "errors": []}
+    result = {"status": "ok", "moved": 0, "already_held": 0, "missing": [], "failed": [],
+              "errors": []}
     try:
         held = _ensure_dir(_held_dir(repo_path, candidate_id))
         if meta is not None:
             _write_json(held, _META_NAME, dict(meta))
-        pending = _pending_dir(repo_path)
-        for event_id in ids:
+    except (OSError, TypeError, ValueError) as exc:   # incl. an unserializable `meta`
+        # The one failure that IS fatal to the batch: with no destination (or no bookkeeping
+        # to attribute it by) there is nowhere to move anything to.
+        result["status"] = "error"
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+        return result
+    pending = _pending_dir(repo_path)
+    for event_id in ids:
+        try:
             source = next(iter(sorted(pending.glob(f"*-{event_id}.json"))), None)
             if source is None:
                 if next(iter(held.glob(f"*-{event_id}.json")), None) is not None:
@@ -320,9 +370,10 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
                 continue
             os.replace(source, held / source.name)
             result["moved"] += 1
-    except (OSError, TypeError, ValueError) as exc:   # incl. an unserializable `meta`
-        result["status"] = "error"
-        result["errors"].append(f"{type(exc).__name__}: {exc}")
+        except OSError as exc:
+            result["status"] = "error"
+            result["failed"].append(event_id)
+            result["errors"].append(f"{event_id}: {type(exc).__name__}: {exc}")
     return result
 
 
@@ -389,9 +440,15 @@ def evidence_diagnostics(repo_path: str) -> dict:
     `readable` is the honest half: an absent spool reports zeros with `readable=True`, while a
     directory that cannot be listed reports `readable=False` — so a reader is never told "no
     evidence" about a spool that could not be read.
+
+    `held_unattributed` is the same honesty applied to the sweep's blind spot: a held candidate
+    whose `candidate.json` is missing or unreadable records no `entry_id`, so
+    `_sweep_orphan_holds` can never judge it and it is held for good. A caller that forgets to
+    pass `meta` therefore accrues held directories nothing will ever clean up — this counter is
+    what makes that show up in `contexer status` instead of accumulating silently.
     """
-    out = {"pending": 0, "held": 0, "held_events": 0, "quarantine": 0, "bytes": 0,
-           "gap": _read_gap(repo_path), "readable": True}
+    out = {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0, "quarantine": 0,
+           "bytes": 0, "gap": _read_gap(repo_path), "readable": True}
     try:
         for key, directory in (("pending", _pending_dir(repo_path)),
                                ("quarantine", _quarantine_dir(repo_path))):
@@ -409,6 +466,8 @@ def evidence_diagnostics(repo_path: str) -> dict:
                 out["held"] += 1
                 out["held_events"] += len(files)
                 out["bytes"] += _total_bytes(files)
+                if not str(_read_meta(directory).get("entry_id") or ""):
+                    out["held_unattributed"] += 1
     except OSError:
         out["readable"] = False
     return out
@@ -427,30 +486,40 @@ def _unlink(path: Path) -> int:
 def _sweep_events(directory: Path) -> int:
     """Drop events past the age cap, then past the count cap. Returns how many went.
 
-    AGE is read from the file's MTIME, never from the timestamp in its own filename: the
-    filename comes from the event's `occurred_at`, which the event itself supplies, and an
-    event must not get to decide how long it is kept. A file that cannot be stat-ed is KEPT —
-    fail-soft means never dropping evidence over a failure to measure it.
+    BOTH caps measure the file's MTIME, never the timestamp in its own filename: the filename
+    comes from the event's `occurred_at`, which the event itself supplies, so ordering
+    evictions by it would let content decide retention (ruling R29). Concretely, a
+    clock-skewed host emitting `occurred_at: 2030-01-01` would sit permanently at the end of
+    the filename order and outlive every honestly-stamped event beside it, while a backdated
+    one would always be first to go however recently it arrived.
 
-    The COUNT cap evicts in the reader's own order (by filename, i.e. by event time) rather
-    than by mtime: over-capacity is about which events reconciliation would consume first, and
-    an eviction order that disagreed with the listing order would drop from the middle.
+    The trade-off this accepts: eviction order (arrival) and listing order (event time) can
+    disagree, so a full spool can drop from the MIDDLE of what a reader would consume. That is
+    the right way round — listing order is consume ergonomics, retention is about which
+    evidence is genuinely stalest, and only one of the two can be decided by the writer.
+
+    A file that cannot be stat-ed is KEPT by both caps: fail-soft means never dropping
+    evidence over a failure to measure it.
     """
     if not directory.is_dir():
         return 0
     cutoff = time.time() - _MAX_PENDING_AGE_DAYS * 86400
-    dropped, survivors = 0, []
+    dropped, survivors, dated = 0, 0, []
     for path in _event_files(directory):
         try:
-            aged = path.stat().st_mtime < cutoff
+            mtime = path.stat().st_mtime
         except OSError:
-            survivors.append(path)
+            survivors += 1              # unmeasurable, so never a count-cap victim either
             continue
-        if aged:
+        if mtime < cutoff:
             dropped += _unlink(path)
         else:
-            survivors.append(path)
-    for path in survivors[:max(0, len(survivors) - _MAX_PENDING_EVENTS)]:
+            survivors += 1
+            dated.append((mtime, path))
+    # Stable on ties: at identical mtimes the spool genuinely cannot tell which arrived first,
+    # and it falls back to the listing order rather than inventing a distinction.
+    for _mtime, path in sorted(dated, key=lambda item: item[0])[:max(0, survivors
+                                                                     - _MAX_PENDING_EVENTS)]:
         dropped += _unlink(path)
     return dropped
 

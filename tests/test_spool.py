@@ -16,6 +16,7 @@ The properties asserted here are the ones the design is FOR, not incidental beha
 import json
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -125,6 +126,34 @@ def test_unwritable_spool_records_a_gap(tmp_repo):
         pending.chmod(0o700)
 
 
+def test_the_gap_counter_accumulates_across_drops(tmp_repo):
+    spool._bump_gap(tmp_repo, "write_error")
+    spool._bump_gap(tmp_repo, "retention", 46)
+    gap = spool.evidence_diagnostics(tmp_repo)["gap"]
+    assert gap["drops"] == 47 and "prior_drops_unknown" not in gap
+
+
+def test_a_damaged_gap_marker_reports_unreadable_rather_than_no_loss(tmp_repo):
+    spool._bump_gap(tmp_repo, "retention", 47)
+    spool._gap_path(tmp_repo).write_text("{ truncated", encoding="utf-8")
+    assert spool.evidence_diagnostics(tmp_repo)["gap"] == {"unreadable": True}
+
+
+def test_a_damaged_gap_marker_is_never_rewritten_as_a_fresh_count_of_one(tmp_repo):
+    """`.gap` is a cumulative loss ledger, not a resettable alarm: the 47 drops are gone, but
+    the fact that an unknown number preceded this one must survive every later bump."""
+    spool._bump_gap(tmp_repo, "retention", 47)
+    spool._gap_path(tmp_repo).write_text("{ truncated", encoding="utf-8")
+
+    spool._bump_gap(tmp_repo, "write_error")
+    gap = spool.evidence_diagnostics(tmp_repo)["gap"]
+    assert gap["drops"] == 1 and gap["prior_drops_unknown"] is True
+
+    spool._bump_gap(tmp_repo, "write_error")
+    carried = spool.evidence_diagnostics(tmp_repo)["gap"]
+    assert carried["drops"] == 2 and carried["prior_drops_unknown"] is True
+
+
 def test_two_concurrent_writers_both_land(tmp_repo):
     """No lock anywhere, so this is the property that replaces the old busy-lock behaviour:
     unique filenames mean there is nothing to serialize and nothing to lose."""
@@ -230,8 +259,8 @@ def test_an_unreadable_spool_reports_unreadable_not_empty(tmp_repo):
 def test_missing_spool_reads_as_empty_and_readable(tmp_repo):
     assert spool.list_pending_evidence(tmp_repo) == []
     diagnostics = spool.evidence_diagnostics(tmp_repo)
-    assert diagnostics == {"pending": 0, "held": 0, "held_events": 0, "quarantine": 0,
-                           "bytes": 0, "gap": None, "readable": True}
+    assert diagnostics == {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
+                           "quarantine": 0, "bytes": 0, "gap": None, "readable": True}
 
 
 # ── hold / finalize ──────────────────────────────────────────────────────────────
@@ -251,7 +280,7 @@ def test_hold_moves_events_out_of_pending(tmp_repo):
                                            meta={"entry_id": "abc123", "lane": "content"})
 
     assert result == {"status": "ok", "moved": 2, "already_held": 0, "missing": [],
-                      "errors": []}
+                      "failed": [], "errors": []}
     assert spool.list_pending_evidence(tmp_repo) == []
     assert spool.held_candidates(tmp_repo) == {candidate: {"entry_id": "abc123",
                                                            "lane": "content"}}
@@ -276,6 +305,28 @@ def test_hold_reports_a_missing_event_instead_of_raising(tmp_repo):
     candidate, ghost = str(uuid.uuid4()), str(uuid.uuid4())
     result = spool.hold_candidate_evidence(tmp_repo, candidate, [ghost])
     assert result["missing"] == [ghost] and result["status"] == "ok"
+
+
+def test_one_failed_move_does_not_abandon_the_rest_of_the_batch(tmp_repo, monkeypatch):
+    """A transient failure on one event must not leave the events behind it unattempted — that
+    would silently shrink the batch to whatever preceded the first bad file."""
+    ids = [_event()["event_id"] for _ in range(3)]
+    for event_id in ids:
+        spool.append_evidence(tmp_repo, _event(event_id=event_id))
+    candidate = str(uuid.uuid4())
+    real_replace = os.replace
+
+    def second_move_fails(src, dst, *args, **kwargs):
+        if ids[1] in str(src):
+            raise OSError("transient")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(spool.os, "replace", second_move_fails)
+    result = spool.hold_candidate_evidence(tmp_repo, candidate, ids)
+
+    assert result["moved"] == 2 and result["failed"] == [ids[1]]
+    assert result["status"] == "error" and ids[1] in result["errors"][0]
+    assert [e["event_id"] for e in spool.list_pending_evidence(tmp_repo)] == [ids[1]]
 
 
 def test_hold_reports_an_unserializable_meta_instead_of_raising(tmp_repo):
@@ -339,6 +390,40 @@ def test_retention_drops_past_the_count_cap_oldest_first(tmp_repo, monkeypatch):
     assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["day 3", "day 2"]
     gap = spool.evidence_diagnostics(tmp_repo)["gap"]
     assert gap["drops"] == 2 and gap["last_reason"] == "retention"
+
+
+def test_the_count_cap_evicts_by_arrival_not_by_the_events_own_stamp(tmp_repo, monkeypatch):
+    """Ruling R29: content must not decide retention. The event that ARRIVED first goes, even
+    though its own `occurred_at` puts it last in the listing — a clock-skewed or hand-written
+    `2030` stamp would otherwise outlive every honestly-stamped event beside it."""
+    monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1)
+    spool.append_evidence(tmp_repo, _event(occurred_at="2030-01-01T00:00:00+00:00",
+                                           summary="arrived first, stamped last"))
+    spool.append_evidence(tmp_repo, _event(occurred_at="2020-01-01T00:00:00+00:00",
+                                           summary="arrived second, stamped first"))
+    by_stamp = sorted(_pending(tmp_repo).iterdir(), key=lambda p: p.name)
+    for path, offset in zip(by_stamp, (1.0, 2.0)):     # 2020 file arrived LAST
+        os.utime(path, (time.time() - offset, time.time() - offset))
+
+    assert spool.run_retention(tmp_repo)["dropped_pending"] == 1
+    assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == \
+        ["arrived second, stamped first"]
+
+
+def test_identical_mtimes_fall_back_to_listing_order(tmp_repo, monkeypatch):
+    """The documented residual: at the same mtime the spool cannot tell which event arrived
+    first, so it evicts in listing order rather than inventing a distinction. Pinned so the
+    fallback is a decision somebody made, not a surprise."""
+    monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1)
+    spool.append_evidence(tmp_repo, _event(occurred_at=_ago(9), summary="listed first"))
+    spool.append_evidence(tmp_repo, _event(occurred_at=_ago(1), summary="listed second"))
+    stamped = time.time()
+    for path in _pending(tmp_repo).iterdir():
+        os.utime(path, (stamped, stamped))
+
+    spool.run_retention(tmp_repo)
+
+    assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["listed second"]
 
 
 def test_retention_drops_past_the_age_cap(tmp_repo):
@@ -445,13 +530,33 @@ def test_a_held_candidate_whose_decision_is_gone_is_finalized(tmp_repo):
     assert list(spool.held_candidates(tmp_repo)) == [live]
 
 
-def test_a_held_candidate_with_no_recorded_entry_is_left_alone(tmp_repo):
-    """Held is exempt while unsettled, and a candidate naming no entry cannot be judged — so
-    it is left rather than guessed at."""
+def test_a_held_candidate_with_no_recorded_entry_is_left_alone_but_counted(tmp_repo):
+    """Held is exempt while unsettled, and a candidate naming no entry cannot be judged — so it
+    is left rather than guessed at. It is also held FOREVER, since no sweep can ever reach it,
+    which is why `contexer status` has to be able to see it accruing."""
     candidate = str(uuid.uuid4())
     spool.hold_candidate_evidence(tmp_repo, candidate, _spool_two(tmp_repo))
     assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
     assert list(spool.held_candidates(tmp_repo)) == [candidate]
+    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+
+
+def test_a_corrupt_candidate_meta_counts_as_unattributed_and_says_so(tmp_repo):
+    candidate = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, candidate, _spool_two(tmp_repo),
+                                  meta={"entry_id": "e1"})
+    (spool._held_dir(tmp_repo, candidate) / spool._META_NAME).write_text("{ nope",
+                                                                        encoding="utf-8")
+
+    assert spool.held_candidates(tmp_repo) == {candidate: {"unreadable": True}}
+    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+    assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
+
+
+def test_an_attributed_held_candidate_is_not_counted_as_unattributed(tmp_repo):
+    spool.hold_candidate_evidence(tmp_repo, str(uuid.uuid4()), _spool_two(tmp_repo),
+                                  meta={"entry_id": "e1"})
+    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 0
 
 
 def test_an_unreadable_store_defers_the_orphan_sweep_rather_than_failing(tmp_repo, monkeypatch):
