@@ -327,6 +327,9 @@ class TestRetireCandidate:
         assert checkpoint["status"] == "pending"      # pending => its events stay pinned
         assert checkpoint["lane"] == "lifecycle"
         assert checkpoint["entry_id"] == entry_id
+        # No revision is recorded: a revision advance is not an approval signal for this lane
+        # (ruling R25), so storing one would only invite a reader to use it.
+        assert "revision_id" not in checkpoint
         assert _unconsumed(tmp_repo) == []
         second = reconcile.reconcile_session(tmp_repo)
         assert (second["lifecycle_proposed"], second["proposed"]) == (0, 0)
@@ -355,6 +358,70 @@ class TestRetireCandidate:
         assert lifecycle.dismiss_lifecycle(tmp_repo, entry_id)[0]
         reconcile.reconcile_session(tmp_repo)
         assert _checkpoints(tmp_repo) == {}
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "dismissed"
+
+    def test_an_unrelated_edit_never_records_a_retirement_that_did_not_happen(self, tmp_repo):
+        # Ruling R25. Retirement is a MOVE, so the revision test that settles a CONTENT proposal
+        # is unsound here: HEAD advancing says a revision landed, not that anything was retired.
+        # Reading it as approval would fabricate exactly the outcome this pipeline measures.
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+
+        # The developer has not answered the retirement — they edited the decision's wording.
+        store.edit_decision(tmp_repo, entry_id, content=f"{STORED} Pooling is tuned per service.")
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["proposed_lifecycle"]                        # still awaiting an answer
+        assert entry["current_revision_id"]                       # ...on a HEAD that moved
+
+        reconcile.reconcile_session(tmp_repo)
+        (checkpoint,) = _checkpoints(tmp_repo).values()
+        assert checkpoint["status"] == "pending"
+        assert [e["kind"] for e in evidence.unconsumed_events(tmp_repo)
+                if e["kind"] == "candidate_disposition"] == []
+
+    def test_a_dismissal_after_an_unrelated_edit_is_still_a_dismissal(self, tmp_repo):
+        # The other half of R25: once the proposal is gone from a still-LIVE decision it died
+        # unapproved, whatever its revisions did in the meantime.
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+        store.edit_decision(tmp_repo, entry_id, content=f"{STORED} Pooling is tuned per service.")
+        assert lifecycle.dismiss_lifecycle(tmp_repo, entry_id)[0]
+
+        reconcile.reconcile_session(tmp_repo)
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "dismissed"
+
+    def test_an_ignored_target_is_dismissed_not_read_as_a_retirement(self, tmp_repo):
+        # `approve_decision(action="ignore")` leaves the decision in the LIVE store with status
+        # ignored — it writes no tombstone and no lifecycle record, so it is not a retirement.
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+        assert store.approve_decision(tmp_repo, entry_id, "ignore")[0]
+        assert store.list_deleted(tmp_repo) == []
+
+        reconcile.reconcile_session(tmp_repo)
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "dismissed"
+
+    def test_a_tombstone_with_no_retirement_record_is_not_an_approval(self, tmp_repo):
+        # A tombstone written before lifecycle history existed records nothing about WHY the
+        # decision left, so the record — not the file — is what `_retired_ids` reads.
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+        assert lifecycle.retire_decision(tmp_repo, entry_id, "gone")[0]
+        graveyard = store.load_deleted(tmp_repo)
+        graveyard["entries"][0].pop("lifecycle")          # a legacy-shaped tombstone
+        store._save_deleted(tmp_repo, graveyard)
+
+        reconcile.reconcile_session(tmp_repo)
         (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
                           if e["kind"] == "candidate_disposition"]
         assert disposition["attributes"]["candidate_status"] == "dismissed"
