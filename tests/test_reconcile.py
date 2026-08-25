@@ -70,6 +70,14 @@ def _pending(repo):
             if e["kind"] in (candidates.SEED_KINDS | candidates.SUPPORT_KINDS)]
 
 
+def _receipts(repo):
+    """The reconciliation log's lines — where a pass's receipt goes now that it is kept out of
+    the evidence spool (ruling R34)."""
+    path = store.STORE_DIR / f".reconcile_{store.repo_slug(repo)}.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()] if path.exists() else []
+
+
 # The stored decision the update/retire/duplicate candidates below are measured against.
 # Token overlap (|A∩B| / |smaller| over retrieval.index_tokens) is what classifies them, so the
 # four texts are pinned by an explicit overlap assertion in the first test of each class rather
@@ -162,8 +170,10 @@ class TestEndToEnd:
         assert summary["candidate_id"] == candidate_id
         assert summary["disposition"] == "approved"
         assert sorted(summary["event_ids"]) == sorted(meta["event_ids"])
-        assert [e["kind"] for e in spool.list_pending_evidence(tmp_repo)] \
-            == ["session_reconcile", "session_reconcile"]
+        # The spool is EMPTY: raw evidence gone with the hold, and the two passes' receipts
+        # logged out of band rather than spooled (ruling R34).
+        assert spool.list_pending_evidence(tmp_repo) == []
+        assert len(_receipts(tmp_repo)) == 2
 
     def test_evidence_summary_is_additive_and_leaves_old_stores_readable(self, tmp_repo):
         """The only store-schema change this pipeline makes. A decision written before the key
@@ -645,6 +655,29 @@ class TestIdempotency:
             == held_files                                    # and no event moved or lost
         assert sorted(meta["event_ids"]) == sorted(e["event_id"] for e in pre_hold)
 
+    def test_an_interrupted_duplicate_settles_as_the_dismissal_it_always_was(self, tmp_repo):
+        """The second crash window. A duplicate is held and finalized in one run; a crash in
+        between leaves a hold carrying an `entry_id` and no `lane`, and the last disposition
+        rule would read its target's `approved_by == "human"` as an APPROVAL — fabricating the
+        very outcome this pipeline measures. The hold records the status it was settled at, so
+        a resumed pass settles it as what it was."""
+        target_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        real_finalize = spool.finalize_candidate_evidence
+        with pytest.MonkeyPatch.context() as patch:         # the crash: finalize never runs
+            patch.setattr(spool, "finalize_candidate_evidence", _boom)
+            assert reconcile.reconcile_session(tmp_repo)["duplicates"] == 1
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["status"], meta["entry_id"]) == ("dismissed", target_id)
+        assert _dispositions_of(tmp_repo) == []             # nothing recorded yet
+
+        assert spool.finalize_candidate_evidence is real_finalize
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _held(tmp_repo) == {}
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+        assert not spool._held_dir(tmp_repo, candidate_id).exists()
+
     def test_a_crash_between_materializing_and_moving_finishes_the_move(self, tmp_repo):
         """Revised plan B3 step 8. Materialize FIRST, then move — so a crash in between leaves
         the decision stored and its events split across `pending/` and `held/`. Re-aggregating
@@ -753,34 +786,73 @@ class TestFastPath:
         assert loads                                   # the store WAS read
         assert len(_held(tmp_repo)) == 1
 
-    def test_a_pass_that_did_nothing_spools_no_receipt_event(self, tmp_repo):
-        # Otherwise a repo with one still-held candidate spools a `session_reconcile` event at
-        # every SessionStart, PreCompact and SessionEnd, forever, filling the spool toward
-        # retention with news of having done nothing.
+    def test_a_pass_that_did_nothing_logs_no_receipt(self, tmp_repo):
+        # Otherwise a repo with one still-held candidate logs a receipt at every SessionStart,
+        # PreCompact and SessionEnd, forever — news of having done nothing, crowding the tail
+        # cap that holds the passes that did something.
         _emit(tmp_repo, "user_directive", UNRELATED)
         reconcile.reconcile_session(tmp_repo)
-        before = _spool_state(tmp_repo)
+        before, logged = _spool_state(tmp_repo), len(_receipts(tmp_repo))
 
         reconcile.reconcile_session(tmp_repo)
         reconcile.reconcile_session(tmp_repo)
         assert _spool_state(tmp_repo) == before
+        assert len(_receipts(tmp_repo)) == logged
 
-    def test_a_pass_that_did_something_does_spool_one(self, tmp_repo):
+    def test_a_pass_that_did_something_logs_one_out_of_band(self, tmp_repo):
+        """Ruling R34: the receipt is a LOG line, not an evidence event. Nothing reads the
+        `session_reconcile` kind, and a receipt spooled into `pending/` is never held — so it
+        would age out through retention, which counts every drop as lost evidence."""
         _emit(tmp_repo, "user_directive", UNRELATED)
         reconcile.reconcile_session(tmp_repo)
-        assert [e["kind"] for e in spool.list_pending_evidence(tmp_repo)] == ["session_reconcile"]
 
-    def test_bookkeeping_events_do_not_keep_the_pass_awake(self, tmp_repo, monkeypatch):
-        # A pass spools its own `session_reconcile` receipt, which nothing ever holds. If that
-        # counted as evidence, the NEXT pass would always have work to do and the fast path
-        # would never fire again on any repo that has reconciled once.
+        (entry,) = _receipts(tmp_repo)
+        assert (entry["proposed"], entry["events_observed"]) == (1, 1)
+        assert entry["session_id"] and entry["at"]
+        assert spool.list_pending_evidence(tmp_repo) == []   # nothing bookkeeping-shaped
+
+    def test_many_passes_never_report_a_loss_that_did_not_happen(self, tmp_repo, monkeypatch):
+        """The reason R34 exists. Receipts in `pending/` are never held, so retention ages them
+        out and `.gap` counts them — `contexer status` then reports "N events lost" on a repo
+        that lost nothing, in the one surface built to be honest about loss."""
+        from contexer import cli
+
+        monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1)   # retention at its most eager
+        for i in range(12):
+            _emit(tmp_repo, "user_directive", f"Always tag release {i} with its sprint number.",
+                  session_id=f"sess-{i}")
+            reconcile.reconcile_session(tmp_repo)
+
+        assert len(_receipts(tmp_repo)) == 12
+        assert spool.evidence_diagnostics(tmp_repo)["gap"] is None
+        # Status may still name what is legitimately held; what it must never say is "lost".
+        assert "lost" not in " ".join(cli._evidence_status_lines([tmp_repo]))
+
+    def test_the_receipt_log_is_tail_capped(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(reconcile, "_RECEIPT_LOG_CAP", 3)
+        for i in range(5):
+            _emit(tmp_repo, "user_directive", f"Always tag release {i} with its sprint number.",
+                  session_id=f"sess-{i}")
+            reconcile.reconcile_session(tmp_repo)
+        assert len(_receipts(tmp_repo)) == 3
+
+    def test_a_broken_receipt_log_never_breaks_the_pass(self, tmp_repo):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        (store.STORE_DIR / f".reconcile_{store.repo_slug(tmp_repo)}.jsonl").write_bytes(
+            b"\xff\xfe not utf-8")
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+    def test_bookkeeping_never_keeps_the_pass_awake(self, tmp_repo, monkeypatch):
+        # Once a pass has settled everything, the spool is empty and the fast path must fire —
+        # so a repo that reconciles at every SessionStart, PreCompact and SessionEnd never
+        # pays for a store load once it is quiet.
         _emit(tmp_repo, "user_directive", UNRELATED)
         reconcile.reconcile_session(tmp_repo)
         (pending,) = store.get_pending_decisions(tmp_repo)
         store.approve_decision(tmp_repo, pending["id"], "approve")
         reconcile.reconcile_session(tmp_repo)               # settles + finalizes
 
-        assert spool.list_pending_evidence(tmp_repo)        # bookkeeping remains
+        assert spool.list_pending_evidence(tmp_repo) == []
         assert _held(tmp_repo) == {}
         monkeypatch.setattr(store, "load",
                             lambda *_a, **_k: pytest.fail("fast path should have returned"))
@@ -920,6 +992,39 @@ class TestRetentionWiring:
         assert spool.run_retention(tmp_repo)["finalized_orphans"] == [candidate_id]
         assert _held(tmp_repo) == {}
         assert not spool._held_dir(tmp_repo, candidate_id).exists()
+
+    def test_a_retired_decisions_hold_survives_the_sweep_for_reconcile_to_settle(self,
+                                                                                 tmp_repo):
+        """The sweep can only ever say `dismissed` and writes no summary, so a RETIRED decision
+        must not read to it as a deleted one: that is the outcome its lifecycle candidate
+        proposed, and reconciliation is what records it as `approved`. Ruling R25's live-vs-
+        tombstoned distinction, applied to the sweep."""
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", RETIRES)
+        reconcile.reconcile_session(tmp_repo)
+        candidate_id, _meta = _only_held(tmp_repo)
+        assert lifecycle.retire_decision(tmp_repo, entry_id, "the developer said so")[0]
+
+        # Session start beats reconciliation to it — the window this fix closes.
+        assert spool.maintain_spool(tmp_repo, force=True)["finalized_orphans"] == []
+        assert list(_held(tmp_repo)) == [candidate_id]
+
+        reconcile.reconcile_session(tmp_repo)
+        (tombstone,) = store.load_deleted(tmp_repo)["entries"]
+        assert [s["disposition"] for s in tombstone["evidence_summary"]] == ["approved"]
+
+    def test_a_hold_whose_decision_exists_nowhere_is_still_swept(self, tmp_repo):
+        # The other half: once nothing anywhere names the decision — not the live store, not
+        # the tombstones — the hold really is an orphan and nothing will ever settle it.
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        candidate_id, _meta = _only_held(tmp_repo)
+        data = store.load(tmp_repo)
+        data["entries"] = []
+        store.save(tmp_repo, data)
+
+        assert spool.maintain_spool(tmp_repo, force=True)["finalized_orphans"] == [candidate_id]
+        assert _held(tmp_repo) == {}
 
     def test_session_start_retention_is_silent_and_fail_soft(self, tmp_repo, monkeypatch):
         _emit(tmp_repo, "user_directive", UNRELATED)
