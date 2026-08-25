@@ -243,9 +243,12 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # ARE settled, so they are held and finalized in this SAME run (red-team mitigation 2),
         # with the summary attached to the decision they matched. Leaving them in `pending/`
         # would re-aggregate this duplicate at every checkpoint forever and permanently defeat
-        # the fast path. (No dry_run guard: `_reconcile` discards `writes` wholesale on a dry
-        # run, which is the single gate — a second one here would be a second place to get it
-        # wrong.)
+        # the fast path. (No dry_run guard needed HERE: this branch only fills `writes`, and
+        # `_reconcile` discards that wholesale on a dry run - a second check would be a second
+        # place to get it wrong. The lifecycle branch above is the one that must guard itself,
+        # because `propose_lifecycle` writes the store DIRECTLY rather than through `writes`,
+        # so the wholesale discard cannot reach it. Any future lane that writes outside
+        # `writes` inherits that obligation.)
         receipt["duplicates"] += 1
         writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
                                 "entry_id": str(candidate.get("target_decision_id") or "")}

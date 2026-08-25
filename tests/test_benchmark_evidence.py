@@ -28,6 +28,7 @@ Four things are measured, one per section:
    both as the pure evaluator and through the repo-scoped facade that loads the store first.
 """
 
+import builtins
 import io
 import os
 import statistics
@@ -199,8 +200,8 @@ def test_the_prompt_path_never_loads_the_evidence_spool(tmp_repo, monkeypatch):
     A latency assertion would pass equally well if the spool were read and merely happened to
     be small, which is the regression that matters - the prompt path is the one place where
     the developer is blocked and never asked for the work. So this proves the reads do not
-    happen: every callable in `spool` is replaced with one that raises, and the three syscalls
-    a read of a spooled file must go through are watched for any path under the evidence root.
+    happen: every callable in `spool` is replaced with one that raises, and the syscalls a read
+    of a spooled file must go through are watched for any path under the evidence root.
 
     `os.stat` is deliberately NOT watched: the gate is about LOADING evidence, and a `stat`
     that never opens anything reads nothing.
@@ -212,7 +213,10 @@ def test_the_prompt_path_never_loads_the_evidence_spool(tmp_repo, monkeypatch):
     root = str(spool._repo_dir(tmp_repo))
 
     touched: list[str] = []
-    for module, name in ((io, "open"), (os, "listdir"), (os, "scandir")):
+    # `io.open` and `builtins.open` are the same function behind two module bindings, and a
+    # caller reaches whichever one it named - `pathlib` uses the first, a plain `open()` the
+    # second - so both are watched.
+    for module, name in ((io, "open"), (builtins, "open"), (os, "listdir"), (os, "scandir")):
         real = getattr(module, name)
 
         def watched(path, *args, _real=real, **kwargs):
