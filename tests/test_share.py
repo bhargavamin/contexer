@@ -1206,9 +1206,12 @@ def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
     assert [x["decision_id"] for x in fake.batches[0]] == ["good1234"]  # only the valid one shared
 
 
-def test_share_ids_empty_shares_most_recent(monkeypatch):
+def test_share_ids_empty_shares_most_recent(tmp_repo, monkeypatch):
+    # `tmp_repo` for its STORE_DIR patch, not for the path: `share_ids` takes the outbox lock
+    # before it dispatches, so without it this test creates `.outbox.lock` in the developer's
+    # real ~/.contexer (the one leak `no_real_store_writes` was extended to catch).
     monkeypatch.setattr(share, "share", lambda repo, did="", **k: f"recent:{did}")
-    assert share.share_ids("/repo", [], profile=TEAM) == "recent:"
+    assert share.share_ids(tmp_repo, [], profile=TEAM) == "recent:"
 
 
 def _three_shareable(monkeypatch):
