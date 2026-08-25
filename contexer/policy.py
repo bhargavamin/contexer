@@ -1,19 +1,27 @@
-"""Policy-evaluation vocabularies, request validation, pure policy SELECTION, and results.
+"""Policy-evaluation vocabularies, request validation, pure policy SELECTION and JUDGING.
 
 A policy evaluation asks one question — "may this operation proceed?" — about a request an
-assistant is about to make. This module owns the halves of that question that are pure: what
+assistant is about to make. This module owns every part of that question that is pure: what
 the vocabularies are, whether a request is well-formed, WHICH stored decisions apply to it,
-how to name the exact policy set that answered, and how to shape the answer.
+whether an applicable one is actually violated, how to name the exact policy set that
+answered, and how to shape the answer.
 
-JUDGING IS NOT HERE. Deciding whether an applicable policy is actually violated (regex, secret
-scanning) is `guard_engine`'s deterministic engine today; a later task moves that ONE
-implementation into this module. Nothing here evaluates a rule, and there is no stub for it —
-a second copy of "what counts as a violation" is exactly the drift this split exists to avoid.
+Judging lives here and ONLY here. `guard_engine` owned it first, against staged git files; it
+now delegates (`_rule_violations`, `_rule_selects`, `arm_guard`'s validation) so the armed
+regex, the `i` flag, the glob and the secret scan each exist once. A second copy of "what
+counts as a violation" is the drift this split exists to prevent, so the guard keeps only what
+is I/O-shaped — enumerating staged paths, reading them, the throttle sidecars, the wall-clock
+budget — and hands the bytes here.
 
-A leaf: stdlib only. It imports no store, no guard_engine, and touches no filesystem, so
-selection can be tested against hand-built entry dicts and reused by any caller that has
-already loaded them. Resolving which store's entries to pass in is the CALLER's job — global
-entries may be mixed in and are selected by the same rules.
+The evaluator owns no time budget and no fail-open/fail-closed policy: it reports what it
+judged and what it could not, and the CALLER decides what that means. A commit gate and a
+read-only prompt hook want opposite answers from the same `partial`.
+
+A leaf: stdlib plus `contexer.redact` (itself a stdlib leaf, for the secret patterns). It
+imports no store, no guard_engine, and touches no filesystem, so selection and judging can be
+tested against hand-built entry dicts and reused by any caller that has already loaded them.
+Resolving which store's entries to pass in is the CALLER's job — global entries may be mixed
+in and are selected by the same rules.
 
 The trust rule below is a MIRROR of `guard_engine._guard_trusted`, restated rather than
 imported (that module imports store, this one cannot). A parity test pins the two equal.
@@ -24,11 +32,32 @@ import json
 import re
 from collections.abc import Mapping
 
+from contexer import redact  # pure stdlib leaf (no cycle): the secret-check patterns
+
 VERDICTS = ("allow", "warn", "block")
 EVALUATION_STATUSES = ("complete", "partial", "error")
 BASES = ("deterministic", "semantic", "mixed")
 OPERATIONS = ("read_files", "write_files", "shell", "commit", "merge", "deploy", "api_request")
 ARTIFACT_KINDS = ("diff", "file_content", "command", "request", "deployment")
+
+# The only two things a rule can be armed with, because they are the only two a machine can
+# settle without a model: one regex, or the fixed high-confidence secret patterns.
+CHECK_TYPES = frozenset({"regex", "secret"})
+
+# Why an applicable policy was not judged. `omitted` is the request carrying no artifact at
+# all; `truncated`/`unreadable`/`binary`/`too-large`/`budget` are the CALLER's reasons for
+# handing over bytes it could not supply (the guard's `_staged_content` vocabulary, kept
+# spelling-for-spelling so one token means one thing on both sides of the boundary);
+# `bad-pattern` and `unsupported-check` are the evaluator's own. Every one of them means a
+# check that DID NOT HAPPEN, which must never read as a check that found nothing.
+UNCHECKED_REASONS = ("omitted", "truncated", "unreadable", "binary", "too-large", "budget",
+                     "bad-pattern", "unsupported-check")
+
+# The most severe verdict each kind of policy may reach. An armed rule is machine-checked, so
+# it may block; advisory prose can only ever warn, because nothing here can machine-check a
+# sentence. Enforced in `_match`, not merely documented — a prose decision that could block
+# would turn every approved opinion into a commit gate.
+MAX_VERDICT = {"armed": "block", "advisory": "warn"}
 
 # Mirror of guard_engine._GUARD_TRUSTED_SOURCES. An `ai`/`memory` entry never enforces on its
 # own confidence; `plan` is trusted because a plan-sourced decision that survived
@@ -133,9 +162,11 @@ def validate_request(request: Mapping) -> tuple[dict | None, list[str]]:
         errors.append(f"intent exceeds {_MAX_INTENT_CHARS} characters ({len(intent)})")
 
     operation = request.get("operation")
-    # The isinstance guard is the never-raises half: `operation not in OPERATIONS` hashes its
-    # left side, so an unhashable value (a JSON list or object) would raise out of a function
-    # whose whole contract is to return its errors instead.
+    # The isinstance guard keeps a non-string out of a vocabulary-membership branch entirely.
+    # `OPERATIONS` is a tuple, so `in` compares by equality and a JSON list or object would
+    # merely test False rather than raise — but the error message then reports a dict as an
+    # "operation", and a later `in` against a set-shaped vocabulary WOULD raise out of a
+    # function whose whole contract is to return its errors instead.
     if not isinstance(operation, str) or operation not in OPERATIONS:
         errors.append(f"operation must be one of {sorted(OPERATIONS)}, got {operation!r}")
 
@@ -289,6 +320,146 @@ def policy_set_version(policies: list) -> str:
     blob = json.dumps(sorted(rows, key=lambda r: json.dumps(r, sort_keys=True, default=str)),
                       sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+# ── judging ──────────────────────────────────────────────────────────────────────
+# The ONE deterministic evaluator. Two sharply separated paths, inherited from the guard:
+#   ARM TIME (`validate_check`) raises — arming is a deliberate developer act, so a request
+#   that is not machine-checkable must fail loudly rather than degrade into a rule that
+#   silently never fires.
+#   RUN TIME (`rule_matches`, `evaluate_policies`) never raises for bad DATA: an unparseable
+#   pattern or an unknown check type comes back as an `unchecked` reason, so the caller can
+#   report the gap instead of reading it as a clean pass.
+
+# Every arm-time refusal shares this message: the caller only needs to know that arming was
+# refused because the request was not checkable, never which clause of the check tripped.
+MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
+
+
+def validate_check(check_type: str, pattern: str, flags: str) -> None:
+    """Refuse anything not deterministically machine-checkable. Raises ValueError, returns
+    None on success. The structural half of arming's refusal contract only — whether the
+    decision exists and is approved is the caller's, which needs a store loaded first."""
+    if check_type not in CHECK_TYPES:
+        raise ValueError(MACHINE_CHECKABLE_MSG)
+    if check_type == "secret":
+        # `secret` always means "match redact.HIGH_CONFIDENCE_PATTERNS" — a pattern alongside
+        # it is nonsensical, not merely redundant.
+        if pattern:
+            raise ValueError(MACHINE_CHECKABLE_MSG)
+        return
+    if not pattern:
+        raise ValueError(MACHINE_CHECKABLE_MSG)
+    if set(flags) - {"i"}:
+        raise ValueError(MACHINE_CHECKABLE_MSG)
+    try:
+        re.compile(pattern, re.IGNORECASE if "i" in flags else 0)
+    except re.error:
+        raise ValueError(MACHINE_CHECKABLE_MSG)
+
+
+def rule_matches(rule: Mapping, content: str) -> tuple[list[int], str | None]:
+    """Run one armed rule's check over `content`. Returns `(line_numbers, unchecked_reason)`;
+    exactly one side is meaningful — a reason means the rule could not be evaluated at all,
+    never that it was evaluated and found nothing.
+
+    `regex` matches line by line, so a hit's line number is exact. An unparseable pattern is
+    `bad-pattern` (defensive: `validate_check` rejects one at arm time, but a store can be
+    edited by hand). `secret` matches `redact.HIGH_CONFIDENCE_PATTERNS` against the WHOLE
+    content rather than per line — the PEM private-key pattern spans BEGIN/…/END lines, so
+    splitting first would silently defeat it — and derives the line from the match offset.
+    """
+    check_type = (rule or {}).get("type")
+    if check_type == "regex":
+        try:
+            compiled = re.compile((rule.get("pattern") or ""),
+                                  re.IGNORECASE if "i" in (rule.get("flags") or "") else 0)
+        except re.error:
+            return [], "bad-pattern"
+        return [n for n, line in enumerate(content.splitlines(), start=1)
+                if compiled.search(line)], None
+    if check_type == "secret":
+        return [content.count("\n", 0, m.start()) + 1
+                for pat in redact.HIGH_CONFIDENCE_PATTERNS for m in pat.finditer(content)], None
+    return [], "unsupported-check"
+
+
+def _match(applicable: Mapping, verdict: str, line: int | None) -> dict:
+    """One violated policy. Always names BOTH ids: `decision_id` is which decision objected,
+    `revision_id` is which wording of it did — a decision whose text has moved on has not made
+    the same objection, and a match that cannot say which revision spoke cannot be audited."""
+    kind = applicable.get("kind") or ""
+    ceiling = MAX_VERDICT.get(kind, "warn")
+    if _VERDICT_RANK[_checked(verdict, VERDICTS, "verdict")] > _VERDICT_RANK[ceiling]:
+        raise ValueError(f"a {kind!r} policy may not {verdict}, at most {ceiling}")
+    return {"decision_id": str(applicable.get("decision_id") or ""),
+            "revision_id": str(applicable.get("revision_id") or ""),
+            "kind": kind,
+            "title": applicable.get("title") or "",
+            "message": (applicable.get("rule") or {}).get("message") or "",
+            "verdict": verdict,
+            "line": line}
+
+
+def _unchecked(reason: str, **fields) -> dict:
+    """One gap, named. The reason is vocabulary-checked for the same reason a verdict is: a
+    typo'd reason is a gap nobody can act on, and this list is the only thing standing between
+    "not judged" and "judged clean"."""
+    return {"reason": _checked(reason, UNCHECKED_REASONS, "reason"), **fields}
+
+
+def evaluate_policies(policies: list, request: Mapping, unchecked: list | None = None) -> dict:
+    """Judge every selected policy against one request's artifact. Pure: no filesystem, no
+    subprocess, no store, no git, no clock.
+
+    An ARMED policy is machine-checked against the artifact's content and may `block`. An
+    ADVISORY policy has already earned its place by anchoring on a named file, so it `warn`s
+    on applicability alone — there is nothing further to check about a sentence.
+
+    `unchecked` is the caller's list of artifacts it could not hand over (see
+    `UNCHECKED_REASONS`); rows it supplies are validated and passed through beside the
+    evaluator's own. An armed policy facing a request with NO artifact is `omitted` rather
+    than passing — that is the whole discipline the guard learned the hard way, where an
+    unreadable staged file read as a clean result.
+
+    Status follows from that list: `complete` when nothing went unjudged, `partial` when
+    something did, `error` on an internal failure. An `error` is never converted to `allow`:
+    the verdict still reports the matches actually found, and the status still says the
+    evaluation broke. Whether that should fail open or closed is the caller's call — this
+    module owns no budget and no exit behaviour.
+    """
+    skipped = [_unchecked(r.get("reason"), **{k: v for k, v in r.items() if k != "reason"})
+               for r in (unchecked or []) if isinstance(r, Mapping)]
+    version = policy_set_version(policies)
+    artifact = request.get("artifact") if isinstance(request, Mapping) else None
+    # None means "no artifact at all", which is different from an artifact that is legitimately
+    # empty: the first cannot be judged, the second was judged and found nothing.
+    content = artifact.get("content") or "" if isinstance(artifact, Mapping) else None
+    matches: list[dict] = []
+
+    try:
+        for applicable in policies or []:
+            if not isinstance(applicable, Mapping):
+                continue
+            if applicable.get("kind") != "armed":
+                matches.append(_match(applicable, "warn", None))
+                continue
+            decision_id = str(applicable.get("decision_id") or "")
+            if content is None:
+                skipped.append(_unchecked("omitted", decision_id=decision_id))
+                continue
+            lines, reason = rule_matches(applicable.get("rule") or {}, content)
+            if reason is not None:
+                skipped.append(_unchecked(reason, decision_id=decision_id))
+                continue
+            matches.extend(_match(applicable, "block", line) for line in lines)
+    except Exception:
+        status = "error"
+    else:
+        status = "partial" if skipped else "complete"
+
+    return build_result(worst_verdict([m["verdict"] for m in matches]), status,
+                        "deterministic", matches, skipped, version)
 
 
 # ── results ──────────────────────────────────────────────────────────────────────
