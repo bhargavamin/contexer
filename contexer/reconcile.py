@@ -112,7 +112,10 @@ def _reconcile_lock(repo_path: str):
     path = store.STORE_DIR / f".reconcile_{store.repo_slug(repo_path)}.lock"
     try:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        handle = open(path, "a")        # noqa: SIM115 - closed in the finally below
+        # Binary, and it stays empty: nothing is ever written to or read from this file -
+        # the flock on its descriptor is the whole content. (Also why the package-wide
+        # pin-your-encoding invariant does not apply: there is no text here.)
+        handle = open(path, "ab")       # noqa: SIM115 - closed on every path below
     except OSError:
         yield True
         return
@@ -508,18 +511,56 @@ def _write_session(event_ids: list, sessions: dict) -> str:
 
 
 def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> dict:
-    # No readability gate any more, and none is needed: settling a candidate MOVES its events
-    # out of `pending/`, so a spool that reads as empty can no longer cause the failure the old
-    # ledger's gate existed for (re-proposing everything its checkpoints had already settled).
-    # An unreadable spool is reported where a developer can act on it - `contexer status`, off
-    # `spool.evidence_diagnostics`' own `readable` flag - rather than costing a pass here.
+    """The fast-path gate, then the lock, then the pass.
+
+    Both bail-outs are tested BEFORE the lock is touched, the same unlocked-then-locked shape
+    `store.ensure_retrieval_index` uses and for a sharper reason here: this runs at every
+    session start on every repo, and taking the lock first would create (and `mkdir` for) a
+    lock file on repos that will never have a single evidence event. The listing under the
+    lock is the authoritative one - a pass that finished while this one waited its turn may
+    have consumed exactly the events read here - so the fast path's read is pure work
+    avoidance and is deliberately thrown away.
+    """
+    if not _has_work(repo_path, session_id):
+        return receipt
+    if dry_run:
+        # NOT lock-guarded, both ways round: a dry run writes nothing, so it cannot cause the
+        # fabricated disposition the lock exists to prevent - and taking the lock would itself
+        # create a file, breaking the "dry_run writes NOTHING anywhere" invariant, while
+        # letting a preview skip (or delay) a real pass. Worst case its report describes a
+        # spool that moved underneath it, which is what a preview is.
+        return _run_pass(repo_path, session_id, True, receipt)
+    with _reconcile_lock(repo_path) as acquired:
+        if not acquired:
+            receipt["skipped"] = True
+            return receipt
+        return _run_pass(repo_path, session_id, False, receipt)
+
+
+def _has_work(repo_path: str, session_id: str) -> bool:
+    """Anything to aggregate, or any held candidate whose fate could have changed.
+
+    Two directory listings; the store is not read at all, let alone locked - this is the
+    every-session-start cost, and the whole pass is skipped on a `False`.
+
+    No readability gate any more, and none is needed: settling a candidate MOVES its events
+    out of `pending/`, so a spool that reads as empty can no longer cause the failure the old
+    ledger's gate existed for (re-proposing everything its checkpoints had already settled).
+    An unreadable spool is reported where a developer can act on it - `contexer status`, off
+    `spool.evidence_diagnostics`' own `readable` flag - rather than costing a pass here.
+    """
+    return bool(spool.held_candidates(repo_path)
+                or [e for e in spool.list_pending_evidence(repo_path, session_id)
+                    if e.get("kind") in _EVIDENCE_KINDS])
+
+
+def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> dict:
     events = [e for e in spool.list_pending_evidence(repo_path, session_id)
               if e.get("kind") in _EVIDENCE_KINDS]
     held = spool.held_candidates(repo_path)
     if not events and not held:
-        # Fast path: nothing to aggregate and no held candidate whose fate could have changed.
-        # Two directory listings; the store is not read at all, let alone locked - this runs at
-        # every session start.
+        # The work the fast path saw is gone: another pass took it while this one waited for
+        # the lock. Nothing to do, and nothing to report about it.
         return receipt
     events = _finish_interrupted_holds(repo_path, events, held, dry_run, receipt)
     # ponytail: counted AFTER the recovery strips events an existing candidate already claims,
@@ -578,26 +619,16 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
         {"events_observed", "proposed", "lifecycle_proposed", "already_pending", "duplicates",
          "insufficient", "incomplete", "skipped", "dry_run"}
 
-    One pass at a time per repo (`_reconcile_lock`): finding another pass already running
-    means this one does NOTHING and says so (`skipped`), rather than waiting or racing it.
+    One pass at a time per repo (`_reconcile_lock`, taken only once there is work to do):
+    finding another pass already running means this one does NOTHING and says so (`skipped`),
+    rather than waiting or racing it.
 
     NEVER raises: every caller is a host hook or a report surface, and a reconciliation that
     could not finish is a receipt marked `incomplete`, never a broken session start.
     """
     receipt = _receipt(dry_run)
     try:
-        if dry_run:
-            # NOT lock-guarded, both ways round: a dry run writes nothing, so it cannot cause
-            # the fabricated disposition the lock exists to prevent - and taking the lock would
-            # itself create a file, breaking the "dry_run writes NOTHING anywhere" invariant,
-            # while letting a preview skip (or delay) a real pass. Worst case its report is a
-            # snapshot of a spool that moved underneath it, which is what a preview is.
-            return _reconcile(repo_path, session_id, True, receipt)
-        with _reconcile_lock(repo_path) as acquired:
-            if not acquired:
-                receipt["skipped"] = True
-                return receipt
-            return _reconcile(repo_path, session_id, dry_run, receipt)
+        return _reconcile(repo_path, session_id, dry_run, receipt)
     except Exception:                  # broad on purpose: the never-raises contract
         receipt["incomplete"] = True
         return receipt

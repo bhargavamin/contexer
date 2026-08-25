@@ -673,6 +673,20 @@ class TestOnePassAtATime:
             receipt = reconcile.reconcile_session(tmp_repo, dry_run=True)
         assert (receipt["skipped"], receipt["proposed"]) == (False, 1)
 
+    def test_a_repo_with_nothing_to_do_never_touches_the_lock(self, tmp_repo):
+        """The lock is taken only once the fast path has found work. This runs at every session
+        start on every repo, so locking first would create a lock file (and mkdir for it) on
+        repos that will never hold a single evidence event - and a test whose STORE_DIR is
+        unpatched would write one into the developer's real store dir, which is how this was
+        caught."""
+        def _names():
+            return ({p.name for p in store.STORE_DIR.iterdir()}
+                    if store.STORE_DIR.is_dir() else None)
+
+        before = _names()
+        assert reconcile.reconcile_session(tmp_repo)["skipped"] is False
+        assert _names() == before      # not even the store dir was created
+
     def test_an_unusable_lock_file_fails_open(self, tmp_repo, monkeypatch):
         # An unwritable STORE_DIR must not silently disable the pipeline: it is the contention
         # case, not the I/O case, that this lock exists to answer.
