@@ -1322,10 +1322,12 @@ def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
     assert [x["decision_id"] for x in fake.batches[0]] == ["good1234"]  # only the valid one shared
 
 
-def test_share_ids_empty_shares_most_recent(monkeypatch):
+def test_share_ids_empty_shares_most_recent(tmp_repo, monkeypatch):
+    # `tmp_repo` patches STORE_DIR as well as providing the path: `share_ids` takes the outbox
+    # lock before dispatch, so the test must never create `.outbox.lock` in the real store.
     monkeypatch.setattr(share, "share", lambda repo, did="", **k:
                         _ok_status(server_id=f"recent:{did}"))
-    assert share.share_ids("/repo", [], profile=TEAM).server_id == "recent:"
+    assert share.share_ids(tmp_repo, [], profile=TEAM).server_id == "recent:"
 
 
 def _ok_status(sent=1, **kw):
@@ -1334,8 +1336,6 @@ def _ok_status(sent=1, **kw):
     These tests replace a share function to check WHICH ids the CLI passed and that it printed
     what came back. They used to return a bare sentence, because a sentence was the return type."""
     return share_status.ShareStatus(share_status.SYNCED, sent=sent, total=sent, **kw)
-
-
 def _three_shareable(monkeypatch):
     from contexer import config
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
