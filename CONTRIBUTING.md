@@ -73,6 +73,7 @@ not.
 | `contexer/memory_sync.py` | Imports Claude Code memory-tool facts into the store |
 | `contexer/miner.py` | Deterministic convention mining over a repo (no model in the loop). A leaf - imports nothing of ours |
 | `contexer/redact.py` | Secret scrubbing at capture and at egress. A leaf |
+| `contexer/share_status.py` | Share/reconcile outcomes as data, plus the one renderer. A leaf |
 | `contexer/repo_key.py` | Canonical repo-key derivation, kept byte-compatible with the TypeScript sibling |
 
 Dependency direction is worth preserving: `adapters`, `server`, `cli` and `ui` all sit above
