@@ -278,6 +278,12 @@ def test_hold_reports_a_missing_event_instead_of_raising(tmp_repo):
     assert result["missing"] == [ghost] and result["status"] == "ok"
 
 
+def test_hold_reports_an_unserializable_meta_instead_of_raising(tmp_repo):
+    result = spool.hold_candidate_evidence(tmp_repo, str(uuid.uuid4()), [],
+                                           meta={"entry_id": object()})
+    assert result["status"] == "error" and result["errors"]
+
+
 def test_finalize_returns_the_summary_and_removes_the_raw_events(tmp_repo):
     ids = _spool_two(tmp_repo)
     candidate = str(uuid.uuid4())
