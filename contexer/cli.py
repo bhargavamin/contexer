@@ -1461,13 +1461,31 @@ def _print_guard_unchecked(unchecked: list) -> None:
     commit carrying a secret inside `contexer/store.py` passed as clean. Same
     honest-on-exhaustion rule as `_budgeted`'s "(git is slow ...)" row and
     `anchors._BudgetExceeded`. Capped like the advisory block, since the interesting
-    part is that a gap exists, not the full list."""
-    shown = unchecked[:_GUARD_UNCHECKED_SHOWN]
-    names = ", ".join(f"{u.get('file')} ({u.get('reason')})" for u in shown)
-    if len(unchecked) > len(shown):
-        names += f", +{len(unchecked) - len(shown)} more"
-    _safe_print(f"contexer guard: {len(unchecked)} staged file(s) not checked by armed "
-                f"rules: {names}", file=sys.stderr)
+    part is that a gap exists, not the full list.
+
+    Two kinds of gap share the list and get their own line, because they are gaps in
+    different things and one message cannot be true of both: a row with a `file` is a staged
+    file that went unscanned, a row with a `decision_id` is an armed RULE that could not run
+    at all (an unparseable pattern, an unknown check type). The second is the one a developer
+    cannot otherwise notice — the rule is armed, the commit passes, and nothing ever says the
+    check did not happen."""
+    files = [u for u in unchecked if u.get("file")]
+    dead = [u for u in unchecked if not u.get("file")]
+    if files:
+        _safe_print(f"contexer guard: {len(files)} staged file(s) not checked by armed "
+                    f"rules: {_guard_gap_names(files, lambda u: str(u.get('file')))}",
+                    file=sys.stderr)
+    if dead:
+        _safe_print(f"contexer guard: {len(dead)} armed rule(s) could not run: "
+                    f"{_guard_gap_names(dead, lambda u: str(u.get('decision_id'))[:8])}",
+                    file=sys.stderr)
+
+
+def _guard_gap_names(rows: list, name) -> str:
+    """`a.py (too-large), b.py (budget), +2 more` — capped at _GUARD_UNCHECKED_SHOWN."""
+    shown = rows[:_GUARD_UNCHECKED_SHOWN]
+    names = ", ".join(f"{name(u)} ({u.get('reason')})" for u in shown)
+    return names + (f", +{len(rows) - len(shown)} more" if len(rows) > len(shown) else "")
 
 
 def _print_guard_explain(candidates: list) -> None:
