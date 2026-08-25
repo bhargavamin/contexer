@@ -44,10 +44,12 @@ Commands:
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook — see below).
   policy        Report what your approved decisions say about one operation:
-                policy evaluate --operation commit --diff-file <path|-> [--intent TEXT]
-                [--file PATH ...] [--json] [--exit-code]. A REPORTER, not a gate: even a
-                `block` verdict exits 0 unless you opt in with --exit-code. Only an adapter
-                inside the system performing the operation ever enforces anything.
+                policy evaluate --operation <op> --diff-file <path|-> [--intent TEXT]
+                [--file PATH ...] [--json] [--exit-code]. <op> is any of read_files,
+                write_files, shell, commit, merge, deploy, api_request. A REPORTER, not a
+                gate: even a `block` verdict exits 0 unless you opt in with --exit-code.
+                Only an adapter inside the system performing the operation ever enforces
+                anything.
   scope-audit   Read-only: find decisions saved into the wrong repo's store (a session
                 whose decisions are split across two or more stores). Changes nothing.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -1522,12 +1524,18 @@ def _cli_repo() -> str:
     return store.git_root(os.getcwd()) or store.resolve_repo("")
 
 
-_POLICY_USAGE = ("Usage: contexer policy evaluate --operation <op> [--diff-file PATH|-] "
-                 "[--intent TEXT] [--file PATH ...] [--json] [--exit-code]")
+def _policy_usage() -> str:
+    """The usage line, with the operation vocabulary read from `policy` rather than restated:
+    the facade accepts all of `policy.OPERATIONS`, and a help text listing fewer is a surface
+    narrower than the thing it documents."""
+    from contexer import policy
+
+    return ("Usage: contexer policy evaluate --operation <" + "|".join(policy.OPERATIONS)
+            + "> [--diff-file PATH|-] [--intent TEXT] [--file PATH ...] [--json] [--exit-code]")
 
 
 def _policy_fail(message: str) -> None:
-    print(f"{message}\n{_POLICY_USAGE}", file=sys.stderr)
+    print(f"{message}\n{_policy_usage()}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -1566,7 +1574,7 @@ def _policy_evaluate(rest: list) -> None:
     """`contexer policy evaluate` — report what the approved decisions say about one
     operation. A REPORTER: `--exit-code` is the only way a `block` verdict changes the exit
     status, because nothing this command does enforces anything."""
-    from contexer import policy_api, redact
+    from contexer import policy_api
 
     operation = intent = diff_file = ""
     files: list = []
@@ -1614,11 +1622,12 @@ def _policy_evaluate(rest: list) -> None:
         artifact_kind="diff" if (diff_file and not gaps) else "",
         artifact=content, unchecked=gaps)
 
-    # `--json` holds for a refused request too — a machine consumer gets one shape either
-    # way. Scrubbed at the dump rather than in the structure: `[REDACTED:kind]` is plain text
-    # inside an already-encoded JSON string, so the document stays valid.
-    text = (redact.scrub_text(json.dumps(result, indent=2, sort_keys=True)) if as_json
-            else policy_api.format_result(result, content))
+    # `--json` holds for a refused request too — a machine consumer gets one shape either way.
+    # Scrubbed BEFORE encoding, never after: JSON escaping rewrites the quotes redact's
+    # keyword-gated pattern matches on, so a dump-then-scrub emits a quoted secret verbatim
+    # (see policy_api.scrubbed_result).
+    text = (json.dumps(policy_api.scrubbed_result(result), indent=2, sort_keys=True)
+            if as_json else policy_api.format_result(result, content))
     print(text, file=sys.stderr if result["errors"] else sys.stdout)
 
     # A refused request exits 1 because nothing was evaluated — that is a usage failure, not

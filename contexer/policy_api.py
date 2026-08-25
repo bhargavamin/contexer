@@ -104,6 +104,28 @@ def evaluate_operation(repo_path: str, *, intent: str = "", operation: str,
 
 # ── rendering (the egress boundary) ──────────────────────────────────────────────
 
+def scrubbed_result(result: dict) -> dict:
+    """A COPY of one answer with every string leaf scrubbed — the egress form of the
+    structured result, for a caller that emits it as JSON instead of as text.
+
+    Scrub the leaves and then encode, NEVER encode and then scrub the document: JSON escaping
+    rewrites `"` as `\\"`, and `redact`'s keyword-gated generic pattern matches a QUOTED value
+    (`password="s3cr3t"`), so scrubbing the encoded text silently stops detecting exactly that
+    class while still looking like it works — the high-confidence provider patterns are
+    quote-independent and keep matching, so a test written against an AWS key passes either
+    way. Encoding is a transformation of the text the detector reads; the detector must run
+    first. (Caught in review; the earlier code dumped and then scrubbed.)
+
+    A copy, because the caller's dict stays authoritative and unmutated — the same guarantee
+    `format_result` gives.
+    """
+    if isinstance(result, dict):
+        return {k: scrubbed_result(v) for k, v in result.items()}
+    if isinstance(result, list):
+        return [scrubbed_result(v) for v in result]
+    return redact.scrub_text(result) if isinstance(result, str) else result
+
+
 def _match_line(match: dict, lines: list) -> str:
     """One violated policy, as a line a human or a model reads.
 

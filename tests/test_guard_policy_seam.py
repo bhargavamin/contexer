@@ -28,7 +28,15 @@ Parity matrix — where each scenario is pinned. Rows already covered are NOT du
     dead armed rule ........... HERE (new behaviour)
 """
 from contexer import cli, guard_engine, policy, store
-from tests.test_guard_engine import _git, _seed_entry, _write, git_repo, repo  # noqa: F401
+from tests.test_guard_engine import _git, _seed_entry, _write, git_repo  # noqa: F401
+from tests.test_guard_engine import repo as _repo_fixture
+
+# Re-bound rather than imported under its own name. pytest resolves a fixture by the name
+# bound in this module, so the name has to be `repo` either way — but as an IMPORT, every test
+# method taking a `repo` parameter reads to ruff as redefining it (F811, nine times over,
+# leaving CI's lint job red). An assignment is a plain module global, which a parameter is
+# allowed to shadow.
+repo = _repo_fixture
 
 
 def _arm_raw(repo_dir, entry, check):

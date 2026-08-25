@@ -2000,8 +2000,12 @@ class TestPolicyEvaluateCommand:
         assert "verdict: block" in out
         assert AWS_KEY not in out
 
-    def test_a_secret_never_reaches_the_json_output_either(self, tmp_repo, tmp_path,
-                                                           monkeypatch, capsys):
+    def test_json_output_hides_a_provider_token_quote_independent_class(
+            self, tmp_repo, tmp_path, monkeypatch, capsys):
+        """The EASY class: an AWS key matches a high-confidence provider pattern that does not
+        depend on surrounding quotes, so it is caught whichever side of the JSON encoding the
+        scrub runs on. Kept as the shape check (still valid JSON after scrubbing) — it is the
+        test BELOW that discriminates the ordering."""
         from tests.test_policy_api import AWS_KEY
         self._armed(tmp_repo, monkeypatch, check="secret",
                     message=f"rotate {AWS_KEY} before committing")
@@ -2012,6 +2016,32 @@ class TestPolicyEvaluateCommand:
         out = capsys.readouterr().out
         assert AWS_KEY not in out
         assert json.loads(out)["verdict"] == "block"   # still valid JSON after scrubbing
+
+    def test_json_output_hides_a_quoted_generic_secret_the_encoding_sensitive_class(
+            self, tmp_repo, tmp_path, monkeypatch, capsys):
+        """The class that actually pins the ordering. `redact`'s keyword-gated pattern matches
+        a QUOTED value, and `json.dumps` rewrites `"` as `\\"` — so a dump-then-scrub emits
+        `password="s3cr3tvalue"` verbatim while the provider-token test above still passes. The
+        secret rides in on the armed rule's `--message` hint, one of the two free-text fields
+        `policy._match` copies into the result."""
+        secret = 'password="s3cr3tvalue"'
+        self._armed(tmp_repo, monkeypatch, pattern="TODO", message=f"rotate {secret} first")
+
+        _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                  "--diff-file", self._diff(tmp_path), "--json")
+        out = capsys.readouterr().out
+        assert "s3cr3tvalue" not in out
+        assert json.loads(out)["matches"][0]["message"] == 'rotate password="[REDACTED:secret]" first'
+
+    def test_json_output_does_not_mutate_the_result_the_caller_holds(self, tmp_repo,
+                                                                     monkeypatch):
+        """Scrubbing for JSON works on a COPY — the same no-mutation guarantee the text render
+        gives, since the structured result is what is authoritative."""
+        from contexer import policy_api
+        result = policy_api.evaluate_operation(tmp_repo, operation="commit")
+        before = repr(result)
+        policy_api.scrubbed_result(result)
+        assert repr(result) == before
 
     def test_unknown_argument_exits_1_instead_of_running(self, tmp_repo, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
@@ -2064,3 +2094,19 @@ class TestPolicyEvaluateCommand:
         out = capsys.readouterr().out
         assert "policy evaluate" in out and "--exit-code" in out
         assert "REPORTER" in out
+
+    def test_help_lists_every_operation_the_facade_accepts(self, monkeypatch, capsys):
+        """A help text narrower than the surface it documents sends a developer looking for a
+        capability that is already there."""
+        from contexer import policy
+        _run_main(monkeypatch, "help")
+        out = capsys.readouterr().out
+        assert all(op in out for op in policy.OPERATIONS)
+
+    def test_the_error_usage_line_lists_every_operation_too(self, tmp_repo, monkeypatch,
+                                                            capsys):
+        from contexer import policy
+        with pytest.raises(SystemExit):
+            _run_main(monkeypatch, "policy", "evaluate", "--nope")
+        err = capsys.readouterr().err
+        assert all(op in err for op in policy.OPERATIONS)
