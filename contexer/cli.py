@@ -1568,7 +1568,7 @@ def _policy_evaluate(rest: list) -> None:
     """`contexer policy evaluate` — report what the approved decisions say about one
     operation. A REPORTER: `--exit-code` is the only way a `block` verdict changes the exit
     status, because nothing this command does enforces anything."""
-    from contexer import policy_api
+    from contexer import policy_api, redact
 
     operation = intent = diff_file = ""
     files: list = []
@@ -1590,6 +1590,11 @@ def _policy_evaluate(rest: list) -> None:
             if arg == "--operation":
                 operation = value
             elif arg == "--diff-file":
+                # An empty value is refused rather than read as "no artifact": that would be a
+                # request the developer thinks carries a diff, evaluated as one that does not.
+                if not value:
+                    _policy_fail("contexer policy evaluate: --diff-file needs a path (or - "
+                                 "for stdin).")
                 diff_file = value
             elif arg == "--intent":
                 intent = value
@@ -1611,19 +1616,16 @@ def _policy_evaluate(rest: list) -> None:
         artifact_kind="diff" if (diff_file and not gaps) else "",
         artifact=content, unchecked=gaps)
 
-    if result["errors"]:
-        print(policy_api.format_result(result), file=sys.stderr)
-        sys.exit(1)
+    # `--json` holds for a refused request too — a machine consumer gets one shape either
+    # way. Scrubbed at the dump rather than in the structure: `[REDACTED:kind]` is plain text
+    # inside an already-encoded JSON string, so the document stays valid.
+    text = (redact.scrub_text(json.dumps(result, indent=2, sort_keys=True)) if as_json
+            else policy_api.format_result(result, content))
+    print(text, file=sys.stderr if result["errors"] else sys.stdout)
 
-    if as_json:
-        # Scrubbed at the dump, not in the structure: the `[REDACTED:kind]` placeholder is
-        # plain text inside an already-encoded JSON string, so the document stays valid.
-        from contexer import redact
-        print(redact.scrub_text(json.dumps(result, indent=2, sort_keys=True)))
-    else:
-        print(policy_api.format_result(result, content))
-
-    if want_exit_code and result["verdict"] == "block":
+    # A refused request exits 1 because nothing was evaluated — that is a usage failure, not
+    # a verdict. A verdict never moves the exit code unless the developer opted in.
+    if result["errors"] or (want_exit_code and result["verdict"] == "block"):
         sys.exit(1)
 
 

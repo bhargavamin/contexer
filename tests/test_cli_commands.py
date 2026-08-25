@@ -2039,6 +2039,26 @@ class TestPolicyEvaluateCommand:
         assert exc.value.code == 1
         assert "operation must be one of" in capsys.readouterr().err
 
+    def test_an_empty_diff_file_value_exits_1_rather_than_meaning_no_artifact(
+            self, tmp_repo, monkeypatch, capsys):
+        """Reading it as "no diff" would evaluate a request the developer believes carries
+        one — the same silent-gap class as a clean-looking pass."""
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation", "commit",
+                      "--diff-file", "")
+        assert exc.value.code == 1
+        assert "needs a path" in capsys.readouterr().err
+
+    def test_json_holds_for_a_refused_request_too(self, tmp_repo, monkeypatch, capsys):
+        # One shape for a machine consumer, whichever way the request went.
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        with pytest.raises(SystemExit) as exc:
+            _run_main(monkeypatch, "policy", "evaluate", "--operation", "rm-rf", "--json")
+        assert exc.value.code == 1
+        emitted = json.loads(capsys.readouterr().err)
+        assert emitted["evaluation_status"] == "error"
+        assert any("operation must be one of" in e for e in emitted["errors"])
+
     def test_help_states_that_it_reports_rather_than_enforces(self, monkeypatch, capsys):
         _run_main(monkeypatch, "help")
         out = capsys.readouterr().out

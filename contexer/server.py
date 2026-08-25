@@ -338,6 +338,10 @@ def evaluate_policy(repo_path: str = "", intent: str = "", operation: str = "",
                    `omitted` rather than passing clean.
     artifact:      the bytes themselves (<= 2 MiB). Pass them verbatim — a redacted or
                    truncated artifact makes a secret check find nothing.
+
+    The sizes above are the schema half of one bound each; the evaluator holds the same bound
+    and is what actually enforces it, so an over-bound value comes back as an error naming the
+    limit rather than being quietly truncated.
     """
     result = policy_api.evaluate_operation(
         repo_path, intent=intent, operation=operation, files=list(files or []),
