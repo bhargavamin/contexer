@@ -213,6 +213,14 @@ class TestDeadRuleRendering:
         assert "1 staged file(s) not checked by armed rules: big.py (too-large)" in err
         assert "1 armed rule(s) could not run: abcdef12 (unsupported-check)" in err
 
+    def test_a_row_with_no_name_renders_the_reason_alone(self, capsys):
+        """The partition is an else-bucket, so a malformed row lands on the rule line. It
+        must not print a literal `None` as though that were a decision id."""
+        cli._print_guard_unchecked([{"file": "", "reason": "too-large"}])
+        err = capsys.readouterr().err
+        assert "(too-large)" in err
+        assert "None" not in err
+
     def test_more_than_the_cap_is_summarized(self, capsys):
         cli._print_guard_unchecked([{"decision_id": f"id{i}", "reason": "bad-pattern"}
                                     for i in range(7)])

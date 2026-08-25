@@ -841,7 +841,15 @@ def _armed_policy(entry: dict, path: str) -> dict:
     explicitly armed — because arming is itself a deliberate developer act, more deliberate
     than approval. Routing Tier 2 through the trust gate would silently disarm every rule a
     developer armed on an approved decision whose revision source is `ai`, which is a
-    behaviour change, not a refactor."""
+    behaviour change, not a refactor.
+
+    Those decisions arise through ORDINARY CAPTURE, not just legacy migration (controller
+    ruling R42): `store._classify_level` returns `auto` when content matches
+    `store._SCAN_FACT_PATTERNS`, and `_level_to_status` maps `auto` -> `approved`, so an
+    `ai` capture whose text merely LOOKS like a scan fact is born approved with revision
+    source `ai` and no `approved_by` stamp. `arm_guard` gates on approved status alone and
+    accepts it. Nothing in the suite seeds an armed untrusted entry, so this would have been
+    a silent kill, not a caught one."""
     rev = revisions.current_revision(entry) or {}
     return {"decision_id": entry.get("id", ""),
             "revision_id": rev.get("revision_id", ""),
@@ -867,7 +875,25 @@ def _evaluate_rules(rules: list[dict], path: str,
     swallowing it. A rule that silently never fires is the failure the developer is least
     able to notice — they believe they are protected and they are not. It is reported, never
     blocked on: a rule that cannot run is the guard's own limitation, the same class as an
-    exhausted budget."""
+    exhausted budget.
+
+    ONE difference from the pre-evaluator path, unreachable today but recorded because it
+    inverts the fail direction: `policy.evaluate_policies` catches an internal failure
+    ITSELF and returns what it judged, where the old inline judging let the exception unwind
+    to `guard_staged`'s catch-all, which discarded every violation accumulated across all
+    earlier files and rules and exited 0. So a raise here used to fail OPEN and would now
+    fail CLOSED — the accumulated violations survive and the commit is blocked. Nothing can
+    currently reach it: `rule_matches` catches `re.error`/`TypeError`, `_match` cannot exceed
+    the armed verdict ceiling, `content` is always a str by the time `_guard_violations` has
+    it, and a malformed `guard_check` raises in `_rule_selects` ABOVE this call, where the old
+    fail-open behaviour still holds. If that ever changes, this is the line to re-read.
+
+    Cost this pays that the old path did not: `evaluate_policies` computes a
+    `policy_set_version` (a JSON dump plus a sha256) per call, and `_guard_violations` calls
+    it once per (file, rule), so a 500-file x 5-rule run computes ~2500 of them — on top of
+    the title derivation in `_armed_policy`, which the old path ran only on a HIT. Both are
+    small against a budget where one 1MB `secret` scan costs ~155ms, and the budget tests
+    pass; they are named so the next person tuning this knows where the cost sits."""
     policies = [_armed_policy(e, path) for e in rules if _rule_selects(e, path)]
     if not policies:
         return [], []
