@@ -3183,7 +3183,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     lifecycle = entry.get("lifecycle")
     if source_files or lifecycle:
         from contexer import remote
-        source_files = remote.bound_source_files(source_files) if source_files else source_files
+        source_files = remote.bound_source_files(source_files)
         # COMPLETED lifecycle events only (plan E2): `lifecycle` is written solely by
         # lifecycle.tombstone_entry / restore_decision, i.e. only once a human has actually
         # retired or restored the decision. `proposed_lifecycle` is a different key, is not read

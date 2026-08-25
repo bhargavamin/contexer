@@ -119,10 +119,11 @@ def bound_source_files(source_files: list[str]) -> list[str]:
             if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
 
 
-def _bounded_id(value) -> str:
-    """One lifecycle id field, or "" when it is missing or implausibly long. An over-long id is
-    corrupt data rather than a long name, so it is dropped rather than truncated — a truncated
-    id would still LOOK like an id and silently point at nothing."""
+def _bounded_token(value) -> str:
+    """One lifecycle id or timestamp, or "" when it is missing or implausibly long. These are
+    machine-generated tokens, so an over-long one is corrupt data rather than a long name and is
+    DROPPED rather than truncated — a truncated id would still LOOK like an id while silently
+    pointing at nothing, which is worse than an absent one."""
     text = str(value or "")
     return text if 0 < len(text) <= _WIRE_LIFECYCLE_MAX_ID else ""
 
@@ -151,13 +152,10 @@ def bound_lifecycle(records: list, *, reasons: bool = True,
         if not isinstance(rec, dict) or rec.get("kind") not in _WIRE_LIFECYCLE_KINDS:
             continue
         row: dict = {"kind": rec["kind"]}
-        for key in ("event_id", "revision_id", "replacement_decision_id"):
-            bounded = _bounded_id(rec.get(key))
+        for key in ("event_id", "revision_id", "replacement_decision_id", "occurred_at"):
+            bounded = _bounded_token(rec.get(key))
             if bounded:
                 row[key] = bounded
-        occurred = _bounded_id(rec.get("occurred_at"))
-        if occurred:
-            row["occurred_at"] = occurred
         if rec.get("actor") in _WIRE_LIFECYCLE_ACTORS:
             row["actor"] = rec["actor"]
         if reasons:
@@ -448,9 +446,10 @@ class RemoteStore:
         # Carried only when built via from_profile - the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
-        # Distinct from None, which is a REAL answer here ("this server does not do lifecycle").
-        # Without the sentinel a not-advertising server would be re-probed on every push.
-        self._lifecycle_caps: "DecisionLifecycleCapabilities | None | object" = _UNDISCOVERED
+        # _UNDISCOVERED, or a DecisionLifecycleCapabilities, or None — and None is a REAL answer
+        # here ("this server does not do lifecycle"), which is why the sentinel exists at all:
+        # without it a not-advertising server would be re-probed on every push.
+        self._lifecycle_caps = _UNDISCOVERED
 
     @classmethod
     def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
