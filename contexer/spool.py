@@ -141,7 +141,7 @@ def _event_files(directory: Path) -> list[Path]:
     else is included, even a name this layer would never mint: a listing that silently
     ignored junk would leave it invisible to quarantine AND to retention, which is how a
     stray file becomes permanent. `candidate.json` is not special-cased here for that reason
-    — in `pending/` or `quarantine/` the name can never legitimately occur, so it should be
+    - in `pending/` or `quarantine/` the name can never legitimately occur, so it should be
     read, fail validation, and be quarantined like any other malformed file. The one caller
     that lists a HELD directory, where the name IS legitimate, filters it itself.
 
@@ -454,7 +454,7 @@ def evidence_diagnostics(repo_path: str) -> dict:
 
     A failed listing therefore returns ZEROS rather than the counts gathered before it failed:
     a half-count beside `readable: False` is the same unreadable-versus-empty collapse this
-    flag exists to prevent, one level down — a reader that only glances at `pending` would be
+    flag exists to prevent, one level down - a reader that only glances at `pending` would be
     told a number that describes part of the spool as though it described all of it.
 
     `bytes` counts every file the spool holds, `candidate.json` included: it is real disk the
@@ -557,7 +557,7 @@ def _sweep_temp(root: Path) -> int:
 
     Matched on the `.tmp` SUFFIX rather than on `_TEMP_PREFIX`, because two writers leave
     debris here and only one of them uses that prefix: `_write_json` mints `tmp-*.tmp`, while
-    `.gap` goes through `store.atomic_write`, which mints `<name>.<random>.tmp` — so a crash
+    `.gap` goes through `store.atomic_write`, which mints `<name>.<random>.tmp` - so a crash
     mid-gap-write left a `.gap.*.tmp` file no sweep would ever remove. The suffix is what both
     actually share, and no event file ends in it (they are all `.json`)."""
     removed = 0

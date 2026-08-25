@@ -93,7 +93,7 @@ def _held_events(repo, candidate_id):
     """The raw event files one held candidate holds, oldest first.
 
     Its `candidate.json` is bookkeeping rather than an event, and `spool._event_files` no
-    longer special-cases the name — in `pending/` or `quarantine/` it can never legitimately
+    longer special-cases the name - in `pending/` or `quarantine/` it can never legitimately
     occur, so skipping it there left such a file invisible to listing, quarantine and
     retention at once. The one directory where the name IS legitimate filters it here."""
     return [p for p in spool._event_files(spool._held_dir(repo, candidate_id))
