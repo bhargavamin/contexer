@@ -803,6 +803,25 @@ class TestDamagedEvidence:
         assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
         assert len(store.get_pending_decisions(tmp_repo)) == 1
 
+    def test_a_hold_naming_no_decision_is_left_alone_rather_than_judged(self, tmp_repo):
+        """A `candidate.json` with no `entry_id` — never written, or unreadable — says nothing
+        about which decision the candidate became, so there is nothing to judge it against.
+        Dismissing it on that silence would settle a candidate that may still be under review;
+        it stays held, and `spool.evidence_diagnostics`' `held_unattributed` is what surfaces
+        it accruing."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        candidate_id, _meta = _only_held(tmp_repo)
+        (spool._held_dir(tmp_repo, candidate_id) / spool._META_NAME).unlink()
+        (pending,) = store.get_pending_decisions(tmp_repo)
+        store.approve_decision(tmp_repo, pending["id"], "approve")   # a real disposition…
+
+        reconcile.reconcile_session(tmp_repo)
+
+        assert list(_held(tmp_repo)) == [candidate_id]      # …that nothing can attribute
+        assert _dispositions_of(tmp_repo) == []
+        assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+
     def test_a_refused_hold_is_reported_not_swallowed(self, tmp_repo, monkeypatch):
         # The decision is stored but its evidence still reads as pending; the receipt must say
         # so, because the next pass is the one that finishes the move.

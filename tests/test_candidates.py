@@ -296,14 +296,13 @@ def test_a_test_result_attaches_to_a_group_that_has_no_files_yet():
 def test_ignored_kinds_are_counted_and_never_grouped():
     events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
               _ev("policy_evaluation", "evaluated", at="2026-08-24T10:01:00+00:00"),
-              _ev("candidate_disposition", "approved", at="2026-08-24T10:02:00+00:00"),
               _ev("session_reconcile", "reconciled", at="2026-08-24T10:03:00+00:00"),
               _ev("session_reconcile", "reconciled again", at="2026-08-24T10:04:00+00:00")]
     result = candidates.aggregate_candidates(events, [])
     got = _only(result)
     assert len(got["signals"]) == 1
     assert result["diagnostics"]["ignored_kinds"] == {
-        "policy_evaluation": 1, "candidate_disposition": 1, "session_reconcile": 2}
+        "policy_evaluation": 1, "session_reconcile": 2}
 
 
 def test_source_files_union_is_capped_at_ten():

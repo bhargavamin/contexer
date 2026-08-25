@@ -1949,8 +1949,8 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     """Append one settled-candidate summary to a decision's own history. Returns whether it
     landed.
 
-    ADDITIVE and nothing else: the entry grows an `evidence_summary` list, no existing key is
-    read or rewritten, so a store written before this key existed loads and renders unchanged.
+    ADDITIVE and nothing else: the entry grows an `evidence_summary` list and no other key is
+    touched, so a store written before this key existed loads and renders unchanged.
 
     This is where a disposition LIVES once reconciliation deletes the raw events it settled
     (`spool.finalize_candidate_evidence` returns the summary, this preserves it) — the decision
