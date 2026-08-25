@@ -48,9 +48,16 @@ CHECK_TYPES = frozenset({"regex", "secret"})
 # all; `truncated`/`unreadable`/`binary`/`too-large`/`budget` are the CALLER's reasons for
 # handing over bytes it could not supply (the guard's `_staged_content` vocabulary, kept
 # spelling-for-spelling so one token means one thing on both sides of the boundary);
-# `bad-pattern`, `unsupported-check` and `evaluator-error` are the evaluator's own. Every one
-# of them means a check that DID NOT HAPPEN, which must never read as a check that found
-# nothing.
+# `bad-pattern`, `unsupported-check`, `unattributable` and `evaluator-error` are the
+# evaluator's own. Every one of them means a check that DID NOT HAPPEN, which must never read
+# as a check that found nothing.
+#
+# `unattributable` is the one the ARTIFACT'S SHAPE causes. A rule scoped to a `paths` glob may
+# only ever be judged against the bytes belonging to the files that glob selects, and an
+# artifact that names several files while carrying no file headers to split on gives the
+# evaluator no way to say which bytes are whose. Judging the lot would let a match inside an
+# out-of-scope file block on a rule that never governed it - a verdict attributed to a
+# decision that never objected, which is the one defect this plane exists to prevent.
 #
 # `evaluator-error` is the one that is not about the artifact at all: the evaluator itself
 # broke partway through the set, so the policy it was on and every one after it were never
@@ -58,7 +65,7 @@ CHECK_TYPES = frozenset({"regex", "secret"})
 # status says only THAT the run broke, and a caller reading `unchecked` to learn what it did
 # not get an answer about would otherwise see an empty list beside it.
 UNCHECKED_REASONS = ("omitted", "truncated", "unreadable", "binary", "too-large", "budget",
-                     "bad-pattern", "unsupported-check", "evaluator-error")
+                     "bad-pattern", "unsupported-check", "unattributable", "evaluator-error")
 
 # The most severe verdict each kind of policy may reach. An armed rule is machine-checked, so
 # it may block; advisory prose can only ever warn, because nothing here can machine-check a
@@ -407,6 +414,196 @@ def rule_matches(rule: Mapping, content: str) -> tuple[list[int], str | None]:
     return [], "unsupported-check"
 
 
+# ── artifact attribution ─────────────────────────────────────────────────────────
+# Which bytes a rule is allowed to see. Selection already decided WHICH files a `paths` glob
+# picks out of the request (`matched_files`); this is the other half, and the half that was
+# missing: judging ran the rule over the WHOLE artifact, so a hit inside a file the glob never
+# selected blocked in the name of a decision scoped away from it. A rule with no glob is not
+# scoped at all and still sees everything, which is what it was armed to do.
+
+_GIT_HEADER = re.compile(r"^diff --git a/(.+) b/(.+)$")
+
+
+def _header_path(field: str) -> str:
+    """The repo-relative path off a `---`/`+++` header line: the tab-separated timestamp some
+    diff writers append is dropped, and the conventional `a/`/`b/` prefix stripped."""
+    path = field.split("\t")[0].strip()
+    return path[2:] if path[:2] in ("a/", "b/") else path
+
+
+def _section_path(lines: list[str]) -> str:
+    """The file one diff section is about, read from its headers - `+++` first, because a
+    rename or a copy makes the post-image the file the change lands in, then `---` for a
+    deletion whose `+++` is `/dev/null`, then the `diff --git` line for a mode-only or
+    rename-only section that carries no `---`/`+++` pair at all. `""` when none of the three
+    says, which is what makes the whole diff unattributable rather than half-judged."""
+    minus = plus = ""
+    for line in lines:
+        if line.startswith("@@"):
+            break
+        if line.startswith("--- "):
+            minus = _header_path(line[4:])
+        elif line.startswith("+++ "):
+            plus = _header_path(line[4:])
+    for candidate in (plus, minus):
+        if candidate and candidate != "/dev/null":
+            return candidate
+    head = _GIT_HEADER.match(lines[0]) if lines else None
+    return head.group(2) if head else ""
+
+
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def _hunk_end(lines: list[str], start: int) -> int:
+    """The index just past the body of the hunk headed at `start`, or `-1` when that body
+    cannot be walked with certainty.
+
+    The end is COUNTED, never recognised. `@@ -a,b +c,d @@` declares that b lines of the old
+    file and d of the new one follow, an omitted count meaning 1; a body line is context
+    (` `, spends one of each), a deletion (`-`, spends an old one), an addition (`+`, spends a
+    new one), or the `\\ No newline` note, which spends neither. The body ends the instant both
+    budgets are spent, so hunk content can never be taken for what comes after it however it
+    is shaped - which is the only thing that holds, since a header and a body line are drawn
+    from the same characters and any fixed lookahead can be written to satisfy.
+
+    `-1` for a body that runs off the end of the input, for one whose lines disagree with the
+    declared counts, and for a header this regex cannot read: an unwalkable diff is reported
+    `unattributable` upstream, never split on a guess.
+    """
+    head = _HUNK_HEADER.match(lines[start])
+    if not head:
+        return -1
+    old = int(head.group(1)) if head.group(1) is not None else 1
+    new = int(head.group(2)) if head.group(2) is not None else 1
+    i = start + 1
+    while old > 0 or new > 0:
+        if i >= len(lines):
+            return -1
+        line, i = lines[i], i + 1
+        if line.startswith("\\"):
+            continue
+        if line.startswith("-"):
+            old -= 1
+        elif line.startswith("+"):
+            new -= 1
+        elif line.startswith(" ") or not line:
+            old -= 1
+            new -= 1
+        else:
+            return -1
+    return i if old == 0 and new == 0 else -1
+
+
+def _plain_starts(lines: list[str]) -> list[int]:
+    """Section starts for a diff carrying no `diff --git ` markers: a walk alternating a
+    `---`/`+++` pair with its hunks, counting its way out of every hunk body via `_hunk_end`.
+
+    Pattern-matching the boundary is what cannot be made safe. A deleted line reading
+    `-- separator` renders as `--- separator` and an added `++ separator` as `+++ separator`,
+    so a pair alone splits a section mid-hunk; demanding a following `@@` only raises the
+    price of the forgery, since the SAME file's next genuine hunk header can sit right behind
+    such a pair by coincidence. Either way the bytes on both sides are still judged, so a
+    secret in the real file lands in a phantom section no glob selects and the run comes back
+    a clean `allow` with no `unchecked` row - the one fabricated pass this module exists to
+    prevent. Counting removes the question: content inside a hunk is never LOOKED at to decide
+    where the hunk ends.
+
+    `[]` when the walk cannot account for every line, which reads as `unattributable`.
+
+    The `diff --git ` branch needs no equivalent: every line inside a hunk carries a
+    ` `/`+`/`-` prefix, so its raw text cannot start with `diff --git ` at column 0.
+    """
+    starts, i = [], 0
+    while i < len(lines):
+        if not (lines[i].startswith("--- ") and i + 1 < len(lines)
+                and lines[i + 1].startswith("+++ ")):
+            return []
+        starts.append(i)
+        i += 2
+        while i < len(lines) and lines[i].startswith("@@"):
+            i = _hunk_end(lines, i)
+            if i < 0:
+                return []
+            # A trailing "\ No newline at end of file" note can sit right after a hunk's last
+            # body line even though both budgets already hit zero on that line, so `_hunk_end`
+            # returns before consuming it. Skip it here rather than in `_hunk_end` itself: it
+            # belongs to no budget, and leaving it unconsumed would make the very next line
+            # match neither "@@" nor "--- ", walking off a diff that is otherwise well-formed.
+            while i < len(lines) and lines[i].startswith("\\"):
+                i += 1
+    return starts
+
+
+def _section_starts(lines: list[str]) -> list[int]:
+    """The 0-based line index each file section begins at. `diff --git` when the writer emits
+    it, else the counted walk over the `---`/`+++` pairs a plain `diff -u` leads with."""
+    git = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
+    return git if git else _plain_starts(lines)
+
+
+def _diff_sections(content: str) -> list[tuple[str, int, str]]:
+    """One `(path, first_line_number, text)` per file in a unified diff.
+
+    `[]` means NOT ATTRIBUTABLE, and it is deliberately all-or-nothing: a diff with no file
+    headers at all, and equally a diff one of whose sections names no file, both come back
+    empty. Judging the sections that did parse and staying silent about the one that did not
+    is precisely the half-answer this module refuses everywhere else.
+
+    ponytail: boundaries are counted (`_hunk_end`), paths are still read off header shapes -
+    the line numbers here are offsets into the artifact, which is all a match row reports. A
+    path containing " b/", or one git quoted under `core.quotePath`, can be misread; the
+    upgrade path is a real diff parser, not a cleverer regex.
+    """
+    lines = content.splitlines()
+    starts = _section_starts(lines)
+    sections = []
+    for n, start in enumerate(starts):
+        body = lines[start:starts[n + 1] if n + 1 < len(starts) else len(lines)]
+        path = _section_path(body)
+        if not path:
+            return []
+        sections.append((path, start + 1, "\n".join(body)))
+    return sections
+
+
+def _scoped_chunks(rule: Mapping, kind: str, files: list[str],
+                   content: str) -> tuple[list[tuple[int, str]], str | None]:
+    """The parts of the artifact one armed rule may be judged against, as `(line_offset, text)`
+    chunks, or `([], reason)` when the artifact cannot be split the way the rule needs.
+
+    Four cases, in this order:
+
+    - NO GLOB: the rule was never scoped, so it sees the whole artifact, exactly as before.
+    - NO FILES NAMED: a repo-wide `commit`/`merge`/`deploy`/`shell` request, which selection
+      already rules a glob-scoped rule governs (there is nothing to filter by). The whole
+      artifact again - and this is the case `guard_engine` runs on, where the content is ONE
+      staged file it read itself.
+    - A DIFF THAT SPLITS: only the sections whose path the glob selects. A glob that selects
+      none of them is `unattributable`, not clean: selection put this rule in the set because
+      the request NAMED a file it governs, so an artifact with no bytes for that file
+      disagrees with the request, and reporting "found nothing" about bytes that were never
+      there is the fabricated pass this whole list exists to prevent.
+    - ONE FILE NAMED: the artifact is that file's, so the glob has already selected all of it.
+
+    Anything else - several files named, nothing in the bytes saying which is which - is
+    `unattributable`. The gate is the DECLARED `kind`, never a guess at the content, because a
+    single file's content that happens to quote a diff header would otherwise be judged as a
+    diff and have most of itself scoped away.
+    """
+    if not (rule.get("paths") or "") or not files:
+        return [(0, content)], None
+    if kind == "diff":
+        sections = _diff_sections(content)
+        if sections:
+            chunks = [(start - 1, text) for path, start, text in sections
+                      if rule_selects(rule, path)]
+            return (chunks, None) if chunks else ([], "unattributable")
+    if len(files) == 1:
+        return [(0, content)], None
+    return [], "unattributable"
+
+
 def _match(applicable: Mapping, verdict: str, line: int | None) -> dict:
     """One violated policy. Always names BOTH ids: `decision_id` is which decision objected,
     `revision_id` is which wording of it did - a decision whose text has moved on has not made
@@ -451,7 +648,12 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
     """Judge every selected policy against one request's artifact. Pure: no filesystem, no
     subprocess, no store, no git, no clock.
 
-    An ARMED policy is machine-checked against the artifact's content and may `block`. An
+    An ARMED policy is machine-checked against the artifact's content and may `block` - and
+    only against the part of that content its `paths` glob actually scopes it to, which is
+    `_scoped_chunks`' job: an unscoped rule still sees everything, a scoped one sees the diff
+    sections belonging to its own files, and an artifact that cannot be split that way is
+    `unattributable` rather than judged whole. A hit in a file the glob never selected would
+    otherwise block in the name of a decision that never governed it. An
     ADVISORY policy has already earned its place by anchoring on a named file, so it `warn`s
     on applicability alone - there is nothing further to check about a sentence.
 
@@ -477,6 +679,12 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
     # None means "no artifact at all", which is different from an artifact that is legitimately
     # empty: the first cannot be judged, the second was judged and found nothing.
     content = artifact.get("content") or "" if isinstance(artifact, Mapping) else None
+    # Both read once, for `_scoped_chunks`: the declared artifact shape, and the files the
+    # request says the operation touches. A path-scoped rule may only be judged against the
+    # bytes those two together attribute to the files its glob selects.
+    kind = artifact.get("kind") or "" if isinstance(artifact, Mapping) else ""
+    files = ([f for f in (request.get("files") or []) if isinstance(f, str)]
+             if isinstance(request, Mapping) else [])
     matches: list[dict] = []
     # Bound before the try so the handler can name what went unreached even if materializing
     # the list is itself what failed (in which case there is nothing to name, and it says so).
@@ -495,11 +703,18 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
             if content is None:
                 skipped.append(_unchecked("omitted", decision_id=decision_id))
                 continue
-            lines, reason = rule_matches(applicable.get("rule") or {}, content)
+            rule = applicable.get("rule") or {}
+            chunks, reason = _scoped_chunks(rule, kind, files, content)
+            hits: list[int] = []
+            for offset, text in chunks:
+                lines, reason = rule_matches(rule, text)
+                if reason is not None:
+                    break
+                hits.extend(n + offset for n in lines)
             if reason is not None:
                 skipped.append(_unchecked(reason, decision_id=decision_id))
                 continue
-            matches.extend(_match(applicable, "block", line) for line in lines)
+            matches.extend(_match(applicable, "block", n) for n in hits)
     except Exception:
         status = "error"
         # `reached` is the policy that raised, so the slice starts AT it: it was not judged
