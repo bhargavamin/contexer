@@ -394,14 +394,14 @@ _ORIGIN_LABELS = {
 def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
     """The retirement block under a decision's own text in `contexer review`: who proposed it,
     why, and — when the decision has moved since — that it is stale and cannot be applied."""
-    from contexer import store
+    from contexer import lifecycle
 
     print(f"Retirement proposed (source: {life.get('source') or 'unknown'}):")
     _print_wrapped(life.get("reason") or "(no reason recorded)")
     replacement = (life.get("replacement_decision_id") or "")[:8]
     if replacement:
         print(f"\nReplaced by: {replacement}")
-    if store.lifecycle_proposal_stale(entry):
+    if lifecycle.lifecycle_proposal_stale(entry):
         print("\n! STALE — proposed against an earlier revision of this decision, which has "
               "changed since.\n  [R] is refused until it is re-proposed against the current "
               "version; [D] still works.")
@@ -415,7 +415,7 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
     """The `[R]etire` sub-flow: confirm the reason, then retire. The proposal's own reason is
     the default rather than the value — a retirement's reason becomes permanent history, and
     the developer is the one signing it."""
-    from contexer import store
+    from contexer import lifecycle
 
     proposed = life.get("reason") or ""
     print(f'Reason [Enter = "{proposed}"]:')
@@ -423,13 +423,13 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
         reason = input("> ").strip() or proposed
     except (KeyboardInterrupt, EOFError):
         return False, "\nSkipped."
-    return store.retire_decision(repo_path, entry["id"], reason,
-                                 life.get("replacement_decision_id"))
+    return lifecycle.retire_decision(repo_path, entry["id"], reason,
+                                     life.get("replacement_decision_id"))
 
 
 def review() -> None:
     """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
-    from contexer import conflicts, revisions, store
+    from contexer import conflicts, lifecycle, revisions, store
 
     repo_path = store.git_root(os.getcwd())
     if not repo_path:
@@ -512,13 +512,17 @@ def review() -> None:
             # RETIREMENT, and approve/edit have no meaning for a decision that is already live.
             if choice in ("R", "RETIRE"):
                 ok, msg = _retire_from_review(repo_path, entry, life)
-                retired += ok
-                skipped += not ok
+                if ok:
+                    retired += 1
+                else:
+                    skipped += 1
                 print(msg)
             elif choice in ("D", "DISMISS"):
-                ok, msg = store.dismiss_lifecycle(repo_path, entry["id"])
-                dismissed += ok
-                skipped += not ok
+                ok, msg = lifecycle.dismiss_lifecycle(repo_path, entry["id"])
+                if ok:
+                    dismissed += 1
+                else:
+                    skipped += 1
                 print(msg)
             else:
                 skipped += 1
@@ -1545,16 +1549,17 @@ def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    from contexer import store
+    from contexer import lifecycle
     repo = _cli_repo()
     if not repo:
         print("No repo detected — run this inside a project directory.", file=sys.stderr)
         sys.exit(1)
-    ok, message = (store.retire_decision(repo, args[0], reason, replacement) if retiring
-                   else store.restore_decision(repo, args[0], reason))
-    _safe_print(message) if ok else print(message, file=sys.stderr)
+    ok, message = (lifecycle.retire_decision(repo, args[0], reason, replacement) if retiring
+                   else lifecycle.restore_decision(repo, args[0], reason))
     if not ok:
+        print(message, file=sys.stderr)
         sys.exit(1)
+    _safe_print(message)
 
 
 def _guard_run(rest: list) -> None:

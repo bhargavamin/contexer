@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from contexer import anchors, review, revisions, store
+from contexer import anchors, lifecycle, review, revisions, store
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ class TestTotalLoss:
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
         anchors.verify_anchors(str(repo), force=True)
 
-        ok, _msg = store.retire_decision(str(repo), entry["id"],
+        ok, _msg = lifecycle.retire_decision(str(repo), entry["id"],
                                           "the file it describes is gone")
         assert ok
         assert store.load(str(repo))["entries"] == []
@@ -387,7 +387,7 @@ class TestTotalLoss:
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
         anchors.verify_anchors(str(repo), force=True)
 
-        ok, _msg = store.dismiss_lifecycle(str(repo), entry["id"])
+        ok, _msg = lifecycle.dismiss_lifecycle(str(repo), entry["id"])
         assert ok
         reloaded = _reload(repo)
         assert reloaded.get("proposed_lifecycle") is None
@@ -408,7 +408,7 @@ class TestTotalLoss:
         _git(repo, "add", "gone.py")
         _commit(repo)
         entry = _seed_entry(repo, "Use gone.py.", source_files=["gone.py"])
-        assert store.propose_lifecycle(str(repo), entry["id"], "retire", "I want this gone",
+        assert lifecycle.propose_lifecycle(str(repo), entry["id"], "retire", "I want this gone",
                                        source="human")["ok"]
         os.remove(str(repo / "gone.py"))
 

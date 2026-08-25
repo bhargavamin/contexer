@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import candidates, evidence, reconcile, store
+from contexer import candidates, evidence, lifecycle, reconcile, store
 from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
@@ -258,6 +258,43 @@ class TestUpdateCandidate:
         assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
         assert _store_bytes(tmp_repo) == before
 
+    def test_the_checkpoint_records_the_revision_it_was_proposed_against(self, tmp_repo):
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", UPDATES)
+        reconcile.reconcile_session(tmp_repo)
+
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        checkpoint = _checkpoints(tmp_repo)[_only_checkpoint_id(tmp_repo)]
+        assert checkpoint["revision_id"] == entry["current_revision_id"]
+        assert "lane" not in checkpoint                      # the content lane is the default
+
+    def test_an_approved_proposal_settles_as_approved(self, tmp_repo):
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", UPDATES)
+        reconcile.reconcile_session(tmp_repo)
+
+        store.approve_decision(tmp_repo, entry_id, "approve")   # HEAD advances
+        reconcile.reconcile_session(tmp_repo)
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "approved"
+
+    def test_a_dismissed_proposal_settles_as_dismissed_rather_than_pinning_forever(
+            self, tmp_repo):
+        # The Task 5 residual. `approved_by == "human"` alone can never become true here — the
+        # target was never a pending entry — so this checkpoint used to sit `pending` for good,
+        # pinning its evidence against eviction and keeping the fast path awake on every pass.
+        entry_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", UPDATES)
+        reconcile.reconcile_session(tmp_repo)
+
+        store.approve_decision(tmp_repo, entry_id, "dismiss")   # HEAD does NOT advance
+        reconcile.reconcile_session(tmp_repo)
+        assert _checkpoints(tmp_repo) == {}
+        (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
+                          if e["kind"] == "candidate_disposition"]
+        assert disposition["attributes"]["candidate_status"] == "dismissed"
+
 
 class TestRetireCandidate:
     """Phase 3: a retirement candidate materializes as a `proposed_lifecycle` on its target —
@@ -299,7 +336,7 @@ class TestRetireCandidate:
         _emit(tmp_repo, "user_directive", RETIRES)
         reconcile.reconcile_session(tmp_repo)
 
-        assert store.retire_decision(tmp_repo, entry_id, "the developer said so")[0]
+        assert lifecycle.retire_decision(tmp_repo, entry_id, "the developer said so")[0]
         reconcile.reconcile_session(tmp_repo)
         # Settled checkpoints are compacted away, so the proof is that its events are gone
         # and a disposition event records the outcome.
@@ -315,7 +352,7 @@ class TestRetireCandidate:
         _emit(tmp_repo, "user_directive", RETIRES)
         reconcile.reconcile_session(tmp_repo)
 
-        assert store.dismiss_lifecycle(tmp_repo, entry_id)[0]
+        assert lifecycle.dismiss_lifecycle(tmp_repo, entry_id)[0]
         reconcile.reconcile_session(tmp_repo)
         assert _checkpoints(tmp_repo) == {}
         (disposition,) = [e for e in evidence.unconsumed_events(tmp_repo)
@@ -334,7 +371,7 @@ class TestRetireCandidate:
 
     def test_a_refused_proposal_settles_its_events_rather_than_retrying_forever(self, tmp_repo):
         entry_id = _stored_decision(tmp_repo)
-        assert store.propose_lifecycle(tmp_repo, entry_id, "retire", "I said so",
+        assert lifecycle.propose_lifecycle(tmp_repo, entry_id, "retire", "I said so",
                                        source="human")["ok"]
         _emit(tmp_repo, "user_directive", RETIRES)
 
