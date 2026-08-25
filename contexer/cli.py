@@ -26,8 +26,11 @@ Commands:
                 use --target claude|cursor|codex|gemini|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
-  review        Interactively approve, edit, or ignore pending engineering decisions;
-                also surfaces possibly-overlapping rules for manual consolidation.
+  review        Interactively approve, edit, ignore, or retire pending engineering
+                decisions; also surfaces possibly-overlapping rules for consolidation.
+  retire        Retire one decision — it leaves active context, keeping its history:
+                retire <id> --reason <text> [--replaced-by <id>].
+  restore       Bring one retired decision back: restore <id> [--reason <text>].
   ui            Local web console over the stored decisions: ui [--open] [--stop]
                 [--status] [--port N] [--foreground] [--reset-token].
   share         Push local decisions to your team cloud context: share [id | --all | --global]
@@ -390,8 +393,44 @@ _ORIGIN_LABELS = {
 }
 
 
+def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
+    """The retirement block under a decision's own text in `contexer review`: who proposed it,
+    why, and — when the decision has moved since — that it is stale and cannot be applied."""
+    from contexer import store
+
+    print(f"Retirement proposed (source: {life.get('source') or 'unknown'}):")
+    _print_wrapped(life.get("reason") or "(no reason recorded)")
+    replacement = (life.get("replacement_decision_id") or "")[:8]
+    if replacement:
+        print(f"\nReplaced by: {replacement}")
+    if store.lifecycle_proposal_stale(entry):
+        print("\n! STALE — proposed against an earlier revision of this decision, which has "
+              "changed since.\n  [R] is refused until it is re-proposed against the current "
+              "version; [D] still works.")
+    if entry.get("proposed_revision"):
+        print("\nNote: this decision also has a suggested update pending. Dismissing the "
+              "retirement leaves it for the next `contexer review`.")
+    print()
+
+
+def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, str]:
+    """The `[R]etire` sub-flow: confirm the reason, then retire. The proposal's own reason is
+    the default rather than the value — a retirement's reason becomes permanent history, and
+    the developer is the one signing it."""
+    from contexer import store
+
+    proposed = life.get("reason") or ""
+    print(f'Reason [Enter = "{proposed}"]:')
+    try:
+        reason = input("> ").strip() or proposed
+    except (KeyboardInterrupt, EOFError):
+        return False, "\nSkipped."
+    return store.retire_decision(repo_path, entry["id"], reason,
+                                 life.get("replacement_decision_id"))
+
+
 def review() -> None:
-    """Interactively review and approve/ignore/edit pending engineering decisions."""
+    """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
     from contexer import conflicts, revisions, store
 
     repo_path = store.git_root(os.getcwd())
@@ -407,10 +446,14 @@ def review() -> None:
 
     print(f"\n{len(pending)} decision(s) pending approval for {Path(repo_path).name}\n")
 
-    approved = ignored = dismissed = edited = skipped = 0
+    approved = ignored = dismissed = edited = skipped = retired = 0
     git_budget = _review_git_budget()   # one budget + memo for the whole run
     for i, entry in enumerate(pending, 1):
-        prop = entry.get("proposed_revision")
+        life = entry.get("proposed_lifecycle")
+        # A retirement outranks a content question on the same decision: there is no point
+        # settling how a decision should read while its existence is in doubt. Dismissing the
+        # retirement leaves any Suggested Update pending for the next run, which the render says.
+        prop = None if life else entry.get("proposed_revision")
         print("─" * 66)
         eid = (entry.get("id") or "")[:8]
         heading = f"Decision {i} of {len(pending)}"
@@ -435,17 +478,23 @@ def review() -> None:
         else:
             score, factors = revisions.compute_confidence(entry)
             title, body = store.title_and_body(entry)
-            print(f"[{subtype}]  {store.entry_status(entry).replace('_', ' ')}\n")
+            status = ("retirement proposed" if life
+                      else store.entry_status(entry).replace("_", " "))
+            print(f"[{subtype}]  {status}\n")
             print(title)
             if body is not None:
                 print()
                 _print_wrapped(body)
             print()
+            if life:
+                _print_lifecycle_proposal(entry, life)
         for label, value in _review_metadata(repo_path, entry, git_budget):
             print(f"{label:<14}{value}")
         print(f"{'Confidence':<14}{score}%" + (f"  ·  {'; '.join(factors)}" if factors else ""))
         print()
-        if prop:
+        if life:
+            print("[R] Retire  [D] Dismiss  [S] Skip  [Q] Quit")
+        elif prop:
             print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip  [Q] Quit")
         else:
             print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip  [Q] Quit")
@@ -460,7 +509,23 @@ def review() -> None:
             print("Stopped - the rest stay pending.")
             break
 
-        if choice in ("Y", "YES"):
+        if life:
+            # Its own branch, not a key bolted onto the content flow: [D] here dismisses the
+            # RETIREMENT, and approve/edit have no meaning for a decision that is already live.
+            if choice in ("R", "RETIRE"):
+                ok, msg = _retire_from_review(repo_path, entry, life)
+                retired += ok
+                skipped += not ok
+                print(msg)
+            elif choice in ("D", "DISMISS"):
+                ok, msg = store.dismiss_lifecycle(repo_path, entry["id"])
+                dismissed += ok
+                skipped += not ok
+                print(msg)
+            else:
+                skipped += 1
+                print("Skipped.")
+        elif choice in ("Y", "YES"):
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
@@ -517,6 +582,8 @@ def review() -> None:
         parts.append(f"{edited} edited and approved")
     if dismissed:
         parts.append(f"{dismissed} dismissed")
+    if retired:
+        parts.append(f"{retired} retired")
     if ignored:
         parts.append(f"{ignored} ignored")
     if skipped:
@@ -1448,6 +1515,50 @@ def reconcile_session_cmd(rest: list) -> None:
         reconcile.reconcile_session(repo, session, dry_run=dry_run)))
 
 
+def _flag_value(args: list, flag: str, usage: str) -> str:
+    """Pull `--flag VALUE` out of `args` in place, exiting with `usage` on a missing or
+    flag-shaped value — the reconcile-session rule, since `--reason --replaced-by x` swallowing
+    a flag as the VALUE is how a retirement gets recorded with a nonsense reason."""
+    if flag not in args:
+        return ""
+    index = args.index(flag)
+    value = args[index + 1] if index + 1 < len(args) else ""
+    if not value or value.startswith("-"):
+        print(f"Missing value for {flag}.\n{usage}", file=sys.stderr)
+        sys.exit(1)
+    del args[index:index + 2]
+    return value
+
+
+def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
+    """`contexer retire <id> --reason <text> [--replaced-by <id>]` and
+    `contexer restore <id> [--reason <text>]`.
+
+    One id, deliberately: retiring moves a decision out of every active surface at once, and a
+    list argument is how one nobody re-read disappears (the same rule `approve_decision` states
+    for approval). Exits non-zero when the store refuses, so a script can tell."""
+    usage = ("Usage: contexer retire <id> --reason <text> [--replaced-by <id>]" if retiring
+             else "Usage: contexer restore <id> [--reason <text>]")
+    args = list(rest)
+    reason = _flag_value(args, "--reason", usage)
+    replacement = _flag_value(args, "--replaced-by", usage) if retiring else ""
+    if len(args) != 1 or args[0].startswith("-") or "," in args[0]:
+        print(f"{'Retire' if retiring else 'Restore'} takes exactly one decision id.\n{usage}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    from contexer import store
+    repo = _cli_repo()
+    if not repo:
+        print("No repo detected — run this inside a project directory.", file=sys.stderr)
+        sys.exit(1)
+    ok, message = (store.retire_decision(repo, args[0], reason, replacement) if retiring
+                   else store.restore_decision(repo, args[0], reason))
+    _safe_print(message) if ok else print(message, file=sys.stderr)
+    if not ok:
+        sys.exit(1)
+
+
 def _guard_run(rest: list) -> None:
     """`contexer guard [path…] [--explain]` - the commit-time run path.
 
@@ -2134,6 +2245,10 @@ def main() -> None:
         _run_guarded(reinstall)
     elif cmd == "review":
         review()
+    elif cmd == "retire":
+        _run_guarded(lambda: _lifecycle_cmd(rest, retiring=True))
+    elif cmd == "restore":
+        _run_guarded(lambda: _lifecycle_cmd(rest, retiring=False))
     elif cmd == "ui":
         _run_guarded(lambda: ui_cmd(rest))
     elif cmd == "status":
