@@ -5,7 +5,7 @@ Run with:
 
 Everything timing-shaped here carries `@pytest.mark.perf`, so it is deselected in CI and
 skipped whenever coverage is on (a wall-clock number taken under a tracer is not the number
-the assertion is about — see docs/testing.md). The thresholds are deliberately several times
+the assertion is about - see docs/testing.md). The thresholds are deliberately several times
 the measured figure: they exist to catch an ORDER-OF-MAGNITUDE regression, not to police
 jitter on a shared runner, which is the failure mode the novelty-filter write-latency
 benchmark already paid for twice.
@@ -13,16 +13,16 @@ benchmark already paid for twice.
 Four things are measured, one per section:
 
 1. **Append cost is FLAT.** The spool's whole design premise is that the cost of event N does
-   not depend on events 1..N-1 — one file, no listing, no lock. That is asserted as a RATIO
+   not depend on events 1..N-1 - one file, no listing, no lock. That is asserted as a RATIO
    (the last 50 appends into a full spool against the first 50 into an empty one), which is
    the property itself rather than a machine-speed proxy, and it holds under concurrent
    writers because a uuid in the filename means two writers can never name one target.
 2. **Reconciliation at the spool's bound** (`_MAX_PENDING_EVENTS` = 1000): the directory
-   listing alone, a full `dry_run` pass over a realistically shaped corpus, and — separately,
-   because it is an order of magnitude dearer — the O(N^2) ceiling a corpus of entirely
+   listing alone, a full `dry_run` pass over a realistically shaped corpus, and - separately,
+   because it is an order of magnitude dearer - the O(N^2) ceiling a corpus of entirely
    unrelated statements reaches.
 3. **The prompt path never loads evidence.** This is the plan's exit gate, and it is asserted
-   as BEHAVIOUR rather than timed — a timing test would pass just as well if the spool were
+   as BEHAVIOUR rather than timed - a timing test would pass just as well if the spool were
    read and simply happened to be small. Unmarked, therefore, and in the default gate.
 4. **Policy selection and evaluation at the 500-decision store cap** (`store.MAX_ENTRIES`),
    both as the pure evaluator and through the repo-scoped facade that loads the store first.
@@ -80,7 +80,7 @@ def test_append_latency_does_not_grow_with_the_spool(tmp_repo):
     """The premise of one-file-per-event: appending is O(1) in what the spool already holds.
 
     Asserted as a RATIO rather than as a millisecond figure, because the ratio IS the property
-    — a listing, a re-read or a lock would make the last batch measurably dearer than the
+    - a listing, a re-read or a lock would make the last batch measurably dearer than the
     first, on any machine. The absolute bound beside it is the loose sanity check."""
     first = [_timed(lambda: spool.append_evidence(tmp_repo, _event())) for _ in range(50)]
     for _ in range(spool._MAX_PENDING_EVENTS - 100):
@@ -169,7 +169,7 @@ def test_aggregation_cost_when_every_event_is_a_distinct_statement(tmp_repo):
     """The measured CEILING of a pass, recorded rather than avoided.
 
     Grouping compares each new seed against every group opened so far, so a corpus of N
-    entirely unrelated statements is O(N^2) token-overlap comparisons — and the shape above,
+    entirely unrelated statements is O(N^2) token-overlap comparisons - and the shape above,
     where most events corroborate one of a hundred statements, does not reach it. At the
     spool's own bound this is seconds rather than the ~70ms the realistic shape costs, and
     reconciliation runs at session start, so the number is worth knowing before somebody
@@ -197,7 +197,7 @@ def test_the_prompt_path_never_loads_the_evidence_spool(tmp_repo, monkeypatch):
     """The plan's exit gate, asserted as BEHAVIOUR rather than as a timing.
 
     A latency assertion would pass equally well if the spool were read and merely happened to
-    be small, which is the regression that matters — the prompt path is the one place where
+    be small, which is the regression that matters - the prompt path is the one place where
     the developer is blocked and never asked for the work. So this proves the reads do not
     happen: every callable in `spool` is replaced with one that raises, and the three syscalls
     a read of a spooled file must go through are watched for any path under the evidence root.
@@ -277,7 +277,7 @@ def test_policy_selection_and_evaluation_at_the_store_cap(tmp_repo):
 
 @pytest.mark.perf
 def test_evaluate_operation_end_to_end_at_the_store_cap(tmp_repo, monkeypatch):
-    """The facade, which loads the repo store and the global one before selecting — the figure
+    """The facade, which loads the repo store and the global one before selecting - the figure
     an `evaluate_policy` caller actually waits on."""
     _fill_store_to_the_cap(tmp_repo)
     monkeypatch.setattr(store, "resolve_repo", lambda _p: tmp_repo)

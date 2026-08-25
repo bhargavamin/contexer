@@ -31,7 +31,7 @@ from contexer import cli, guard_engine, policy, store
 from tests.conftest import _git, _seed_entry, _write
 
 # `repo` and `git_repo` are conftest fixtures, so pytest resolves them by name with no
-# import here at all — which is what retired the re-binding this file used to carry.
+# import here at all - which is what retired the re-binding this file used to carry.
 
 
 def _arm_raw(repo_dir, entry, check):
@@ -117,7 +117,7 @@ class TestSecretCheckBlocksEndToEnd:
 class TestDeadArmedRuleIsSurfaced:
     """A rule the evaluator cannot run at all used to be indistinguishable from a rule that
     ran and found nothing: the pre-evaluator judging collapsed both into one `continue`. That
-    is the failure a developer is least able to notice — the rule is armed, the commit passes,
+    is the failure a developer is least able to notice - the rule is armed, the commit passes,
     and nothing ever says the check did not happen."""
 
     def test_unparseable_pattern_is_reported_with_its_decision_id(self, repo):

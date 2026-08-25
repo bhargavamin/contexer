@@ -264,7 +264,7 @@ def _refuse_held_only(path):
 
 def test_an_unreadable_spool_reports_zeros_not_the_counts_it_reached(tmp_repo, monkeypatch):
     """`readable: False` beside a real `pending` count describes PART of the spool as though it
-    described all of it — the same unreadable-versus-empty collapse the flag exists to prevent,
+    described all of it - the same unreadable-versus-empty collapse the flag exists to prevent,
     one level down. The pending listing here succeeds; only the held one fails."""
     spool.append_evidence(tmp_repo, _event())
     assert spool.evidence_diagnostics(tmp_repo)["pending"] == 1
@@ -568,7 +568,7 @@ def test_retention_removes_stale_temp_files_but_not_fresh_ones(tmp_repo):
 
 def test_retention_removes_gap_write_debris_too(tmp_repo):
     """`.gap` goes through `store.atomic_write`, whose temp files are named
-    `<name>.<random>.tmp` rather than with this module's own `tmp-` prefix — so a
+    `<name>.<random>.tmp` rather than with this module's own `tmp-` prefix - so a
     prefix-matched sweep left an interrupted gap write behind for good. The `.tmp` suffix is
     what the two writers actually share."""
     spool.append_evidence(tmp_repo, _event())
