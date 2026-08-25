@@ -10,7 +10,6 @@ cycle resolves cleanly. Approval-time anchoring (`approve_decision`,
 and stays in store.py.
 """
 
-import fnmatch
 import hashlib
 import json
 import os
@@ -20,7 +19,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import redact          # pure stdlib leaf (no cycle): secret redaction
+from contexer import policy          # pure leaf (no cycle): THE deterministic evaluator
 from contexer import retrieval       # pure stdlib leaf (no cycle): path/module artifact shapes
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store           # module object, not `from`-imports: see docstring above
@@ -721,9 +720,11 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
 #   evaluation must never raise out of guard_staged and never block a commit on
 #   its own failure (see _GUARD_TIME_BUDGET below: a catastrophic regex fails
 #   OPEN, never partial-blocks).
+# What a rule MEANS on both paths is `policy`'s: `policy.validate_check` decides
+# what may be armed, `policy.rule_matches` decides what counts as a hit. This
+# module owns only the git-shaped half — which files, read how, budgeted by what,
+# reported where — so the deterministic check exists in exactly one place.
 
-_GUARD_CHECK_TYPES = frozenset({"regex", "secret"})
-_GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
 # Wall-clock seconds, across the WHOLE guard_staged call: the deadline is stamped
 # at the top of guard_staged and threaded through BOTH tiers — Tier-2 rule
 # evaluation (checked between files/rules) and Tier-1 pairing (checked per
@@ -732,36 +733,11 @@ _GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
 _GUARD_TIME_BUDGET = 2.0
 
 
-def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
-    """Refuse anything not deterministically machine-checkable — the structural
-    half of arm_guard's refusal contract (entry existence and approval status are
-    checked by the caller, which needs the store loaded first). Every failure
-    here raises the SAME message: the caller only needs to know arming was
-    refused because the request wasn't checkable, not which specific rule of
-    the check tripped."""
-    if check_type not in _GUARD_CHECK_TYPES:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-    if check_type == "secret":
-        # `secret` always means "match redact.HIGH_CONFIDENCE_PATTERNS" — a
-        # pattern alongside it is nonsensical, not merely redundant.
-        if pattern:
-            raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-        return
-    if not pattern:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-    if set(flags) - {"i"}:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-    try:
-        re.compile(pattern, re.IGNORECASE if "i" in flags else 0)
-    except re.error:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-
-
 def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
               flags: str = "", paths: str = "", message: str = "") -> str:
     """Arm a decision with a machine-checkable commit-time rule — the blocking
     (Tier-2) counterpart to Tier-1's advisory pairing. MANAGEMENT path: under
-    store_lock, may raise ValueError (see _validate_guard_check for the
+    store_lock, may raise ValueError (see policy.validate_check for the
     machine-checkable refusals; separately refuses an entry that doesn't exist,
     or one whose entry_status isn't "approved" — an armed rule must already be
     developer-trusted, since arming an unreviewed AI guess would let it block a
@@ -771,7 +747,7 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
     an 8-char prefix — tried against the REPO store first, then the GLOBAL
     store, so a global armed rule (see _armed_rules) also blocks every repo's
     commits, matching how global rules are already injected everywhere else."""
-    _validate_guard_check(check_type, pattern, flags)
+    policy.validate_check(check_type, pattern, flags)
     repo = store.resolve_repo(repo_path)
     guard_check = {"type": check_type, "pattern": pattern, "flags": flags,
                     "paths": paths, "message": message,
@@ -842,59 +818,44 @@ def _armed_rules(entries: list[dict]) -> list[dict]:
 
 
 def _rule_selects(rule: dict, path: str) -> bool:
-    """Whether one armed rule's `paths` glob applies to `path` (no glob = every file).
+    """Whether one armed ENTRY's `paths` glob applies to `path` — unwrapping the guard_check
+    the entry carries and delegating the glob itself to `policy.rule_selects`, which is the
+    one definition of it.
 
-    Extracted so the ONE definition serves both callers rather than each keeping its own
-    copy: `_rule_violations` uses it to decide what to scan, and `_guard_violations` uses
-    it to decide whether an unscannable file is worth REPORTING as unchecked. Without it
-    there, a rule armed `--paths "src/**/*.py"` made a staged 4MB `data/dump.json` print
-    a "not checked by armed rules" line on every commit, naming a gap that does not exist
-    because no armed rule would ever have been run against that file."""
-    paths_glob = (rule.get("guard_check") or {}).get("paths") or ""
-    return not paths_glob or fnmatch.fnmatch(path, paths_glob)
+    Kept as a named function because BOTH of this module's callers want it entry-shaped:
+    `_rule_violations` uses it to decide what to scan, and `_guard_violations` uses it to
+    decide whether an unscannable file is worth REPORTING as unchecked. Without it there, a
+    rule armed `--paths "src/**/*.py"` made a staged 4MB `data/dump.json` print a "not checked
+    by armed rules" line on every commit, naming a gap that does not exist because no armed
+    rule would ever have been run against that file."""
+    return policy.rule_selects(rule.get("guard_check") or {}, path)
 
 
 def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
-    """Evaluate every entry in `rules` (as returned by _armed_rules) against one
-    staged file's content. `path` must already be _guard_relpath's canonical
-    output. A rule whose guard_check["paths"] glob doesn't fnmatch `path` is
-    skipped entirely (empty paths = applies to every staged file).
+    """Shape `policy.rule_matches`' line numbers into commit-time violation rows for every
+    entry in `rules` (as returned by _armed_rules) against one staged file's content. `path`
+    must already be _guard_relpath's canonical output. A rule whose guard_check["paths"] glob
+    doesn't fnmatch `path` is skipped entirely (empty paths = applies to every staged file).
 
-    `regex` rules match line-by-line (so a hit's reported line number is exact);
-    an unparseable pattern (defensive only — arm_guard already validates at arm
-    time) is skipped rather than raised. `secret` rules match any hit from
-    redact.HIGH_CONFIDENCE_PATTERNS against the WHOLE file content, not
-    per-line — the PEM private-key pattern spans multiple lines (BEGIN/…/END),
-    so per-line splitting would silently defeat it; the line number is then
-    derived from the match's character offset via a newline count.
+    The judging — the regex, the `i` flag, the secret patterns, the line numbers — lives in
+    `policy.rule_matches` and only there. What stays here is the guard-shaped half: which
+    entry spoke, its title, its operator message, and the staged path they hang off. A rule
+    the evaluator could not run at all (an unparseable pattern, an unknown check type) yields
+    no rows here rather than an error — the file was still SCANNED, and a rule that cannot
+    fire is an arming-time defect `arm_guard` already refuses.
 
     Each hit: {path, line, decision_id, title, message}."""
     out: list[dict] = []
     for rule in rules:
-        gc = rule.get("guard_check") or {}
         if not _rule_selects(rule, path):
             continue
-        decision_id = rule.get("id", "")
+        lines, reason = policy.rule_matches(rule.get("guard_check") or {}, content)
+        if reason is not None:
+            continue
         title = rule.get("title") or revisions.derive_title(revisions.current_content(rule))
-        message = gc.get("message") or ""
-        check_type = gc.get("type")
-
-        if check_type == "regex":
-            flags = re.IGNORECASE if "i" in (gc.get("flags") or "") else 0
-            try:
-                compiled = re.compile(gc.get("pattern", ""), flags)
-            except re.error:
-                continue
-            for lineno, line in enumerate(content.splitlines(), start=1):
-                if compiled.search(line):
-                    out.append({"path": path, "line": lineno, "decision_id": decision_id,
-                                "title": title, "message": message})
-        elif check_type == "secret":
-            for pat in redact.HIGH_CONFIDENCE_PATTERNS:
-                for m in pat.finditer(content):
-                    lineno = content.count("\n", 0, m.start()) + 1
-                    out.append({"path": path, "line": lineno, "decision_id": decision_id,
-                                "title": title, "message": message})
+        out.extend({"path": path, "line": lineno, "decision_id": rule.get("id", ""),
+                    "title": title, "message": (rule.get("guard_check") or {}).get("message") or ""}
+                   for lineno in lines)
     return out
 
 

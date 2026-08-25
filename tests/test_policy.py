@@ -9,11 +9,14 @@ because a verdict is only tied to its policies if the same set always hashes the
 Every bound in the module has a test here saying what it buys; a constant nobody can explain
 is a constant nobody can change.
 """
+import ast
 import itertools
+import pathlib
+import re
 
 import pytest
 
-from contexer import guard_engine, policy
+from contexer import guard_engine, policy, redact
 
 
 def _rev(rev_id="rev-1", source="human"):
@@ -47,6 +50,11 @@ def _armed(paths="", pattern="TODO"):
     """The shape `guard_engine.arm_guard` writes onto an entry."""
     return {"type": "regex", "pattern": pattern, "flags": "", "paths": paths,
             "message": "", "armed_at": "2026-08-24T10:00:00+00:00"}
+
+
+def _diff(content):
+    """The artifact a commit-shaped request carries — the bytes the evaluator judges."""
+    return {"kind": "diff", "content": content}
 
 
 def _request(**over):
@@ -440,6 +448,255 @@ class TestPolicySetVersion:
         first = policy.select_policies([entry], _request(files=["a.py"]))
         second = policy.select_policies([entry], _request(files=["b.py"]))
         assert policy.policy_set_version(first) == policy.policy_set_version(second)
+
+
+# ── judging ──────────────────────────────────────────────────────────────────────
+
+class TestValidateCheck:
+    """Arm time. Every refusal raises the SAME message, so these tests pin WHAT is refused
+    rather than how it is phrased — the phrasing is deliberately uninformative."""
+
+    def test_the_only_two_check_types_are_regex_and_secret(self):
+        assert policy.CHECK_TYPES == frozenset({"regex", "secret"})
+
+    def test_a_valid_regex_rule_is_accepted(self):
+        assert policy.validate_check("regex", "TODO", "") is None
+
+    def test_a_secret_rule_takes_no_pattern(self):
+        assert policy.validate_check("secret", "", "") is None
+        # A pattern beside `secret` is nonsensical, not merely redundant: `secret` already
+        # means "the high-confidence patterns", so honouring one would be a silent lie.
+        with pytest.raises(ValueError):
+            policy.validate_check("secret", "AKIA", "")
+
+    @pytest.mark.parametrize("args", [
+        ("semantic", "looks risky", ""),   # not machine-checkable at all
+        ("regex", "", ""),                 # a regex rule with nothing to match
+        ("regex", "TODO", "im"),           # only `i` is accepted
+        ("regex", "TODO", "x"),
+        ("regex", "([unclosed", ""),       # must actually compile
+    ])
+    def test_an_unarmable_request_raises(self, args):
+        with pytest.raises(ValueError, match="machine-checkable"):
+            policy.validate_check(*args)
+
+    def test_the_i_flag_alone_is_accepted(self):
+        assert policy.validate_check("regex", "todo", "i") is None
+
+
+class TestRuleMatches:
+    """Run time. `(lines, reason)` — a reason means the rule could NOT be evaluated, which is
+    the distinction the guard learned the hard way: "not checked" must never read as "clean"."""
+
+    def test_a_regex_reports_the_exact_line_of_each_hit(self):
+        lines, reason = policy.rule_matches({"type": "regex", "pattern": "TODO"},
+                                            "one\nTODO here\nthree\nTODO again\n")
+        assert (lines, reason) == ([2, 4], None)
+
+    def test_no_match_is_an_empty_list_with_no_reason(self):
+        assert policy.rule_matches({"type": "regex", "pattern": "TODO"}, "clean\n") == ([], None)
+
+    def test_the_i_flag_is_the_only_one_honoured_and_it_works(self):
+        rule = {"type": "regex", "pattern": "todo", "flags": "i"}
+        assert policy.rule_matches(rule, "# TODO fix\n")[0] == [1]
+        assert policy.rule_matches({**rule, "flags": ""}, "# TODO fix\n")[0] == []
+
+    def test_an_unparseable_pattern_is_unchecked_not_clean(self):
+        # Defensive — `validate_check` refuses one at arm time — but a store is a JSON file a
+        # human can edit, and a rule that silently never fires is the worst of both worlds.
+        assert policy.rule_matches({"type": "regex", "pattern": "([oops"}, "x") == ([], "bad-pattern")
+
+    def test_an_unknown_check_type_is_unchecked_not_clean(self):
+        assert policy.rule_matches({"type": "vibes"}, "x") == ([], "unsupported-check")
+        assert policy.rule_matches({}, "x") == ([], "unsupported-check")
+
+    @pytest.mark.parametrize("sample", [
+        "key = 'AKIAIOSFODNN7EXAMPLE'",
+        "tok = ghp_" + "a" * 36,
+        "tok = xoxb-1234567890-abcdefghij",
+        "tok = sk_live_" + "0" * 20,
+        "tok = AIza" + "b" * 35,
+        "jwt = eyJhbGciOiJI.eyJzdWIiOiIx.SflKxwRJSMeKK",
+        "url = postgres://user:hunter2@db.example.com/app",
+    ])
+    def test_the_secret_check_catches_each_provider_shape(self, sample):
+        lines, reason = policy.rule_matches({"type": "secret"}, "before\n" + sample + "\nafter\n")
+        assert reason is None and lines == [2]
+
+    def test_the_secret_check_spans_lines_because_a_pem_block_does(self):
+        pem = ("before\n-----BEGIN RSA PRIVATE KEY-----\n"
+               "MIIEpAIBAAKCAQEA1234567890abcdefG\n-----END RSA PRIVATE KEY-----\nafter\n")
+        # Matching per line would silently defeat the multi-line pattern entirely.
+        assert policy.rule_matches({"type": "secret"}, pem) == ([2], None)
+
+    def test_prose_that_merely_mentions_a_password_is_not_a_secret(self):
+        # High-confidence only: a blocking check has zero tolerance for a false positive.
+        assert policy.rule_matches({"type": "secret"}, 'password = "hunter2-wordy"\n') == ([], None)
+
+    def test_the_secret_check_reads_redact_s_list_rather_than_a_copy_of_it(self, monkeypatch):
+        # The one property that matters: there is no second list here to drift from redact's.
+        monkeypatch.setattr(redact, "HIGH_CONFIDENCE_PATTERNS", [re.compile(r"CANARY")])
+        assert policy.rule_matches({"type": "secret"}, "a\nCANARY\n")[0] == [2]
+
+
+class TestMatchCeilings:
+    def test_the_ceilings_are_armed_blocks_advisory_warns(self):
+        assert policy.MAX_VERDICT == {"armed": "block", "advisory": "warn"}
+
+    def test_an_advisory_may_not_block_and_the_code_says_so_not_just_the_docs(self):
+        with pytest.raises(ValueError, match="may not block"):
+            policy._match({"kind": "advisory", "decision_id": "d1"}, "block", None)
+
+    def test_an_unrecognised_kind_is_capped_at_warn_not_trusted_to_block(self):
+        with pytest.raises(ValueError, match="may not block"):
+            policy._match({"kind": "whatever", "decision_id": "d1"}, "block", None)
+
+    def test_an_armed_policy_may_block(self):
+        assert policy._match({"kind": "armed"}, "block", 3)["verdict"] == "block"
+
+
+class TestEvaluatePolicies:
+    def test_no_policies_allows_and_is_complete(self):
+        result = policy.evaluate_policies([], _request())
+        assert result["verdict"] == "allow" and result["evaluation_status"] == "complete"
+        assert result["matches"] == [] and result["unchecked"] == []
+        assert result["basis"] == "deterministic"
+
+    def test_an_armed_rule_that_matches_blocks(self):
+        selected = policy.select_policies([_entry(guard_check=_armed(pattern="TODO"))],
+                                          _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("a\n# TODO\n")))
+        assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
+        assert [m["line"] for m in result["matches"]] == [2]
+
+    def test_an_armed_rule_that_does_not_match_allows(self):
+        selected = policy.select_policies([_entry(guard_check=_armed(pattern="TODO"))],
+                                          _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("clean\n")))
+        assert result["verdict"] == "allow" and result["matches"] == []
+
+    def test_an_advisory_warns_on_applicability_alone(self):
+        selected = policy.select_policies([_entry(source_files=["a.py"])],
+                                          _request(files=["a.py"]))
+        result = policy.evaluate_policies(selected, _request(files=["a.py"],
+                                                             artifact=_diff("anything\n")))
+        assert result["verdict"] == "warn"
+        assert [m["kind"] for m in result["matches"]] == ["advisory"]
+        assert result["matches"][0]["line"] is None
+
+    def test_an_advisory_alongside_a_blocking_rule_yields_the_worst_verdict(self):
+        entries = [_entry("d1", guard_check=_armed(pattern="TODO")),
+                   _entry("d2", source_files=["a.py"])]
+        selected = policy.select_policies(entries, _request(files=["a.py"]))
+        result = policy.evaluate_policies(selected, _request(files=["a.py"],
+                                                             artifact=_diff("# TODO\n")))
+        assert result["verdict"] == "block" and len(result["matches"]) == 2
+
+    def test_every_match_names_both_the_decision_and_the_revision(self):
+        # A decision whose text has moved on has not made the same objection, so a match that
+        # cannot say which revision spoke cannot be audited.
+        selected = policy.select_policies([_entry(guard_check=_armed(pattern="TODO"))],
+                                          _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("# TODO\n")))
+        [match] = result["matches"]
+        assert match["decision_id"] == "d1" and match["revision_id"] == "rev-1"
+        assert set(match) == {"decision_id", "revision_id", "kind", "title", "message",
+                              "verdict", "line"}
+
+    def test_the_rule_s_operator_message_travels_on_the_match(self):
+        rule = {**_armed(pattern="TODO"), "message": "no TODOs on main"}
+        selected = policy.select_policies([_entry(guard_check=rule)], _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("# TODO\n")))
+        assert result["matches"][0]["message"] == "no TODOs on main"
+
+    def test_the_result_names_the_policy_set_that_answered(self):
+        selected = policy.select_policies([_entry(guard_check=_armed())], _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("x")))
+        assert result["policy_set_version"] == policy.policy_set_version(selected)
+
+    def test_an_armed_rule_with_no_artifact_is_unchecked_never_clean(self):
+        selected = policy.select_policies([_entry(guard_check=_armed(pattern="TODO"))],
+                                          _request())
+        result = policy.evaluate_policies(selected, _request(artifact=None))
+        assert result["evaluation_status"] == "partial"
+        assert result["unchecked"] == [{"reason": "omitted", "decision_id": "d1"}]
+        assert result["verdict"] == "allow"  # allow + partial, never allow + complete
+
+    def test_an_empty_artifact_is_judged_rather_than_reported_as_omitted(self):
+        # An empty file WAS scanned and found nothing; a missing one was never scanned.
+        selected = policy.select_policies([_entry(guard_check=_armed(pattern="TODO"))],
+                                          _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("")))
+        assert result["evaluation_status"] == "complete" and result["unchecked"] == []
+
+    def test_an_unrunnable_rule_is_reported_as_unchecked(self):
+        selected = policy.select_policies([_entry(guard_check={**_armed(), "pattern": "([bad"})],
+                                          _request())
+        result = policy.evaluate_policies(selected, _request(artifact=_diff("x")))
+        assert result["unchecked"] == [{"reason": "bad-pattern", "decision_id": "d1"}]
+        assert result["evaluation_status"] == "partial"
+
+    @pytest.mark.parametrize("reason", ["truncated", "unreadable", "binary", "too-large",
+                                        "budget"])
+    def test_the_caller_s_own_gaps_are_carried_through_and_make_it_partial(self, reason):
+        # The caller owns the bytes, so it owns why they are missing; the evaluator's job is
+        # to refuse to call the result complete.
+        result = policy.evaluate_policies([], _request(),
+                                          unchecked=[{"file": "big.bin", "reason": reason}])
+        assert result["unchecked"] == [{"reason": reason, "file": "big.bin"}]
+        assert result["evaluation_status"] == "partial"
+
+    def test_a_typo_d_reason_raises_rather_than_becoming_an_unactionable_gap(self):
+        with pytest.raises(ValueError, match="reason must be one of"):
+            policy.evaluate_policies([], _request(), unchecked=[{"reason": "too_large"}])
+
+    def test_an_internal_failure_is_an_error_and_is_never_laundered_into_complete(self):
+        # A rule that is not a mapping at all: the evaluator breaks rather than guessing.
+        broken = [{"decision_id": "d1", "revision_id": "r1", "kind": "armed",
+                   "title": "", "rule": "not a mapping", "matched_files": []}]
+        result = policy.evaluate_policies(broken, _request(artifact=_diff("x")))
+        assert result["evaluation_status"] == "error"
+
+    def test_an_error_keeps_the_matches_already_found_rather_than_allowing(self):
+        good = policy.select_policies([_entry("d1", guard_check=_armed(pattern="TODO"))],
+                                      _request())
+        broken = [{"decision_id": "d2", "revision_id": "r2", "kind": "armed",
+                   "title": "", "rule": "not a mapping", "matched_files": []}]
+        result = policy.evaluate_policies(good + broken, _request(artifact=_diff("# TODO\n")))
+        assert result["evaluation_status"] == "error" and result["verdict"] == "block"
+
+    def test_junk_in_the_policy_list_is_skipped_not_raised_on(self):
+        assert policy.evaluate_policies(["nonsense", None], _request())["verdict"] == "allow"
+
+
+class TestLeafPurity:
+    """policy.py is where the ONE deterministic check lives, which only works while every
+    caller can reach it. A dependency on the store or the guard would make it unreachable
+    from below and push someone into keeping a second copy."""
+
+    def _imports(self):
+        tree = ast.parse(pathlib.Path(policy.__file__).read_text(encoding="utf-8"))
+        plain, internal = set(), set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                plain |= {a.name.split(".")[0] for a in node.names}
+            if isinstance(node, ast.ImportFrom):
+                root = (node.module or "").split(".")[0]
+                if root == "contexer":
+                    internal |= {f"{node.module}.{a.name}" for a in node.names}
+                else:
+                    plain.add(root)
+        return plain, internal
+
+    def test_the_only_contexer_dependency_is_redact(self):
+        _plain, internal = self._imports()
+        assert internal == {"contexer.redact"}
+
+    def test_it_owns_no_clock(self):
+        # The caller owns the deadline, the reserve and the exit behaviour; a budget growing
+        # back in here is exactly how one implementation becomes two.
+        plain, _internal = self._imports()
+        assert "time" not in plain and "datetime" not in plain
 
 
 # ── results ──────────────────────────────────────────────────────────────────────
