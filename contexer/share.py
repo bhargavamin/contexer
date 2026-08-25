@@ -1,6 +1,6 @@
 """Explicit share: push a local decision up to the Teams cloud context (C4).
 
-Path B, the write counterpart to team_context.pull. Sharing is an EXPLICIT verb — never
+Path B, the write counterpart to team_context.pull. Sharing is an EXPLICIT verb - never
 auto-shares on capture. v1 syncs to your PERSONAL cloud context (push_decision auto-approves
 it); a team `shared_candidate` awaits a team-scoped push endpoint (future Track A).
 
@@ -32,14 +32,15 @@ import threading
 import time
 import uuid
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
-from contexer import sidecars, store
+from contexer import share_status, sidecars, store
 from contexer.config import Profile, load_profile
 from contexer.remote import (
     DecisionReconciliationPreview,
     RemoteAuthError,
+    RemoteRateLimitError,
     RemoteStore,
     RemoteStoreError,
     RemoteTeam,
@@ -51,6 +52,38 @@ from contexer.remote import (
 )
 from contexer.repo_key import canonical_repo_key
 
+# THE definition of "this refusal is transient", and the only one. A transient refusal keeps a
+# confirmed write queued so a later retry can land it; anything else is terminal, and the drain
+# moves that entry to `attention`. `RemoteRateLimitError` is what makes the rate-limit arm
+# structural - the three copies of `"rate" in str(exc) and "limit" in str(exc)` that used to
+# decide this lived here, in the retry-versus-drop path for a write the developer had already
+# confirmed. See remote.py.
+#
+# The value is the (queued, could-not-queue) outcome pair, so ONE table serves both decision
+# sites: the drain asks only "is this transient?" through _RETRYABLE_REFUSALS, while
+# submit_reconciliation needs the pair too. Those two used to enumerate the same three classes
+# separately, so adding a fourth transient class to the tuple would have left
+# submit_reconciliation reporting it as terminal - "Nothing was queued" - for a confirmed write.
+# Every key is a direct sibling under RemoteStoreError, so first-match lookup is unambiguous.
+_TRANSIENT_REFUSALS: dict[type[RemoteStoreError], tuple[str, str]] = {
+    RemoteUnavailableError: (
+        share_status.UNREACHABLE_QUEUED, share_status.UNREACHABLE_NOT_QUEUED),
+    RemoteAuthError: (
+        share_status.UNREACHABLE_QUEUED, share_status.UNREACHABLE_NOT_QUEUED),
+    RemoteRateLimitError: (
+        share_status.RATE_LIMITED_QUEUED, share_status.RATE_LIMITED_NOT_QUEUED),
+}
+_RETRYABLE_REFUSALS = tuple(_TRANSIENT_REFUSALS)
+
+
+def _transient_outcomes(exc: BaseException) -> tuple[str, str] | None:
+    """The (queued, could-not-queue) outcomes for a transient refusal, else None for a terminal
+    one. Derived from `_TRANSIENT_REFUSALS`, so the transient set has exactly one home."""
+    for cls, outcomes in _TRANSIENT_REFUSALS.items():
+        if isinstance(exc, cls):
+            return outcomes
+    return None
+
 # Outbox cap: push_decision is idempotent on decision_id server-side, so a queued entry is
 # never dropped for age or attempt count in v1 - retrying is always safe. This count is the
 # only bound, so a long-offline stretch can't grow ~/.contexer/.outbox.json without limit.
@@ -60,6 +93,10 @@ _OUTBOX_LOCAL_LOCK = threading.Lock()
 _OUTBOX_LOCK_DEPTH = contextvars.ContextVar("contexer_outbox_lock_depth", default=0)
 _OUTBOX_ASYNC_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _OUTBOX_ASYNC_LOCKS_GUARD = threading.Lock()
+# How long an async waiter sleeps between attempts at the outbox lock. Small enough that the
+# wait is not noticeable next to the network push it precedes, large enough that a contended
+# wait is not a spin.
+_OUTBOX_LOCK_POLL_SECONDS = 0.02
 
 
 @dataclass
@@ -93,7 +130,7 @@ def _wire_source(source: str | None) -> str | None:
     -32602 that silently poisons the outbox forever. `plan` (a provisional maturity marker that
     leaks from `created_by` into a revision's `source`) is accepted and PRESERVED end-to-end, so
     the provisional signal reaches the cloud intact. Any *other* off-taxonomy *string* degrades
-    to "ai" — a safe accepted value — so an unknown source can never brick the outbox. `None`
+    to "ai" - a safe accepted value - so an unknown source can never brick the outbox. `None`
     passes through unchanged: push_decision OMITS source when it is None (the cloud stores NULL =
     unknown provenance), so None must not be fabricated into a false "ai" provenance."""
     if source is None or source in _WIRE_SOURCES:
@@ -154,6 +191,27 @@ def _enqueue_reconciliation(operation: dict) -> None:
         _save_reconcile_outbox(entries)
 
 
+def _acquire_outbox_lock(*, blocking: bool = True) -> contextlib.ExitStack:
+    """Take the process-local mutex AND the cross-process file lock; return what releases both.
+
+    Raises `BlockingIOError` when `blocking=False` and either is already held, leaving nothing
+    acquired. Split out of `outbox_lock` so the reentrancy depth ContextVar is set by the CALLER,
+    in the caller's own context: the async path needs to acquire without blocking its loop, and a
+    token set anywhere else than the awaiting coroutine's own context would be invisible to it -
+    a nested `_enqueue` would then read depth 0 and try to take the non-reentrant `store_lock` a
+    second time, deadlocking against itself."""
+    stack = contextlib.ExitStack()
+    try:
+        if not _OUTBOX_LOCAL_LOCK.acquire(blocking=blocking):
+            raise BlockingIOError("the outbox lock is held by another thread")
+        stack.callback(_OUTBOX_LOCAL_LOCK.release)
+        stack.enter_context(store.store_lock(_OUTBOX_LOCK_SLUG, blocking=blocking))
+    except BaseException:
+        stack.close()
+        raise
+    return stack
+
+
 @contextlib.contextmanager
 def outbox_lock():
     """Serialize an account transition against outbox writers and drains."""
@@ -165,13 +223,12 @@ def outbox_lock():
         finally:
             _OUTBOX_LOCK_DEPTH.reset(token)
         return
-    with _OUTBOX_LOCAL_LOCK:
-        with store.store_lock(_OUTBOX_LOCK_SLUG):
-            token = _OUTBOX_LOCK_DEPTH.set(1)
-            try:
-                yield
-            finally:
-                _OUTBOX_LOCK_DEPTH.reset(token)
+    with _acquire_outbox_lock():
+        token = _OUTBOX_LOCK_DEPTH.set(1)
+        try:
+            yield
+        finally:
+            _OUTBOX_LOCK_DEPTH.reset(token)
 
 
 def _async_outbox_loop_lock() -> asyncio.Lock:
@@ -184,16 +241,53 @@ def _async_outbox_loop_lock() -> asyncio.Lock:
         return lock
 
 
+async def _await_outbox_lock() -> contextlib.ExitStack:
+    """Wait for the outbox lock without blocking the event loop, one poll at a time.
+
+    Every wait is an `await`, so the caller's deadline can cancel it (`server.share_decision`
+    wraps the share in `asyncio.wait_for`) and every other tool on the loop keeps running while
+    this one waits. Unbounded on purpose: the semantics are the blocking lock's - wait until you
+    get it - and the bound belongs to the caller's own timeout, as it already does.
+
+    Accepted trade: a poller can lose repeatedly to a blocking waiter that is queued in the
+    kernel. Both holders here take the lock for one short file rewrite, so the wait is bounded in
+    practice by the other side finishing, not by fairness."""
+    while True:
+        try:
+            return _acquire_outbox_lock(blocking=False)
+        except BlockingIOError:
+            await asyncio.sleep(_OUTBOX_LOCK_POLL_SECONDS)
+
+
 @contextlib.asynccontextmanager
 async def async_outbox_lock():
-    """Async task-safe wrapper for the same outbox critical section."""
-    if _OUTBOX_LOCK_DEPTH.get():
-        with outbox_lock():
+    """Async task-safe wrapper for the same outbox critical section.
+
+    Held across an `await`, so it is entered without ever blocking the loop (see
+    `_await_outbox_lock`). RELEASE stays synchronous: `flock(LOCK_UN)` never waits, and awaiting
+    in the `finally` would let a cancellation arriving at that moment skip the release and strand
+    the lock for every other process."""
+    depth = _OUTBOX_LOCK_DEPTH.get()
+    if depth:
+        token = _OUTBOX_LOCK_DEPTH.set(depth + 1)
+        try:
             yield
+        finally:
+            _OUTBOX_LOCK_DEPTH.reset(token)
         return
     async with _async_outbox_loop_lock():
-        with outbox_lock():
-            yield
+        stack = await _await_outbox_lock()
+        try:
+            # Set in THIS coroutine's context, so a nested sync `outbox_lock()` (every
+            # `_enqueue` on this path takes one) sees the depth and re-enters instead of
+            # deadlocking on the lock this frame already holds.
+            token = _OUTBOX_LOCK_DEPTH.set(1)
+            try:
+                yield
+            finally:
+                _OUTBOX_LOCK_DEPTH.reset(token)
+        finally:
+            stack.close()
 
 
 def _read_outbox() -> tuple[list[dict], str | None]:
@@ -530,8 +624,9 @@ def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
 
 
 def _entry_push_kwargs(entry: dict) -> dict:
-    """push_decision kwargs for one outbox entry. Shared by drain_outbox + adrain_outbox so
-    the two drains serialize an entry identically (source coerced through _wire_source).
+    """push_decision kwargs for one outbox entry. Shared by both drains (`_drain_outbox_unlocked`
+    and `_adrain_outbox_unlocked`) so they serialize an entry identically (source coerced through
+    _wire_source).
 
     `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally - the
     wire gate `remote._wire_args`/`_WIRE_SOURCE_FILES` is read at CALL time, i.e. AT DRAIN, not
@@ -559,27 +654,25 @@ def _dec_push_kwargs(dec: dict, key) -> dict:
         source_files=dec.get("source_files"))
 
 
-def _finish_share(dec: dict, key, server_id, endpoint: str | None = None) -> str:
-    """Turn one push outcome into the user-facing status (shared by share + share_async).
+def _finish_share(dec: dict, key, server_id,
+                  endpoint: str | None = None) -> share_status.ShareStatus:
+    """Turn one push outcome into a :class:`share_status.ShareStatus` (share + share_async).
 
     On failure (server_id is None: cloud unreachable OR auth rejected) enqueue the decision
     so a later drain retries it - either way a queued retry can succeed later, so both
     degradations queue rather than losing the share. On success, mark the decision shared
-    (endpoint-scoped, cosmetic - never lets a marker failure affect the returned status) and
-    return the honest personal-scope message (teammates don't see it until team promotion
-    ships)."""
+    (endpoint-scoped, cosmetic - never lets a marker failure affect the returned status)."""
     if server_id is None:
         try:
             _enqueue(_payload(dec, key))
         except Exception:
-            # Even queueing can fail (disk full, temp-dir perms). Never raise - and the
-            # message must not promise a retry that was never recorded.
-            return ("Share failed (see the warning above for why). Your local decision is unchanged.")
-        return ("Share failed (see the warning above for why). Queued - it will retry "
-                "automatically at the next session start.")
+            # Even queueing can fail (disk full, temp-dir perms). Never raise - and the outcome
+            # must not claim a retry that was never recorded, hence NOT_QUEUED, not QUEUED.
+            return share_status.ShareStatus(share_status.NOT_QUEUED, lost=1, total=1)
+        return share_status.ShareStatus(share_status.QUEUED, queued=1, total=1)
     _mark_shared([dec.get("id")], endpoint)
-    return (f"Synced decision to your personal cloud context (server id={server_id}) - "
-            "teammates won't see this until team promotion ships.")
+    return share_status.ShareStatus(
+        share_status.SYNCED, sent=1, total=1, server_id=str(server_id))
 
 
 # ── batch push (share_all / share_ids / drain, both twins) ───────────────────────────
@@ -602,19 +695,6 @@ def _resolve_ids(repo_path: str, decision_ids: list) -> tuple[list[dict], list]:
     return projs, missing
 
 
-def _prepend_unknown(status: str, missing: list) -> str:
-    """Prefix a share status with a note about unknown ids (empty missing -> unchanged)."""
-    if not missing:
-        return status
-    unknown = ", ".join(str(m)[:8] for m in missing)
-    return f"Skipped {len(missing)} unknown id(s): {unknown}.\n{status}"
-
-
-def _no_match_status(missing: list) -> str:
-    unknown = ", ".join(str(m)[:8] for m in missing)
-    return f"Nothing to share: no matching local decision (unknown id(s): {unknown})."
-
-
 def _requeue_skipped(chunk: list[dict], key, skipped_ids: list) -> tuple[int, int]:
     """Re-queue the capacity-skipped rows of a chunk; return (requeued, lost). A failed _enqueue
     (e.g. disk full) is COUNTED as lost, not swallowed - that row is neither stored remotely nor
@@ -631,23 +711,57 @@ def _requeue_skipped(chunk: list[dict], key, skipped_ids: list) -> tuple[int, in
     return requeued, lost
 
 
-def _queue_rest_status(decs: list[dict], start: int, key, sent: int, total: int) -> str:
+@dataclass
+class _BatchCounts:
+    """The running per-decision counts for one batch push, carried as ONE object.
+
+    Both twins accumulate into this, and both of a batch's exits render from it, so no exit can
+    report a subset of the fields. A loose parameter list is exactly what let `lost` be dropped:
+    it was computed in the loop and then five of the six counts were forwarded to the early
+    return, so a decision that was neither stored NOR queued reported `lost=0` and the sentence
+    said "the rest are queued". Passing the object whole makes that unforgettable rather than
+    merely fixed once."""
+
+    sent: int = 0
+    at_capacity: int = 0
+    invalid: int = 0
+    lost: int = 0
+
+    def status(self, outcome: str, total: int, **extra) -> share_status.ShareStatus:
+        return share_status.ShareStatus(
+            outcome, sent=self.sent, at_capacity=self.at_capacity, invalid=self.invalid,
+            lost=self.lost, total=total, **extra)
+
+
+def _queue_rest_status(decs: list[dict], start: int, key, counts: _BatchCounts,
+                       total: int) -> share_status.ShareStatus:
     """A chunk the cloud stopped accepting (unreachable, auth, OR a refusal like a rate limit - the
     stderr warning above names which): queue decs[start:] (this chunk + everything after) and
-    return the status. Mirrors share_all's original disk-error handling."""
+    report what that achieved. Mirrors share_all's original disk-error handling.
+
+    The two outcomes differ in exactly the way a caller cares about: BATCH_INTERRUPTED means
+    every unsent decision is safely queued, BATCH_STRANDED means the queue write itself failed
+    partway and `lost` decisions are recorded nowhere.
+
+    What this call is responsible for comes from `start`, NOT from `counts.sent`. It owns
+    `decs[start:]` and nothing else, and `sent` can trail `start` whenever an earlier chunk had a
+    row the server skipped: deriving from `sent` then double-counts those rows, which
+    `_requeue_skipped` has already queued and counted under `at_capacity`. As prose that was a
+    vague overstatement; as a number a caller acts on it would be a false `lost`.
+
+    A failure here ADDS to whatever was already lost in earlier chunks rather than replacing it,
+    so the total stays a true partition of `total`. The rendered sentence still summarises (it
+    points at the stderr warning for the reason); the FIELDS are the complete account."""
+    handled = total - start          # what this call is responsible for queueing
     queued = 0
     try:
         for rest in decs[start:]:
             _enqueue(_payload(rest, key))
             queued += 1
     except Exception:
-        return (f"Shared {sent} of {total} decision(s), then the cloud stopped accepting them "
-                f"(see the warning above for why). Queued {queued} of the remaining {total - sent} "
-                "for retry before the outbox write failed - run `contexer share --all` again to "
-                "queue the rest; your local decisions are unchanged.")
-    return (f"Shared {sent} of {total} decision(s). The rest are queued and will retry "
-            "automatically at the next session start (see the warning above for why the cloud "
-            "stopped accepting them).")
+        counts.lost += handled - queued
+        return counts.status(share_status.BATCH_STRANDED, total, queued=queued)
+    return counts.status(share_status.BATCH_INTERRUPTED, total, queued=queued)
 
 
 def _split_skips(skipped: list) -> tuple[set, int]:
@@ -657,20 +771,6 @@ def _split_skips(skipped: list) -> tuple[set, int]:
     retry = {s["decision_id"] for s in skipped if s.get("reason") == "quota_exceeded"}
     invalid = len(skipped) - len(retry)
     return retry, invalid
-
-
-def _batch_success_status(sent: int, at_capacity: int, invalid: int, lost: int) -> str:
-    """Status when no chunk hit a transport failure: what synced, what was queued at capacity, what
-    the server rejected as invalid (dropped), and what was genuinely lost (queued but un-writeable)."""
-    msg = f"Synced {sent} decision(s) to your personal cloud context"
-    if at_capacity:
-        msg += (f"; {at_capacity} could not be stored (context at capacity) and were queued - "
-                "delete some decisions to sync them")
-    if invalid:
-        msg += f"; {invalid} were rejected by the server (unsupported type or content) and skipped"
-    if lost:
-        msg += f"; {lost} at capacity could NOT be queued (outbox write failed) and are unsaved"
-    return msg + " - teammates won't see these until team promotion ships."
 
 
 def _drain_mark(chunk: list[dict], res: tuple[list[str], list[dict]], sent_ids: set,
@@ -698,52 +798,54 @@ def _mark_batch_saved(chunk: list[dict], skipped: list[dict], endpoint: str | No
     _mark_shared([d["id"] for d in chunk if d["id"] not in skipped_ids], endpoint)
 
 
-def _push_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None = None) -> str:
+def _push_batch(remote: RemoteStore, decs: list[dict], key,
+                endpoint: str | None = None) -> share_status.ShareStatus:
     """Sync batch push of shareable projections (share_all / share_ids). Stops at the first failed
     chunk (queues it + the rest); re-queues TRANSIENT capacity skips; drops PERMANENT invalid ones."""
     total = len(decs)
-    sent = at_capacity = invalid = lost = 0
+    counts = _BatchCounts()
     for start in range(0, total, _BATCH_SIZE):
         chunk = decs[start:start + _BATCH_SIZE]
         res = with_local_fallback(
             lambda chunk=chunk: remote.push_decisions([_dec_push_kwargs(d, key) for d in chunk]),
             default=None, action="share decisions")
         if res is None:
-            return _queue_rest_status(decs, start, key, sent, total)
+            return _queue_rest_status(decs, start, key, counts, total)
         _saved, skipped = res
         _mark_batch_saved(chunk, skipped, endpoint)
-        sent += len(chunk) - len(skipped)
+        counts.sent += len(chunk) - len(skipped)
         retry, inv = _split_skips(skipped)
-        invalid += inv
+        counts.invalid += inv
         if retry:
             requeued, dropped = _requeue_skipped(chunk, key, retry)
-            at_capacity += requeued
-            lost += dropped
-    return _batch_success_status(sent, at_capacity, invalid, lost)
+            counts.at_capacity += requeued
+            counts.lost += dropped
+    return counts.status(share_status.BATCH_DONE, total)
 
 
-async def _apush_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None = None) -> str:
+async def _apush_batch(remote: RemoteStore, decs: list[dict], key,
+                       endpoint: str | None = None) -> share_status.ShareStatus:
     """Async twin of :func:`_push_batch` (awaits apush_decisions so a wedged chunk is cancellable).
     Mirrors it line-for-line except the awaited push; shares every outbox/status helper."""
     total = len(decs)
-    sent = at_capacity = invalid = lost = 0
+    counts = _BatchCounts()
     for start in range(0, total, _BATCH_SIZE):
         chunk = decs[start:start + _BATCH_SIZE]
         res = await awith_local_fallback(
             lambda chunk=chunk: remote.apush_decisions([_dec_push_kwargs(d, key) for d in chunk]),
             default=None, action="share decisions")
         if res is None:
-            return _queue_rest_status(decs, start, key, sent, total)
+            return _queue_rest_status(decs, start, key, counts, total)
         _saved, skipped = res
         _mark_batch_saved(chunk, skipped, endpoint)
-        sent += len(chunk) - len(skipped)
+        counts.sent += len(chunk) - len(skipped)
         retry, inv = _split_skips(skipped)
-        invalid += inv
+        counts.invalid += inv
         if retry:
             requeued, dropped = _requeue_skipped(chunk, key, retry)
-            at_capacity += requeued
-            lost += dropped
-    return _batch_success_status(sent, at_capacity, invalid, lost)
+            counts.at_capacity += requeued
+            counts.lost += dropped
+    return counts.status(share_status.BATCH_DONE, total)
 
 
 def drain_outbox(profile: Profile | None = None) -> int:
@@ -822,8 +924,7 @@ def _drain_reconciliation_outbox_unlocked(profile: Profile) -> int:
             result = _call_atomic_submission(remote, entry)
         except RemoteStoreError as exc:
             entry["attempts"] = entry.get("attempts", 0) + 1
-            if not isinstance(exc, (RemoteUnavailableError, RemoteAuthError)) and not (
-                    "rate" in str(exc).casefold() and "limit" in str(exc).casefold()):
+            if not isinstance(exc, _RETRYABLE_REFUSALS):
                 entry.update(stage="attention", reason=str(exc))
                 kept.append(entry)
                 continue
@@ -851,18 +952,16 @@ def _drain_reconciliation_outbox_unlocked(profile: Profile) -> int:
     return sent
 
 
-async def adrain_outbox(profile: Profile | None = None) -> int:
-    """Locked wrapper for retrying queued pushes from async callers."""
-    async with async_outbox_lock():
-        profile = profile or load_profile()
-        sent = await _adrain_outbox_unlocked(profile)
-        return sent + await _adrain_reconciliation_outbox_unlocked(profile)
-
-
 async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
-    """Async twin of :func:`drain_outbox` (awaits apush_decision so a wedged retry is
-    cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics — the only
-    difference is the awaited push; every other line is the shared local outbox logic."""
+    """Async twin of :func:`_drain_outbox_unlocked` (awaits apush_decisions so a wedged retry is
+    cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics - the only
+    difference is the awaited push; every other line is the shared local outbox logic.
+
+    Drains the SHARE outbox only, exactly like its sync twin. The reconciliation retry queue is
+    drained by `drain_outbox`, the public locked wrapper, which `team_context.refresh` calls at
+    session start. An async wrapper pairing this with an async-native reconciliation drain existed
+    and was deleted: nothing but its own tests ever called it, so the 68-line copy of that drain
+    only ever drifted from the sync original it duplicated."""
     entries = _load_outbox()
     if not entries:
         return 0
@@ -887,80 +986,10 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
     return sent
 
 
-async def _adrain_reconciliation_outbox_unlocked(profile: Profile) -> int:
-    """Async-native twin of the confirmed-operation drain."""
-    entries, error = _read_reconcile_outbox()
-    if error is not None:
-        return 0
-    if not entries:
-        return 0
-    remote = RemoteStore.from_profile(profile)
-    if remote is None:
-        return 0
-    try:
-        protocol = (await remote.aget_capabilities()).decision_reconciliation
-    except RemoteStoreError as exc:
-        if _unsupported_capability_error(exc):
-            for entry in entries:
-                if entry.get("stage") != "attention":
-                    entry.update(stage="attention", reason="unsupported_protocol")
-            _save_reconcile_outbox(entries)
-        return 0
-    if not protocol or protocol.version < 1 or not protocol.atomic_submit:
-        for entry in entries:
-            if entry.get("stage") != "attention":
-                entry.update(stage="attention", reason="unsupported_protocol")
-        _save_reconcile_outbox(entries)
-        return 0
-
-    kept: list[dict] = []
-    sent = 0
-    for index, entry in enumerate(entries):
-        if entry.get("stage") == "attention":
-            kept.append(entry)
-            continue
-        try:
-            result = await remote.asubmit_team_decision(
-                entry["decision_id"], entry["revision_id"], entry["team_id"],
-                expected_personal_head=entry.get("expected_personal_head"),
-                expected_team_head=entry.get("expected_team_head"),
-                idempotency_key=entry["idempotency_key"],
-                **(entry.get("payload") or entry.get("decision") or {}))
-        except RemoteStoreError as exc:
-            entry["attempts"] = entry.get("attempts", 0) + 1
-            if not isinstance(exc, (RemoteUnavailableError, RemoteAuthError)) and not (
-                    "rate" in str(exc).casefold() and "limit" in str(exc).casefold()):
-                entry.update(stage="attention", reason=str(exc))
-                kept.append(entry)
-                continue
-            kept.extend([entry, *entries[index + 1:]])
-            _save_reconcile_outbox(kept)
-            return sent
-        if result.status in {"heads_changed", "needs_rebase"}:
-            entry.update(stage="attention", reason=result.status,
-                         observed_personal_head=result.personal_head,
-                         observed_team_head=result.team_head)
-            kept.append(entry)
-            continue
-        if result.status == "rate_limited":
-            entry["attempts"] = entry.get("attempts", 0) + 1
-            kept.extend([entry, *entries[index + 1:]])
-            _save_reconcile_outbox(kept)
-            return sent
-        if result.status not in {"submitted", "unchanged", "already_pending"}:
-            entry.update(stage="attention", reason=result.status or "unknown_result")
-            kept.append(entry)
-            continue
-        _mark_shared([entry.get("decision_id")], profile.endpoint)
-        sent += 1
-    _save_reconcile_outbox(kept)
-    return sent
-
-
 def _payload(dec: dict, key) -> dict:
     """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
     title so a queued offline share still sends it once drained (_entry_push_kwargs reads
-    it back off this same row). Also carries `source_files` (issue #174 Task 5) the same way —
+    it back off this same row). Also carries `source_files` (issue #174 Task 5) the same way -
     stored in the outbox regardless of the current wire gate, so `_entry_push_kwargs` +
     `remote._wire_args` decide at DRAIN time whether it actually egresses."""
     return {
@@ -972,12 +1001,13 @@ def _payload(dec: dict, key) -> dict:
     }
 
 
-def share_all(repo_path: str, *, profile: Profile | None = None) -> str:
+def share_all(repo_path: str, *, profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
         return _share_all_unlocked(repo_path, profile=profile)
 
 
-def _share_all_unlocked(repo_path: str, *, profile: Profile | None = None) -> str:
+def _share_all_unlocked(repo_path: str, *,
+                        profile: Profile | None = None) -> share_status.ShareStatus:
     """Push every non-ignored local decision to your team cloud context, oldest first.
 
     Same local-first contract as share(): never raises for cloud problems. Stops at the
@@ -990,21 +1020,21 @@ def _share_all_unlocked(repo_path: str, *, profile: Profile | None = None) -> st
         pass
     decs = store.get_shareable_all(repo_path)
     if not decs:
-        return "Nothing to share: no local decisions."
+        return share_status.ShareStatus(share_status.NOTHING_TO_SHARE)
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Set mode='team' + endpoint + token in "
-                "~/.contexer/config.toml to share.")
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
     key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     return _push_batch(remote, decs, key, profile.endpoint)
 
 
-def share_global(*, profile: Profile | None = None) -> str:
+def share_global(*, profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
         return _share_global_unlocked(profile=profile)
 
 
-def _share_global_unlocked(*, profile: Profile | None = None) -> str:
+def _share_global_unlocked(*,
+                           profile: Profile | None = None) -> share_status.ShareStatus:
     """Push every global rule (`~/.contexer/_global.json`) to your team cloud context (#239).
 
     Global rules apply to every repo, so they go up with `repo=None`: `remote._wire_args` omits
@@ -1025,24 +1055,24 @@ def _share_global_unlocked(*, profile: Profile | None = None) -> str:
         pass
     decs = store.get_shareable_global()
     if not decs:
-        return "Nothing to share: no global rules."
+        return share_status.ShareStatus(share_status.NOTHING_TO_SHARE, scope="global")
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Set mode='team' + endpoint + token in "
-                "~/.contexer/config.toml to share.")
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
     return _push_batch(remote, decs, None, profile.endpoint)
 
 
-def share(repo_path: str, decision_id: str = "", *, profile: Profile | None = None) -> str:
+def share(repo_path: str, decision_id: str = "", *,
+          profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
         return _share_unlocked(repo_path, decision_id, profile=profile)
 
 
 def _share_unlocked(repo_path: str, decision_id: str = "", *,
-                    profile: Profile | None = None) -> str:
+                    profile: Profile | None = None) -> share_status.ShareStatus:
     """Push one local decision to your team cloud context; return a human-readable status.
 
-    Local-first: never raises for cloud problems — returns a message and leaves the local
+    Local-first: never raises for cloud problems - returns a message and leaves the local
     decision untouched. `decision_id` selects the decision (full id / 8-char prefix); omit
     to share the most recent. `profile` defaults to load_profile()."""
     profile = profile or load_profile()
@@ -1052,11 +1082,10 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
         pass  # a broken drain (e.g. disk error saving the outbox) must not block this share
     dec = store.get_shareable(repo_path, decision_id)
     if dec is None:
-        return "Nothing to share: no matching local decision."
+        return share_status.ShareStatus(share_status.NO_MATCH)
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Set mode='team' + endpoint + token in "
-                "~/.contexer/config.toml to share.")
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
     key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     server_id = with_local_fallback(
         lambda: remote.push_decision(**_dec_push_kwargs(dec, key)),
@@ -1064,40 +1093,52 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
     return _finish_share(dec, key, server_id, profile.endpoint)
 
 
-def share_ids(repo_path: str, decision_ids: list, *, profile: Profile | None = None) -> str:
+def share_ids(repo_path: str, decision_ids: list, *,
+              profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
         return _share_ids_unlocked(repo_path, decision_ids, profile=profile)
 
 
 def reconcile(repo_path: str, decision_id: str, team: str = "", *,
-              profile: Profile | None = None) -> str:
+              profile: Profile | None = None) -> share_status.ReconcileStatus:
     """Prepare and submit one reconciliation without an interactive confirmation.
 
     The CLI calls :func:`prepare_reconciliation` itself so it can show the authoritative server
     preview before asking. This convenience entry point remains useful to API callers and tests.
     """
-    prepared = prepare_reconciliation(repo_path, decision_id, team, profile=profile)
-    if isinstance(prepared, str):
-        return prepared
-    return submit_reconciliation(prepared, profile=profile)
+    plan, why = prepare_reconciliation(repo_path, decision_id, team, profile=profile)
+    if plan is None:
+        return why
+    return submit_reconciliation(plan, profile=profile)
 
 
-def _select_team(teams: list[RemoteTeam], requested: str) -> RemoteTeam | str:
+def _team_rows(teams: list[RemoteTeam]) -> tuple[str, ...]:
+    return tuple(f"{t.name} ({t.id})" for t in teams)
+
+
+def _select_team(teams: list[RemoteTeam],
+                 requested: str) -> tuple[RemoteTeam | None, share_status.ReconcileStatus | None]:
+    """(team, None) on a resolved target, (None, why) otherwise.
+
+    The 2-tuple is the house shape for "a value, or the reason there isn't one"
+    (`store._read_outbox`, `store.resolve_repo_verbose`). It replaces `RemoteTeam | str`, where a
+    `str` MEANT failure and every caller had to test the type to find out."""
     if not teams:
-        return "You do not belong to any shared teams."
+        return None, share_status.ReconcileStatus(share_status.NO_TEAMS)
     if requested:
         matches = ([t for t in teams if t.id == requested]
                    or [t for t in teams if t.name.casefold() == requested.casefold()])
         if len(matches) == 1:
-            return matches[0]
+            return matches[0], None
         if len(matches) > 1:
-            return f"Team name {requested!r} is ambiguous; pass its id instead."
-        available = ", ".join(f"{t.name} ({t.id})" for t in teams)
-        return f"No shared team matches {requested!r}. Available: {available}."
+            return None, share_status.ReconcileStatus(
+                share_status.TEAM_AMBIGUOUS, detail=requested)
+        return None, share_status.ReconcileStatus(
+            share_status.TEAM_UNKNOWN, detail=requested, teams=_team_rows(teams))
     if len(teams) == 1:
-        return teams[0]
-    available = ", ".join(f"{t.name} ({t.id})" for t in teams)
-    return f"Choose a team with `--team NAME_OR_ID`. Available: {available}."
+        return teams[0], None
+    return None, share_status.ReconcileStatus(
+        share_status.TEAM_CHOICE_REQUIRED, teams=_team_rows(teams))
 
 
 def _atomic_decision_kwargs(dec: dict, key: str | None, *,
@@ -1121,62 +1162,73 @@ def _unsupported_capability_error(exc: RemoteStoreError) -> bool:
         "unknown tool", "tool not found", "method not found", "-32601", "get_capabilities failed"))
 
 
-def _resolve_reconciliation_team(remote: RemoteStore, requested: str) -> RemoteTeam | str:
+def _resolve_reconciliation_team(
+        remote: RemoteStore,
+        requested: str) -> tuple[RemoteTeam | None, share_status.ReconcileStatus | None]:
     try:
         teams = remote.list_teams()
     except RemoteStoreError as exc:
         if requested and _unsupported_capability_error(exc):
-            return RemoteTeam(requested, requested, "member")
+            return RemoteTeam(requested, requested, "member"), None
         if _unsupported_capability_error(exc):
-            return ("This team server does not support team discovery. "
-                    "Run reconcile again with `--team TEAM_ID`.")
-        return "Could not list shared teams (see the warning above); nothing was submitted."
+            return None, share_status.ReconcileStatus(share_status.NO_TEAM_DISCOVERY)
+        return None, share_status.ReconcileStatus(share_status.TEAM_LIST_FAILED)
     return _select_team(teams, requested)
 
 
-def prepare_reconciliation(repo_path: str, decision_id: str, team: str = "", *,
-                           profile: Profile | None = None) -> ReconciliationPlan | str:
-    """Resolve a target and fetch the authoritative preview without changing remote state."""
+def prepare_reconciliation(
+        repo_path: str, decision_id: str, team: str = "", *,
+        profile: Profile | None = None,
+) -> tuple[ReconciliationPlan | None, share_status.ReconcileStatus | None]:
+    """Resolve a target and fetch the authoritative preview without changing remote state.
+
+    Returns `(plan, None)` when a submission can go ahead, `(None, why)` otherwise. It used to
+    return `ReconciliationPlan | str`, so `str` MEANT failure and `cli.reconcile_cmd` had to run
+    `isinstance(prepared, str)` to discover which it had been given."""
     profile = profile or load_profile()
     dec = store.get_shareable(repo_path, decision_id, redact_on=profile.redact_secrets)
     if dec is None:
-        return "Nothing to reconcile: no matching local decision."
+        return None, share_status.ReconcileStatus(share_status.NO_LOCAL_MATCH)
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Run `contexer login` to connect this machine before "
-                "submitting a team update.")
+        return None, share_status.ReconcileStatus(share_status.NOT_LOGGED_IN)
 
     key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     try:
         capabilities = remote.get_capabilities()
     except RemoteStoreError as exc:
         if _unsupported_capability_error(exc):
-            target = _resolve_reconciliation_team(remote, team)
-            if isinstance(target, str):
-                return target
+            target, why = _resolve_reconciliation_team(remote, team)
+            if target is None:
+                return None, why
             return ReconciliationPlan(
-                dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
-        return f"Could not discover reconciliation capabilities: {exc}. Nothing was submitted."
+                dec, key, target, remote, None, False, str(uuid.uuid4()),
+                profile.redact_secrets), None
+        return None, share_status.ReconcileStatus(
+            share_status.CAPABILITIES_FAILED, detail=str(exc))
 
     protocol = capabilities.decision_reconciliation
     atomic = bool(protocol and protocol.version >= 1
                   and protocol.atomic_submit and protocol.preview)
-    target = _resolve_reconciliation_team(remote, team)
-    if isinstance(target, str):
-        return target
+    target, why = _resolve_reconciliation_team(remote, team)
+    if target is None:
+        return None, why
     if not atomic:
         return ReconciliationPlan(
-            dec, key, target, remote, None, False, str(uuid.uuid4()), profile.redact_secrets)
+            dec, key, target, remote, None, False, str(uuid.uuid4()),
+            profile.redact_secrets), None
     if not dec.get("revision_id"):
-        return "This decision has no stable local revision id; nothing was submitted."
+        return None, share_status.ReconcileStatus(share_status.NO_REVISION_ID)
     try:
         preview = remote.preview_decision_reconciliation(
             dec["id"], target.id, **_atomic_decision_kwargs(
                 dec, key, redact_on=profile.redact_secrets))
     except RemoteStoreError as exc:
-        return f"Could not preview reconciliation: {exc}. Nothing was submitted."
+        return None, share_status.ReconcileStatus(
+            share_status.PREVIEW_FAILED, detail=str(exc))
     return ReconciliationPlan(
-        dec, key, target, remote, preview, True, str(uuid.uuid4()), profile.redact_secrets)
+        dec, key, target, remote, preview, True, str(uuid.uuid4()),
+        profile.redact_secrets), None
 
 
 def format_reconciliation_preview(plan: ReconciliationPlan) -> str:
@@ -1224,36 +1276,60 @@ def _call_atomic_submission(remote: RemoteStore, operation: dict) -> TeamSubmiss
         idempotency_key=operation["idempotency_key"], **payload)
 
 
-def _submission_status(result: TeamSubmissionResult, team_name: str) -> str:
-    if result.status == "heads_changed":
-        return ("The personal or team decision changed after the preview. Nothing was submitted; "
-                "run reconcile again to review the new heads.")
-    if result.status == "needs_rebase":
-        return ("The team decision moved ahead and this update needs review. Nothing was "
-                "submitted; pull and run reconcile again.")
-    if result.status == "unchanged":
-        return f"{team_name} already has this decision; no candidate was needed."
-    if result.status == "already_pending":
-        return (f"This exact update is already pending lead review in {team_name}"
-                f"{f' as {result.candidate_id}' if result.candidate_id else ''}.")
-    if result.status == "quota_exceeded":
-        return ("The team service is at capacity. Nothing was submitted or queued; free capacity "
-                "and run reconcile again for a fresh preview.")
-    if result.status in {"not_member", "not_authored_by_caller", "invalid_team",
-                         "trial_expired", "unsupported_protocol"}:
-        return (f"The service refused the reconciliation ({result.status}). Nothing was submitted "
-                "or queued.")
+# Statuses the service returns for a refusal it will not reconsider. Named here rather than
+# inline so the set is one thing a reader can check against the server's own taxonomy.
+_TERMINAL_SUBMISSION_REFUSALS = frozenset({
+    "not_member", "not_authored_by_caller", "invalid_team", "trial_expired",
+    "unsupported_protocol"})
+
+_SUBMISSION_OUTCOMES = {
+    "heads_changed": share_status.HEADS_CHANGED,
+    "needs_rebase": share_status.NEEDS_REBASE,
+    "unchanged": share_status.UNCHANGED,
+    "already_pending": share_status.ALREADY_PENDING,
+    "quota_exceeded": share_status.QUOTA_EXCEEDED,
+}
+
+
+def _submission_status(result: TeamSubmissionResult,
+                       team_name: str) -> share_status.ReconcileStatus:
+    """Map one server answer onto an outcome, carrying the server's own status either way.
+
+    `server_status` is kept even when the outcome names it, so a caller can log or branch on what
+    the service actually said without re-reading a sentence."""
+    def status(outcome: str) -> share_status.ReconcileStatus:
+        return share_status.ReconcileStatus(
+            outcome, team_name=team_name, candidate_id=result.candidate_id or "",
+            server_status=result.status or "",
+            noun="update" if result.kind == "update" else "decision",
+            replayed=bool(result.replayed))
+
+    mapped = _SUBMISSION_OUTCOMES.get(result.status or "")
+    if mapped:
+        return status(mapped)
+    if result.status in _TERMINAL_SUBMISSION_REFUSALS:
+        return status(share_status.SERVICE_REFUSED)
     if result.status != "submitted":
-        return (f"The service returned an unknown reconciliation result ({result.status or 'empty'}). "
-                "Nothing was treated as submitted or queued.")
-    noun = "update" if result.kind == "update" else "decision"
-    replay = " (confirmed from an idempotent retry)" if result.replayed else ""
-    return (f"Submitted {noun}{f' {result.candidate_id}' if result.candidate_id else ''} to "
-            f"{team_name} for lead review{replay}. The currently approved team version remains "
-            "active until it is approved.")
+        return status(share_status.UNKNOWN_RESULT)
+    return status(share_status.SUBMITTED)
 
 
-def submit_reconciliation(plan: ReconciliationPlan, *, profile: Profile | None = None) -> str:
+def _queue_confirmed(operation: dict, queued: str,
+                     stranded: str) -> share_status.ReconcileStatus:
+    """Queue a CONFIRMED operation for automatic retry and say which of the two things happened.
+
+    Both callers below reach this after the service declined to take the write now. The
+    distinction is the whole point: `queued` means a later drain resubmits it with the same
+    idempotency key, `stranded` means the queue write itself failed and nothing will resend it."""
+    try:
+        _enqueue_reconciliation(operation)
+    except Exception:
+        return share_status.ReconcileStatus(stranded)
+    return share_status.ReconcileStatus(queued)
+
+
+def submit_reconciliation(plan: ReconciliationPlan, *,
+                          profile: Profile | None = None) -> share_status.ReconcileStatus:
     """Submit a previously previewed plan. Only confirmed atomic operations may be queued."""
     profile = profile or load_profile()
     dec, target = plan.decision, plan.target
@@ -1261,31 +1337,17 @@ def submit_reconciliation(plan: ReconciliationPlan, *, profile: Profile | None =
         operation = _reconciliation_operation(plan)
         try:
             result = _call_atomic_submission(plan.remote, operation)
-        except (RemoteUnavailableError, RemoteAuthError) as exc:
-            try:
-                _enqueue_reconciliation(operation)
-            except Exception:
-                return (f"Could not reach the team service ({exc}), and the confirmed operation "
-                        "could not be written to the retry queue. Nothing was submitted; rerun "
-                        "reconcile when the service is available.")
-            return (f"Could not reach the team service ({exc}); the confirmed submission is "
-                    "queued with the same idempotency key for automatic retry.")
         except RemoteStoreError as exc:
-            if "rate" in str(exc).casefold() and "limit" in str(exc).casefold():
-                try:
-                    _enqueue_reconciliation(operation)
-                except Exception:
-                    return ("The service rate limit was reached, and the confirmed operation "
-                            "could not be written to the retry queue. Rerun reconcile later.")
-                return "The service rate limit was reached; the confirmed submission is queued."
-            return f"The service refused the submission: {exc}. Nothing was queued."
+            outcomes = _transient_outcomes(exc)
+            if outcomes is None:                     # terminal: do not queue, do not retry
+                return share_status.ReconcileStatus(
+                    share_status.SUBMISSION_REFUSED, detail=str(exc))
+            # Transient, so the confirmed write is kept for retry. `detail` is carried on every
+            # arm; the rate-limit sentences ignore it, and recording the reason costs nothing.
+            return replace(_queue_confirmed(operation, *outcomes), detail=str(exc))
         if result.status == "rate_limited":
-            try:
-                _enqueue_reconciliation(operation)
-            except Exception:
-                return ("The service rate limit was reached, and the confirmed operation could "
-                        "not be written to the retry queue. Rerun reconcile later.")
-            return "The service rate limit was reached; the confirmed submission is queued."
+            return _queue_confirmed(operation, share_status.RATE_LIMITED_QUEUED,
+                                    share_status.RATE_LIMITED_NOT_QUEUED)
         if result.status in {"submitted", "unchanged", "already_pending"}:
             _mark_shared([dec.get("id")], profile.endpoint)
         return _submission_status(result, target.name)
@@ -1296,24 +1358,28 @@ def submit_reconciliation(plan: ReconciliationPlan, *, profile: Profile | None =
         lambda: plan.remote.push_decision(**_dec_push_kwargs(dec, plan.repo_key)),
         default=None, action="sync decision before team submission")
     if server_id is None:
-        return _finish_share(dec, plan.repo_key, None, profile.endpoint)
+        return share_status.ReconcileStatus(
+            share_status.COMPAT_SYNC_FAILED,
+            share=_finish_share(dec, plan.repo_key, None, profile.endpoint))
 
     submitted = with_local_fallback(
         lambda: plan.remote.submit_decision_to_team(dec["id"], target.id),
         default=None, action="submit decision for team review")
-    if submitted is None:
-        _mark_shared([dec.get("id")], profile.endpoint)
-        return (f"Synced the decision to personal cloud, but could not submit it to {target.name} "
-                "for review. Run the same reconcile command again; the personal sync is idempotent.")
-
     _mark_shared([dec.get("id")], profile.endpoint)
-    noun = "update" if submitted.kind == "update" else "decision"
-    return (f"Submitted {noun} {submitted.candidate_id} to {submitted.team.name} for lead review. "
-            "The currently approved team version remains active until it is approved.")
+    if submitted is None:
+        return share_status.ReconcileStatus(
+            share_status.COMPAT_SUBMIT_FAILED, team_name=target.name)
+
+    # Deliberately the SAME outcome the atomic path returns: the two branches produced two copies
+    # of one sentence, identical whenever a candidate id was present, which it always is here.
+    return share_status.ReconcileStatus(
+        share_status.SUBMITTED, team_name=submitted.team.name,
+        candidate_id=submitted.candidate_id or "",
+        noun="update" if submitted.kind == "update" else "decision")
 
 
 def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
-                        profile: Profile | None = None) -> str:
+                        profile: Profile | None = None) -> share_status.ShareStatus:
     """Share a selection of decisions (a multi-pick) in ONE batched call, returning a combined
     status. An empty list shares the most recent (delegates to share('')). Outbox + local-first
     guarantees are preserved (a failed chunk is queued); unknown/typo'd ids are REPORTED, not
@@ -1327,13 +1393,14 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
         pass
     projs, missing = _resolve_ids(repo_path, decision_ids)
     if not projs:
-        return _no_match_status(missing)
+        return share_status.ShareStatus(
+            share_status.NO_MATCH, unknown_ids=tuple(str(m) for m in missing))
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Set mode='team' + endpoint + token in "
-                "~/.contexer/config.toml to share.")
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
     key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
-    return _prepend_unknown(_push_batch(remote, projs, key, profile.endpoint), missing)
+    return share_status.with_unknown(
+        _push_batch(remote, projs, key, profile.endpoint), missing)
 
 
 # ── async share path (#108) ────────────────────────────────────────────────────────
@@ -1343,13 +1410,13 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
 # (_finish_share, _dec_push_kwargs, _payload, _enqueue) so no logic drifts between the paths.
 
 async def share_async(repo_path: str, decision_id: str = "", *,
-                      profile: Profile | None = None) -> str:
+                      profile: Profile | None = None) -> share_status.ShareStatus:
     async with async_outbox_lock():
         return await _share_async_unlocked(repo_path, decision_id, profile=profile)
 
 
 async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
-                                profile: Profile | None = None) -> str:
+                                profile: Profile | None = None) -> share_status.ShareStatus:
     """Async twin of :func:`share`. Same local-first contract: never raises for cloud
     problems, leaves the local decision untouched, queues on failure."""
     profile = profile or load_profile()
@@ -1359,11 +1426,10 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
         pass  # a broken drain (e.g. disk error) must not block this share
     dec = store.get_shareable(repo_path, decision_id)
     if dec is None:
-        return "Nothing to share: no matching local decision."
+        return share_status.ShareStatus(share_status.NO_MATCH)
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Set mode='team' + endpoint + token in "
-                "~/.contexer/config.toml to share.")
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
     key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     try:
         server_id = await awith_local_fallback(
@@ -1379,13 +1445,13 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
 
 
 async def share_ids_async(repo_path: str, decision_ids: list, *,
-                          profile: Profile | None = None) -> str:
+                          profile: Profile | None = None) -> share_status.ShareStatus:
     async with async_outbox_lock():
         return await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
 
 
 async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
-                                    profile: Profile | None = None) -> str:
+                                    profile: Profile | None = None) -> share_status.ShareStatus:
     """Async twin of :func:`share_ids`: one batched (awaited) push per _BATCH_SIZE, unknown ids
     reported, capacity-skipped rows re-queued. An empty list shares the most recent."""
     profile = profile or load_profile()
@@ -1397,11 +1463,11 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
         pass
     projs, missing = _resolve_ids(repo_path, decision_ids)
     if not projs:
-        return _no_match_status(missing)
+        return share_status.ShareStatus(
+            share_status.NO_MATCH, unknown_ids=tuple(str(m) for m in missing))
     remote = RemoteStore.from_profile(profile)
     if remote is None:
-        return ("Not in team mode. Set mode='team' + endpoint + token in "
-                "~/.contexer/config.toml to share.")
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
     key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     try:
         status = await _apush_batch(remote, projs, key, profile.endpoint)
@@ -1411,7 +1477,7 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
             for dec in projs:
                 _enqueue_unlocked(_payload(dec, key))
         raise
-    return _prepend_unknown(status, missing)
+    return share_status.with_unknown(status, missing)
 
 
 def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
@@ -1420,7 +1486,7 @@ def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
     Called when an in-loop share is CANCELLED by its deadline (server.share_decision timeout)
     before it could push or queue them itself: cancellation bypasses share_async's own
     enqueue-on-failure, so without this the tool's "the outbox retries it" message would be an
-    empty promise. Idempotent — `_enqueue` dedups by decision_id and a re-push is idempotent
+    empty promise. Idempotent - `_enqueue` dedups by decision_id and a re-push is idempotent
     server-side, so queuing a decision that may already have been sent is safe. An empty list
     queues the most recent shareable (matching `share_async('')`). Missing ids are skipped.
     Returns the count queued."""

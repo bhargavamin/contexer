@@ -1,4 +1,4 @@
-"""JSON API for the local console — the one module that knows both HTTP and the store.
+"""JSON API for the local console - the one module that knows both HTTP and the store.
 
 `server.py` owns transport: binding, the auth guard, headers, static files, the watchdog.
 Everything here turns an already-authenticated request into a status code plus a JSON-able
@@ -12,7 +12,7 @@ here silently blanks a pane there.
 """
 from urllib.parse import unquote
 
-from contexer import auth, config, console_api, share, store, team_context
+from contexer import auth, config, console_api, share, share_status, store, team_context
 from contexer.ui import daemon
 
 # Mirrored in console.js as maxlength attributes; enforced here because the browser is not
@@ -27,7 +27,7 @@ MAX_QUERY = 200
 MAX_SHARE_IDS = 200
 
 # Bounds on the `file=` filter (Task 4 of #174): a generous cap on how many files one commit
-# or one filter box plausibly names, and a generous per-path length — well past MAX_QUERY
+# or one filter box plausibly names, and a generous per-path length - well past MAX_QUERY
 # because a real repo-relative path (nested monorepo packages) can run longer than a search
 # phrase.
 MAX_FILES = 50
@@ -45,7 +45,7 @@ GLOBAL_SUBTYPES = ("constraint", "convention")
 # Credential states a login actually fixes, so a failed pull is worth flagging as auth-shaped.
 # `static_only` is deliberately absent: from here a rejected static token and an unreachable
 # endpoint look identical, and telling someone to log in while their network is down is its own
-# wrong turn. `logged_in` is absent because the credential is fine — the failure is elsewhere.
+# wrong turn. `logged_in` is absent because the credential is fine - the failure is elsewhere.
 LOGIN_FIXES = ("expired", "refresh_failed", "none")
 
 # Written into every revision this surface creates, so the revision timeline shows which
@@ -146,13 +146,13 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
             query=_str_param(query, "q")[:MAX_QUERY],
             subtype=_str_param(query, "subtype"),
             status=_str_param(query, "status"),
-            # Repeatable (`file=a&file=b`) AND comma-separated (`file=a,b`) both work —
+            # Repeatable (`file=a&file=b`) AND comma-separated (`file=a,b`) both work -
             # _list_param flattens either into one list, so the console's single filter input
             # can just comma-join and a `curl` caller can repeat the param instead.
             files=_list_param(query, "file", MAX_FILES, MAX_FILE_LEN) or None,
             # Absent/0 means MAX_LIMIT, not "no cap": console_api.list_decisions reads `limit <= 0`
             # as unbounded, so forwarding the bare 0 let a `limit`-less URL serialize every
-            # row after all — the exact thing MAX_LIMIT is here to prevent.
+            # row after all - the exact thing MAX_LIMIT is here to prevent.
             limit=_int_param(query, "limit", MAX_LIMIT) or MAX_LIMIT,
             offset=_int_param(query, "offset", MAX_OFFSET),
         )
@@ -195,7 +195,7 @@ def _decision_route(method: str, repo_path: str, entry_id: str, rest: list[str],
 # ── handlers ────────────────────────────────────────────────────────────────────
 
 def _approve(repo_path: str, entry_id: str, body: object) -> tuple[int, object]:
-    """Approve or reject. "reject" is the console's word for the store's `ignore` action —
+    """Approve or reject. "reject" is the console's word for the store's `ignore` action -
     the store vocabulary (approve/ignore/edit/skip/dismiss) stays unchanged."""
     action = _body(body, "action").get("action", "approve")
     if action == "reject":
@@ -217,9 +217,9 @@ def _edit(repo_path: str, entry_id: str, body: object) -> tuple[int, object]:
     # alone" so a legacy entry that carries no subtype stays editable. Only a MISSING field is
     # "nothing to change" here; a body of nothing but `subtype: ""` is the store's own refusal.
     if content is None and title is None and subtype is None:
-        raise ApiError(400, "nothing to change — pass content, title, or subtype")
+        raise ApiError(400, "nothing to change - pass content, title, or subtype")
 
-    # `source="human"`, not SOURCE — same reasoning as `_add_global`: an edit arriving here was
+    # `source="human"`, not SOURCE - same reasoning as `_add_global`: an edit arriving here was
     # typed by a developer, and "ui" names the surface, not the author. Only this call site
     # changes; `edit_decision`'s own "ui" default still covers a direct (non-console) caller,
     # which by definition is not a developer at a form.
@@ -236,8 +236,8 @@ def _pull(repo_path: str) -> tuple[int, object]:
     """Refresh the team cache. Degrades to a renderable `{error}` rather than a stacktrace:
     being offline or unauthenticated is an ordinary state for this button.
 
-    `team_context.pull` is the seam here — the one `contexer pull` uses, at the full transport
-    timeout — NOT `team_context.refresh`. `refresh` bounds the transport to ~3s because
+    `team_context.pull` is the seam here - the one `contexer pull` uses, at the full transport
+    timeout - NOT `team_context.refresh`. `refresh` bounds the transport to ~3s because
     SessionStart runs before the assistant can answer; against a cold-start endpoint replying
     in 4-8s this button failed on every click (counting a consecutive failure each time) while
     the same pull succeeded in a terminal on the same machine. `refresh` also drains the share
@@ -246,37 +246,37 @@ def _pull(repo_path: str) -> tuple[int, object]:
 
     The trade is that `pull` can raise where `refresh` never did. The cloud's own failures are
     already swallowed into the degraded stamp below, so what is left is local (disk, git) and
-    must still reach the console as text, never as a 500 — same rule as `_share`.
+    must still reach the console as text, never as a 500 - same rule as `_share`.
 
     `pull` answers `(0, 0)` for a clean no-op, a refused connection and a rejected token alike,
-    so its return value cannot tell success from failure — reporting "Pulled — 0 updated, 0
+    so its return value cannot tell success from failure - reporting "Pulled - 0 updated, 0
     removed." over an unreachable endpoint is the lie this avoids. The sync's own `last_sync`
     stamp is the evidence: a NEW stamp carrying `ok: false` is a failed attempt, and an
     UNCHANGED stamp means no attempt was made at all (nothing to key on), which is not a
     success either."""
     profile = config.load_profile()
     if profile.mode != "team" or not profile.endpoint:
-        return 200, {"error": "Not connected to a team — run `contexer login` first."}
+        return 200, {"error": "Not connected to a team - run `contexer login` first."}
     before = console_api.team_snapshot(repo_path)["last_sync"]
     try:
         # The already-loaded profile, so the mode check above, the sync, and the message below
         # all describe ONE reading of config.toml.
         upserted, removed = team_context.pull(repo_path, profile=profile)
     except Exception as exc:
-        return 200, {"error": f"Pull failed — {exc}"}
+        return 200, {"error": f"Pull failed - {exc}"}
     after = console_api.team_snapshot(repo_path)["last_sync"]
     if after != before and after.get("ok") is False:
         failures = after.get("consecutive_failures") or 0
         streak = f" {failures} consecutive failures." if failures > 1 else ""
-        return 200, _pull_failure(f"Pull failed — could not sync with {profile.endpoint}. "
+        return 200, _pull_failure(f"Pull failed - could not sync with {profile.endpoint}. "
                                   f"The cached rows are unchanged.{streak}", profile,
                                   rejected=after.get("error") == "auth")
     if after == before and not upserted and not removed:
-        return 200, _pull_failure("Pull did not run — no sync was attempted. Team context is "
+        return 200, _pull_failure("Pull did not run - no sync was attempted. Team context is "
                                   "keyed on this repo's git remote, so a checkout with no "
                                   "origin has nothing to sync against.", profile,
                                   attempted=False)
-    return 200, {"message": f"Pulled — {upserted} updated, {removed} removed."}
+    return 200, {"message": f"Pulled - {upserted} updated, {removed} removed."}
 
 
 def _pull_failure(error: str, profile: config.Profile, *, attempted: bool = True,
@@ -289,14 +289,14 @@ def _pull_failure(error: str, profile: config.Profile, *, attempted: bool = True
 
     Two independent pieces of evidence, because either alone leaves a hole. The LOCAL state
     (`auth_state`) catches an expired or unrefreshable session before the network is even
-    consulted. `rejected` carries the SERVER's verdict — `team_context` now records
-    `last_sync.error == "auth"` when the endpoint refused the credential — and that is the only
+    consulted. `rejected` carries the SERVER's verdict - `team_context` now records
+    `last_sync.error == "auth"` when the endpoint refused the credential - and that is the only
     thing that can see a token which is unexpired locally but revoked upstream, the case where
     `auth_state` honestly reports `logged_in` and would otherwise blame the network.
 
     `attempted=False` means no sync was even tried, which has two causes: no credential to try
     with, or no git remote to key team context on. Only the first is worth a login, and `not
-    profile.token` is what tells them apart — with no static fallback, an unusable session
+    profile.token` is what tells them apart - with no static fallback, an unusable session
     means the token resolved to None and the sync could not start; with one, the cause is the
     missing remote, and sending that user to a login screen is the wrong turn."""
     state = auth.auth_state(profile)
@@ -304,14 +304,14 @@ def _pull_failure(error: str, profile: config.Profile, *, attempted: bool = True
     if not (local_says_auth or rejected):
         return {"error": error}
     detail = state["message"] if local_says_auth else (
-        "The endpoint rejected this machine's credential — log in again.")
+        "The endpoint rejected this machine's credential - log in again.")
     return {"error": f"{error} {detail}", "auth": True, "state": state["state"]}
 
 
 def _login(body: object) -> tuple[int, object]:
     """Start the browser login flow as a tracked subprocess.
 
-    The body must be EMPTY — not "an endpoint is ignored" but "no field is accepted": an
+    The body must be EMPTY - not "an endpoint is ignored" but "no field is accepted": an
     endpoint from a request would point the OAuth flow at an attacker's IdP and persist the
     token it returned, so the endpoint comes from config and a body carrying one is refused
     loudly rather than silently dropped."""
@@ -336,7 +336,7 @@ def _logout(body: object) -> tuple[int, object]:
 
     A browser flow started minutes earlier finishes AFTER the unlink and rewrites both the
     creds file and config.toml, undoing a logout the user was told had succeeded. The console's
-    own polling flag cannot prevent it — it is per-tab, so a second tab or a `contexer login`
+    own polling flag cannot prevent it - it is per-tab, so a second tab or a `contexer login`
     in a terminal is invisible to it, which is why the server has to be the one to resolve the
     race. Killing the job BEFORE the unlink is what closes the window: a child that already
     wrote its credentials still loses them to the unlink that follows.
@@ -347,7 +347,7 @@ def _logout(body: object) -> tuple[int, object]:
     _body(body)
     # Name the real reason: stop_login_job's default says the console stopped, which is a
     # different event, and a tab polling that job would be told something that did not happen.
-    cancelled = auth.stop_login_job("Login was cancelled — you signed out.")
+    cancelled = auth.stop_login_job("Login was cancelled - you signed out.")
     message = ("Signed out of Contexer Teams. Team context stays cached until the next pull."
                if auth.logout() else "No Contexer Teams credentials were stored.")
     if cancelled:
@@ -365,11 +365,28 @@ def _share(repo_path: str, body: object) -> tuple[int, object]:
         if not isinstance(value, str) or not value or len(value) > MAX_WORD:
             raise ApiError(400, "every id must be a non-empty string")
     try:
-        return 200, {"message": share.share_ids(repo_path, ids)}
+        status = share.share_ids(repo_path, ids)
     except Exception as exc:
         # share_ids already swallows cloud failures (it queues them); anything left is local
-        # and must still reach the console as text, never as a 500.
-        return 200, {"error": f"Share failed: {exc}"}
+        # and must still reach the console as text, never as a 500. `outcome`/`ok` are present
+        # here too, so a page branching on them never meets a second response shape.
+        return 200, {"error": f"Share failed: {exc}", "outcome": "share_failed", "ok": False}
+    # The counts, not only the sentence. `share.py` computed all of these and then rendered them
+    # into one English string, so this endpoint shipped prose as a machine result and no console
+    # page could tell "3 synced" from "3 unsaved". `message` stays for the pages that render it
+    # today; `outcome` is the stable token to branch on.
+    return 200, {
+        "message": share_status.describe(status),
+        "outcome": status.outcome,
+        "ok": share_status.is_ok(status),
+        "sent": status.sent,
+        "queued": status.queued,
+        "at_capacity": status.at_capacity,
+        "invalid": status.invalid,
+        "lost": status.lost,
+        "total": status.total,
+        "unknown_ids": list(status.unknown_ids),
+    }
 
 
 def _add_global(body: object) -> tuple[int, object]:
@@ -380,12 +397,12 @@ def _add_global(body: object) -> tuple[int, object]:
     if subtype not in GLOBAL_SUBTYPES:
         raise ApiError(400, f"subtype must be one of: {', '.join(GLOBAL_SUBTYPES)}")
     # `created_by="human"`, not SOURCE: a rule reaching this handler was typed by a developer
-    # into the Add form, and `created_by` is where that fact has to land — it drives the entry's
+    # into the Add form, and `created_by` is where that fact has to land - it drives the entry's
     # attribution, revision 1's `source`, and `revisions.compute_confidence`'s "Stated by developer" +20.
     # SOURCE ("ui") stays the session id and is deliberately not reused as the provenance:
     # `share._WIRE_SOURCES` is a closed allowlist (ai | human | scan | bootstrap | memory | plan)
     # mirroring the cloud's push_decision enum, so `_wire_source` degrades "ui" back to "ai" on
-    # the way out — a rule born "ui" would reach the cloud indistinguishable from an AI-authored
+    # the way out - a rule born "ui" would reach the cloud indistinguishable from an AI-authored
     # one. `_edit` passes "human" for the same reason.
     stored, _entry_id = store.update_global_decision(content, SOURCE, subtype, title=title,
                                                      created_by="human")
@@ -393,14 +410,14 @@ def _add_global(body: object) -> tuple[int, object]:
         # The store signals a duplicate and its REFUSAL to write over an unparseable global
         # file with the same `(False, None)`. Reporting both as "already exists" told a
         # developer whose global rules had become unreadable that their new rule was
-        # redundant — while the file holding the old ones is the thing that needs repair.
+        # redundant - while the file holding the old ones is the thing that needs repair.
         health = store.global_diagnostics()
         if not health["ok"]:
-            return 200, {"error": f"Not stored — the global rules file is unreadable "
+            return 200, {"error": f"Not stored - the global rules file is unreadable "
                                   f"({health['error']}), and overwriting it would discard "
                                   "every global rule on this machine. Move it aside, "
                                   "then retry."}
-        return 200, {"error": "Not stored — a matching global rule already exists."}
+        return 200, {"error": "Not stored - a matching global rule already exists."}
     return 200, {"message": "Global rule added."}
 
 
@@ -419,7 +436,7 @@ def _config() -> dict:
                     "token_set": bool(profile.token)},
         # `logged_in` is DERIVED from the state, never a second reading of the creds file: a
         # payload claiming logged_in next to state="refresh_failed" is a contradiction the
-        # console would have to arbitrate. Still no token here — auth_state carries no secret.
+        # console would have to arbitrate. Still no token here - auth_state carries no secret.
         "login": {**login, "logged_in": login["state"] == "logged_in"},
         "version": daemon.current_version(),
         "store_dir": str(store.STORE_DIR),
@@ -472,7 +489,7 @@ def _repo(slug: str) -> str:
     if resolved is None:
         raise ApiError(404, "no such store")
     if not resolved["repo_path"]:
-        raise ApiError(409, f"Store unreadable — {resolved['error']}")
+        raise ApiError(409, f"Store unreadable - {resolved['error']}")
     return resolved["repo_path"]
 
 
@@ -492,7 +509,7 @@ def _finish_restore(repo_path: str, entry_id: str, ok: bool,
                     message: str) -> tuple[int, object]:
     """`_finish`'s tombstone-side twin: separates "no such tombstone" from a refusal.
 
-    A restore now fails for two very different reasons — the id names no tombstone (gone: 404)
+    A restore now fails for two very different reasons - the id names no tombstone (gone: 404)
     and the live store is at capacity, so restoring would evict an untombstoned decision
     (refused: 409). Mapping both to 404 told the developer their tombstone had vanished when it
     is still sitting there, restorable as soon as they delete something. Decided by re-reading
@@ -548,11 +565,11 @@ def _str_param(query: dict, key: str) -> str:
 
 def _list_param(query: dict, key: str, max_items: int, max_len: int) -> list[str]:
     """Every value for `key`, accepting BOTH a repeated param (`file=a&file=b`) and a single
-    comma-separated one (`file=a,b`) — `parse_qs` already hands back one list entry per
+    comma-separated one (`file=a,b`) - `parse_qs` already hands back one list entry per
     repeated occurrence, so splitting each entry on "," and flattening covers both
     conventions without forcing a caller to pick one. Blank pieces (a stray leading/trailing
     comma) are dropped. Canonicalization, traversal-escaping and repo-relativity are NOT this
-    function's job — `guard_engine.decisions_for_files` (via `_guard_relpath`) already does
+    function's job - `guard_engine.decisions_for_files` (via `_guard_relpath`) already does
     that safely and this stays a thin, path-agnostic string splitter."""
     raw = query.get(key) or []
     out: list[str] = []

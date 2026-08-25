@@ -16,7 +16,7 @@ from contexer.adapters.base import _is_corrupt, _load_safe
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
 
-USAGE = """contexer — persistent context for Claude Code, Cursor, Codex, and Gemini CLI
+USAGE = """contexer - persistent context for Claude Code, Cursor, Codex, and Gemini CLI
 
 Usage: contexer [command]
 
@@ -36,7 +36,7 @@ Commands:
                 reconcile <id> [--team NAME_OR_ID] [--yes].
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
-  guard         Commit-time decision guard (invoked by the pre-commit hook — see below).
+  guard         Commit-time decision guard (invoked by the pre-commit hook - see below).
   scope-audit   Read-only: find decisions saved into the wrong repo's store (a session
                 whose decisions are split across two or more stores). Changes nothing.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -62,7 +62,7 @@ Guard (contexer guard):
                 Assisted anchor backfill: interactively derive candidate source_files
                 anchors from each trusted, currently-unanchored decision's own content
                 and ratify them per decision. --list previews candidates read-only
-                (also the non-interactive/agent-facing surface — the interactive loop
+                (also the non-interactive/agent-facing surface - the interactive loop
                 refuses when stdin isn't a TTY).
   guard --install-hook
                 Wire the guard into .git/hooks/pre-commit for the cwd's repo (not run
@@ -129,7 +129,7 @@ def _num(value: object, default: float = 0.0) -> float:
     `_read_team_creds` and `_read_team_cache` validate no further than "it is a dict", so a
     hand-edited or half-written `"expires_at": "2026-01-01T00:00:00Z"` reaches arithmetic as a
     string. `main()` runs `status` outside `_run_guarded`, so that TypeError is a raw traceback
-    in place of every other diagnostic line — from the command whose whole job is surviving the
+    in place of every other diagnostic line - from the command whose whole job is surviving the
     state it is asked to diagnose. Booleans are excluded deliberately: JSON `true` is an int in
     Python and would date a session to 1970."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -225,10 +225,10 @@ def install(rest: list | None = None) -> None:
 
 def _confirm_purge(store_dir: Path) -> bool:
     """Guard the destructive --purge: require an explicit 'yes'. In a non-interactive
-    context (no TTY) refuse rather than risk an accidental delete of stored context —
+    context (no TTY) refuse rather than risk an accidental delete of stored context -
     use --yes to purge unattended."""
     if not sys.stdin.isatty():
-        print("  Refusing to purge non-interactively — re-run with --yes to confirm.")
+        print("  Refusing to purge non-interactively - re-run with --yes to confirm.")
         return False
     print(f"  WARNING: this permanently deletes {store_dir} and ALL stored context.")
     try:
@@ -286,7 +286,7 @@ def _print_wrapped(text: str, indent: str = "  ", width: int = 64) -> None:
 # call-count cap the batch renders use (`_STALENESS_MAX_CHECKS = 3`): those protect a prompt's
 # critical path, where the developer is blocked and never asked for the work. Here the
 # developer explicitly ran `contexer review` to inspect decisions, so paying for git IS the
-# feature — a 3-call cap would blank the accuracy rows from the 4th decision onward even on a
+# feature - a 3-call cap would blank the accuracy rows from the 4th decision onward even on a
 # warm repo where each call costs ~10ms. A time budget only degrades when git is genuinely
 # slow, which this repo's 2s `GIT_FAST_TIMEOUT` says does happen under load.
 _REVIEW_GIT_BUDGET = 3.0
@@ -301,7 +301,7 @@ def _budgeted(budget: dict | None, key: tuple, fn):
     """Run `fn` at most once per `key`, charging its wall time to `budget`.
 
     Returns None once the budget is spent, and flags `skipped` so the caller can SAY the row
-    is missing rather than render a bare line indistinguishable from "nothing to report" —
+    is missing rather than render a bare line indistinguishable from "nothing to report" -
     the same honest-on-exhaustion rule `anchors.py` follows with `_BudgetExceeded`. Memoising
     matters more than the cap in practice: a review queue is usually decisions captured in one
     session, which share an `anchor_commit`, so the whole queue collapses to one lookup."""
@@ -326,8 +326,8 @@ def _review_metadata(repo_path: str, entry: dict,
     code has moved since, and what work was in flight when it was captured.
 
     Everything here is already on the entry except the anchor-commit lookup and the staleness
-    check, both of which are fail-soft (see store.review_anchor_note / _staleness_note) — a git
-    hiccup degrades a row, never the review — and both routed through `_budgeted` so a slow git
+    check, both of which are fail-soft (see store.review_anchor_note / _staleness_note) - a git
+    hiccup degrades a row, never the review - and both routed through `_budgeted` so a slow git
     can't tax every screen of a long queue."""
     from contexer import store
 
@@ -365,12 +365,12 @@ def _review_metadata(repo_path: str, entry: dict,
     if anchor:
         rows.append(("Anchor", anchor))
     if budget and budget["skipped"]:
-        rows.append(("", "(git is slow — anchor/staleness checks skipped this run)"))
+        rows.append(("", "(git is slow - anchor/staleness checks skipped this run)"))
 
     # Only worth screen space when it is the branch that can silently target the WRONG repo;
     # every other value means a caller named this repo explicitly. See resolve_repo_verbose.
     if entry.get("repo_source") == "pointer":
-        rows.append(("Origin", "! resolved via the shared repo pointer — verify this is the "
+        rows.append(("Origin", "! resolved via the shared repo pointer - verify this is the "
                                "right repo for this decision"))
     return rows
 
@@ -415,7 +415,7 @@ def review() -> None:
         subtype = entry.get("subtype") or "decision"
         if prop:
             # Suggested Update: show the standing revision and the detected change, both in
-            # full — deciding between two versions is exactly when truncation costs the most.
+            # full - deciding between two versions is exactly when truncation costs the most.
             score = prop.get("confidence", 0)
             factors = prop.get("confidence_factors") or []
             rev = entry.get("revision", 1)
@@ -453,7 +453,7 @@ def review() -> None:
             break
 
         if choice in ("Q", "QUIT"):
-            print("Stopped — the rest stay pending.")
+            print("Stopped - the rest stay pending.")
             break
 
         if choice in ("Y", "YES"):
@@ -464,7 +464,7 @@ def review() -> None:
             else:
                 # Print the store's reason instead of dropping it. `pending` was read before
                 # the prompt, so a concurrent MCP session (or a second terminal) can have
-                # approved this id already — silence there reads as a lost keypress, and the
+                # approved this id already - silence there reads as a lost keypress, and the
                 # tail would print "nothing changed" under a message the user never saw.
                 skipped += 1
                 print(msg)
@@ -523,7 +523,7 @@ def review() -> None:
 
 def _print_overlap_section(repo_path: str) -> None:
     """Tail of `contexer review`: read-only report of possibly-overlapping
-    constraint/convention rules, for manual consolidation. Silent when clean —
+    constraint/convention rules, for manual consolidation. Silent when clean -
     never merges or deletes."""
     from contexer import store
 
@@ -538,7 +538,7 @@ def _print_overlap_section(repo_path: str) -> None:
         print()
     print("To consolidate: keep the best rule (edit its wording via your agent or "
           "update_context with replace_id if it needs cleanup) and retire the rest with "
-          "approve_decision(entry_id, action=\"ignore\") — ignore now works on approved "
+          "approve_decision(entry_id, action=\"ignore\") - ignore now works on approved "
           "rules too, not just pending ones. Contexer never merges or deletes automatically.")
 
 
@@ -556,8 +556,8 @@ def status(rest: list | None = None) -> None:
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
 
-    # Resolve targets once — used for both the status_lines loop and installed_ok.
-    # status is a diagnostic — it must survive any state it might be asked to
+    # Resolve targets once - used for both the status_lines loop and installed_ok.
+    # status is a diagnostic - it must survive any state it might be asked to
     # diagnose, including corrupt config files and hand-edited entries.
     targets = _resolve_targets(rest or [])
     installed_ok = all(a.is_installed(home) for a in targets)
@@ -567,7 +567,7 @@ def status(rest: list | None = None) -> None:
     if store_dir.exists():
         # Sweep temp files leaked by interrupted atomic writes (hard crash between
         # mkstemp and os.replace). Never matched by the *.json glob below. The age
-        # gate keeps us from unlinking a temp another process is writing right now —
+        # gate keeps us from unlinking a temp another process is writing right now -
         # that would make its os.replace fail and lose the save.
         for tmp in store_dir.glob("*.tmp"):
             try:
@@ -601,7 +601,7 @@ def status(rest: list | None = None) -> None:
     print(f"  repo stores:  {len(stores)} ({entries} entries total)")
     print(f"  guard hook:   {_guard_hook_status_line()}")
     if latest_t and installed_t and latest_t > installed_t:
-        print(f"  update:       {latest} available — run `uv tool upgrade contexer`, "
+        print(f"  update:       {latest} available - run `uv tool upgrade contexer`, "
               f"then restart your AI assistant")
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
@@ -664,7 +664,7 @@ def status(rest: list | None = None) -> None:
         elif not repo:
             print("    cache:      (no current repo detected)")
         else:
-            # Every value below is typed by whatever is in the cache file, not by us —
+            # Every value below is typed by whatever is in the cache file, not by us -
             # same reason `_num` exists: a torn write costs these lines, never the command.
             cache = _read_team_cache(store_dir, repo)
             rows = cache.get("decisions")
@@ -694,10 +694,10 @@ def status(rest: list | None = None) -> None:
                if _is_corrupt(p)]
     if corrupt:
         for p in corrupt:
-            print(f"\n  WARNING: {p} exists but is not valid JSON — fix or remove it.")
+            print(f"\n  WARNING: {p} exists but is not valid JSON - fix or remove it.")
         print("  (`contexer install` fails loudly on a corrupt file rather than overwrite it.)")
     elif not installed_ok:
-        print("\n  Not fully installed — run `contexer install`.")
+        print("\n  Not fully installed - run `contexer install`.")
 
 
 def _run_guarded(fn) -> None:
@@ -705,7 +705,7 @@ def _run_guarded(fn) -> None:
 
     contexer only ever writes inside the user's own home (assistant config directories
     and ~/.contexer/), so permission errors almost always
-    mean a previous `sudo` run left those files owned by root — the fix is to
+    mean a previous `sudo` run left those files owned by root - the fix is to
     restore ownership, never to escalate."""
     try:
         fn()
@@ -713,7 +713,7 @@ def _run_guarded(fn) -> None:
         target = e.filename or "a config file"
         print(f"Permission denied: {target}", file=sys.stderr)
         print("contexer writes only to files in your own home directory "
-              "(~/.claude*, ~/.cursor, ~/.codex, ~/.gemini, ~/.contexer) — "
+              "(~/.claude*, ~/.cursor, ~/.codex, ~/.gemini, ~/.contexer) - "
               "it never needs sudo.", file=sys.stderr)
         print("A previous run with sudo can leave those files owned by root. "
               "Restore ownership:", file=sys.stderr)
@@ -723,7 +723,7 @@ def _run_guarded(fn) -> None:
         sys.exit(1)
     except (json.JSONDecodeError, ValueError) as e:
         # A corrupt or non-object assistant config. Abort cleanly
-        # and leave the file untouched for the user to fix — never overwrite it.
+        # and leave the file untouched for the user to fix - never overwrite it.
         print(f"Corrupt config: {e}", file=sys.stderr)
         print("An assistant config file is not valid JSON (or not a JSON object). "
               "contexer won't overwrite it.", file=sys.stderr)
@@ -768,7 +768,7 @@ def share_cmd(rest: list | None = None) -> None:
     one there would be a check with nothing behind it."""
     import os
 
-    from contexer import config, share, store
+    from contexer import config, share, share_status, store
 
     rest = rest or []
     yes = "--yes" in rest or "-y" in rest
@@ -797,36 +797,36 @@ def share_cmd(rest: list | None = None) -> None:
             if not decision:
                 print("Cancelled - nothing was pushed.")
                 return
-        print(share.share_global())
+        print(share_status.describe(share.share_global()))
         return
 
-    # No id and no --all: don't guess ('most recent') — show a numbered picker so the developer
+    # No id and no --all: don't guess ('most recent') - show a numbered picker so the developer
     # sees the options and multi-selects. Selecting IS the confirm, so we push directly.
     if not share_all and not ids and not bypass:
         picked = _pick_shareable(repo, profile)
         if not picked:
-            print("Cancelled — nothing was pushed.")
+            print("Cancelled - nothing was pushed.")
             return
         # Selecting IS the confirm here, so an unreviewed decision would otherwise go up with
-        # no second look — gate it explicitly before the push.
+        # no second look - gate it explicitly before the push.
         chosen = set(picked)
         selection = [p for p in store.get_shareable_all(repo) if (p.get("id") or "") in chosen]
         if not _confirm_unapproved(selection):
-            print("Cancelled — nothing was pushed.")
+            print("Cancelled - nothing was pushed.")
             return
-        print(share.share_ids(repo, picked))
+        print(share_status.describe(share.share_ids(repo, picked)))
         return
 
     if not bypass:
         decision = _confirm_share(repo, share_all, ids)
-        if decision is None:   # nothing to share — _confirm_share already said so
+        if decision is None:   # nothing to share - _confirm_share already said so
             return
         if not decision:       # developer declined
-            print("Cancelled — nothing was pushed.")
+            print("Cancelled - nothing was pushed.")
             return
 
     if share_all:
-        print(share.share_all(repo))
+        print(share_status.describe(share.share_all(repo)))
         # --all is repo-scoped by construction (its key comes from this repo's git origin), so
         # global rules are NOT swept up by it. Say so rather than letting "all" read as all.
         n_global = len(store.get_shareable_global())
@@ -834,13 +834,13 @@ def share_cmd(rest: list | None = None) -> None:
             print(f"\n{n_global} global rule(s) were not included - "
                   "they apply to every repo. Push them with `contexer share --global`.")
     else:
-        print(share.share(repo, ids[0] if ids else ""))
+        print(share_status.describe(share.share(repo, ids[0] if ids else "")))
 
 
 def reconcile_cmd(rest: list | None = None) -> None:
     """`contexer reconcile <id> [--team NAME_OR_ID]`: sync locally-corrected wording and
     submit it as a lead-reviewed team candidate. A sole shared team is selected automatically."""
-    from contexer import config, share, store
+    from contexer import config, share, share_status, store
 
     rest = rest or []
     yes = False
@@ -872,11 +872,11 @@ def reconcile_cmd(rest: list | None = None) -> None:
         print("No git repo detected - run `contexer reconcile` inside a repository.", file=sys.stderr)
         sys.exit(1)
     profile = config.load_profile()
-    prepared = share.prepare_reconciliation(repo, ids[0], team, profile=profile)
-    if isinstance(prepared, str):
-        print(prepared)
+    plan, why = share.prepare_reconciliation(repo, ids[0], team, profile=profile)
+    if plan is None:
+        print(share_status.describe(why))
         return
-    print(share.format_reconciliation_preview(prepared))
+    print(share.format_reconciliation_preview(plan))
     if not (yes or profile.skip_confirm):
         try:
             answer = input("Submit for lead review? [y/N] ").strip().lower()
@@ -885,18 +885,18 @@ def reconcile_cmd(rest: list | None = None) -> None:
         if answer not in ("y", "yes"):
             print("Cancelled - nothing was submitted.")
             return
-    print(share.submit_reconciliation(prepared, profile=profile))
+    print(share_status.describe(share.submit_reconciliation(plan, profile=profile)))
 
 
 def _parse_selection(raw: str, loaded: int) -> tuple[list[int], list[str]]:
     """Parse a picker answer into 1-based row numbers, in the order typed, deduped.
 
     Accepts single numbers and inclusive ranges, mixed freely: `1,3,5-8`. A descending range
-    (`8-5`) reads the same as `5-8` — either way the developer meant those four rows. A range
+    (`8-5`) reads the same as `5-8` - either way the developer meant those four rows. A range
     that runs past the last loaded row is CLAMPED to it rather than thrown away, since with
     paging `1-20` on a 10-row page is a natural way to say "everything I can see"; the clamped
     part comes back as a note so the caller can say what it didn't take. Returns
-    (row_numbers, ignored_tokens) — a token contributing nothing (a stray word, `-3`, a number
+    (row_numbers, ignored_tokens) - a token contributing nothing (a stray word, `-3`, a number
     past the end) lands in `ignored_tokens` and never silently changes the selection."""
     picked: list[int] = []
     ignored: list[str] = []
@@ -926,9 +926,9 @@ def _parse_selection(raw: str, loaded: int) -> tuple[list[int], list[str]]:
 
 def _pick_shareable(repo: str, profile) -> list:
     """Interactive numbered multi-select of shareable decisions, paged `store._SHARE_PAGE`
-    at a time. `m` loads the next page — numbering stays continuous, so e.g. `11` resolves once
+    at a time. `m` loads the next page - numbering stays continuous, so e.g. `11` resolves once
     page 2 is loaded; `all`'s count in the prompt label (`all (10)`, then `all (20)` after paging)
-    makes explicit that it shares exactly the currently-loaded set, not the whole store — that's
+    makes explicit that it shares exactly the currently-loaded set, not the whole store - that's
     what `contexer share --all` is for, and the two used to collide silently. Selections accept
     ranges as well as single numbers (`1,3,5-8`) via `_parse_selection`. Returns the chosen
     ids ([] to cancel / nothing to share). Pure local read; no network until the caller pushes.
@@ -946,7 +946,7 @@ def _pick_shareable(repo: str, profile) -> list:
         return []
     shared = share.shared_map(profile.endpoint)
     items = sorted(items, key=lambda it: (it.get("id") or "") in shared)
-    print("\nShareable decisions — pushing sends them to your PERSONAL cloud.")
+    print("\nShareable decisions - pushing sends them to your PERSONAL cloud.")
     print(f"{store._SHARE_SECRETS_HINT}:\n")
 
     page = store._SHARE_PAGE
@@ -988,7 +988,7 @@ def _pending_review_warning(projs: list) -> list[str]:
     Scoped to `pending_approval` ONLY, matching the store's own trust boundary: auto-injection
     (`get_context(_active_only=True)`) already serves `approved` AND `suggested`, so a suggested
     decision is trusted context locally and sharing it promotes nothing new. `pending_approval`
-    is the one state deliberately held back until a human reviews it — and a personal-cloud push
+    is the one state deliberately held back until a human reviews it - and a personal-cloud push
     AUTO-APPROVES, so pushing one silently ratifies a decision that was never reviewed. The
     status pill shows every state while picking; this gate fires only for that real hazard."""
     pending = sum(1 for p in projs if (p.get("status") or "approved") == "pending_approval")
@@ -1084,7 +1084,7 @@ def _confirm_share_global() -> bool | None:
 def login_cmd(rest: list | None = None) -> None:
     """`contexer login [--endpoint URL]`: sign in to Contexer Teams via the browser (OAuth).
 
-    Self-configuring — writes config.toml itself, so no manual setup. Endpoint defaults to prod
+    Self-configuring - writes config.toml itself, so no manual setup. Endpoint defaults to prod
     (or localhost under CONTEXER_ENV=local); override with --endpoint."""
     from contexer import auth, config
 
@@ -1101,9 +1101,9 @@ def login_cmd(rest: list | None = None) -> None:
     except (ValueError, RuntimeError, config.ConfigError) as e:
         # ValueError: bad --endpoint; RuntimeError: OAuth flow failure (state mismatch,
         # no code, no token); ConfigError: an unusable ~/.contexer/config.toml reached the
-        # profile write — it is NOT a ValueError subclass, so it needs naming here or it
+        # profile write - it is NOT a ValueError subclass, so it needs naming here or it
         # surfaces as a traceback out of a login that already spent the browser flow.
-        # All three are user-actionable — print cleanly, no traceback.
+        # All three are user-actionable - print cleanly, no traceback.
         print(f"contexer login: {e}", file=sys.stderr)
         sys.exit(1)
     # Skipped only when login could not clear the previous session's queued shares (#232):
@@ -1119,7 +1119,7 @@ def _post_login_sync() -> None:
     keep showing the stale pre-auth `last sync: failed`.
 
     Refreshes BOTH the current working repo and the repo `contexer status` actually displays
-    (the `.current_repo` pointer) — these differ when login is run outside the project you
+    (the `.current_repo` pointer) - these differ when login is run outside the project you
     last worked in (e.g. logging in from the CLI repo while status still points at your app),
     which is exactly when the stale line is most visible. Uses `team_context.refresh()`: it
     bounds each pull to a short transport timeout (never stalls login on a slow cloud), never
@@ -1140,7 +1140,7 @@ def _post_login_sync() -> None:
             upserted += up
             removed += rm
     except Exception:
-        return  # login is done — never let a post-login sync problem surface as a failure
+        return  # login is done - never let a post-login sync problem surface as a failure
     if upserted or removed:
         msg = f"Synced {upserted} team decision(s)"
         if removed:
@@ -1161,7 +1161,7 @@ def logout_cmd(rest: list | None = None) -> None:
 def ui_cmd(rest: list | None = None) -> None:
     """`contexer ui [--open] [--stop] [--status] [--port N] [--foreground] [--reset-token]`.
 
-    Starts (or reports on) the local console — a loopback web UI over every store on this
+    Starts (or reports on) the local console - a loopback web UI over every store on this
     machine. The printed URL carries a short-lived pairing code, never the console token."""
     from contexer.ui import daemon
 
@@ -1197,7 +1197,7 @@ def ui_cmd(rest: list | None = None) -> None:
     # own dying daemon still holds the socket and nothing is left to recognise it by. Blaming
     # "another process" there sends the user to a different port to escape themselves.
     if not ours and daemon.port_occupied(port) and not daemon.await_port_free(port):
-        print(f"Port {port} is in use by another process — the console cannot bind it.",
+        print(f"Port {port} is in use by another process - the console cannot bind it.",
               file=sys.stderr)
         print(f"Pick another one: set `[ui] port` in {_ui_config_path()}, "
               f"or run `contexer ui --port N`.", file=sys.stderr)
@@ -1207,14 +1207,14 @@ def ui_cmd(rest: list | None = None) -> None:
     # SIGTERM the incumbent: a mistyped --port must not kill a console someone is using, and
     # `--stop` (or `--reset-token`, which already stops it) is the explicit way to move it.
     if "--port" in rest and state is not None and state.port != port and daemon.is_alive(state):
-        print(f"A console is already running on port {state.port} — there is one console per "
+        print(f"A console is already running on port {state.port} - there is one console per "
               f"machine, so `--port {port}` cannot apply to it.", file=sys.stderr)
         print(f"Move it: contexer ui --stop && contexer ui --port {port}", file=sys.stderr)
         sys.exit(1)
 
     running = daemon.ensure_running(port)
     if running is None:
-        print(f"Could not start the console — see {daemon.LOG_PATH}.", file=sys.stderr)
+        print(f"Could not start the console - see {daemon.LOG_PATH}.", file=sys.stderr)
         sys.exit(1)
     url = daemon.console_url(*running)
     print(f"Console: {url}")
@@ -1225,7 +1225,7 @@ def ui_cmd(rest: list | None = None) -> None:
 
 
 def _ui_config_path() -> Path:
-    """config.toml under THIS invocation's home, not config.CONFIG_PATH (frozen at import) —
+    """config.toml under THIS invocation's home, not config.CONFIG_PATH (frozen at import) -
     same resolution status() uses, so the file we read is the file we name in errors."""
     return Path.home() / ".contexer" / "config.toml"
 
@@ -1253,7 +1253,7 @@ def _print_ui_status(info: dict) -> None:
     if info["running"]:
         state = f"running (pid {info['pid']}, started {info['started_at']})"
     elif info["stale"]:
-        state = "not running (stale statefile — the next `contexer ui` replaces it)"
+        state = "not running (stale statefile - the next `contexer ui` replaces it)"
     else:
         state = "not running"
     print(f"contexer console {info['version'] or _version()}")
@@ -1266,14 +1266,14 @@ def _print_ui_status(info: dict) -> None:
 
 
 def _safe_print(text: str = "", **kwargs) -> None:
-    """print(), but never raises on a surrogate-bearing string — a staged
+    """print(), but never raises on a surrogate-bearing string - a staged
     filename that wasn't valid UTF-8, carried through as a surrogate-escaped
     path (see guard_engine._staged_files). Some terminal/locale combinations encode
     stdout in strict mode, where printing a lone surrogate raises
     UnicodeEncodeError; guard rendering must degrade to a lossy-but-visible
     rendering instead, never let a print failure turn a real violation into a
     silently-passed commit (the guard's own outer try/except would otherwise
-    swallow the exception and fail OPEN — correct per the guard's fail-open
+    swallow the exception and fail OPEN - correct per the guard's fail-open
     invariant, but a worse outcome than just rendering the escape visibly)."""
     try:
         print(text, **kwargs)
@@ -1296,7 +1296,7 @@ def _print_guard_advisories(advisories: list, total_advisories: int | None) -> N
     _safe_print(f"⚠️ Contexer: review this commit against {n} approved decision(s) before proceeding:")
     for a in advisories:
         id8 = (a.get("decision_id") or "")[:8]
-        _safe_print(f"  - [{id8}] {a.get('title')} — {a.get('file')}  "
+        _safe_print(f"  - [{id8}] {a.get('title')} - {a.get('file')}  "
                     f"(dismiss: contexer guard --dismiss {a.get('hash')})")
     if total_advisories and total_advisories > n:
         _safe_print(f"  ({total_advisories - n} more suppressed)")
@@ -1309,7 +1309,7 @@ def _print_guard_violations(violations: list) -> None:
         id8 = (v.get("decision_id") or "")[:8]
         line = f"✗ {v.get('path')}:{v.get('line')} violates decision [{id8}]: {v.get('title')}"
         if v.get("message"):
-            line += f" — {v['message']}"
+            line += f" - {v['message']}"
         _safe_print(line)
     _safe_print()
     _safe_print("To bypass this commit: CONTEXER_GUARD=0 git commit …")
@@ -1344,20 +1344,20 @@ def _print_guard_explain(candidates: list) -> None:
     for c in candidates:
         id8 = (c.get("decision_id") or "")[:8]
         tag = "EMITTED " if c.get("emitted") else "REJECTED"
-        _safe_print(f"  [{tag}] [{id8}] {c.get('title')} — {c.get('file')}  "
+        _safe_print(f"  [{tag}] [{id8}] {c.get('title')} - {c.get('file')}  "
                     f"({c.get('reason')})  hash={c.get('hash')}")
 
 
 def _cli_repo() -> str:
     """Same repo-resolution idiom as pull()/share_cmd() (git root, else the
-    shared last-resort pointer) — factored out after a dismiss-path divergence
+    shared last-resort pointer) - factored out after a dismiss-path divergence
     once sent guard commands to a different store than the rest of the CLI."""
     from contexer import store
     return store.git_root(os.getcwd()) or store.resolve_repo("")
 
 
 def scope_audit_cmd(rest: list) -> None:
-    """`contexer scope-audit` — report decisions that landed in the wrong repo's store.
+    """`contexer scope-audit` - report decisions that landed in the wrong repo's store.
 
     Read-only, and takes no arguments: anything else exits 1 rather than being ignored, the
     same rule `guard anchors` follows so a mistyped flag can never read as consent to
@@ -1371,7 +1371,7 @@ def scope_audit_cmd(rest: list) -> None:
 
 
 def _guard_run(rest: list) -> None:
-    """`contexer guard [path…] [--explain]` — the commit-time run path.
+    """`contexer guard [path…] [--explain]` - the commit-time run path.
 
     Deliberately NOT `_run_guarded`-wrapped: a broken guard must never block a
     commit, so any exception, or the engine's own `error: True`, degrades to a
@@ -1427,7 +1427,7 @@ def _guard_run(rest: list) -> None:
 
 
 def _guard_dismiss(rest: list) -> None:
-    """`contexer guard --dismiss <hash|n>` — permanently suppress one advisory
+    """`contexer guard --dismiss <hash|n>` - permanently suppress one advisory
     pair. Management path (called under `_run_guarded`). The hash form (usually
     copy-pasted straight off an advisory line) acts directly with no prompt; the
     numeric form re-derives the current candidate listing and requires an
@@ -1483,8 +1483,8 @@ def _guard_arm(rest: list) -> None:
     entirely to `guard_engine.arm_guard`.
 
     Its ValueError refusals ("machine-checkable", "only approved decisions can
-    be armed") are a documented CONTRACT — a rejected request, not a broken
-    file — so they are caught and printed here under this command's own name.
+    be armed") are a documented CONTRACT - a rejected request, not a broken
+    file - so they are caught and printed here under this command's own name.
     Left to `_run_guarded`'s generic ValueError arm they came out prefixed
     "Corrupt config:" and followed by advice to fix or remove a config file,
     which is both wrong and destructive to act on."""
@@ -1525,9 +1525,9 @@ def _guard_arm(rest: list) -> None:
 
 
 def _guard_disarm(rest: list) -> None:
-    """`contexer guard disarm <id>` — remove a decision's armed rule. Its
+    """`contexer guard disarm <id>` - remove a decision's armed rule. Its
     ValueError refusal (unknown id) is a contract refusal, reported under this
-    command's own name — see `_guard_arm` for why it must not fall through to
+    command's own name - see `_guard_arm` for why it must not fall through to
     `_run_guarded`'s "Corrupt config:" arm."""
     from contexer import guard_engine
 
@@ -1543,7 +1543,7 @@ def _guard_disarm(rest: list) -> None:
 
 
 def _guard_list() -> None:
-    """`contexer guard list` — show every currently armed rule, repo + global."""
+    """`contexer guard list` - show every currently armed rule, repo + global."""
     from contexer import store, guard_engine, revisions
 
     repo = _cli_repo()
@@ -1580,7 +1580,7 @@ def _print_candidate_card(index: int, total: int, item: dict) -> None:
 
 def _prompt_edited_paths(repo: str) -> list[str] | None:
     """The [E]dit sub-flow: prompt for a comma-separated file list and
-    validate each entry the same way the write layer will see it — resolved
+    validate each entry the same way the write layer will see it - resolved
     through _guard_relpath (rejecting ../-escaping and absolute spellings,
     exactly what _anchor_sources itself drops) THEN existence-checked, so a
     path this calls valid is guaranteed to actually anchor. Prints the
@@ -1606,10 +1606,10 @@ def _prompt_edited_paths(repo: str) -> list[str] | None:
 
 
 def _guard_anchors(rest: list) -> None:
-    """`contexer guard anchors [--list]` — interactive review over trusted,
+    """`contexer guard anchors [--list]` - interactive review over trusted,
     unanchored decisions (guard_engine.anchor_candidates_for_backfill).
     Ratified selections apply in ONE batch via store.apply_backfill_anchors,
-    on [Q]uit too — but an interrupt (Ctrl-C/EOF) aborts and writes nothing.
+    on [Q]uit too - but an interrupt (Ctrl-C/EOF) aborts and writes nothing.
 
     `--list` is the only accepted argument: it prints the candidate table
     read-only, and is also the non-TTY/agent-facing surface, since the
@@ -1618,7 +1618,7 @@ def _guard_anchors(rest: list) -> None:
 
     unknown = [a for a in rest if a != "--list"]
     if unknown:
-        print(f"contexer guard anchors: unknown argument(s): {' '.join(unknown)} — "
+        print(f"contexer guard anchors: unknown argument(s): {' '.join(unknown)} - "
               "the only accepted flag is --list.", file=sys.stderr)
         sys.exit(1)
 
@@ -1641,7 +1641,7 @@ def _guard_anchors(rest: list) -> None:
         return
 
     if not sys.stdin.isatty():
-        print("contexer guard anchors: requires an interactive terminal — use "
+        print("contexer guard anchors: requires an interactive terminal - use "
               "`contexer guard anchors --list` to preview candidates without prompting.",
               file=sys.stderr)
         sys.exit(1)
@@ -1680,8 +1680,8 @@ def _guard_anchors(rest: list) -> None:
             print("Skipped.")
 
     if aborted:
-        # An interrupt writes NOTHING — not even selections ratified before it.
-        print("\nAborted — nothing was anchored.")
+        # An interrupt writes NOTHING - not even selections ratified before it.
+        print("\nAborted - nothing was anchored.")
         return
 
     applied = store.apply_backfill_anchors(repo, selections) if selections else 0
@@ -1698,7 +1698,7 @@ def _guard_anchors(rest: list) -> None:
 _GUARD_FENCE_START = "# >>> contexer guard >>>"
 _GUARD_FENCE_END = "# <<< contexer guard <<<"
 # Substrings the pre-commit framework (https://pre-commit.com) writes into every
-# hook it generates — either one is enough to identify the file as framework-owned.
+# hook it generates - either one is enough to identify the file as framework-owned.
 _GUARD_FRAMEWORK_MARKERS = ("File generated by pre-commit", "pre-commit.com")
 
 
@@ -1706,13 +1706,13 @@ def _guard_bin_path() -> str:
     """Absolute path to the contexer binary, resolved once at install time and
     embedded literally in the hook script. The path is embedded (rather than a
     bare `contexer` / `command -v contexer` in the hook body) because
-    GUI-launched editors — and their embedded terminals and git clients — don't
+    GUI-launched editors - and their embedded terminals and git clients - don't
     always inherit the shell's PATH, which would silently disable the guard for
     exactly those users.
 
     The RUNNING entry point (`sys.argv[0]`) is preferred over `shutil.which`:
     `which` finds whatever is first on PATH, which is very often an OLDER global
-    install than the one the developer just ran — and baking a pre-guard binary
+    install than the one the developer just ran - and baking a pre-guard binary
     into the hook makes `"<bin>" guard` exit 1 on EVERY commit. argv[0] only
     qualifies when it is an absolute, executable, contexer-named file that isn't
     a `.py` source file (a `python -m contexer` / `python server.py` invocation
@@ -1738,7 +1738,7 @@ def _guard_bin_supports_guard(bin_path: str) -> bool:
     `"<bin>" guard || exit $?` would fail and BLOCK every commit in the repo.
     Refusing the install is strictly better than installing a hook that bricks
     committing. Any failure (missing file, timeout, non-zero exit) reads as
-    unsupported — the probe must never itself be the reason a hook gets
+    unsupported - the probe must never itself be the reason a hook gets
     written."""
     try:
         out = subprocess.run([bin_path, "help"], capture_output=True, text=True,
@@ -1767,7 +1767,7 @@ def _guard_require_capable_bin() -> str:
 def _guard_hook_block(bin_path: str) -> str:
     """The fenced hook body embedding the absolute binary path, shell-quoted
     (`shlex.quote`) so a path containing `$`, a backtick, a quote or a backslash
-    can neither expand nor break the script — either of which would fail the
+    can neither expand nor break the script - either of which would fail the
     hook and block commits. The `-x` existence guard means uninstalling or
     upgrading-away the package can never break a commit either: the hook just
     silently no-ops instead of erroring."""
@@ -1783,7 +1783,7 @@ def _guard_hook_block(bin_path: str) -> str:
 
 def _guard_precommit_stanza() -> str:
     """The `.pre-commit-config.yaml` stanza to hand the developer when an
-    existing hook was generated by the pre-commit framework — mirrors the
+    existing hook was generated by the pre-commit framework - mirrors the
     keys in `.pre-commit-hooks.yaml` at the repo root."""
     return (
         "  - repo: local\n"
@@ -1812,7 +1812,7 @@ def _guard_hooks_path_override(repo: str) -> str:
 
 def _guard_hooks_dir(repo: str) -> Path:
     """The real hooks directory for `repo`, correct across plain repos, linked
-    worktrees, and submodules — `.git` may be a FILE, not a directory, so
+    worktrees, and submodules - `.git` may be a FILE, not a directory, so
     `<root>/.git/hooks` is only right for a plain repo. `git rev-parse
     --git-path hooks` resolves it in every layout. Its output is relative to
     `repo` unless the git dir lives outside the worktree (linked worktrees
@@ -1827,13 +1827,13 @@ def _guard_hooks_dir(repo: str) -> Path:
 def _guard_strip_fence(content: str) -> str:
     """Remove exactly the fenced contexer block (marker line to marker line,
     plus the single trailing newline that belongs to the block) from `content`.
-    Everything else — including foreign content before/after — is byte-preserved."""
+    Everything else - including foreign content before/after - is byte-preserved."""
     start = content.find(_GUARD_FENCE_START)
     if start == -1:
         return content
     end_marker = content.find(_GUARD_FENCE_END, start)
     if end_marker == -1:
-        return content  # malformed (no closing marker) — leave untouched
+        return content  # malformed (no closing marker) - leave untouched
     end = end_marker + len(_GUARD_FENCE_END)
     if end < len(content) and content[end] == "\n":
         end += 1
@@ -1847,7 +1847,7 @@ def _guard_read_hook(hook_path: Path) -> tuple[str | None, str]:
 
     1. The codec must be pinned. A perfectly ordinary hook that echoes a
        non-ASCII message (`echo "✖ lint failed"`) decoded fine under a UTF-8
-       locale and raised UnicodeDecodeError under LC_ALL=C — crashing
+       locale and raised UnicodeDecodeError under LC_ALL=C - crashing
        --install-hook and --uninstall-hook with a traceback and making status
        report "not installed" for a hook that was.
     2. Text mode also translates newlines, which is not byte-preserving. Reading
@@ -1855,13 +1855,13 @@ def _guard_read_hook(hook_path: Path) -> tuple[str | None, str]:
        the \\r from every one of the developer's lines (verified: a
        `#!/bin/sh\\r\\n` hook came back LF-only); on Windows the write side would
        have turned our LF-only block into CRLF, handing `#!/bin/sh` a \\r on every
-       line. `Path.read_text(newline=...)` is no help — that parameter is 3.13+
+       line. `Path.read_text(newline=...)` is no help - that parameter is 3.13+
        and this package supports 3.12.
 
     The reason is carried out instead of being flattened into "not UTF-8": a
     mode-0o000 or EIO hook is an OSError, and sending that developer after an
     encoding problem wastes their time. None always means "do not touch this
-    file" — never "empty", never "not ours"."""
+    file" - never "empty", never "not ours"."""
     try:
         return hook_path.read_bytes().decode("utf-8"), ""
     except UnicodeDecodeError:
@@ -1871,7 +1871,7 @@ def _guard_read_hook(hook_path: Path) -> tuple[str | None, str]:
 
 
 def _guard_hook_status_line() -> str:
-    """The `contexer status` guard-hook line for the cwd's repo. Read-only —
+    """The `contexer status` guard-hook line for the cwd's repo. Read-only -
     never writes, never refuses; a status command must survive whatever it's
     diagnosing (not in a repo, no hook yet, a foreign or framework hook, or one
     it cannot decode)."""
@@ -1888,7 +1888,7 @@ def _guard_hook_status_line() -> str:
                 # Distinguished from "not installed": suggesting --install-hook here
                 # would send the developer into a command that cannot read the file
                 # either, with no hint as to why.
-                return f"unknown — {hook_path} {reason}"
+                return f"unknown - {hook_path} {reason}"
             if _GUARD_FENCE_START in content:
                 return f"installed at {hook_path}"
     except Exception:
@@ -1897,7 +1897,7 @@ def _guard_hook_status_line() -> str:
 
 
 def _guard_install_hook() -> None:
-    """`contexer guard --install-hook` — wire the guard into the cwd repo's
+    """`contexer guard --install-hook` - wire the guard into the cwd repo's
     `.git/hooks/pre-commit`. Refusal order is load-bearing:
 
     1. `core.hooksPath` set → hooks for this repo live entirely outside
@@ -1909,10 +1909,10 @@ def _guard_install_hook() -> None:
        ours → no-op (idempotent).
     4. Immediately before either write, the resolved binary is capability-probed
        (`_guard_require_capable_bin`) and the install refused if it has no
-       `guard` command — the "already installed" no-op path never probes, so a
+       `guard` command - the "already installed" no-op path never probes, so a
        re-run in an already-wired repo costs no subprocess.
 
-    A management path — called under `_run_guarded` like `arm`/`disarm`, not
+    A management path - called under `_run_guarded` like `arm`/`disarm`, not
     the fail-soft commit-time run path."""
     from contexer import store
 
@@ -1923,7 +1923,7 @@ def _guard_install_hook() -> None:
 
     override = _guard_hooks_path_override(repo)
     if override:
-        print(f"contexer guard --install-hook: core.hooksPath is set to {override!r} — "
+        print(f"contexer guard --install-hook: core.hooksPath is set to {override!r} - "
               "hooks for this repo live outside .git/hooks (husky, .githooks, or "
               "similar), so writing there would create a dead file nothing runs.",
               file=sys.stderr)
@@ -1947,7 +1947,7 @@ def _guard_install_hook() -> None:
             sys.exit(1)
         if any(marker in content for marker in _GUARD_FRAMEWORK_MARKERS):
             print(f"contexer guard --install-hook: {hook_path} was generated by the "
-                  "pre-commit framework — appending here would be wiped by the next "
+                  "pre-commit framework - appending here would be wiped by the next "
                   "`pre-commit install`.", file=sys.stderr)
             print("Add this to .pre-commit-config.yaml instead:", file=sys.stderr)
             print(_guard_precommit_stanza(), file=sys.stderr)
@@ -1972,7 +1972,7 @@ def _guard_install_hook() -> None:
 
 
 def _guard_uninstall_hook() -> None:
-    """`contexer guard --uninstall-hook` — remove exactly the fenced block from
+    """`contexer guard --uninstall-hook` - remove exactly the fenced block from
     the cwd repo's `.git/hooks/pre-commit`; remove the whole file when nothing
     but our block (and the shebang we write with it) remains. Foreign content
     is byte-preserved. No-op with a message when nothing is installed."""
@@ -1989,7 +1989,7 @@ def _guard_uninstall_hook() -> None:
         return
     content, reason = _guard_read_hook(hook_path)
     if content is None:
-        # Never "no hook installed" here — ours may well be in there. Say what is
+        # Never "no hook installed" here - ours may well be in there. Say what is
         # actually wrong and leave the developer a way out, rather than tracebacking
         # out of the one command that removes the block.
         print(f"contexer guard --uninstall-hook: {hook_path} {reason}, so the block "
@@ -2011,7 +2011,7 @@ def _guard_uninstall_hook() -> None:
 
 
 def guard(rest: list | None = None) -> None:
-    """`contexer guard` — the commit-time hook entrypoint, plus its management
+    """`contexer guard` - the commit-time hook entrypoint, plus its management
     subcommands (`arm`, `disarm`, `list`, `--dismiss`, `--install-hook`,
     `--uninstall-hook`). The run path is deliberately NOT `_run_guarded`-wrapped
     (see `_guard_run`); the management subcommands are deliberate developer acts

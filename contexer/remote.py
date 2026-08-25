@@ -26,11 +26,11 @@ T = TypeVar("T")
 
 
 def _redaction_enabled() -> bool:
-    """Whether outbound secret redaction is on — config.redaction_enabled() is the one
+    """Whether outbound secret redaction is on - config.redaction_enabled() is the one
     implementation (default True); this stays as the remote-side patch point its tests target.
     Import inside the try, and function-local even though `Profile` is imported at module top:
-    _wire_args is the last-mile wire guarantee, so ANY failure here — an unresolvable name
-    included — must degrade to redaction-ON, never raise and never fail at module load."""
+    _wire_args is the last-mile wire guarantee, so ANY failure here - an unresolvable name
+    included - must degrade to redaction-ON, never raise and never fail at module load."""
     try:
         from contexer.config import redaction_enabled
         return redaction_enabled()
@@ -43,7 +43,7 @@ _DEFAULT_TIMEOUT = 10.0
 
 # GATE (issue #174 Task 5, developer-ruled): the contexer-teams `push_decision`/`push_decisions`
 # schema is server-controlled, and an unknown/rejected field can poison the outbox with permanent
-# validation failures — this happened for real with `source="plan"` (-32602 on every retry, 192
+# validation failures - this happened for real with `source="plan"` (-32602 on every retry, 192
 # attempts, before the server accepted the value). `source_files` therefore stayed LOCAL until the
 # server accepted it: the share projection/preview/outbox carried it, but `_wire_args` omitted it
 # from the actual push payload.
@@ -99,7 +99,7 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
 
     This is also the last-mile secret-redaction chokepoint: every push (single, batch, and
     outbox drain) funnels through here, so scrubbing content/evidence/rationale/title here is the
-    hard guarantee that no secret egresses — including legacy on-disk secrets that predate
+    hard guarantee that no secret egresses - including legacy on-disk secrets that predate
     capture-time redaction. A title is derived from content, so it can carry the same secrets;
     it is scrubbed independently, same as content/evidence. Idempotent with the capture scrub
     (the [REDACTED] placeholder never re-matches).
@@ -179,13 +179,31 @@ class RemoteAuthError(RemoteStoreError):
 
     ``_transport_auth`` is set True only for a genuine transport 401/403 (by ``_classify``);
     it stays False for a server-side authz/scope denial (``_classify_tool_error``). The sync
-    reactive-refresh path refreshes only when it is True — a scope denial a refresh can't fix."""
+    reactive-refresh path refreshes only when it is True - a scope denial a refresh can't fix."""
 
     _transport_auth = False
 
 
 class RemoteUnavailableError(RemoteStoreError):
     """The Teams endpoint was unreachable (network error, timeout, 5xx)."""
+
+
+class RemoteRateLimitError(RemoteStoreError):
+    """The Teams endpoint was reached and refused this call for RATE LIMITING.
+
+    Its own class because callers act on it: a rate limit is transient, so a confirmed write
+    stays queued for automatic retry, while every other refusal is terminal and must stop being
+    retried. `share.py` decided that by matching the words "rate" and "limit" in the error text,
+    at three separate call sites - so the retry-versus-drop choice for a confirmed team write
+    depended on wording this client does not own, and one server-side rephrase would have made a
+    queued submission look terminal. Recognising the shape HERE, next to `_AUTHZ_ERROR_RE` which
+    already classifies a refusal by its text for the same reason, leaves exactly one definition
+    and makes every decision site structural. When the service grows a real error code, this
+    module changes and no caller does.
+
+    Deliberately NOT a subclass of `RemoteUnavailableError`: the endpoint answered, so an
+    "unreachable" verdict would be untrue, and `_warn_degrade` would tell the developer to check
+    a network that is fine."""
 
 
 @dataclass(frozen=True)
@@ -291,7 +309,7 @@ class RemoteStore:
         self._endpoint = endpoint
         self._token = token
         self._timeout = timeout
-        # Carried only when built via from_profile — the reactive 401 refresh needs it to
+        # Carried only when built via from_profile - the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
 
@@ -315,9 +333,9 @@ class RemoteStore:
     # can AWAIT it and therefore CANCEL it: on a deadline the awaitable is cancelled and the
     # cancellation propagates into httpx's async context managers, closing the socket. The
     # sync push_decision/get_context below are thin asyncio.run(...) shims over this same
-    # core for off-loop callers (CLI, hooks — separate processes, no running loop), so there
+    # core for off-loop callers (CLI, hooks - separate processes, no running loop), so there
     # is exactly ONE copy of the wire-serialization + error-mapping logic. The one thing the
-    # shims add is reactive token refresh — kept OFF the async core on purpose so the awaited
+    # shims add is reactive token refresh - kept OFF the async core on purpose so the awaited
     # push never spawns an uncancellable refresh thread (see _run_with_reactive_refresh).
 
     def _redact_on(self) -> bool:
@@ -536,7 +554,7 @@ class RemoteStore:
 
         Returns the server decision id (best-effort; ``""`` if the response carries none).
         Idempotent on ``decision_id`` server-side. Raises RemoteStoreError on failure. For
-        off-loop callers only — an in-loop caller must await :meth:`apush_decision` instead
+        off-loop callers only - an in-loop caller must await :meth:`apush_decision` instead
         (asyncio.run cannot run inside a running event loop)."""
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
@@ -588,11 +606,11 @@ class RemoteStore:
         """Run an off-loop op, and on a transport 401/403 do exactly ONE token refresh + retry.
 
         The bearer can expire mid-session (it is frozen at construction), so a transport-auth
-        failure gets one bounded refresh-and-retry. This lives in the SYNC shim layer — NOT in
-        the async core — deliberately (#108): the refresh is a blocking, cross-process-locked
+        failure gets one bounded refresh-and-retry. This lives in the SYNC shim layer - NOT in
+        the async core - deliberately (#108): the refresh is a blocking, cross-process-locked
         network call (`auth._locked_refresh`), and doing it here (off the event loop, no running
         loop) means the awaited async push path never spawns an uncancellable worker thread. Only
-        a genuine *transport* 401/403 (tagged `_transport_auth`) refreshes — a server-side
+        a genuine *transport* 401/403 (tagged `_transport_auth`) refreshes - a server-side
         authz/scope denial (which a refresh can't fix) surfaces unchanged."""
         try:
             return run()
@@ -604,7 +622,7 @@ class RemoteStore:
     async def _ainvoke(self, name: str, arguments: dict):
         """Call one Teams tool, mapping any transport failure to a typed RemoteStoreError.
 
-        Async core — pure and cancellable: it does NO blocking token refresh (that lives in
+        Async core - pure and cancellable: it does NO blocking token refresh (that lives in
         the sync shim's :meth:`_run_with_reactive_refresh`), so a cancelled push tears the
         transport down with nothing lingering (#108). A transport 401/403 surfaces as a
         ``RemoteAuthError`` tagged ``_transport_auth`` so the sync shim knows it is
@@ -632,7 +650,7 @@ class RemoteStore:
 
     def _refresh_token(self) -> bool:
         """Reactively refresh the bearer after a 401. Returns True (and swaps self._token)
-        only when a genuinely *new* token was obtained — so the caller retries at most once
+        only when a genuinely *new* token was obtained - so the caller retries at most once
         and a stale/unchanged token doesn't trigger a pointless retry. Never raises."""
         if self._profile is None:
             return False
@@ -661,7 +679,7 @@ def reset_degradation_warnings() -> None:
 def warn_once(message: str, *, key: str) -> None:
     """Print `message` to stderr at most once per process per `key` (no per-call spam).
 
-    Uses stderr prints (contexer's convention — it has no logging module) so the warning
+    Uses stderr prints (contexer's convention - it has no logging module) so the warning
     is visible to the developer without ever being injected into the agent's context."""
     if key in _WARNED:
         return
@@ -702,7 +720,7 @@ def with_local_fallback(op: Callable[[], T], *, default: T, action: str) -> T:
     """Run a RemoteStore operation, degrading to local-only on any RemoteStoreError.
 
     Returns `default` (and warns once per failure category) when the cloud is unreachable
-    or rejects the token — a cloud failure MUST NEVER block local capture or local reads,
+    or rejects the token - a cloud failure MUST NEVER block local capture or local reads,
     so no RemoteStoreError bubbles out. Non-RemoteStoreError exceptions (real bugs) are NOT
     swallowed; they propagate. `action` is a short phrase ("pull team context") used in the
     warning so the developer knows what degraded."""
@@ -719,7 +737,7 @@ async def awith_local_fallback(op: Callable[[], Awaitable[T]], *, default: T, ac
     ``op`` is a zero-arg callable returning an awaitable; it is ``await``-ed so a wedged push
     stays cancellable. Same local-first contract and identical warn-once messages (via the
     shared ``_warn_degrade``). A CancelledError is a BaseException, so an outer deadline
-    cancels straight through this wrapper — it is not swallowed as a degradation."""
+    cancels straight through this wrapper - it is not swallowed as a degradation."""
     try:
         return await op()
     except RemoteStoreError as exc:
@@ -761,6 +779,11 @@ def _classify(exc: BaseException) -> RemoteStoreError:
         err = RemoteAuthError(f"Teams rejected the token (HTTP {status}).")
         err._transport_auth = True
         return err
+    if status == 429:
+        # Reached and throttled, not unreachable. This used to fall through to the line below,
+        # so a 429 read as a network outage; both verdicts keep a confirmed write queued, so the
+        # ACTION is unchanged and only the reason reported gets truer.
+        return RemoteRateLimitError(f"Teams refused the request (HTTP {status}: rate limited).")
     return RemoteUnavailableError(f"Teams endpoint unreachable: {exc}")
 
 
@@ -778,14 +801,38 @@ _AUTHZ_ERROR_RE = re.compile(
 )
 
 
+# A tool call that returns isError matching this is a RATE LIMIT: the cloud was reached and
+# answered, and the refusal is TRANSIENT, so a confirmed write stays queued for automatic retry
+# instead of being dropped as terminal. Sits beside _AUTHZ_ERROR_RE because it does the same job -
+# classify a server refusal by the only signal the service currently sends, its own words.
+_RATE_LIMIT_RE = re.compile(r"rate[\s_-]*limit|ratelimit|too many requests|\b429\b", re.I)
+
+
+def _is_rate_limit_message(message: str) -> bool:
+    """True when a server refusal reads as rate limiting.
+
+    A deliberate SUPERSET of the `"rate" in m and "limit" in m` test this replaces, which lived
+    (copied) at three `share.py` decision sites. The two ways of being wrong are not symmetric,
+    and that sets the direction: a false NEGATIVE drops a confirmed team write that would have
+    succeeded on retry, while a false POSITIVE only retries a terminal refusal, which the outbox
+    already bounds by `_OUTBOX_CAP` and records in each entry's `attempts`. So the loose original
+    arm is kept rather than tightened away, and the explicit markers are added on top."""
+    folded = message.casefold()
+    return bool(_RATE_LIMIT_RE.search(message)) or ("rate" in folded and "limit" in folded)
+
+
 def _classify_tool_error(message: str) -> RemoteStoreError:
     """Map a server-returned tool error (an isError result's text) to a typed RemoteStoreError.
 
     An insufficient-scope / permission message is an authorization failure (RemoteAuthError), not
     a transport outage - so with_local_fallback tells the user to re-authenticate instead of
-    misreporting a reachable-but-refusing cloud as unreachable."""
+    misreporting a reachable-but-refusing cloud as unreachable. A rate limit is its own transient
+    category (RemoteRateLimitError). Authorization is tested FIRST, preserving the precedence the
+    callers already had: a RemoteAuthError was treated as retryable before this class existed."""
     if _AUTHZ_ERROR_RE.search(message):
         return RemoteAuthError(message)
+    if _is_rate_limit_message(message):
+        return RemoteRateLimitError(message)
     return RemoteStoreError(message)
 
 
@@ -793,7 +840,7 @@ async def _acall_tool(endpoint: str, token: str, name: str, arguments: dict, tim
     """Network seam: open a Streamable-HTTP MCP session, call one tool, return the result.
 
     The single async boundary the whole client funnels through (both the async core and the
-    sync asyncio.run shims). Awaiting it is what makes a wedged call cancellable — cancellation
+    sync asyncio.run shims). Awaiting it is what makes a wedged call cancellable - cancellation
     unwinds these ``async with`` blocks, closing the transport."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client

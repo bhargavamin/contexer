@@ -21,7 +21,7 @@ MANUAL RUNBOOK (real stack) -- run when validating against a live deployment:
      "## Team context (synced)", proving both paths resolved to the same canonical repo key.
   6. Re-run `contexer share` in A  ->  idempotent (same decisionId, no duplicate row).
 """
-from contexer import config, share, store, team_context
+from contexer import config, share, share_status, store, team_context
 from contexer.repo_key import canonical_repo_key
 
 TEAM = config.Profile(mode="team", endpoint="http://fake/mcp", token="tok")
@@ -33,7 +33,7 @@ def test_share_then_other_clone_pulls_it(team_stack):
     server = team_stack
     # Clone A captures a decision locally and shares it up.
     _, did = store.update_decision(CLONE_A, "use postgres for the primary datastore", "sA", subtype="architecture")
-    assert "Synced" in share.share(CLONE_A, profile=TEAM)
+    assert share.share(CLONE_A, profile=TEAM).outcome == share_status.SYNCED
     assert did in server.rows  # pushed under the local (stable) decision id
 
     # A lead approves the shared decision (personal -> team-approved).
@@ -66,7 +66,7 @@ def test_share_all_pushes_every_decision_e2e(team_stack):
     _, id1 = store.update_decision(CLONE_A, "use postgres for the primary datastore", "sA", subtype="architecture")
     _, id2 = store.update_decision(CLONE_A, "always run migrations before deploy", "sA", subtype="constraint")
     msg = share.share_all(CLONE_A, profile=TEAM)
-    assert "2" in msg
+    assert msg.outcome == share_status.BATCH_DONE and (msg.sent, msg.total) == (2, 2)
     assert set(server.rows) == {id1, id2}
     assert all(r["repo"] == server.REPO_KEY for r in server.rows.values())
 
@@ -83,7 +83,8 @@ def test_share_all_outage_then_recovery_drains_outbox(team_stack, monkeypatch):
     real_transport = remote._acall_tool
     monkeypatch.setattr(remote, "_acall_tool",
                         lambda *a, **k: (_ for _ in ()).throw(RemoteUnavailableError("down")))
-    assert "queued" in share.share_all(CLONE_A, profile=TEAM).lower()
+    assert share.share_all(
+        CLONE_A, profile=TEAM).outcome == share_status.BATCH_INTERRUPTED
     assert server.rows == {}
     assert [e["decision_id"] for e in share._load_outbox()] == [id1, id2]
 
@@ -102,7 +103,8 @@ def test_local_capture_survives_cloud_outage(team_stack, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RemoteUnavailableError("down")))
     ok, _ = store.update_decision(CLONE_A, "local decision while cloud is down", "sA", subtype="architecture")
     assert ok
-    assert "Share failed" in share.share(CLONE_A, profile=TEAM)  # degrades, no crash
+    # degrades, no crash: the push failed and the decision is queued for retry
+    assert share.share(CLONE_A, profile=TEAM).outcome == share_status.QUEUED
     assert "decision while cloud is down" in store.get_context(CLONE_A)  # still readable (normalized)
 
 
@@ -114,7 +116,7 @@ def test_shared_title_round_trips_to_other_clones_team_context(team_stack):
     content = "use blue/green deploys for zero-downtime releases across every service"
     title = "Adopt blue/green deploys"
     _, did = store.update_decision(CLONE_A, content, "sA", subtype="architecture", title=title)
-    assert "Synced" in share.share(CLONE_A, profile=TEAM)
+    assert share.share(CLONE_A, profile=TEAM).outcome == share_status.SYNCED
     assert server.rows[did]["title"] == title  # wire carried the title, not just content
 
     server.approve_as_team(did)
@@ -135,7 +137,7 @@ def test_shared_title_round_trips_to_other_clones_team_context(team_stack):
 
 def test_shared_decision_without_title_still_renders_via_derived_fallback(team_stack):
     """Older-server / untitled path: a row with NO title (e.g. added before Decision Titles
-    v2 existed) must still pull and render cleanly — title is never mandatory in the fake,
+    v2 existed) must still pull and render cleanly - title is never mandatory in the fake,
     and the team-context renderer derives a heading from content, same as a local decision."""
     server = team_stack
     server.add_team_decision("always squash-merge feature branches")  # title=None, the default
