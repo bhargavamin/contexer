@@ -364,17 +364,23 @@ def rule_matches(rule: Mapping, content: str) -> tuple[list[int], str | None]:
     never that it was evaluated and found nothing.
 
     `regex` matches line by line, so a hit's line number is exact. An unparseable pattern is
-    `bad-pattern` (defensive: `validate_check` rejects one at arm time, but a store can be
-    edited by hand). `secret` matches `redact.HIGH_CONFIDENCE_PATTERNS` against the WHOLE
-    content rather than per line — the PEM private-key pattern spans BEGIN/…/END lines, so
-    splitting first would silently defeat it — and derives the line from the match offset.
+    `bad-pattern` (defensive: `validate_check` rejects one at arm time, but a store is a JSON
+    file a human can edit). TypeError is caught beside `re.error` deliberately: a JSON `null`
+    pattern is not a string, and letting that escape would take down the caller's whole run
+    over one corrupt rule instead of naming it. An ABSENT pattern still reads as `""` — which
+    matches every line — because that is what the guard has always done with one, and
+    `validate_check` is what stops an empty rule being armed in the first place.
+
+    `secret` matches `redact.HIGH_CONFIDENCE_PATTERNS` against the WHOLE content rather than
+    per line — the PEM private-key pattern spans BEGIN/…/END lines, so splitting first would
+    silently defeat it — and derives the line from the match offset.
     """
     check_type = (rule or {}).get("type")
     if check_type == "regex":
         try:
-            compiled = re.compile((rule.get("pattern") or ""),
+            compiled = re.compile(rule.get("pattern", ""),
                                   re.IGNORECASE if "i" in (rule.get("flags") or "") else 0)
-        except re.error:
+        except (re.error, TypeError):
             return [], "bad-pattern"
         return [n for n, line in enumerate(content.splitlines(), start=1)
                 if compiled.search(line)], None
