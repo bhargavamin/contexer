@@ -115,12 +115,14 @@ def _match_line(match: dict, lines: list) -> str:
     number alone sends the reader back to a file to find out what happened. This is the one
     place a secret can reach the output — `format_result` is what scrubs it, once, for the
     whole render."""
-    line = match.get("line")
+    # Every key here is one `policy._match` always sets, so they are read directly: a missing
+    # one is a broken producer, which should surface rather than render as an empty field.
+    line = match["line"]
     quoted = lines[line - 1].strip() if isinstance(line, int) and 0 < line <= len(lines) else ""
     where = f" line {line}" if isinstance(line, int) else ""
-    note = f" — {match['message']}" if match.get("message") else ""
-    return (f"  [{match['verdict']}] {match.get('title') or '(untitled)'}"
-            f" ({match.get('decision_id', '')} rev {match.get('revision_id', '')}){where}{note}"
+    note = f" — {match['message']}" if match["message"] else ""
+    return (f"  [{match['verdict']}] {match['title'] or '(untitled)'}"
+            f" ({match['decision_id']} rev {match['revision_id']}){where}{note}"
             + (f"\n      {quoted}" if quoted else ""))
 
 
@@ -145,12 +147,12 @@ def format_result(result: dict, artifact: str = "") -> str:
     out = [f"verdict: {result['verdict']}  (evaluation_status: "
            f"{result['evaluation_status']}, basis: {result['basis']})"]
 
-    matches = result.get("matches") or []
+    matches = result["matches"]
     out.append(f"matched {len(matches)} polic{'y' if len(matches) == 1 else 'ies'}:"
                if matches else "matched no policies.")
     out.extend(_match_line(m, lines) for m in matches)
 
-    gaps = result.get("unchecked") or []
+    gaps = result["unchecked"]
     if gaps:
         out.append(f"unchecked ({len(gaps)}) — these were NOT judged, not judged clean:")
         out.extend(f"  - {g.get('reason', '')}"
@@ -158,5 +160,5 @@ def format_result(result: dict, artifact: str = "") -> str:
                    + (f" [decision {g['decision_id']}]" if g.get("decision_id") else "")
                    for g in gaps)
 
-    out.append(f"policy_set: {result.get('policy_set_version', '')}")
+    out.append(f"policy_set: {result['policy_set_version']}")
     return redact.scrub_text("\n".join(out))
