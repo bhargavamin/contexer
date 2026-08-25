@@ -183,12 +183,97 @@ def resolve_conflict(entry_id: str, choice: str, repo_path: str = "") -> str:
     return conflicts.record_conflict_memo(resolved, entry_id, choice, session_id=SESSION_ID)[1]
 
 
+_LIFECYCLE_BULK_REFUSAL = (
+    "Bulk retirement isn't supported — act on decisions one at a time, by id.\n"
+    "Retiring moves a decision out of every active surface at once, and a blanket gesture is "
+    "exactly how a decision nobody re-read disappears.\n"
+    "Call review_pending, show each proposal to the developer, and pass their answer as a "
+    'single id: retire_decision(entry_id="<id>", reason="<their reason>").'
+)
+
+
+def _single_id(entry_id: str) -> tuple[str, str | None]:
+    """(id, refusal) — the one place the lifecycle tools reject a bulk target."""
+    target = entry_id.strip()
+    if target.lower() in ("all", "*") or "," in target:
+        return "", _LIFECYCLE_BULK_REFUSAL
+    if not target:
+        return "", "No decision id given."
+    return target, None
+
+
+@mcp.tool()
+def retire_decision(entry_id: str, reason: str, repo_path: str = "",
+                    replacement_id: str = "") -> str:
+    """Retire ONE decision the developer has told you to retire: it leaves active context —
+    retrieval, session start, and the commit-time guard all stop seeing it — while its full
+    revision and lifecycle history is kept and `restore_decision` can bring it back.
+
+    Call this ONLY when the developer themselves said to retire the decision, in a genuine
+    user turn in this conversation. NEVER call it from your own judgment, from a codebase
+    reading, or because a retirement proposal (shown by review_pending as "retirement
+    proposed") looks correct to you — that proposal is a question FOR the developer, and
+    answering it yourself is the one thing this lane exists to prevent. If they have not said,
+    show them the proposal and ask.
+
+    entry_id:       the decision's id exactly as rendered, e.g. 6fb28fd9. One id — no lists.
+    reason:         the developer's reason, recorded permanently as lifecycle history.
+    replacement_id: the decision that supersedes this one, when they named one (records the
+                    lifecycle event as "superseded" rather than "retired").
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    target, refusal = _single_id(entry_id)
+    if refusal:
+        return refusal
+    return store.retire_decision(resolved, target, reason, replacement_id or None)[1]
+
+
+@mcp.tool()
+def restore_decision(entry_id: str, repo_path: str = "", reason: str = "") -> str:
+    """Bring ONE retired decision back into the live store with its prior status and its whole
+    history, one "restored" record longer. Call this when the developer asks for a retirement
+    to be undone. Refused when the store is already at capacity.
+
+    entry_id: the retired decision's id. One id — no lists.
+    reason:   the developer's reason, recorded in the lifecycle history.
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    target, refusal = _single_id(entry_id)
+    if refusal:
+        return refusal
+    return store.restore_decision(resolved, target, reason)[1]
+
+
+@mcp.tool()
+def dismiss_lifecycle(entry_id: str, repo_path: str = "") -> str:
+    """Drop ONE decision's pending retirement proposal, keeping the decision live and
+    unchanged. This is the developer's "no, keep it" answer to a proposal review_pending
+    showed — call it only when they said so. Dismissing means "not now": an evidence-driven
+    proposer may raise it again later.
+
+    entry_id: the decision's id. One id — no lists.
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped — repo path not detected."
+    target, refusal = _single_id(entry_id)
+    if refusal:
+        return refusal
+    return store.dismiss_lifecycle(resolved, target)[1]
+
+
 @mcp.tool()
 def review_pending(repo_path: str = "") -> str:
-    """List decisions awaiting the developer's review — brand-new pending-approval decisions and
-    suggested updates — each with its id and full content, so you can surface them conversationally
-    and approve via approve_decision. The in-session equivalent of the `contexer review` terminal
-    command. Call this when the developer asks to review, or when SessionStart reported items pending."""
+    """List decisions awaiting the developer's review — brand-new pending-approval decisions,
+    suggested updates, and proposed retirements — each with its id and full content, so you can
+    surface them conversationally and act on the developer's answer (approve_decision for
+    content, retire_decision / dismiss_lifecycle for a retirement). The in-session equivalent of
+    the `contexer review` terminal command. Call this when the developer asks to review, or when
+    SessionStart reported items pending."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
@@ -207,8 +292,9 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
     dry_run:    report what would be proposed and write nothing at all.
 
     Anything proposed is recorded `pending_approval` — NOT yet trusted, never injected into a
-    session, and it does not block your work. Retirements and replacements are only ever
-    recommendations here; nothing is retired, replaced or approved.
+    session, and it does not block your work. A retirement is likewise only PROPOSED: the
+    decision stays live and keeps rendering until the developer themselves retires it.
+    Nothing here retires, replaces or approves anything.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
