@@ -45,6 +45,11 @@ from contexer import evidence, store
 # afford to read; 30 days is longer than any session anyone reconciles. The temp-file age is
 # the only one that is about crashes rather than volume: an hour is far beyond how long an
 # `os.replace` can legitimately be in flight, so anything older is debris.
+#
+# BEFORE RAISING `_MAX_PENDING_EVENTS`, read `candidates._merge_target`: reading 8MB is the
+# cheap half. Grouping is O(N^2) in DISTINCT statements, and reconciliation runs on the
+# SessionStart path. Measured at 1000: ~69ms for a realistic corpus (100 statements plus
+# corroborating file changes), ~2.7s if every event is its own distinct statement.
 _MAX_PENDING_EVENTS = 1000
 _MAX_PENDING_AGE_DAYS = 30
 _MAX_TEMP_AGE_SECONDS = 3600
@@ -142,8 +147,10 @@ def _event_files(directory: Path) -> list[Path]:
     ignored junk would leave it invisible to quarantine AND to retention, which is how a
     stray file becomes permanent. `candidate.json` is not special-cased here for that reason
     - in `pending/` or `quarantine/` the name can never legitimately occur, so it should be
-    read, fail validation, and be quarantined like any other malformed file. The one caller
-    that lists a HELD directory, where the name IS legitimate, filters it itself.
+    read, fail validation, and be quarantined like any other malformed file. Two callers list
+    a HELD directory, where the name IS legitimate: `evidence_diagnostics` filters it out of
+    the event count itself, and `finalize_candidate_evidence` needs no filter because
+    `_EVENT_ID_IN_NAME` cannot match it.
 
     An ABSENT directory is an empty listing; any other listing failure is raised. The two are
     not the same fact, and a caller that must tell "nothing spooled" from "could not read the

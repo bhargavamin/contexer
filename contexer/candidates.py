@@ -139,6 +139,15 @@ def _merge_target(seed, groups):
     with what it rebuts, and burying it in its own group would hide the disagreement from the
     developer instead of scoring it. Whichever bar it crossed, a merged negating seed is
     counted as a contradiction by `_score_group`.
+
+    ponytail: this compares each seed against every group opened so far, so a pass is O(N^2)
+    in DISTINCT statements. That is a CEILING, not the normal cost - a real session spools a
+    few statements and many corroborating file changes, which merge into a handful of groups.
+    Measured at `spool._MAX_PENDING_EVENTS` = 1000: ~69ms for 100 statements plus support,
+    ~2.7s if every event is its own distinct statement, and reconciliation runs on the
+    SessionStart path. Upgrade path when that ceiling starts to matter: block on a cheap key
+    (shared index token, or session) so a seed is only compared within its block, rather than
+    a cleverer overlap function.
     """
     fallback = None
     negating = _negates(seed.get("summary"))
