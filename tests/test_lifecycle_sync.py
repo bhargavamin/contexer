@@ -351,16 +351,22 @@ def test_anchor_candidates_key_never_reaches_the_wire(tmp_repo, monkeypatch):
 
 def test_raw_evidence_spool_never_reaches_the_wire(tmp_repo, monkeypatch):
     # Raw events, held evidence, `.gap` and receipts are a separate store entirely: nothing on
-    # the wire path reads the spool, and this pins that a spooled event stays home.
+    # the wire path reads the spool, and this pins that a spooled event stays home. The
+    # `.reconcile_<slug>.jsonl` receipt log is named explicitly beside it — same rule, different
+    # file, and it is the one an "evidence spool" sentinel would otherwise miss by name.
     spool.append_evidence(tmp_repo, {
         "schema_version": 1, "event_id": str(uuid.uuid4()), "session_id": "sess-1",
         "repo_key": tmp_repo, "kind": "file_changed",
         "occurred_at": datetime.now(timezone.utc).isoformat(), "source": "test",
         "summary": "SPOOLEDSECRET: the raw prompt and the full diff",
         "files": ["src/app.py"], "attributes": {}})
+    store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (store.STORE_DIR / f".reconcile_{store.repo_slug(tmp_repo)}.jsonl").write_text(
+        '{"receipt": "RECEIPTLOGSECRET"}\n', encoding="utf-8")
     did = _seed(tmp_repo)
     args = _wire_for(tmp_repo, did, monkeypatch=monkeypatch)
     assert "SPOOLEDSECRET" not in _payload_text(args)
+    assert "RECEIPTLOGSECRET" not in _payload_text(args)
     assert not any(k in args for k in ("evidence_events", "held", "gap", "receipts"))
 
 
