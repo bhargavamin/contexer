@@ -4,6 +4,7 @@ RemoteStore is faked (monkeypatched from_profile) so no network is touched. The 
 profile is passed explicitly to share() to avoid reading a real config.toml.
 """
 import asyncio
+import contextlib
 import threading
 import time
 import types
@@ -11,8 +12,12 @@ import types
 import pytest
 
 import contexer.remote as remote
-from contexer import config, share, store
-from contexer.remote import RemoteAuthError, RemoteUnavailableError
+from contexer import config, share, share_status, store
+from contexer.remote import (
+    RemoteAuthError,
+    RemoteRateLimitError,
+    RemoteUnavailableError,
+)
 
 TEAM = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
 
@@ -143,13 +148,14 @@ def test_get_shareable_all_order_unaffected_by_shared_marker(tmp_repo):
 # ── share.share ──────────────────────────────────────────────────────────────────
 
 def test_share_nothing_to_share(tmp_repo):
-    assert "nothing to share" in share.share(tmp_repo, profile=TEAM).lower()
+    assert share.share(tmp_repo, profile=TEAM).outcome == share_status.NO_MATCH
 
 
 def test_share_local_mode_message(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "a decision to maybe share", "s1", subtype="architecture")
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
-    assert "team mode" in share.share(tmp_repo, profile=config.Profile()).lower()
+    assert share.share(
+        tmp_repo, profile=config.Profile()).outcome == share_status.NOT_TEAM_MODE
 
 
 def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
@@ -157,9 +163,12 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "srv-9" in msg
-    assert "personal" in msg.lower()
-    assert "team" in msg.lower() and "won't see" in msg.lower()  # honest about visibility
+    assert msg.outcome == share_status.SYNCED
+    assert msg.server_id == "srv-9"
+    assert (msg.sent, msg.total) == (1, 1)
+    rendered = share_status.describe(msg)      # the wording is the renderer's job now
+    assert "personal" in rendered.lower()
+    assert "won't see" in rendered.lower()     # honest about visibility
     assert len(fake.calls) == 1
     kw = fake.calls[0]
     assert kw["type"] == "architecture"
@@ -182,7 +191,7 @@ def test_share_no_git_origin_pushes_repo_none(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "decision without a remote origin", "s1", subtype="constraint")
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     fake = _fake(monkeypatch, ret="srv-x")
-    assert "srv-x" in share.share(tmp_repo, profile=TEAM)
+    assert share.share(tmp_repo, profile=TEAM).server_id == "srv-x"
     assert fake.calls[0]["repo"] is None
 
 
@@ -200,7 +209,7 @@ def test_share_degraded_unreachable(tmp_repo, monkeypatch, capsys):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "fail" in msg.lower()
+    assert msg.outcome == share_status.QUEUED and msg.queued == 1
     assert "unreachable" in capsys.readouterr().err.lower()
 
 
@@ -208,7 +217,7 @@ def test_share_degraded_auth(tmp_repo, monkeypatch, capsys):
     store.update_decision(tmp_repo, "decision with bad token sync", "s1", subtype="architecture")
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteAuthError("401"))
-    assert "fail" in share.share(tmp_repo, profile=TEAM).lower()
+    assert share.share(tmp_repo, profile=TEAM).outcome == share_status.QUEUED
     err = capsys.readouterr().err
     assert "contexer login" in err and "--team" not in err  # a flag that never existed
 
@@ -245,7 +254,8 @@ def test_reconcile_previews_then_atomically_submits_team_candidate(tmp_repo, mon
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     out = share.reconcile(tmp_repo, did[:8], profile=TEAM)
 
-    assert "candidate-1" in out and "Platform" in out and "lead review" in out
+    assert out.outcome == share_status.SUBMITTED
+    assert (out.candidate_id, out.team_name) == ("candidate-1", "Platform")
     assert fake.events[0][:3] == ("preview", did, "team-1")
     assert fake.events[1][0] == "submit" and fake.events[1][1] == did
     assert fake.events[1][2] and fake.events[1][3] == "team-1"
@@ -270,7 +280,8 @@ def test_reconcile_requires_explicit_team_when_memberships_are_ambiguous(tmp_rep
 
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
-    assert "--team" in out and "Platform" in out and "Security" in out
+    assert out.outcome == share_status.TEAM_CHOICE_REQUIRED
+    assert out.teams == ("Platform (t-1)", "Security (t-2)")
 
 
 def test_cli_reconcile_confirms_and_routes_team(monkeypatch, capsys):
@@ -281,14 +292,16 @@ def test_cli_reconcile_confirms_and_routes_team(monkeypatch, capsys):
     captured = {}
     plan = object()
     monkeypatch.setattr(share, "prepare_reconciliation", lambda repo, did, team, **kwargs:
-                        captured.update(repo=repo, did=did, team=team) or plan)
+                        (captured.update(repo=repo, did=did, team=team), (plan, None))[1])
     monkeypatch.setattr(share, "format_reconciliation_preview", lambda p: "server preview")
-    monkeypatch.setattr(share, "submit_reconciliation", lambda p, **kwargs: "submitted")
+    monkeypatch.setattr(share, "submit_reconciliation", lambda p, **kwargs:
+                        share_status.ReconcileStatus(
+                            share_status.SUBMITTED, team_name="Platform", candidate_id="cand-1"))
 
     cli.reconcile_cmd(["abc12345", "--team", "Platform"])
     assert captured == {"repo": "/repo", "did": "abc12345", "team": "Platform"}
     output = capsys.readouterr().out
-    assert "server preview" in output and "submitted" in output
+    assert "server preview" in output and "Submitted decision cand-1" in output
 
 
 def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, monkeypatch):
@@ -316,7 +329,7 @@ def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, m
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
     queued = share._load_reconcile_outbox()
-    assert "queued" in out.lower() and len(queued) == 1
+    assert out.outcome == share_status.UNREACHABLE_QUEUED and len(queued) == 1
     assert queued[0]["decision_id"] == did
     assert queued[0]["expected_personal_head"] == "ph-1"
     assert queued[0]["expected_team_head"] == "th-1"
@@ -351,7 +364,7 @@ def test_heads_changed_is_not_blindly_queued(tmp_repo, monkeypatch):
 
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
-    assert "changed after the preview" in out
+    assert out.outcome == share_status.HEADS_CHANGED
     assert share._load_reconcile_outbox() == []
 
 
@@ -384,7 +397,7 @@ def test_reconcile_falls_back_for_server_without_capability_tool(tmp_repo, monke
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
     assert fake.events == ["push", "submit"]
-    assert "candidate-1" in out
+    assert out.outcome == share_status.SUBMITTED and out.candidate_id == "candidate-1"
 
 
 def test_reconcile_falls_back_with_explicit_team_when_discovery_is_missing(
@@ -417,7 +430,7 @@ def test_reconcile_falls_back_with_explicit_team_when_discovery_is_missing(
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     out = share.reconcile(tmp_repo, did, team="team-legacy", profile=TEAM)
     assert fake.events == [("push", did), ("submit", did, "team-legacy")]
-    assert "candidate-1" in out
+    assert out.outcome == share_status.SUBMITTED and out.candidate_id == "candidate-1"
 
 
 def test_reconcile_falls_back_with_explicit_team_when_capabilities_are_generic(
@@ -450,7 +463,7 @@ def test_reconcile_falls_back_with_explicit_team_when_capabilities_are_generic(
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
     out = share.reconcile(tmp_repo, did, team="team-legacy", profile=TEAM)
     assert fake.events == [("push", did), ("submit", did, "team-legacy")]
-    assert "candidate-1" in out
+    assert out.outcome == share_status.SUBMITTED and out.candidate_id == "candidate-1"
 
 
 def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monkeypatch):
@@ -484,6 +497,102 @@ def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monke
     assert fake.calls[0][3]["expected_personal_head"] == "ph1"
     assert fake.calls[0][3]["content"] == "new"
     assert share._load_reconcile_outbox() == []
+
+
+def _atomic_plan(monkeypatch, *, raises):
+    """A previewed atomic ReconciliationPlan whose submit raises `raises`."""
+    class Fake:
+        def submit_team_decision(self, *a, **k):
+            raise raises
+
+    preview = remote.DecisionReconciliationPreview(
+        "ph-1", "th-1", None, "diverged", "submit_update", [], ["submit"],
+        remote.RemoteTeam("t1", "Platform", "member"))
+    return share.ReconciliationPlan(
+        {"id": "d1", "revision_id": "r1", "type": "constraint", "content": "c",
+         "confidence": None, "evidence": None, "source": "ai"},
+        None, remote.RemoteTeam("t1", "Platform", "member"), Fake(), preview,
+        True, "idem-1", False)
+
+
+def _queue_one_confirmed_operation():
+    share._enqueue_reconciliation({
+        "operation": "submit_team_decision", "idempotency_key": "idem-stable",
+        "decision_id": "d1", "revision_id": "r1", "team_id": "t1",
+        "team_name": "Platform", "expected_personal_head": "ph1",
+        "expected_team_head": "th1", "payload": {"type": "constraint", "content": "new"},
+        "stage": "confirmed", "attempts": 0,
+    })
+
+
+def _drain_refusing(monkeypatch, exc):
+    """Drain the reconciliation queue against a server that refuses with `exc`."""
+
+    class Fake:
+        def get_capabilities(self):
+            return remote.ServerCapabilities(remote.DecisionReconciliationCapabilities(
+                1, True, True, False))
+
+        def submit_team_decision(self, *args, **kwargs):
+            raise exc
+
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
+    return share.drain_outbox(TEAM)
+
+
+def test_rate_limited_reconciliation_stays_queued_for_retry(tmp_repo, monkeypatch):
+    """The retry-versus-drop choice for a CONFIRMED team write. A rate limit is transient, so the
+    entry keeps its `confirmed` stage and its stable idempotency key and the drain stops - a later
+    drain resubmits it. This was decided by matching the words "rate" and "limit" in the server's
+    error text, so one rephrase upstream would have marked the write terminal and stopped
+    retrying it; it is now decided by the error's TYPE."""
+    _queue_one_confirmed_operation()
+    assert _drain_refusing(monkeypatch, RemoteRateLimitError("Rate limit exceeded")) == 0
+    queued = share._load_reconcile_outbox()
+    assert len(queued) == 1
+    assert queued[0]["stage"] == "confirmed"     # NOT "attention" - it will be retried
+    assert queued[0]["attempts"] == 1
+    assert queued[0]["idempotency_key"] == "idem-stable"
+
+
+def test_every_transient_refusal_class_is_queued_by_submit_reconciliation(tmp_repo, monkeypatch):
+    """One table, both decision sites. The drain asked `_RETRYABLE_REFUSALS` while
+    `submit_reconciliation` re-enumerated the same classes in its own except-cascade, so a fourth
+    transient class added to the set would have been reported as terminal here - "Nothing was
+    queued" for a write the developer had already confirmed. This walks the table itself, so
+    adding a class covers it automatically."""
+    assert set(share._RETRYABLE_REFUSALS) == set(share._TRANSIENT_REFUSALS)
+    for cls, (queued_outcome, _stranded) in share._TRANSIENT_REFUSALS.items():
+        share._save_reconcile_outbox([])
+        plan = _atomic_plan(monkeypatch, raises=cls("nope"))
+        status = share.submit_reconciliation(plan, profile=TEAM)
+        assert status.outcome == queued_outcome, cls
+        assert len(share._load_reconcile_outbox()) == 1, cls
+
+
+def test_a_new_transient_class_needs_no_change_in_submit_reconciliation(tmp_repo, monkeypatch):
+    """The point of the table: registering a class is the whole change. Without it this test sees
+    SUBMISSION_REFUSED and an empty queue."""
+    class NewlyTransient(remote.RemoteStoreError):
+        pass
+
+    monkeypatch.setitem(share._TRANSIENT_REFUSALS, NewlyTransient,
+                        (share_status.UNREACHABLE_QUEUED, share_status.UNREACHABLE_NOT_QUEUED))
+    plan = _atomic_plan(monkeypatch, raises=NewlyTransient("brand new"))
+    status = share.submit_reconciliation(plan, profile=TEAM)
+    assert status.outcome == share_status.UNREACHABLE_QUEUED
+    assert len(share._load_reconcile_outbox()) == 1
+
+
+def test_terminal_refusal_moves_the_reconciliation_to_attention(tmp_repo, monkeypatch):
+    """The other side of the same branch: a refusal that is not transient stops being retried and
+    records why, so the developer sees it in the queue instead of it looping forever."""
+    _queue_one_confirmed_operation()
+    assert _drain_refusing(monkeypatch, remote.RemoteStoreError("invalid revision")) == 0
+    queued = share._load_reconcile_outbox()
+    assert len(queued) == 1
+    assert queued[0]["stage"] == "attention"
+    assert queued[0]["reason"] == "invalid revision"
 
 
 def test_reconciliation_outbox_full_refuses_new_distinct_operation(tmp_repo, monkeypatch):
@@ -528,13 +637,14 @@ def test_discard_outbox_also_clears_confirmed_reconciliations(tmp_repo):
 # ── share.share_all ──────────────────────────────────────────────────────────────
 
 def test_share_all_nothing_to_share(tmp_repo):
-    assert "nothing to share" in share.share_all(tmp_repo, profile=TEAM).lower()
+    assert share.share_all(tmp_repo, profile=TEAM).outcome == share_status.NOTHING_TO_SHARE
 
 
 def test_share_all_local_mode_message(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "a decision to maybe share", "s1", subtype="architecture")
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
-    assert "team mode" in share.share_all(tmp_repo, profile=config.Profile()).lower()
+    assert share.share_all(
+        tmp_repo, profile=config.Profile()).outcome == share_status.NOT_TEAM_MODE
 
 
 def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
@@ -544,8 +654,9 @@ def test_share_all_happy_path_pushes_every_decision(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "3" in msg
-    assert "won't see" in msg.lower()  # honest about visibility, like single share
+    assert msg.outcome == share_status.BATCH_DONE
+    assert (msg.sent, msg.total) == (3, 3)
+    assert (msg.at_capacity, msg.invalid, msg.lost) == (0, 0, 0)
     assert len(fake.batches) == 1  # ONE network call for all three, not one per decision
     assert [c["decision_id"] for c in fake.batches[0]] == [id1, id2, id3]  # oldest first
     assert all(c["repo"] == "github.com/a/b" for c in fake.batches[0])
@@ -594,8 +705,8 @@ def test_share_all_failure_enqueues_failed_and_remaining(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share, "_BATCH_SIZE", 1)  # one decision per chunk -> partial progress
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "1" in msg  # one synced (the first chunk)
-    assert "queued" in msg.lower()
+    assert msg.outcome == share_status.BATCH_INTERRUPTED
+    assert (msg.sent, msg.queued, msg.total) == (1, 2, 3)   # 1 synced, the rest queued
     assert [b[0]["decision_id"] for b in fake.batches] == [id1, id2]  # stopped after the failing chunk
     assert [e["decision_id"] for e in share._load_outbox()] == [id2, id3]
 
@@ -620,7 +731,9 @@ def test_share_all_partial_enqueue_failure_message_is_accurate(tmp_repo, monkeyp
 
     monkeypatch.setattr(share, "_enqueue", flaky_enqueue)
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "queued 1 of the remaining 3" in msg.lower()
+    assert msg.outcome == share_status.BATCH_STRANDED
+    # The count no caller could read before: 1 queued, so 2 of the 3 are recorded NOWHERE.
+    assert (msg.sent, msg.queued, msg.lost, msg.total) == (0, 1, 2, 3)
     assert [e["decision_id"] for e in share._load_outbox()] == [id1]
 
 
@@ -630,7 +743,8 @@ def test_share_all_total_failure_queues_everything(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "fail" in msg.lower() or "queued" in msg.lower()
+    assert msg.outcome == share_status.BATCH_INTERRUPTED
+    assert (msg.sent, msg.queued, msg.lost) == (0, 2, 0)
     assert [e["decision_id"] for e in share._load_outbox()] == [id1, id2]
 
 
@@ -641,7 +755,7 @@ def test_share_degraded_enqueues_payload(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "queued" in msg.lower()
+    assert msg.outcome == share_status.QUEUED and msg.queued == 1
     entries = share._load_outbox()
     assert len(entries) == 1
     entry = entries[0]
@@ -936,8 +1050,8 @@ def test_a_failed_queue_is_reported_as_not_queued_not_as_queued(tmp_repo, monkey
     _damaged_outbox()
 
     status = share._finish_share(dec, "r", None, "https://example.test")
-    assert "Your local decision is unchanged" in status
-    assert "Queued" not in status
+    assert status.outcome == share_status.NOT_QUEUED
+    assert (status.lost, status.queued) == (1, 0)   # unsaved, and it does not claim a retry
 
 
 def test_cancellation_still_wins_when_queueing_fails(tmp_repo, monkeypatch):
@@ -969,7 +1083,7 @@ def test_share_drains_queued_items_before_new_push(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _fake(monkeypatch, ret="srv-ok")
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "srv-ok" in msg
+    assert msg.outcome == share_status.SYNCED and msg.server_id == "srv-ok"
     # queued-1 drains via the batch path; the new decision via the single push - drain runs first.
     assert [c["decision_id"] for c in fake.batches[0]] == ["queued-1"]
     assert [c["decision_id"] for c in fake.calls] == [did]
@@ -987,7 +1101,7 @@ def test_share_survives_drain_failure(tmp_repo, monkeypatch):
 
     monkeypatch.setattr(share, "drain_outbox", boom)
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "Synced decision" in msg
+    assert msg.outcome == share_status.SYNCED
     assert [c["decision_id"] for c in fake.calls] == [did]  # the push still happened
 
 
@@ -1003,9 +1117,8 @@ def test_share_survives_enqueue_failure(tmp_repo, monkeypatch, capsys):
 
     monkeypatch.setattr(share, "_enqueue", boom)
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "fail" in msg.lower()
-    assert "queued" not in msg.lower()  # honest: nothing was recorded for retry
-    assert "unchanged" in msg.lower()
+    assert msg.outcome == share_status.NOT_QUEUED   # honest: nothing was recorded for retry
+    assert (msg.lost, msg.queued) == (1, 0)
 
 
 # ── shared-marker sidecar (.shared.json, endpoint-scoped, cosmetic) ───────────────
@@ -1125,7 +1238,8 @@ def test_mark_shared_write_failure_does_not_raise_or_block_share(tmp_repo, monke
 
     monkeypatch.setattr(share, "_append_shared", boom)
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "srv-9" in msg  # the push itself is unaffected by the marker write failing
+    # the push itself is unaffected by the marker write failing
+    assert msg.outcome == share_status.SYNCED and msg.server_id == "srv-9"
 
 
 def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
@@ -1138,7 +1252,7 @@ def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _fake(monkeypatch, ret="srv-9")
     msg = share.share(tmp_repo, profile=TEAM)
-    assert "srv-9" in msg
+    assert msg.outcome == share_status.SYNCED and msg.server_id == "srv-9"
     assert did in share.shared_map(TEAM.endpoint)  # recovered - the fresh mark succeeded
 
 
@@ -1147,17 +1261,19 @@ def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
 def test_cli_share_prints_result(monkeypatch, capsys):
     from contexer import cli
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
-    monkeypatch.setattr(share, "share", lambda repo, decision_id="", **kw: f"shared {decision_id or 'latest'}")
+    monkeypatch.setattr(share, "share", lambda repo, decision_id="", **kw:
+                        _ok_status(server_id=f"srv-{decision_id or 'latest'}"))
     cli.share_cmd(["abc123", "--yes"])  # --yes bypasses the push-confirm preview
-    assert "abc123" in capsys.readouterr().out
+    assert "srv-abc123" in capsys.readouterr().out
 
 
 def test_cli_share_all_flag(monkeypatch, capsys):
     from contexer import cli
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
-    monkeypatch.setattr(share, "share_all", lambda repo, **kw: "shared all of them")
+    monkeypatch.setattr(share, "share_all", lambda repo, **kw:
+                        share_status.ShareStatus(share_status.BATCH_DONE, sent=3, total=3))
     cli.share_cmd(["--all", "--yes"])
-    assert "shared all of them" in capsys.readouterr().out
+    assert "Synced 3 decision(s)" in capsys.readouterr().out
 
 
 def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
@@ -1168,7 +1284,7 @@ def test_cli_share_previews_and_cancels_on_no(monkeypatch, capsys):
     monkeypatch.setattr(store, "get_shareable",
                         lambda repo, did="": {"id": "abc12345", "type": "constraint", "content": "never X"})
     pushed = {"n": 0}
-    monkeypatch.setattr(share, "share", lambda *a, **k: pushed.__setitem__("n", pushed["n"] + 1))
+    monkeypatch.setattr(share, "share", lambda *a, **k: pushed.__setitem__("n", pushed["n"] + 1) or _ok_status())
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     cli.share_cmd(["abc12345"])
     out = capsys.readouterr().out
@@ -1186,7 +1302,7 @@ def test_share_ids_shares_selected_in_one_batch(tmp_repo, monkeypatch):
     out = share.share_ids(tmp_repo, ["a", "b"], profile=TEAM)
     assert len(fake.batches) == 1  # one call for both, not one per id
     assert [x["decision_id"] for x in fake.batches[0]] == ["a", "b"]
-    assert "2" in out  # "Synced 2 decision(s)..."
+    assert out.outcome == share_status.BATCH_DONE and (out.sent, out.total) == (2, 2)
 
 
 def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
@@ -1201,14 +1317,23 @@ def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "get_shareable", _get)
     fake = _fake(monkeypatch, ret="srv-1")
     out = share.share_ids(tmp_repo, ["good1234", "bad99999"], profile=TEAM)
-    assert "Skipped 1 unknown id" in out
-    assert "bad99999" in out
+    assert out.unknown_ids == ("bad99999",)     # reported as data, not as a prose prefix
+    assert "Skipped 1 unknown id" in share_status.describe(out)
     assert [x["decision_id"] for x in fake.batches[0]] == ["good1234"]  # only the valid one shared
 
 
 def test_share_ids_empty_shares_most_recent(monkeypatch):
-    monkeypatch.setattr(share, "share", lambda repo, did="", **k: f"recent:{did}")
-    assert share.share_ids("/repo", [], profile=TEAM) == "recent:"
+    monkeypatch.setattr(share, "share", lambda repo, did="", **k:
+                        _ok_status(server_id=f"recent:{did}"))
+    assert share.share_ids("/repo", [], profile=TEAM).server_id == "recent:"
+
+
+def _ok_status(sent=1, **kw):
+    """A successful ShareStatus for CLI fakes whose subject is routing, not wording.
+
+    These tests replace a share function to check WHICH ids the CLI passed and that it printed
+    what came back. They used to return a bare sentence, because a sentence was the return type."""
+    return share_status.ShareStatus(share_status.SYNCED, sent=sent, total=sent, **kw)
 
 
 def _three_shareable(monkeypatch):
@@ -1230,13 +1355,13 @@ def test_cli_share_no_args_picker_multi_select(monkeypatch, capsys):
 
     def fake_ids(repo, ids, **k):
         got["ids"] = ids
-        return "pushed 2"
+        return share_status.ShareStatus(share_status.BATCH_DONE, sent=2, total=2)
 
     monkeypatch.setattr(share, "share_ids", fake_ids)
     cli.share_cmd([])  # no id, no --all -> numbered picker
     out = capsys.readouterr().out
     assert got["ids"] == ["aaa11111", "ccc33333"]  # selection 1,3 -> those ids
-    assert "pushed 2" in out
+    assert "Synced 2 decision(s)" in out
 
 
 def _mixed_status_shareable(monkeypatch):
@@ -1271,7 +1396,7 @@ def test_cli_share_picker_guards_unapproved_and_cancels(monkeypatch, capsys):
     answers = iter(["3", "n"])  # item 3 is the pending_approval one; decline the guard
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     called = {}
-    monkeypatch.setattr(share, "share_ids", lambda *a, **k: called.setdefault("hit", True))
+    monkeypatch.setattr(share, "share_ids", lambda *a, **k: called.__setitem__("hit", True) or _ok_status())
     cli.share_cmd([])
     out = capsys.readouterr().out
     assert "PENDING REVIEW" in out and "auto-approves" in out
@@ -1288,12 +1413,12 @@ def test_cli_share_picker_guard_proceeds_on_yes(monkeypatch, capsys):
 
     def fake_ids(repo, ids, **k):
         got["ids"] = ids
-        return "pushed 1"
+        return _ok_status()
 
     monkeypatch.setattr(share, "share_ids", fake_ids)
     cli.share_cmd([])
     assert got["ids"] == ["ccc33333"]
-    assert "pushed 1" in capsys.readouterr().out
+    assert "Synced decision" in capsys.readouterr().out
 
 
 def test_cli_share_picker_no_guard_for_suggested_or_approved(monkeypatch, capsys):
@@ -1307,7 +1432,7 @@ def test_cli_share_picker_no_guard_for_suggested_or_approved(monkeypatch, capsys
 
     def fake_ids(repo, ids, **k):
         got["ids"] = ids
-        return "pushed 1"
+        return _ok_status()
 
     monkeypatch.setattr(share, "share_ids", fake_ids)
     cli.share_cmd([])
@@ -1324,7 +1449,7 @@ def test_cli_share_confirm_path_warns_inline_before_single_prompt(monkeypatch, c
         "id": "ccc33333", "type": "convention", "content": "do Z", "status": "pending_approval"})
     answers = iter(["n"])  # the ONE prompt this path has
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
-    monkeypatch.setattr(share, "share", lambda *a, **k: "pushed")
+    monkeypatch.setattr(share, "share", lambda *a, **k: _ok_status())
     cli.share_cmd(["aaa11111"])
     out = capsys.readouterr().out
     assert "PENDING REVIEW" in out
@@ -1382,7 +1507,7 @@ def test_cli_share_picker_shared_entry_still_selectable(monkeypatch, capsys):
     monkeypatch.setattr(share, "shared_map", lambda endpoint: {"bbb22222": "t"})
     monkeypatch.setattr("builtins.input", lambda *a: "3")  # 3rd item shown = bbb22222 (moved last)
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     assert got["ids"] == ["bbb22222"]
 
@@ -1403,7 +1528,7 @@ def test_cli_share_picker_cancel(monkeypatch, capsys):
     _three_shareable(monkeypatch)
     monkeypatch.setattr("builtins.input", lambda *a: "q")
     pushed = {"n": 0}
-    monkeypatch.setattr(share, "share_ids", lambda *a, **k: pushed.__setitem__("n", 1))
+    monkeypatch.setattr(share, "share_ids", lambda *a, **k: pushed.__setitem__("n", 1) or _ok_status())
     cli.share_cmd([])
     out = capsys.readouterr().out
     assert "Cancelled" in out
@@ -1419,7 +1544,7 @@ def test_cli_share_picker_cancel_on_keyboard_interrupt(monkeypatch, capsys):
 
     monkeypatch.setattr("builtins.input", boom)
     pushed = {"n": 0}
-    monkeypatch.setattr(share, "share_ids", lambda *a, **k: pushed.__setitem__("n", 1))
+    monkeypatch.setattr(share, "share_ids", lambda *a, **k: pushed.__setitem__("n", 1) or _ok_status())
     cli.share_cmd([])
     out = capsys.readouterr().out
     assert "Cancelled" in out
@@ -1433,7 +1558,7 @@ def test_cli_share_picker_all_on_single_page_returns_shown_ids(monkeypatch, caps
     prompts = []
     monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), "all")[1])
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     assert got["ids"] == ["aaa11111", "bbb22222", "ccc33333"]
     assert "all (3)" in prompts[0]  # label carries the exact loaded count
@@ -1458,7 +1583,7 @@ def test_cli_share_picker_pages_and_selects_from_second_page(monkeypatch, capsys
     inputs = iter(["m", "11"])
     monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), next(inputs))[1])
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     assert "all (10)" in prompts[0] and "m=more" in prompts[0]   # first prompt: page 1 only
     assert "all (20)" in prompts[1] and "m=more" in prompts[1]   # after 'm': two pages loaded
@@ -1473,7 +1598,7 @@ def test_cli_share_picker_all_after_paging_returns_loaded_set(monkeypatch, capsy
     inputs = iter(["m", "all"])
     monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     assert got["ids"] == [it["id"] for it in items[:20]]  # two pages loaded, not all 30
     assert len(got["ids"]) == 20
@@ -1486,7 +1611,7 @@ def test_cli_share_picker_first_page_hides_m_and_unloaded_count(monkeypatch, cap
     prompts = []
     monkeypatch.setattr("builtins.input", lambda p="": (prompts.append(p), "26")[1])  # unloaded
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     out = capsys.readouterr().out
     assert "all (10)" in prompts[0]
@@ -1556,7 +1681,7 @@ def test_cli_share_picker_accepts_a_range(monkeypatch, capsys):
     items = _many_shareable(monkeypatch, 12)
     monkeypatch.setattr("builtins.input", lambda *a: "1-4")
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     assert got["ids"] == [it["id"] for it in items[:4]]
 
@@ -1568,7 +1693,7 @@ def test_cli_share_picker_reports_clamped_range_before_pushing(monkeypatch, caps
     items = _many_shareable(monkeypatch, 30)
     monkeypatch.setattr("builtins.input", lambda *a: "1-25")
     got = {}
-    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids))
+    monkeypatch.setattr(share, "share_ids", lambda repo, ids, **k: got.__setitem__("ids", ids) or _ok_status())
     cli.share_cmd([])
     out = capsys.readouterr().out
     assert got["ids"] == [it["id"] for it in items[:10]]
@@ -1691,15 +1816,120 @@ def test_drain_outbox_preserves_plan_source(tmp_repo, monkeypatch):
 
 
 # ── #108: async share path (awaited by the in-loop server.share_decision tool) ─────
-# share_async / share_ids_async / adrain_outbox are the async twins of share / share_ids /
-# drain_outbox. They await RemoteStore.apush_decision so a wedged push is CANCELLABLE, and
-# reuse every local helper (_finish_share, _entry_push_kwargs, _payload, _enqueue) so the
-# sync and async paths can't drift.
+# share_async / share_ids_async / _adrain_outbox_unlocked are the async twins of share /
+# share_ids / _drain_outbox_unlocked. They await RemoteStore.apush_decision so a wedged push is
+# CANCELLABLE, and reuse every local helper (_finish_share, _entry_push_kwargs, _payload,
+# _enqueue) so the sync and async paths can't drift.
+#
+# There is no public `adrain_outbox` wrapper: it was deleted along with the async-native
+# reconciliation drain it called, neither of which any production path reached. The async drain
+# below is entered through the real `async_outbox_lock`, which is how the live share paths reach
+# it and what keeps that lock on a tested route.
+
+async def _adrain(profile):
+    async with share.async_outbox_lock():
+        return await share._adrain_outbox_unlocked(profile)
+
+
+def test_store_lock_non_blocking_refuses_a_lock_already_held(tmp_repo):
+    """The capability `async_outbox_lock` polls with. flock is per open file description, so two
+    separate opens contend even inside one process."""
+    with store.store_lock("poll-probe"):
+        with pytest.raises(BlockingIOError):
+            with store.store_lock("poll-probe", blocking=False):
+                pass
+
+
+def test_a_failed_non_blocking_acquire_releases_what_it_took(tmp_repo, monkeypatch):
+    """`_acquire_outbox_lock` takes the process-local mutex BEFORE the file lock. If the file lock
+    then refuses, the mutex has to come back, or every later share in this process blocks on a
+    lock nothing holds - a permanent deadlock, not a slow path."""
+    monkeypatch.setattr(store, "store_lock",
+                        lambda slug, blocking=True: (_ for _ in ()).throw(BlockingIOError("held")))
+    with pytest.raises(BlockingIOError):
+        share._acquire_outbox_lock(blocking=False)
+    assert share._OUTBOX_LOCAL_LOCK.acquire(blocking=False), "the local mutex was leaked"
+    share._OUTBOX_LOCAL_LOCK.release()
+
+
+def test_a_successful_acquire_hands_back_a_release_for_both_locks(tmp_repo):
+    stack = share._acquire_outbox_lock(blocking=False)
+    assert not share._OUTBOX_LOCAL_LOCK.acquire(blocking=False)   # held while the stack is open
+    stack.close()
+    assert share._OUTBOX_LOCAL_LOCK.acquire(blocking=False)       # and released by closing it
+    share._OUTBOX_LOCAL_LOCK.release()
+
+
+def test_async_outbox_lock_does_not_stall_the_event_loop(tmp_repo):
+    """The stall this fixed: `async_outbox_lock` took the blocking file lock synchronously inside
+    the loop. A blocking flock has no await point, so a single concurrent `contexer share` holding
+    the lock froze EVERY tool on the MCP server, and `server.share_decision`'s own
+    `asyncio.wait_for` could not cancel the wait because there was nothing to cancel.
+
+    Both halves are asserted: other work on the loop keeps running while the lock is held
+    elsewhere, and the caller's deadline actually fires."""
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with share.outbox_lock():
+            held.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert held.wait(10), "the holder thread never took the lock"
+
+    async def waiter():
+        async with share.async_outbox_lock():
+            return "acquired"
+
+    async def scenario():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.005)
+
+        spin = asyncio.ensure_future(ticker())
+        try:
+            with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+                await asyncio.wait_for(waiter(), 0.25)
+        finally:
+            spin.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await spin
+        return ticks
+
+    try:
+        ticks = asyncio.run(scenario())
+    finally:
+        release.set()
+        thread.join(10)
+    assert ticks > 1, "the event loop was blocked while waiting for the outbox lock"
+
+
+def test_async_outbox_lock_still_reentrant_for_a_nested_enqueue(tmp_repo, monkeypatch):
+    """Every async share path enqueues while already holding this lock, and `_enqueue` takes the
+    SYNC `outbox_lock`. Reentrancy rides on a ContextVar, so the depth token has to be set in the
+    awaiting coroutine's own context - acquiring in a worker thread would set it in that thread's
+    copy, the nested call would read depth 0, and it would deadlock on the non-reentrant
+    `store_lock`. Bounded by a timeout so a regression fails instead of hanging the suite."""
+    async def scenario():
+        async with share.async_outbox_lock():
+            share._enqueue({"decision_id": "nested-1", "type": "architecture", "content": "c",
+                            "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+                            "source": "ai", "queued_at": 1.0, "attempts": 0})
+            return [e["decision_id"] for e in share._load_outbox()]
+
+    assert asyncio.run(asyncio.wait_for(scenario(), 10)) == ["nested-1"]
+
 
 def test_share_async_is_coroutine():
     assert asyncio.iscoroutinefunction(share.share_async)
     assert asyncio.iscoroutinefunction(share.share_ids_async)
-    assert asyncio.iscoroutinefunction(share.adrain_outbox)
+    assert asyncio.iscoroutinefunction(share._adrain_outbox_unlocked)
 
 
 def test_share_async_happy_path_awaits_apush(tmp_repo, monkeypatch):
@@ -1707,8 +1937,9 @@ def test_share_async_happy_path_awaits_apush(tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
     fake = _afake(monkeypatch, ret="srv-9")
     msg = asyncio.run(share.share_async(tmp_repo, profile=TEAM))
-    assert "srv-9" in msg
-    assert "won't see" in msg.lower()  # same honest-visibility message as sync share()
+    assert msg.outcome == share_status.SYNCED and msg.server_id == "srv-9"
+    # same honest-visibility message as sync share(), from the same renderer
+    assert "won't see" in share_status.describe(msg).lower()
     assert len(fake.calls) == 1
     kw = fake.calls[0]
     assert kw["decision_id"] == did
@@ -1717,13 +1948,15 @@ def test_share_async_happy_path_awaits_apush(tmp_repo, monkeypatch):
 
 
 def test_share_async_nothing_to_share(tmp_repo):
-    assert "nothing to share" in asyncio.run(share.share_async(tmp_repo, profile=TEAM)).lower()
+    assert asyncio.run(
+        share.share_async(tmp_repo, profile=TEAM)).outcome == share_status.NO_MATCH
 
 
 def test_share_async_local_mode_message(tmp_repo, monkeypatch):
     store.update_decision(tmp_repo, "a decision to maybe share", "s1", subtype="architecture")
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
-    assert "team mode" in asyncio.run(share.share_async(tmp_repo, profile=config.Profile())).lower()
+    assert asyncio.run(share.share_async(
+        tmp_repo, profile=config.Profile())).outcome == share_status.NOT_TEAM_MODE
 
 
 def test_share_ids_async_shares_each_selected(tmp_repo, monkeypatch):
@@ -1734,7 +1967,7 @@ def test_share_ids_async_shares_each_selected(tmp_repo, monkeypatch):
     msg = asyncio.run(share.share_ids_async(tmp_repo, [id1[:8], id2[:8]], profile=TEAM))
     assert len(fake.batches) == 1  # one awaited batched call for both, not one per id
     assert [c["decision_id"] for c in fake.batches[0]] == [id1, id2]
-    assert "2" in msg  # "Synced 2 decision(s)..."
+    assert msg.outcome == share_status.BATCH_DONE and (msg.sent, msg.total) == (2, 2)
 
 
 def test_share_ids_async_empty_shares_most_recent(tmp_repo, monkeypatch):
@@ -1750,7 +1983,7 @@ def test_share_async_degraded_enqueues(tmp_repo, monkeypatch, capsys):
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     _afake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = asyncio.run(share.share_async(tmp_repo, profile=TEAM))
-    assert "queued" in msg.lower()
+    assert msg.outcome == share_status.QUEUED and msg.queued == 1
     assert [e["decision_id"] for e in share._load_outbox()] == [did]
     assert "unreachable" in capsys.readouterr().err.lower()
 
@@ -1790,7 +2023,7 @@ def test_share_async_serializes_overlapping_tasks(tmp_repo, monkeypatch):
     assert len(calls) == 2
 
 
-def test_adrain_outbox_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
+def test_async_drain_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
                     "repo": "r", "rationale": None, "confidence": 80,
                     "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
@@ -1798,18 +2031,18 @@ def test_adrain_outbox_sends_fifo_and_removes_successes(tmp_repo, monkeypatch):
                     "repo": "r", "rationale": None, "confidence": 90,
                     "evidence": None, "source": "ai", "queued_at": 2.0, "attempts": 0})
     fake = _afake(monkeypatch, ret="srv-ok")
-    sent = asyncio.run(share.adrain_outbox(TEAM))
+    sent = asyncio.run(_adrain(TEAM))
     assert sent == 2
     assert [c["decision_id"] for c in fake.batches[0]] == ["d1", "d2"]  # FIFO, one awaited batch
     assert share._load_outbox() == []
 
 
-def test_adrain_outbox_stops_at_first_failure_keeps_tail(tmp_repo, monkeypatch):
+def test_async_drain_stops_at_first_failure_keeps_tail(tmp_repo, monkeypatch):
     share._enqueue({"decision_id": "d1", "type": "architecture", "content": "first",
                     "repo": "r", "rationale": None, "confidence": 80,
                     "evidence": None, "source": "ai", "queued_at": 1.0, "attempts": 0})
     _afake(monkeypatch, exc=RemoteUnavailableError("down"))
-    sent = asyncio.run(share.adrain_outbox(TEAM))
+    sent = asyncio.run(_adrain(TEAM))
     assert sent == 0
     remaining = share._load_outbox()
     assert [e["decision_id"] for e in remaining] == ["d1"]
@@ -1919,8 +2152,60 @@ def test_share_all_capacity_skip_requeues_only_skipped(tmp_repo, monkeypatch):
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
     remote.reset_degradation_warnings()
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "1" in msg and "capacity" in msg.lower()
+    assert msg.outcome == share_status.BATCH_DONE
+    assert (msg.sent, msg.at_capacity, msg.lost) == (1, 2, 0)
     assert {e["decision_id"] for e in share._load_outbox()} == {"id1", "id2"}  # id0 saved, not queued
+
+
+def test_a_capacity_skip_before_an_outage_is_not_counted_as_lost(tmp_repo, monkeypatch):
+    """`lost` comes from the chunk index, not from `sent`.
+
+    Three decisions, one per chunk. The server saves the first, skips the second at capacity (so
+    `_requeue_skipped` queues it and counts it under `at_capacity`), then the transport fails on
+    the third AND the outbox write for that third one fails too. Exactly ONE decision is
+    unrecorded.
+
+    `sent` trails `start` here, because the at-capacity row advanced the index without being
+    sent. Deriving from `sent` gives `total - sent` = 2, so the status would claim TWO decisions
+    were dropped when one was, and the one it double-counts is already safely on disk. That was a
+    vague overstatement while it was only prose ("of the remaining 2"); as a number a caller acts
+    on, it is a false report of data loss. No test distinguished the two, which is why this one
+    drives the outbox write to fail for the last decision only."""
+    projs = [{"id": f"id{i}", "type": "architecture", "content": f"d{i}",
+              "confidence": None, "evidence": None, "source": "ai"} for i in range(3)]
+    monkeypatch.setattr(store, "get_shareable_all", lambda repo: projs)
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
+    monkeypatch.setattr(share, "_BATCH_SIZE", 1)          # one decision per chunk
+    calls = {"n": 0}
+
+    class Staged:
+        def push_decisions(self, rows):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ["srv-0"], []                       # id0 saved
+            if calls["n"] == 2:                            # id1 skipped at capacity
+                return [], [{"decision_id": rows[0]["decision_id"], "reason": "quota_exceeded"}]
+            raise RemoteUnavailableError("down")           # id2: transport dies
+
+    real_enqueue = share._enqueue
+
+    def enqueue_but_not_id2(payload):
+        if payload.get("decision_id") == "id2":
+            raise OSError("disk full")                     # only the LAST one fails to queue
+        real_enqueue(payload)
+
+    monkeypatch.setattr(share, "_enqueue", enqueue_but_not_id2)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Staged()))
+    remote.reset_degradation_warnings()
+    msg = share.share_all(tmp_repo, profile=TEAM)
+
+    assert msg.outcome == share_status.BATCH_STRANDED
+    assert msg.sent == 1                                   # id0
+    assert msg.at_capacity == 1                            # id1, queued and counted once
+    assert msg.queued == 0                                 # id2 never made it to the outbox
+    assert msg.lost == 1                                   # id2 only - NOT 2
+    assert {e["decision_id"] for e in share._load_outbox()} == {"id1"}
+    assert "Queued 0 for retry before the outbox write failed" in share_status.describe(msg)
 
 
 def test_drain_outbox_capacity_skip_keeps_skipped_queued(tmp_repo, monkeypatch):
@@ -1943,7 +2228,7 @@ def test_share_ids_async_capacity_skip_requeues(tmp_repo, monkeypatch):
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _CapacityRS()))
     remote.reset_degradation_warnings()
     msg = asyncio.run(share.share_ids_async(tmp_repo, ["a", "b"], profile=TEAM))
-    assert "capacity" in msg.lower()
+    assert msg.outcome == share_status.BATCH_DONE and msg.at_capacity == 1
     assert {e["decision_id"] for e in share._load_outbox()} == {"b"}  # a saved, b at capacity -> queued
 
 
@@ -1960,7 +2245,8 @@ def test_share_all_capacity_skip_and_enqueue_failure_reports_lost(tmp_repo, monk
     monkeypatch.setattr(share, "_enqueue", lambda payload: (_ for _ in ()).throw(OSError("disk full")))
     remote.reset_degradation_warnings()
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "unsaved" in msg.lower()  # id1 skipped AND un-queueable -> honestly reported as lost
+    # id1 skipped AND un-queueable: `lost` is the count that says its share intent is gone
+    assert msg.outcome == share_status.BATCH_DONE and msg.lost == 1
     assert share._load_outbox() == []
 
 
@@ -1973,7 +2259,7 @@ def test_share_all_chunks_large_selection(tmp_repo, monkeypatch):
     monkeypatch.setattr(share, "_BATCH_SIZE", 2)
     fake = _fake(monkeypatch, ret="srv-1")
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "5" in msg
+    assert msg.outcome == share_status.BATCH_DONE and (msg.sent, msg.total) == (5, 5)
     assert [len(b) for b in fake.batches] == [2, 2, 1]  # 5 -> chunks of 2,2,1
     assert [a["decision_id"] for b in fake.batches for a in b] == [f"id{i}" for i in range(5)]
     assert share._load_outbox() == []
@@ -2009,7 +2295,7 @@ def test_share_all_invalid_skip_reported_and_dropped(tmp_repo, monkeypatch):
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: _RejectRS()))
     remote.reset_degradation_warnings()
     msg = share.share_all(tmp_repo, profile=TEAM)
-    assert "1" in msg and "rejected" in msg.lower()
+    assert msg.outcome == share_status.BATCH_DONE and msg.invalid == 2
     assert share._load_outbox() == []  # id0 saved; id1/id2 invalid -> dropped, NOT queued
 
 
@@ -2144,13 +2430,15 @@ def _add_globals(*contents: str) -> list[str]:
 
 
 def test_share_global_nothing_to_share(tmp_repo):
-    assert "no global rules" in share.share_global(profile=TEAM).lower()
+    status = share.share_global(profile=TEAM)
+    assert (status.outcome, status.scope) == (share_status.NOTHING_TO_SHARE, "global")
 
 
 def test_share_global_local_mode_message(tmp_repo, monkeypatch):
     _add_globals("always use conventional commits here")
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: None))
-    assert "team mode" in share.share_global(profile=config.Profile()).lower()
+    assert share.share_global(
+        profile=config.Profile()).outcome == share_status.NOT_TEAM_MODE
 
 
 def test_share_global_pushes_every_rule_unbound(tmp_repo, monkeypatch):
@@ -2158,7 +2446,7 @@ def test_share_global_pushes_every_rule_unbound(tmp_repo, monkeypatch):
                        "never use an em dash in prose")
     fake = _fake(monkeypatch, ret="srv-9")
     msg = share.share_global(profile=TEAM)
-    assert "2" in msg
+    assert msg.outcome == share_status.BATCH_DONE and (msg.sent, msg.total) == (2, 2)
     assert len(fake.batches) == 1                                   # one batched call
     assert [c["decision_id"] for c in fake.batches[0]] == ids       # oldest first
     # The whole point: no repo binding. _wire_args omits `repo` when it is None, which is
@@ -2205,7 +2493,7 @@ def test_share_global_failure_queues_with_no_repo(tmp_repo, monkeypatch):
     _add_globals("always use conventional commits here")
     _fake(monkeypatch, exc=RemoteUnavailableError("down"))
     msg = share.share_global(profile=TEAM)
-    assert "queued" in msg.lower()
+    assert msg.outcome == share_status.BATCH_INTERRUPTED and msg.queued == 1
     queued = share._load_outbox()
     assert len(queued) == 1 and queued[0]["repo"] is None
 
@@ -2213,9 +2501,10 @@ def test_share_global_failure_queues_with_no_repo(tmp_repo, monkeypatch):
 def test_cli_share_global_flag(monkeypatch, capsys, tmp_repo):
     from contexer import cli
     monkeypatch.setattr(store, "git_root", lambda p: None)   # NOT in a git repo
-    monkeypatch.setattr(share, "share_global", lambda **kw: "pushed the globals")
+    monkeypatch.setattr(share, "share_global", lambda **kw:
+                        share_status.ShareStatus(share_status.BATCH_DONE, sent=2, total=2))
     cli.share_cmd(["--global", "--yes"])
-    assert "pushed the globals" in capsys.readouterr().out
+    assert "Synced 2 decision(s)" in capsys.readouterr().out
 
 
 def test_cli_share_global_needs_no_repo(monkeypatch, capsys, tmp_repo):
@@ -2224,9 +2513,9 @@ def test_cli_share_global_needs_no_repo(monkeypatch, capsys, tmp_repo):
     from contexer import cli
     monkeypatch.setattr(store, "git_root", lambda p: None)
     monkeypatch.setattr(store, "resolve_repo", lambda p: "")
-    monkeypatch.setattr(share, "share_global", lambda **kw: "ok")
+    monkeypatch.setattr(share, "share_global", lambda **kw: _ok_status())
     cli.share_cmd(["--global", "--yes"])          # must not SystemExit
-    assert "ok" in capsys.readouterr().out
+    assert "Synced decision" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("argv", [["--global", "--all"], ["--global", "abc12345"]])
@@ -2244,7 +2533,7 @@ def test_cli_share_global_previews_and_cancels_on_no(monkeypatch, capsys, tmp_re
     monkeypatch.setattr(config, "load_profile", lambda *a, **k: config.Profile())
     store.update_global_decision("never use an em dash in prose", "s1", "convention")
     pushed = {"n": 0}
-    monkeypatch.setattr(share, "share_global", lambda **k: pushed.__setitem__("n", pushed["n"] + 1))
+    monkeypatch.setattr(share, "share_global", lambda **k: pushed.__setitem__("n", pushed["n"] + 1) or _ok_status())
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     cli.share_cmd(["--global"])
     out = capsys.readouterr().out
@@ -2257,7 +2546,7 @@ def test_cli_share_all_points_at_the_global_flag(monkeypatch, capsys, tmp_repo):
     from contexer import cli
     store.update_global_decision("never use an em dash in prose", "s1", "convention")
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
-    monkeypatch.setattr(share, "share_all", lambda repo, **kw: "shared all of them")
+    monkeypatch.setattr(share, "share_all", lambda repo, **kw: _ok_status())
     cli.share_cmd(["--all", "--yes"])
     out = capsys.readouterr().out
     assert "1 global rule(s) were not included" in out and "--global" in out

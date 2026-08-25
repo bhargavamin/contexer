@@ -383,7 +383,7 @@ def save(repo_path: str, data: dict) -> None:
 
 
 @contextlib.contextmanager
-def store_lock(slug: str):
+def store_lock(slug: str, *, blocking: bool = True):
     """Serialize a load→mutate→save critical section for one store across processes.
 
     Atomic writes prevent a *torn* file, but two sessions writing the same store
@@ -391,7 +391,16 @@ def store_lock(slug: str):
     (lost update). An exclusive advisory lock on a per-store `.lock` sidecar makes the
     read-modify-write atomic so concurrent writers serialize instead of clobbering.
     Best-effort: if locks are unavailable (non-POSIX), degrade to no serialization
-    rather than fail the write."""
+    rather than fail the write.
+
+    `blocking=False` raises `BlockingIOError` instead of waiting when another holder has the
+    lock. That exists for ASYNC callers: `flock(LOCK_EX)` has no await point, so a coroutine
+    that waits on it stalls its whole event loop and cannot be cancelled by its own deadline -
+    one concurrent `contexer share` could hold up every tool on the MCP server, not just the
+    share. `share.async_outbox_lock` polls this with an `await` between tries instead. Offloading
+    the blocking acquire to a thread was the other option and is worse: `asyncio.to_thread`
+    cannot be cancelled, so a deadline firing mid-wait would leave a thread that goes on to take
+    the lock with nobody left to release it."""
     if fcntl is None:                  # pragma: no cover - non-POSIX fallback
         yield
         return
@@ -402,7 +411,13 @@ def store_lock(slug: str):
     # into. "wb" says that outright - and keeps this call out of the text-IO invariant.
     f = open(lock_path, "wb")
     try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    except BaseException:
+        # Never unlock here: acquisition FAILED, so this process holds nothing, and a stray
+        # LOCK_UN would be a no-op at best and a lie in the code at worst. Just drop the fd.
+        f.close()
+        raise
+    try:
         yield
     finally:
         try:

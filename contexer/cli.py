@@ -768,7 +768,7 @@ def share_cmd(rest: list | None = None) -> None:
     one there would be a check with nothing behind it."""
     import os
 
-    from contexer import config, share, store
+    from contexer import config, share, share_status, store
 
     rest = rest or []
     yes = "--yes" in rest or "-y" in rest
@@ -797,7 +797,7 @@ def share_cmd(rest: list | None = None) -> None:
             if not decision:
                 print("Cancelled - nothing was pushed.")
                 return
-        print(share.share_global())
+        print(share_status.describe(share.share_global()))
         return
 
     # No id and no --all: don't guess ('most recent') - show a numbered picker so the developer
@@ -814,7 +814,7 @@ def share_cmd(rest: list | None = None) -> None:
         if not _confirm_unapproved(selection):
             print("Cancelled - nothing was pushed.")
             return
-        print(share.share_ids(repo, picked))
+        print(share_status.describe(share.share_ids(repo, picked)))
         return
 
     if not bypass:
@@ -826,7 +826,7 @@ def share_cmd(rest: list | None = None) -> None:
             return
 
     if share_all:
-        print(share.share_all(repo))
+        print(share_status.describe(share.share_all(repo)))
         # --all is repo-scoped by construction (its key comes from this repo's git origin), so
         # global rules are NOT swept up by it. Say so rather than letting "all" read as all.
         n_global = len(store.get_shareable_global())
@@ -834,13 +834,13 @@ def share_cmd(rest: list | None = None) -> None:
             print(f"\n{n_global} global rule(s) were not included - "
                   "they apply to every repo. Push them with `contexer share --global`.")
     else:
-        print(share.share(repo, ids[0] if ids else ""))
+        print(share_status.describe(share.share(repo, ids[0] if ids else "")))
 
 
 def reconcile_cmd(rest: list | None = None) -> None:
     """`contexer reconcile <id> [--team NAME_OR_ID]`: sync locally-corrected wording and
     submit it as a lead-reviewed team candidate. A sole shared team is selected automatically."""
-    from contexer import config, share, store
+    from contexer import config, share, share_status, store
 
     rest = rest or []
     yes = False
@@ -872,11 +872,11 @@ def reconcile_cmd(rest: list | None = None) -> None:
         print("No git repo detected - run `contexer reconcile` inside a repository.", file=sys.stderr)
         sys.exit(1)
     profile = config.load_profile()
-    prepared = share.prepare_reconciliation(repo, ids[0], team, profile=profile)
-    if isinstance(prepared, str):
-        print(prepared)
+    plan, why = share.prepare_reconciliation(repo, ids[0], team, profile=profile)
+    if plan is None:
+        print(share_status.describe(why))
         return
-    print(share.format_reconciliation_preview(prepared))
+    print(share.format_reconciliation_preview(plan))
     if not (yes or profile.skip_confirm):
         try:
             answer = input("Submit for lead review? [y/N] ").strip().lower()
@@ -885,7 +885,7 @@ def reconcile_cmd(rest: list | None = None) -> None:
         if answer not in ("y", "yes"):
             print("Cancelled - nothing was submitted.")
             return
-    print(share.submit_reconciliation(prepared, profile=profile))
+    print(share_status.describe(share.submit_reconciliation(plan, profile=profile)))
 
 
 def _parse_selection(raw: str, loaded: int) -> tuple[list[int], list[str]]:

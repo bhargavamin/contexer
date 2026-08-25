@@ -283,11 +283,15 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     # on timeout: the cancellation propagates into the async transport and closes the socket,
     # so nothing lingers in the background (#108). share_ids_async is local-first + outbox-
     # backed, so a false trip is harmless - the decision is saved and the outbox retries it.
+    from contexer import share_status as _share_status
+
     try:
-        return await asyncio.wait_for(
+        # The tool answers a model, so the sentence is what it needs, and the status is rendered
+        # and discarded right here. A caller that wants the counts calls share_ids_async itself.
+        return _share_status.describe(await asyncio.wait_for(
             _share.share_ids_async(resolved, ids),
             timeout=_SHARE_TIMEOUT,
-        )
+        ))
     except TimeoutError:
         # The awaited push was cancelled at the deadline. Cancellation bypasses share_async's
         # own enqueue-on-failure, so queue the selection here (off the loop) to make the

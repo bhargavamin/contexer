@@ -12,7 +12,7 @@ here silently blanks a pane there.
 """
 from urllib.parse import unquote
 
-from contexer import auth, config, console_api, share, store, team_context
+from contexer import auth, config, console_api, share, share_status, store, team_context
 from contexer.ui import daemon
 
 # Mirrored in console.js as maxlength attributes; enforced here because the browser is not
@@ -365,11 +365,28 @@ def _share(repo_path: str, body: object) -> tuple[int, object]:
         if not isinstance(value, str) or not value or len(value) > MAX_WORD:
             raise ApiError(400, "every id must be a non-empty string")
     try:
-        return 200, {"message": share.share_ids(repo_path, ids)}
+        status = share.share_ids(repo_path, ids)
     except Exception as exc:
         # share_ids already swallows cloud failures (it queues them); anything left is local
-        # and must still reach the console as text, never as a 500.
-        return 200, {"error": f"Share failed: {exc}"}
+        # and must still reach the console as text, never as a 500. `outcome`/`ok` are present
+        # here too, so a page branching on them never meets a second response shape.
+        return 200, {"error": f"Share failed: {exc}", "outcome": "share_failed", "ok": False}
+    # The counts, not only the sentence. `share.py` computed all of these and then rendered them
+    # into one English string, so this endpoint shipped prose as a machine result and no console
+    # page could tell "3 synced" from "3 unsaved". `message` stays for the pages that render it
+    # today; `outcome` is the stable token to branch on.
+    return 200, {
+        "message": share_status.describe(status),
+        "outcome": status.outcome,
+        "ok": share_status.is_ok(status),
+        "sent": status.sent,
+        "queued": status.queued,
+        "at_capacity": status.at_capacity,
+        "invalid": status.invalid,
+        "lost": status.lost,
+        "total": status.total,
+        "unknown_ids": list(status.unknown_ids),
+    }
 
 
 def _add_global(body: object) -> tuple[int, object]:

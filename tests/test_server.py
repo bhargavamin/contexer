@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import pytest
 
 import contexer.share as share_mod
+import contexer.share_status as share_status
 from contexer import config as _config_mod
 from contexer import review
 from contexer import server, store
@@ -43,7 +44,8 @@ def test_share_decision_awaits_async_share_path_on_the_loop(monkeypatch):
     async def fake_share_ids(repo, ids, **kw):
         seen["thread"] = threading.current_thread()
         seen["args"] = (repo, ids)
-        return "shared srv-1"
+        return share_status.ShareStatus(
+            share_status.SYNCED, sent=1, total=1, server_id="srv-1")
 
     monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
@@ -52,7 +54,7 @@ def test_share_decision_awaits_async_share_path_on_the_loop(monkeypatch):
         return await server.share_decision("dec-42", "/repo/x", confirm=True)
 
     result = asyncio.run(driver())
-    assert result == "shared srv-1"
+    assert "srv-1" in result          # the tool answers a model, so it renders the status
     assert seen["args"] == ("/repo/x", ["dec-42"])
     assert seen["thread"] is seen["loop_thread"]  # awaited on the loop, not offloaded to a thread
 
@@ -66,7 +68,7 @@ def test_share_decision_does_not_block_the_event_loop(monkeypatch):
     async def slow_share_ids(repo, ids, **kw):
         await asyncio.sleep(0.2)  # stands in for a slow network round-trip
         order.append("share_done")
-        return "ok"
+        return share_status.ShareStatus(share_status.SYNCED, sent=1, total=1)
 
     monkeypatch.setattr(share_mod, "share_ids_async", slow_share_ids)
 
@@ -200,12 +202,12 @@ def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
                         lambda *a, **k: _config_mod.Profile(skip_confirm=True))
 
     async def fake_share_ids(repo, ids, **k):
-        return "pushed"
+        return share_status.ShareStatus(share_status.SYNCED, sent=1, total=1, server_id="srv-1")
 
     monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
-    assert result == "pushed"
+    assert "srv-1" in result
 
 
 def test_share_decision_local_mode_skips_preview(monkeypatch):
@@ -217,12 +219,12 @@ def test_share_decision_local_mode_skips_preview(monkeypatch):
                         lambda *a, **k: previewed.__setitem__("n", previewed["n"] + 1) or "PREVIEW")
 
     async def fake_share_ids(repo, ids, **k):
-        return "not configured"
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
 
     monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
-    assert result == "not configured"
+    assert "Not in team mode" in result
     assert previewed["n"] == 0  # never previewed in local mode
 
 
@@ -237,12 +239,12 @@ def test_share_decision_team_no_token_skips_preview(monkeypatch):
                         lambda *a, **k: previewed.__setitem__("n", 1) or "PREVIEW")
 
     async def fake_share_ids(repo, ids, **k):
-        return "not configured"
+        return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
 
     monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
 
     result = asyncio.run(server.share_decision("ab12cd34", "/repo"))
-    assert result == "not configured"
+    assert "Not in team mode" in result
     assert previewed["n"] == 0  # never advertised a push that can't happen
 
 
@@ -390,12 +392,12 @@ def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
 
     async def fake_share_ids(repo, ids, **k):
         got["ids"] = ids
-        return "done"
+        return share_status.ShareStatus(share_status.BATCH_DONE, sent=2, total=2)
 
     monkeypatch.setattr(share_mod, "share_ids_async", fake_share_ids)
     result = asyncio.run(server.share_decision(" ab12 , cd34 ,", "/repo", confirm=True))
     assert got["ids"] == ["ab12", "cd34"]  # parsed, trimmed, blanks dropped
-    assert result == "done"
+    assert "Synced 2 decision(s)" in result
 
 
 def test_get_context_logs_followup_on_matching_pointer(tmp_repo):
