@@ -530,13 +530,20 @@ def _entry_push_kwargs(entry: dict) -> dict:
     wire gate `remote._wire_args`/`_WIRE_SOURCE_FILES` is read at CALL time, i.e. AT DRAIN, not
     at the time this entry was queued. So an entry queued before the gate opened drains with its
     files intact, no re-queue or schema migration needed; conversely a rollback before this entry
-    drains means it won't egress the field, exactly as if it had never been gated on."""
+    drains means it won't egress the field, exactly as if it had never been gated on.
+
+    `revision_id`/`lifecycle` (plan E1/E2) ride the identical rule, and one step further: their
+    gate is the SERVER's advertised capability, discovered by the draining store at drain time.
+    A row queued before this client had ever spoken to the server therefore drains under
+    whatever that server turns out to support, with `.get` returning None for a row queued
+    before these keys existed at all."""
     return dict(
         type=entry.get("type"), content=entry.get("content"), repo=entry.get("repo"),
         rationale=entry.get("rationale"), confidence=entry.get("confidence"),
         evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
         decision_id=entry.get("decision_id"), title=entry.get("title"),
-        source_files=entry.get("source_files"))
+        source_files=entry.get("source_files"), revision_id=entry.get("revision_id"),
+        lifecycle=entry.get("lifecycle"))
 
 
 def _dec_push_kwargs(dec: dict, key) -> dict:
@@ -549,7 +556,8 @@ def _dec_push_kwargs(dec: dict, key) -> dict:
         type=dec["type"], content=dec["content"], repo=key,
         confidence=dec["confidence"], evidence=dec["evidence"],
         source=_wire_source(dec["source"]), decision_id=dec["id"], title=dec.get("title"),
-        source_files=dec.get("source_files"))
+        source_files=dec.get("source_files"), revision_id=dec.get("revision_id"),
+        lifecycle=dec.get("lifecycle"))
 
 
 def _finish_share(dec: dict, key, server_id, endpoint: str | None = None) -> str:
@@ -953,14 +961,16 @@ async def _adrain_reconciliation_outbox_unlocked(profile: Profile) -> int:
 def _payload(dec: dict, key) -> dict:
     """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
     title so a queued offline share still sends it once drained (_entry_push_kwargs reads
-    it back off this same row). Also carries `source_files` (issue #174 Task 5) the same way —
-    stored in the outbox regardless of the current wire gate, so `_entry_push_kwargs` +
-    `remote._wire_args` decide at DRAIN time whether it actually egresses."""
+    it back off this same row). Also carries `source_files` (issue #174 Task 5) and
+    `revision_id`/`lifecycle` (plan E1/E2) the same way — stored in the outbox regardless of the
+    current wire gate or of what any server has advertised, so `_entry_push_kwargs` +
+    `remote._wire_args` decide at DRAIN time whether they actually egress."""
     return {
         "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
         "repo": key, "rationale": None, "confidence": dec["confidence"],
         "evidence": dec["evidence"], "source": _wire_source(dec["source"]),
         "title": dec.get("title"), "source_files": dec.get("source_files"),
+        "revision_id": dec.get("revision_id"), "lifecycle": dec.get("lifecycle"),
         "queued_at": time.time(), "attempts": 0,
     }
 
