@@ -410,20 +410,24 @@ def test_the_count_cap_evicts_by_arrival_not_by_the_events_own_stamp(tmp_repo, m
         ["arrived second, stamped first"]
 
 
-def test_identical_mtimes_fall_back_to_listing_order(tmp_repo, monkeypatch):
-    """The documented residual: at the same mtime the spool cannot tell which event arrived
-    first, so it evicts in listing order rather than inventing a distinction. Pinned so the
-    fallback is a decision somebody made, not a surprise."""
+def test_identical_mtimes_still_let_the_events_own_stamp_decide(tmp_repo, monkeypatch):
+    """The documented residual, named for what it is: at the same mtime the sort is stable, so
+    the tie is decided by listing order — filename order — which is the event's own
+    `occurred_at`. That is exactly the content influence R29 removes from the distinct-mtime
+    case, and it is NOT removed here: the spool has no arrival fact left to decide with, and a
+    monotonic arrival counter stamped at write time is the upgrade path. Pinned so the residual
+    is a decision somebody made rather than a surprise."""
     monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1)
-    spool.append_evidence(tmp_repo, _event(occurred_at=_ago(9), summary="listed first"))
-    spool.append_evidence(tmp_repo, _event(occurred_at=_ago(1), summary="listed second"))
+    spool.append_evidence(tmp_repo, _event(occurred_at=_ago(9), summary="stamped older"))
+    spool.append_evidence(tmp_repo, _event(occurred_at=_ago(1), summary="stamped newer"))
     stamped = time.time()
     for path in _pending(tmp_repo).iterdir():
         os.utime(path, (stamped, stamped))
 
     spool.run_retention(tmp_repo)
 
-    assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["listed second"]
+    # The event's own stamp picked the victim — the residual, not the desired behaviour.
+    assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["stamped newer"]
 
 
 def test_retention_drops_past_the_age_cap(tmp_repo):
