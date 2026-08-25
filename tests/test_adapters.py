@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import adapters, evidence, store
+from contexer import adapters, spool, store
 from contexer.adapters import claude, cursor
 
 
@@ -174,7 +174,7 @@ class TestClaudeCaptureEntrypoints:
         assert claude.capture_constraint(tmp_repo, "garbage") == "{}"
         assert claude.rationale(tmp_repo, "garbage") == "{}"
         # An unparseable payload yields no prompt, so it is not evidence of a directive.
-        assert evidence.evidence_diagnostics(tmp_repo)["events"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
 
 
 class TestClaudePostWrite:
@@ -206,8 +206,8 @@ class TestClaudePostWrite:
         # Still arms the flag — a malformed payload must not cost the deterministic
         # capture-reminder signal, only the edited-file recording (which has nothing to record).
         assert (store.STORE_DIR / ".pending_capture").exists()
-        # …and nothing was recorded, so the evidence ledger has nothing to say either.
-        assert evidence.evidence_diagnostics(tmp_repo)["events"] == 0
+        # …and nothing was recorded, so the evidence spool has nothing to say either.
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
 
     def test_fail_soft_on_missing_tool_input(self, tmp_repo):
         raw = _json.dumps({"session_id": "s1"})

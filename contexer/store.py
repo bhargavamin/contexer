@@ -1956,21 +1956,37 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     (`spool.finalize_candidate_evidence` returns the summary, this preserves it) — the decision
     keeps the receipt for the evidence it came from. A missing entry returns False rather than
     raising: the candidate is settled either way, and only the receipt is lost.
+
+    A TOMBSTONED decision is written too, and that is not an edge case: an approved retirement
+    proposal settles precisely because its decision left the live store, so refusing there
+    would throw away the one disposition the lifecycle lane exists to record. An unreadable
+    tombstone sidecar refuses rather than replacing it, the rule `lifecycle.tombstone_entry`
+    already follows.
     """
     if not entry_id or not isinstance(summary, dict):
         return False
-    with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
-        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
-                            entry_id)
-        if entry is None:
-            return False
+
+    def _appended(entry: dict) -> None:
         history = entry.get("evidence_summary")
         # Rebuilt rather than appended to: a hand-edited non-list would otherwise raise here,
         # and this is bookkeeping — it must never be the thing that breaks a store write.
         entry["evidence_summary"] = (history if isinstance(history, list) else []) + \
             [dict(summary)]
-        save(repo_path, data)
+
+    with store_lock(repo_slug(repo_path)):
+        data = load(repo_path)
+        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
+                            entry_id)
+        if entry is not None:
+            _appended(entry)
+            save(repo_path, data)
+            return True
+        graveyard, error = read_deleted(repo_path)
+        entry = None if error else entry_by_id(graveyard["entries"], entry_id)
+        if entry is None:
+            return False
+        _appended(entry)
+        _save_deleted(repo_path, graveyard)
     return True
 
 

@@ -287,7 +287,7 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
     session start, before compaction, and at session end; call it explicitly when the developer
     asks what was learned this session, or before wrapping up a long piece of work.
 
-    session_id: scope to ONE host session id; omit to reconcile everything the repo's ledger
+    session_id: scope to ONE host session id; omit to reconcile everything the repo's spool
                 holds (the default, and what a session shared across git worktrees needs).
     dry_run:    report what would be proposed and write nothing at all.
 

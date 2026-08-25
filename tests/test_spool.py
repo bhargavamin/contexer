@@ -585,3 +585,109 @@ def test_retention_on_an_absent_spool_is_a_clean_no_op(tmp_repo):
     assert spool.run_retention(tmp_repo) == {
         "dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
         "finalized_orphans": [], "errors": []}
+
+
+# ── session-start maintenance (mitigation 1) ─────────────────────────────────────
+
+def test_maintain_spool_runs_retention_once_per_ttl(tmp_repo):
+    """The emit-only host's only bound: `run_retention`'s other caller is reconciliation,
+    which Codex never reaches and Cursor never has file evidence for."""
+    spool.append_evidence(tmp_repo, _event(summary="ancient"))
+    _age(next(iter(_pending(tmp_repo).iterdir())), spool._MAX_PENDING_AGE_DAYS + 1)
+
+    assert spool.maintain_spool(tmp_repo)["dropped_pending"] == 1
+    assert spool.list_pending_evidence(tmp_repo) == []
+
+    # A second call inside the TTL does no work at all — not even a listing.
+    spool.append_evidence(tmp_repo, _event(summary="fresh"))
+    _age(next(iter(_pending(tmp_repo).iterdir())), spool._MAX_PENDING_AGE_DAYS + 1)
+    assert spool.maintain_spool(tmp_repo) == {}
+    assert len(spool.list_pending_evidence(tmp_repo)) == 1
+
+
+def test_maintain_spool_does_nothing_at_all_without_a_spool(tmp_repo):
+    # The cheap gate. Every session start on every repo runs this and the overwhelming
+    # majority have never emitted an event, so no stamp is written and no state accrues.
+    assert spool.maintain_spool(tmp_repo) == {}
+    assert not spool._maintenance_stamp(tmp_repo).exists()
+
+
+def test_an_expired_stamp_lets_maintenance_run_again(tmp_repo):
+    spool.append_evidence(tmp_repo, _event())
+    spool.maintain_spool(tmp_repo)
+    _age(spool._maintenance_stamp(tmp_repo), 2)
+    _age(next(iter(_pending(tmp_repo).iterdir())), spool._MAX_PENDING_AGE_DAYS + 1)
+
+    assert spool.maintain_spool(tmp_repo)["dropped_pending"] == 1
+
+
+def test_maintain_spool_never_raises(tmp_repo, monkeypatch):
+    spool.append_evidence(tmp_repo, _event())
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(spool, "run_retention", boom)
+    assert spool.maintain_spool(tmp_repo) == {}
+
+
+# ── contexer status ──────────────────────────────────────────────────────────────
+
+def _status_line(repo):
+    from contexer import cli
+
+    lines = cli._evidence_status_lines([repo])
+    return lines[0] if lines else ""
+
+
+def test_status_is_silent_for_a_repo_with_no_spool(tmp_repo):
+    from contexer import cli
+
+    assert cli._evidence_status_lines([tmp_repo]) == []
+
+
+def test_status_counts_what_the_spool_holds(tmp_repo):
+    spool.append_evidence(tmp_repo, _event())
+    spool.hold_candidate_evidence(tmp_repo, str(uuid.uuid4()), _spool_two(tmp_repo),
+                                  meta={"entry_id": "e1"})
+    assert _status_line(tmp_repo) == f"  evidence:     {tmp_repo}: 1 pending, 1 held (2 events)"
+
+
+def test_status_reads_the_gap_as_a_cumulative_loss_ledger_not_an_alarm(tmp_repo):
+    """Ruling R28: nothing clears `.gap`, so it reports what this spool has LOST — a count and
+    a date, never a condition the developer is being asked to resolve."""
+    spool.append_evidence(tmp_repo, _event())
+    spool._bump_gap(tmp_repo, "write_error", 3)
+    rendered = _status_line(tmp_repo).split(f"{tmp_repo}: ", 1)[1]
+    assert rendered.startswith("1 pending, 3 events lost, last 20")
+    assert "gap" not in rendered          # the word names a hole to fill, not a loss ledger
+
+
+def test_status_says_when_the_loss_count_is_a_lower_bound(tmp_repo):
+    spool.append_evidence(tmp_repo, _event())
+    spool._gap_path(tmp_repo).write_text("{ mangled", encoding="utf-8")
+    spool._bump_gap(tmp_repo, "write_error")
+    assert "earlier losses uncounted" in _status_line(tmp_repo)
+
+
+def test_status_reports_a_damaged_gap_marker_rather_than_a_number(tmp_repo):
+    spool.append_evidence(tmp_repo, _event())
+    spool._gap_path(tmp_repo).write_text("{ mangled", encoding="utf-8")
+    assert _status_line(tmp_repo).endswith("1 pending, loss ledger unreadable")
+
+
+def test_status_names_held_candidates_nothing_will_ever_settle(tmp_repo):
+    spool.hold_candidate_evidence(tmp_repo, str(uuid.uuid4()), _spool_two(tmp_repo))
+    assert "1 unattributed" in _status_line(tmp_repo)
+
+
+def _refuse_spool_dirs(path):
+    if path.name in ("pending", "quarantine", "held"):
+        raise OSError("cannot stat")
+    return True
+
+
+def test_status_says_a_spool_is_unreadable_rather_than_empty(tmp_repo, monkeypatch):
+    spool.append_evidence(tmp_repo, _event())
+    monkeypatch.setattr(Path, "is_dir", _refuse_spool_dirs)
+    assert _status_line(tmp_repo).endswith("spool unreadable")
