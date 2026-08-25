@@ -59,6 +59,30 @@ def tmp_repo(tmp_path, monkeypatch):
 _FORBIDDEN = ("ui.json", "ui.log")
 _TEMP_MARKERS = ("private_tmp", "var_folders", "pytest", "tmp_")
 
+# Families a test has no business creating in the real dir, whatever repo they are keyed to.
+# The evidence spool, its maintenance stamp and the reconcile log/lock arrived with the
+# evidence-capture work; `.evidence_*` is the retired single-sidecar spelling (plus its
+# `.evidence_lock_*`), kept here so a stale checkout that still writes one is caught too.
+# The `_` in `.reconcile_` is load-bearing: `.reconcile-outbox.json` is the share retry
+# queue, which a live session may legitimately write alongside the suite.
+_FORBIDDEN_PREFIXES = (".evidence_", ".reconcile_", ".spool_maintained_")
+_SPOOL_DIR = "evidence"
+
+
+def _spool_dirs(root: Path) -> list[str]:
+    """Every DIRECTORY under `~/.contexer/evidence`, relative to the store dir.
+
+    Directories, not files: once the developer's real dir holds a spool at all, a top-level
+    `evidence` name is in the baseline forever and the check would be blind to everything
+    added inside it. A per-repo spool dir (or a `held/<candidate>` batch) appearing during
+    the run is a test reaching the real store; a live PostToolUse hook appending an event
+    into a spool that already exists only adds FILES, so it can never fail the run - the
+    same "never flag what a live session legitimately writes" line `_FORBIDDEN` draws."""
+    try:
+        return [str(p.relative_to(root.parent)) for p in root.rglob("*") if p.is_dir()]
+    except OSError:
+        return []
+
 
 def _leaked(real_store_dir: Path) -> list[str]:
     if not real_store_dir.is_dir():
@@ -66,7 +90,11 @@ def _leaked(real_store_dir: Path) -> list[str]:
     found = []
     for entry in real_store_dir.iterdir():
         name = entry.name
-        if name in _FORBIDDEN or name.endswith(".deleted.json"):
+        if name == _SPOOL_DIR and entry.is_dir():
+            found.append(name)
+            found.extend(_spool_dirs(entry))
+        elif (name in _FORBIDDEN or name.endswith(".deleted.json")
+                or name.startswith(_FORBIDDEN_PREFIXES)):
             found.append(name)
         elif any(marker in name for marker in _TEMP_MARKERS):
             found.append(name)  # a store keyed to a tmp_path escaped into the real dir
@@ -135,9 +163,10 @@ def no_real_store_writes():
     yield
     new = [n for n in _leaked(real) if n not in before]
     assert not new, (
-        f"tests leaked into the real store dir {real}: {new}. Patch HOME (not just "
-        "store.STORE_DIR or the port) before anything that can spawn a daemon or "
-        "resolve paths from Path.home()."
+        f"tests leaked into the real store dir {real}: {new}. Patch store.STORE_DIR (the "
+        "`tmp_repo` fixture) before anything that spools evidence, reconciles, or takes a "
+        "store-dir lock, and patch HOME (not just store.STORE_DIR or the port) before "
+        "anything that can spawn a daemon, a subprocess, or resolve paths from Path.home()."
     )
     assert _real_config_bytes(real) == config_before, (
         f"tests rewrote the real {real / 'config.toml'}. Patch config.CONFIG_PATH before "
