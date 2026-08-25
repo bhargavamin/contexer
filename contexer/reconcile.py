@@ -44,7 +44,9 @@ between the two leaves a candidate whose decision exists and whose events are sp
 second candidate under a different id.
 """
 
+import fcntl
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from contexer import candidates, lifecycle, spool, store
@@ -64,10 +66,12 @@ _RECEIPT_LOG_CAP = 200
 # eventual lifecycle record read "superseded" instead of "retired").
 _LIFECYCLE_KINDS = frozenset({"retire", "replace"})
 
-# Lifecycle record kinds that mean "this decision was retired" (`lifecycle.lifecycle_record`).
-# `restored` is deliberately absent: a restored decision is back in the live store, so it is
-# not in the tombstone list `_retired_ids` reads at all.
-_RETIRED_KINDS = frozenset({"retired", "superseded"})
+# Lifecycle record kinds that mean "this decision was retired". DERIVED, never respelled:
+# `lifecycle.py` owns the vocabulary it writes, and a local copy here would keep passing its
+# own tests while a rename there silently emptied this set. `restored` is excluded at the
+# source — a restored decision is back in the live store, so it is not in the tombstone list
+# `_retired_ids` reads at all.
+_RETIRED_KINDS = lifecycle.RETIRED_KINDS
 
 # The session stamped on a materialized decision when its evidence names none. Real evidence
 # carries the session that produced it, and that is what the entry records — this is only the
@@ -77,7 +81,69 @@ _FALLBACK_SESSION = "reconcile"
 
 def _receipt(dry_run: bool) -> dict:
     return {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0, "already_pending": 0,
-            "duplicates": 0, "insufficient": 0, "incomplete": False, "dry_run": bool(dry_run)}
+            "duplicates": 0, "insufficient": 0, "incomplete": False, "skipped": False,
+            "dry_run": bool(dry_run)}
+
+
+@contextmanager
+def _reconcile_lock(repo_path: str):
+    """Yield True to the one pass that holds this repo's reconcile lock, False to any pass
+    that finds it already held. NEVER waits.
+
+    Two concurrent passes over one spool can record a disposition that never happened: each
+    snapshots the live decisions before classifying, so a store write landing between B's
+    snapshot and B's classification changes the `kind`/`target_decision_id` B computes for the
+    SAME events, hence their `candidate_id` — and B then holds events A already moved, sees
+    them `missing`, and files an `evidence_summary` under its own entry describing a
+    disposition nobody made. Claude and Gemini both reconcile at SessionStart, PreCompact and
+    SessionEnd, so two sessions on one repo is ordinary, not exotic.
+
+    THIS DOES NOT VIOLATE THE SPOOL'S "no locks anywhere" RULE. That rule governs EVIDENCE
+    WRITES FROM EDITOR HOOKS (`spool.append_evidence`), which must never wait behind another
+    writer. Reconciliation is neither an editor hook nor an evidence write: it is the scanning
+    consumer, it already takes the store lock to write, and skipping it costs nothing because
+    the next checkpoint picks the work up. Do not "fix" this back out.
+
+    `flock` and not a lock FILE's existence: a crashed pass releases it with its fd, where a
+    stale marker would wedge reconciliation on this repo for good. Failing to open the lock at
+    all fails OPEN (yield True) — an unwritable STORE_DIR must not silently disable the
+    pipeline, and it is the contention case, not the I/O case, this exists to answer.
+    """
+    path = store.STORE_DIR / f".reconcile_{store.repo_slug(repo_path)}.lock"
+    try:
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        handle = open(path, "a")        # noqa: SIM115 - closed in the finally below
+    except OSError:
+        yield True
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:             # held by another pass: skip, never wait
+        handle.close()
+        yield False
+        return
+    except OSError:                     # no flock on this filesystem: fail open, as above
+        handle.close()
+        yield True
+        return
+    try:
+        yield True
+    finally:
+        handle.close()                  # closing the fd releases the flock
+
+
+def _hold(repo_path: str, candidate_id: str, event_ids: list, meta: dict | None = None) -> bool:
+    """Move a candidate's events into its hold. True only when every named event is verifiably
+    THERE.
+
+    `spool.hold_candidate_evidence` reports rather than raises: a source gone with no target
+    lands in `missing`, and its docstring hands the decision to the caller. Deciding is what
+    this is — `missing` means those events were never verified as moved (evicted, or already
+    claimed by a concurrent pass), so the caller must not go on to record a clean disposition
+    over them.
+    """
+    result = spool.hold_candidate_evidence(repo_path, candidate_id, event_ids, meta=meta)
+    return result["status"] == "ok" and not result["missing"]
 
 
 def _projected(entry: dict, tombstoned: bool) -> dict:
@@ -353,8 +419,7 @@ def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run:
     for candidate_id, event_ids in sorted(stray.items()):
         # No `meta`: the directory already describes this candidate, and rewriting the
         # bookkeeping from a recovery pass could only ever replace it with less.
-        if not dry_run and spool.hold_candidate_evidence(
-                repo_path, candidate_id, event_ids)["status"] != "ok":
+        if not dry_run and not _hold(repo_path, candidate_id, event_ids):
             receipt["incomplete"] = True
     return kept
 
@@ -386,15 +451,23 @@ def _commit_writes(repo_path: str, writes: dict, receipt: dict) -> None:
     that is settled on arrival (a duplicate, or an update the store applied in place) is
     finalized on the next line, and if that never happens the recorded status is the only thing
     that tells a resumed pass what this hold already was. See `_dispositions`' first rule.
+
+    An INCOMPLETE hold is never finalized. Finalizing writes an `evidence_summary` onto the
+    decision saying this event set was settled as `dismissed`/`approved`, and a hold that
+    reported `missing` or `failed` never verified that the events are where the summary claims
+    they are — so a clean disposition over them is a receipt for something that did not happen.
+    The recorded status stays on the hold, and `_dispositions`' first rule settles it on a
+    later pass, when the events can actually be accounted for.
     """
     for candidate_id, record in sorted(writes.items()):
-        if spool.hold_candidate_evidence(repo_path, candidate_id, record["event_ids"],
-                                         meta=record)["status"] != "ok":
-            # The decision is stored but some of its evidence still reads as pending. Say so:
-            # the next pass finishes the move (`_finish_interrupted_holds`) rather than
-            # proposing it again, but this pass did not do everything it set out to.
+        complete = _hold(repo_path, candidate_id, record["event_ids"], meta=record)
+        if not complete:
+            # The decision is stored but some of its evidence still reads as pending, or was
+            # not found at all. Say so: the next pass finishes the move
+            # (`_finish_interrupted_holds`) rather than proposing it again, but this pass did
+            # not do everything it set out to.
             receipt["incomplete"] = True
-        if record["status"] != "pending":
+        if record["status"] != "pending" and complete:
             _finalize(repo_path, candidate_id, record["status"],
                       str(record.get("entry_id") or ""), receipt)
 
@@ -503,14 +576,28 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
     worktree-shared spool needs). Returns the receipt:
 
         {"events_observed", "proposed", "lifecycle_proposed", "already_pending", "duplicates",
-         "insufficient", "incomplete", "dry_run"}
+         "insufficient", "incomplete", "skipped", "dry_run"}
+
+    One pass at a time per repo (`_reconcile_lock`): finding another pass already running
+    means this one does NOTHING and says so (`skipped`), rather than waiting or racing it.
 
     NEVER raises: every caller is a host hook or a report surface, and a reconciliation that
     could not finish is a receipt marked `incomplete`, never a broken session start.
     """
     receipt = _receipt(dry_run)
     try:
-        return _reconcile(repo_path, session_id, dry_run, receipt)
+        if dry_run:
+            # NOT lock-guarded, both ways round: a dry run writes nothing, so it cannot cause
+            # the fabricated disposition the lock exists to prevent — and taking the lock would
+            # itself create a file, breaking the "dry_run writes NOTHING anywhere" invariant,
+            # while letting a preview skip (or delay) a real pass. Worst case its report is a
+            # snapshot of a spool that moved underneath it, which is what a preview is.
+            return _reconcile(repo_path, session_id, True, receipt)
+        with _reconcile_lock(repo_path) as acquired:
+            if not acquired:
+                receipt["skipped"] = True
+                return receipt
+            return _reconcile(repo_path, session_id, dry_run, receipt)
     except Exception:                  # broad on purpose: the never-raises contract
         receipt["incomplete"] = True
         return receipt
@@ -519,6 +606,9 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
 def format_receipt(receipt: dict) -> str:
     """The receipt as human-readable lines — shared by the CLI command and the MCP tool so a
     developer and a model are never told two different stories about one pass."""
+    if receipt.get("skipped"):
+        return ("Reconciled evidence: skipped — another reconciliation pass is already "
+                "running on this repo. The next checkpoint picks this up.")
     head = "Reconciled evidence" + (" (dry run — nothing was written)" if receipt["dry_run"]
                                     else "")
     lines = [

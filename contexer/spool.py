@@ -24,9 +24,11 @@ call time (`store.STORE_DIR`, `store.repo_slug`, `store.load`), the load-order d
 `guard_engine.py` documents, so store.py never needs this module at import time and a test
 patching `contexer.store.STORE_DIR` is seen here.
 
-`.gap` is an honesty marker, not a queue: it records that evidence was lost (a failed write,
-a retention drop) and nothing here ever clears it — a successful run does not un-lose an
-event, so only explicit maintenance may acknowledge one.
+`.gap` is an honesty marker, not a queue: it records what left the spool without being
+consumed, and nothing here ever clears it — a successful run does not un-lose an event, so
+only explicit maintenance may acknowledge one. It keeps TWO counts, because "we failed to
+record this" (`drops`) and "this aged out unconsumed" (`expired`) are different news for a
+developer and only the first is a bug (see `_bump_gap`).
 """
 import json
 import os
@@ -63,9 +65,13 @@ _DIR_MODE = 0o700
 _TEMP_PREFIX = "tmp-"
 _META_NAME = "candidate.json"
 
-# What `finalize_candidate_evidence` will settle a candidate as. `edited` is distinct from
-# `approved` because a developer who rewrote the wording reviewed it just as deliberately.
-DISPOSITIONS = frozenset({"approved", "edited", "dismissed", "ignored"})
+# What `finalize_candidate_evidence` will settle a candidate as, and the whole vocabulary:
+# these are the only two dispositions anything writes. `edited` and `ignored` were declared
+# here alongside them with no writer anywhere, which made a closed vocabulary read as exercised
+# code and gave `reconcile._dispositions` two statuses it could accept off a hand-edited
+# `candidate.json` and never produce. Adding one back when a human-review path actually
+# distinguishes "the developer rewrote it" from "the developer approved it" is one word.
+DISPOSITIONS = frozenset({"approved", "dismissed"})
 
 # Mitigation 6: every id that becomes a path component is shape-checked BEFORE the join, so
 # no `..`, no separator and no absolute path can ever reach one. Deliberately a whitelist of
@@ -76,30 +82,51 @@ _EVENT_ID_IN_NAME = re.compile(r"-([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\
 
 # ── layout ───────────────────────────────────────────────────────────────────────
 
-def _repo_dir(repo_path: str) -> Path:
+def _evidence_root() -> Path:
+    return store.STORE_DIR / "evidence"
+
+
+def _repo_dir(repo_path: str, slug: str = "") -> Path:
     # `store.repo_slug` and nothing else: the readers resolve the same way, so a linked
-    # worktree and its main worktree address one spool (the identity-agreement rule).
-    return store.STORE_DIR / "evidence" / store.repo_slug(repo_path)
+    # worktree and its main worktree address one spool (the identity-agreement rule). An
+    # explicit `slug` is for the one reader that has no repo path to resolve — see
+    # `spool_slugs`.
+    return _evidence_root() / (slug or store.repo_slug(repo_path))
 
 
-def _pending_dir(repo_path: str) -> Path:
-    return _repo_dir(repo_path) / "pending"
+def _pending_dir(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / "pending"
 
 
-def _held_root(repo_path: str) -> Path:
-    return _repo_dir(repo_path) / "held"
+def _held_root(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / "held"
 
 
 def _held_dir(repo_path: str, candidate_id: str) -> Path:
     return _held_root(repo_path) / _checked_id(candidate_id, "candidate_id")
 
 
-def _quarantine_dir(repo_path: str) -> Path:
-    return _repo_dir(repo_path) / "quarantine"
+def _quarantine_dir(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / "quarantine"
 
 
-def _gap_path(repo_path: str) -> Path:
-    return _repo_dir(repo_path) / ".gap"
+def _gap_path(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / ".gap"
+
+
+def spool_slugs() -> list[str]:
+    """Every repo slug that has a spool directory, sorted.
+
+    A slug is not reversible into a repo path, which is exactly why this exists: a repo whose
+    evidence never produced a store entry (every candidate insufficient, or duplicates before
+    any entry existed) has no store file for `contexer status` to find it by, so its pending
+    count and its `.gap` were invisible in the one surface meant to report them. The slug is
+    what the developer is shown for such a repo — less readable than a path, and the only
+    honest thing on offer."""
+    try:
+        return sorted(p.name for p in _evidence_root().iterdir() if p.is_dir())
+    except OSError:
+        return []
 
 
 def _checked_id(value: object, label: str) -> str:
@@ -182,7 +209,7 @@ def _write_json(directory: Path, name: str, payload) -> None:
 
 # ── the gap marker ───────────────────────────────────────────────────────────────
 
-def _read_gap(repo_path: str) -> dict | None:
+def _read_gap(repo_path: str, slug: str = "") -> dict | None:
     """The gap marker, `None` if there has never been one, `{"unreadable": True}` if there is
     one that cannot be read.
 
@@ -193,7 +220,7 @@ def _read_gap(repo_path: str) -> dict | None:
     `store._read_global` carries, and the same one `_event_files` draws for a directory.
     """
     try:
-        raw = _gap_path(repo_path).read_text(encoding="utf-8")
+        raw = _gap_path(repo_path, slug).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except OSError:
@@ -205,25 +232,40 @@ def _read_gap(repo_path: str) -> dict | None:
     return gap if isinstance(gap, dict) else {"unreadable": True}
 
 
-def _bump_gap(repo_path: str, reason: str, drops: int = 1) -> None:
-    """Record that `drops` events were lost. Best-effort: failing to record a gap must never
-    be the thing that raises into a host hook.
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
-    A DAMAGED marker is never overwritten with a fresh count of one. The drops it recorded are
-    unrecoverable, so the count restarts — but `prior_drops_unknown` is stamped and carried
-    forward for good, which keeps the ledger honest about being a lower bound instead of
-    quietly reporting `drops: 1` over a marker that had said 47.
+
+def _bump_gap(repo_path: str, reason: str, drops: int = 1, field: str = "drops") -> None:
+    """Record that `drops` events went. Best-effort: failing to record a gap must never be the
+    thing that raises into a host hook.
+
+    TWO counters, and which one is bumped is decided by the CALLER's own path, never by
+    looking at the events (ruling R29 forbids retention reading content):
+
+    * `drops` is genuine LOSS — a write that failed, a quarantined event that aged out. We
+      tried to record this and could not.
+    * `expired` is evidence that aged out of `pending/` UNCONSUMED. On a host that never
+      reconciles (Codex reaches no reconciliation entrypoint; Cursor emits directives only)
+      that is the DESIGNED end of the queue, not a failure — and counting it as loss made
+      `contexer status` report "N events lost" on a repo that lost nothing, in the one surface
+      built to be honest about loss.
+
+    A DAMAGED marker is never overwritten with a fresh count of one. The counts it recorded are
+    unrecoverable, so they restart — but `prior_drops_unknown` is stamped and carried forward
+    for good, which keeps the ledger honest about being a lower bound instead of quietly
+    reporting `drops: 1` over a marker that had said 47.
     """
     try:
         _ensure_dir(_repo_dir(repo_path))
         previous = _read_gap(repo_path) or {}
-        count = previous.get("drops")
         marker = {
-            "drops": (count if isinstance(count, int) and not isinstance(count, bool)
-                      else 0) + drops,
+            "drops": _count(previous.get("drops")),
+            "expired": _count(previous.get("expired")),
             "last_at": _now().isoformat(),
             "last_reason": reason,
         }
+        marker[field] = _count(marker.get(field)) + drops
         if previous.get("unreadable") or previous.get("prior_drops_unknown"):
             marker["prior_drops_unknown"] = True
         store.atomic_write(_gap_path(repo_path), json.dumps(marker))
@@ -452,8 +494,11 @@ def _total_bytes(paths: list[Path]) -> int:
     return total
 
 
-def evidence_diagnostics(repo_path: str) -> dict:
+def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     """What the spool holds, for `contexer status`. Lock-free.
+
+    `slug` addresses a spool whose repo path is not known — see `spool_slugs`. It is the only
+    reader that takes one, and it never resolves a path when given one.
 
     `readable` is the honest half: an absent spool reports zeros with `readable=True`, while a
     directory that cannot be listed reports `readable=False` — so a reader is never told "no
@@ -478,14 +523,14 @@ def evidence_diagnostics(repo_path: str) -> dict:
               "quarantine": 0, "bytes": 0}
     readable = True
     try:
-        for key, directory in (("pending", _pending_dir(repo_path)),
-                               ("quarantine", _quarantine_dir(repo_path))):
+        for key, directory in (("pending", _pending_dir(repo_path, slug)),
+                               ("quarantine", _quarantine_dir(repo_path, slug))):
             if not directory.is_dir():
                 continue
             files = _event_files(directory)
             counts[key] = len(files)
             counts["bytes"] += _total_bytes(files)
-        root = _held_root(repo_path)
+        root = _held_root(repo_path, slug)
         if root.is_dir():
             for directory in sorted(root.iterdir()):
                 if not directory.is_dir():
@@ -501,7 +546,7 @@ def evidence_diagnostics(repo_path: str) -> dict:
     except OSError:
         counts = dict.fromkeys(counts, 0)
         readable = False
-    return {**counts, "gap": _read_gap(repo_path), "readable": readable}
+    return {**counts, "gap": _read_gap(repo_path, slug), "readable": readable}
 
 
 # ── retention (reconciliation / maintenance only) ────────────────────────────────
@@ -619,8 +664,13 @@ def run_retention(repo_path: str) -> dict:
 
     The ONLY caller-facing retention entry point, and it SCANS — so it runs from
     reconciliation or maintenance and never from an editor hook. Held events are exempt while
-    their candidate is unsettled; dropping pending or quarantined events is real loss, so it
-    bumps `.gap` with the count.
+    their candidate is unsettled.
+
+    The two drops it makes are recorded as DIFFERENT facts (see `_bump_gap`), decided by which
+    directory was swept rather than by anything inside the events: an aged-out PENDING event
+    was never consumed, which on an emit-only host is the queue working as designed, while an
+    aged-out QUARANTINED one is evidence that could not be read at all. Reporting both as
+    "lost" is what made `contexer status` accuse a healthy repo of losing evidence.
     """
     report = {"dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
               "finalized_orphans": [], "errors": []}
@@ -634,9 +684,11 @@ def run_retention(repo_path: str) -> dict:
         report["finalized_orphans"] = _sweep_orphan_holds(repo_path)
     except Exception as exc:            # broad on purpose: a report, not a traceback
         report["errors"].append(f"{type(exc).__name__}: {exc}")
-    dropped = report["dropped_pending"] + report["dropped_quarantine"]
-    if dropped:
-        _bump_gap(repo_path, "retention", dropped)
+    if report["dropped_pending"]:
+        _bump_gap(repo_path, "retention_unconsumed", report["dropped_pending"],
+                  field="expired")
+    if report["dropped_quarantine"]:
+        _bump_gap(repo_path, "retention_quarantine", report["dropped_quarantine"])
     return report
 
 

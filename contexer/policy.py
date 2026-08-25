@@ -71,8 +71,14 @@ MAX_VERDICT = {"armed": "block", "advisory": "warn"}
 # reconciliation AND approval is more vetted than `scan`.
 TRUSTED_SOURCES = frozenset({"human", "scan", "bootstrap", "plan"})
 
-# Request bounds. `files` and paths reuse the evidence event's rules so one path never passes
-# one gate and fails the other; `intent`/`repo_key` share evidence's 300-char text cap.
+# Request bounds. The path RULES (repo-relative only: no absolute, no `..`, no windows drive)
+# and the 300-char path/text caps deliberately MIRROR `evidence.py`'s, so one path never
+# passes one gate and fails the other. They are COPIED, not shared, and the duplication is
+# forced rather than lazy: `evidence.py` imports `store`, and this module is a pure leaf that
+# must not. Hoisting them into a third module would be an abstraction with two callers and no
+# behaviour of its own, which this repo's design constraints forbid. If either side's path
+# rules change, change both. (`_MAX_FILES` is NOT mirrored: an event describes one edit, a
+# request can name a whole change set.)
 _MAX_INTENT_CHARS = 300
 _MAX_REPO_KEY_CHARS = 300
 _MAX_FILES = 100
@@ -92,10 +98,9 @@ _ARTIFACT_KEYS = frozenset({"kind", "content"})
 
 _WINDOWS_DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 
-# Severity ladders. Both are total orders over their vocabulary, which is what makes the two
-# merge helpers below associative — a caller may fold in any order and get one answer.
+# The severity ladder. A total order over `VERDICTS`, which is what makes `worst_verdict`
+# associative — a caller may fold in any order and get one answer.
 _VERDICT_RANK = {"allow": 0, "warn": 1, "block": 2}
-_STATUS_RANK = {"complete": 0, "partial": 1, "error": 2}
 
 
 # ── request validation ───────────────────────────────────────────────────────────
@@ -547,9 +552,3 @@ def worst_verdict(verdicts) -> str:
                key=_VERDICT_RANK.__getitem__, default="allow")
 
 
-def merge_status(statuses) -> str:
-    """The least complete status present: error > partial > complete. Empty is `complete` —
-    every one of the zero policies was evaluated. Merging never launders an `error` into
-    something softer; that is the same invariant `build_result` documents."""
-    return max((_checked(s, EVALUATION_STATUSES, "evaluation_status") for s in statuses or []),
-               key=_STATUS_RANK.__getitem__, default="complete")

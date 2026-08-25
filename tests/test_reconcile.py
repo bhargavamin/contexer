@@ -110,6 +110,10 @@ def _boom(*_a, **_k):
     raise RuntimeError("boom")
 
 
+def _boom_oserror(*_a, **_k):
+    raise OSError("no")
+
+
 def test_the_fixture_texts_sit_in_the_bands_that_classify_them():
     """The four texts above are not arbitrary prose: each one is chosen for its token overlap
     with STORED, and that is what decides its candidate kind. Pinned here so a reworded fixture
@@ -626,6 +630,59 @@ class TestInsufficientCandidate:
 
 # ── idempotency, crash recovery, dry run, fast path ──────────────────────────
 
+class TestOnePassAtATime:
+    """`_reconcile_lock`: one reconciliation per repo, and a second pass SKIPS rather than
+    waits. Two overlapping passes each snapshot the live decisions before classifying, so a
+    store write landing between one pass's snapshot and the other's classification changes the
+    candidate id it computes for the same events — and it then files a disposition under its
+    own entry for a review that never happened. Claude and Gemini both reconcile at
+    SessionStart, PreCompact and SessionEnd, so two sessions on one repo is ordinary."""
+
+    def test_a_pass_finding_the_lock_held_skips_and_says_so(self, tmp_repo):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with reconcile._reconcile_lock(tmp_repo) as acquired:
+            assert acquired                             # stands in for the running pass
+            receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["skipped"] is True
+        assert (receipt["proposed"], receipt["events_observed"]) == (0, 0)
+        assert _pending(tmp_repo)                       # nothing was consumed
+        assert store.load(tmp_repo)["entries"] == []
+        assert "another reconciliation pass is already running" \
+            in reconcile.format_receipt(receipt)
+
+    def test_the_next_checkpoint_picks_up_what_a_skipped_pass_left(self, tmp_repo):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with reconcile._reconcile_lock(tmp_repo):
+            reconcile.reconcile_session(tmp_repo)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+    def test_the_lock_is_per_repo(self, tmp_repo, tmp_path):
+        other_dir = tmp_path / "other-repo"
+        other_dir.mkdir(exist_ok=True)
+        other = str(other_dir)
+        _emit(other, "user_directive", UNRELATED)
+        with reconcile._reconcile_lock(tmp_repo):
+            assert reconcile.reconcile_session(other)["proposed"] == 1
+
+    def test_a_dry_run_is_never_gated_by_the_lock(self, tmp_repo):
+        # It writes nothing, so it cannot cause what the lock prevents — and taking the lock
+        # would create a file, breaking "dry_run writes NOTHING anywhere".
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with reconcile._reconcile_lock(tmp_repo):
+            receipt = reconcile.reconcile_session(tmp_repo, dry_run=True)
+        assert (receipt["skipped"], receipt["proposed"]) == (False, 1)
+
+    def test_an_unusable_lock_file_fails_open(self, tmp_repo, monkeypatch):
+        # An unwritable STORE_DIR must not silently disable the pipeline: it is the contention
+        # case, not the I/O case, that this lock exists to answer.
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        # Shadows the builtin inside `reconcile` only — a module global wins over builtins,
+        # and this module opens nothing else.
+        monkeypatch.setattr(reconcile, "open", _boom_oserror, raising=False)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+
 class TestIdempotency:
 
     def test_second_pass_proposes_nothing_and_holds_nothing_twice(self, tmp_repo):
@@ -678,11 +735,12 @@ class TestIdempotency:
         assert (created["id"], "dismissed") in _dispositions_of(tmp_repo)
 
     def test_two_concurrent_passes_converge_on_one_decision(self, tmp_repo, monkeypatch):
-        """Red-team mitigation 4. There is NO lock in the evidence layer, so two reconciles can
-        both aggregate the same pending set before either holds anything. Simulated by giving
-        the second pass the spool as it looked before the first one wrote: the same events, no
-        held candidate to recognize. It must converge — one decision (the store's novelty
-        filter absorbs the second), the first pass's hold intact, no event lost or held twice.
+        """Red-team mitigation 4. `_reconcile_lock` now stops two passes overlapping in the
+        first place, so this is the belt-and-braces case: what the pipeline does if one ever
+        does. Simulated by giving the second pass the spool as it looked before the first one
+        wrote (the same events, no held candidate to recognize) — the lock is per PROCESS and
+        cannot be tripped from inside one. It must converge — one decision (the store's novelty
+        filter absorbs the second), the first pass's hold and its events untouched.
         """
         _emit(tmp_repo, "user_directive", UNRELATED)
         pre_hold = spool.list_pending_evidence(tmp_repo)
@@ -691,6 +749,7 @@ class TestIdempotency:
         winner, meta = _only_held(tmp_repo)
         held_files = [p.name for p in _held_events(tmp_repo, winner)]
 
+        real_list, real_held = spool.list_pending_evidence, spool.held_candidates
         monkeypatch.setattr(spool, "list_pending_evidence", lambda *_a, **_k: list(pre_hold))
         monkeypatch.setattr(spool, "held_candidates", lambda *_a, **_k: {})
         receipt = reconcile.reconcile_session(tmp_repo)
@@ -699,10 +758,21 @@ class TestIdempotency:
         assert [e["id"] for e in store.load(tmp_repo)["entries"]] == [created["id"]]
         # Read off the filesystem, not `held_candidates` — it is still patched to the
         # pre-hold view for the length of this test.
-        assert [d.name for d in spool._held_root(tmp_repo).iterdir()] == [winner]
+        assert winner in [d.name for d in spool._held_root(tmp_repo).iterdir()]
         assert [p.name for p in _held_events(tmp_repo, winner)] \
             == held_files                                    # and no event moved or lost
         assert sorted(meta["event_ids"]) == sorted(e["event_id"] for e in pre_hold)
+        # The loser's own hold is left UNFINALIZED, and that is the point: its events are in
+        # the winner's directory, so `hold_candidate_evidence` reported them `missing` and no
+        # disposition may be recorded over evidence this pass never verified. It carries the
+        # status it settled at, so the next ordinary pass finalizes it away.
+        assert receipt["incomplete"] is True
+        # Restore just these two — `monkeypatch.undo()` would also undo the fixture's STORE_DIR
+        # patch and run the next pass against the developer's real store.
+        monkeypatch.setattr(spool, "list_pending_evidence", real_list)
+        monkeypatch.setattr(spool, "held_candidates", real_held)
+        reconcile.reconcile_session(tmp_repo)
+        assert [d.name for d in spool._held_root(tmp_repo).iterdir()] == [winner]
 
     def test_an_interrupted_duplicate_settles_as_the_dismissal_it_always_was(self, tmp_repo):
         """The second crash window. A duplicate is held and finalized in one run; a crash in
@@ -814,7 +884,7 @@ class TestFastPath:
         receipt = reconcile.reconcile_session(tmp_repo)
         assert receipt == {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0,
                            "already_pending": 0, "duplicates": 0, "insufficient": 0,
-                           "incomplete": False, "dry_run": False}
+                           "incomplete": False, "skipped": False, "dry_run": False}
 
     def test_a_still_held_candidate_reads_the_store_but_never_locks_it(self, tmp_repo,
                                                                       monkeypatch):
@@ -954,6 +1024,36 @@ class TestDamagedEvidence:
         receipt = reconcile.reconcile_session(tmp_repo)
         assert (receipt["proposed"], receipt["incomplete"]) == (1, True)
 
+    def test_a_hold_reporting_missing_evidence_records_no_disposition(self, tmp_repo,
+                                                                      monkeypatch):
+        """`hold_candidate_evidence` REPORTS a source that is gone with no target instead of
+        raising, and its docstring hands the decision to the caller — so the caller has to make
+        one. A duplicate settles in the same pass, and finalizing it writes an
+        `evidence_summary` onto the decision saying this event set was dismissed: a receipt for
+        events this pass never verified as moved. It stays held instead, and the recorded
+        status settles it on a later pass that can account for them."""
+        _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        real_hold = spool.hold_candidate_evidence
+
+        def _vanish(repo, candidate_id, event_ids, meta=None):
+            for path in spool._event_files(spool._pending_dir(repo)):
+                path.unlink()               # the events go missing between read and move
+            return real_hold(repo, candidate_id, event_ids, meta=meta)
+
+        monkeypatch.setattr(spool, "hold_candidate_evidence", _vanish)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["duplicates"], receipt["incomplete"]) == (1, True)
+        assert _dispositions_of(tmp_repo) == []          # nothing claimed to have settled
+        candidate_id, meta = _only_held(tmp_repo)        # and the hold is still there
+        assert meta["status"] == "dismissed"
+
+        monkeypatch.setattr(spool, "hold_candidate_evidence", real_hold)
+        reconcile.reconcile_session(tmp_repo)
+        assert _held(tmp_repo) == {}
+        assert [kind for _id, kind in _dispositions_of(tmp_repo)] == ["dismissed"]
+
     def test_a_failed_summary_write_costs_the_receipt_not_the_batch(self, tmp_repo,
                                                                     monkeypatch):
         # Finalizing already deleted the events, so a store failure here loses only the record
@@ -1010,7 +1110,8 @@ class TestRetentionWiring:
         # The aged file event corroborated nothing (`insufficient`), so nothing held it and
         # retention is what finally bounds it.
         assert _pending(tmp_repo) == []
-        assert spool.evidence_diagnostics(tmp_repo)["gap"]["drops"] >= 1
+        gap = spool.evidence_diagnostics(tmp_repo)["gap"]
+        assert gap["expired"] >= 1 and gap["drops"] == 0
 
     def test_an_emit_only_host_still_gets_retention_at_session_start(self, tmp_repo):
         """Codex reaches no reconciliation entrypoint and Cursor emits directives only, so
@@ -1022,7 +1123,11 @@ class TestRetentionWiring:
         store.session_start_payload(tmp_repo)
 
         assert spool.list_pending_evidence(tmp_repo) == []
-        assert spool.evidence_diagnostics(tmp_repo)["gap"]["drops"] == 1
+        # And it is recorded as what it is. This host NEVER reconciles, so its evidence ageing
+        # out is the queue working as designed — counting it in `drops` made `contexer status`
+        # report "1 event lost" on a repo that lost nothing.
+        gap = spool.evidence_diagnostics(tmp_repo)["gap"]
+        assert gap["expired"] == 1 and gap["drops"] == 0
 
     def test_session_start_finalizes_a_held_candidate_whose_decision_is_gone(self, tmp_repo):
         """The orphan sweep, end to end. A held candidate's decision can be deleted out of
