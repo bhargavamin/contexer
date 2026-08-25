@@ -7,8 +7,8 @@ Everything timing-shaped here carries `@pytest.mark.perf`, so it is deselected i
 skipped whenever coverage is on (a wall-clock number taken under a tracer is not the number
 the assertion is about — see docs/testing.md). The thresholds are deliberately several times
 the measured figure: they exist to catch an ORDER-OF-MAGNITUDE regression, not to police
-jitter on a shared runner, which is the failure mode `test_novelty_filter_write_latency_at_
-capacity` already paid for.
+jitter on a shared runner, which is the failure mode the novelty-filter write-latency
+benchmark already paid for twice.
 
 Four things are measured, one per section:
 
@@ -40,7 +40,7 @@ import pytest
 
 from contexer import candidates, evidence, policy, policy_api, reconcile, spool, store
 
-RUNS = 200
+_SAMPLES = 50          # per timed loop; enough for a stable p95 without a slow suite
 
 
 def _pstats(values: list[float]) -> dict:
@@ -261,13 +261,13 @@ def test_policy_selection_and_evaluation_at_the_store_cap(tmp_repo):
                                        + "\n+ # TODO fix this\n"}}
 
     selection = _pstats([_timed(lambda: policy.select_policies(entries, request))
-                         for _ in range(RUNS // 4)])
-    _report(f"select_policies over {store.MAX_ENTRIES} decisions ({RUNS // 4})", selection)
+                         for _ in range(_SAMPLES)])
+    _report(f"select_policies over {store.MAX_ENTRIES} decisions ({_SAMPLES})", selection)
 
     selected = policy.select_policies(entries, request)
     judging = _pstats([_timed(lambda: policy.evaluate_policies(selected, request))
-                       for _ in range(RUNS // 4)])
-    _report(f"evaluate_policies over {len(selected)} selected ({RUNS // 4})", judging)
+                       for _ in range(_SAMPLES)])
+    _report(f"evaluate_policies over {len(selected)} selected ({_SAMPLES})", judging)
 
     assert [m["verdict"] for m in policy.evaluate_policies(selected, request)["matches"]], \
         "the armed rule never fired, so the numbers describe an empty run"
@@ -285,7 +285,7 @@ def test_evaluate_operation_end_to_end_at_the_store_cap(tmp_repo, monkeypatch):
 
     stats = _pstats([_timed(lambda: policy_api.evaluate_operation(
         tmp_repo, operation="commit", files=[f"src/module_{i}.py" for i in range(5)],
-        artifact_kind="diff", artifact=diff)) for _ in range(RUNS // 4)])
-    _report(f"evaluate_operation at {store.MAX_ENTRIES} decisions ({RUNS // 4})", stats)
+        artifact_kind="diff", artifact=diff)) for _ in range(_SAMPLES)])
+    _report(f"evaluate_operation at {store.MAX_ENTRIES} decisions ({_SAMPLES})", stats)
 
     assert stats["p99"] < 500.0, f"evaluate_operation too slow: {stats['p99']:.3f}ms"
