@@ -316,7 +316,7 @@ def git_repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def repo(git_repo, monkeypatch):
-    """`git_repo` with STORE_DIR redirected to a sibling temp dir — for tests
+    """`git_repo` with STORE_DIR redirected to a sibling temp dir - for tests
     that read/write the store or the guard's sidecar files, not just git plumbing.
     Same pattern as test_store.py's tmp_repo / session_repo_preferred_over_pointer."""
     monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
@@ -343,7 +343,7 @@ def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
                 title="", session_id="test-session", approved_by=None):
     """Build a decision entry via the real entry constructor (so revisions/
     current_revision_id/status/source all come out shaped exactly like production
-    data) and append it directly to the (repo or global) store — bypassing the
+    data) and append it directly to the (repo or global) store - bypassing the
     novelty filter, which is irrelevant to the guard engine's own tests."""
     entry = store._new_decision_entry(content, session_id, subtype,
                                       created_by=created_by, status=status, title=title)

@@ -487,7 +487,7 @@ class TestTotalLoss:
 # ── legacy clear_anchors proposals (pre-lifecycle-lane stores) ────────────────
 
 class TestLegacyClearAnchorsProposal:
-    """anchors.py no longer CREATES a `clear_anchors` proposed_revision — anchor-loss
+    """anchors.py no longer CREATES a `clear_anchors` proposed_revision - anchor-loss
     withdrawal moved to the `proposed_lifecycle` lane. A store written before that move can
     still hold one pending, so the promote path stays working: a proposal a developer can
     neither approve nor understand would be worse than the branch it costs."""
@@ -524,7 +524,7 @@ class TestLegacyClearAnchorsProposal:
 
     def test_approving_pops_stale_anchor_candidates(self, repo):
         # `anchor_candidates` legitimately SURVIVE on an already-approved entry, so a
-        # retirement approval can meet a stale guess — and the candidate-blessing branch
+        # retirement approval can meet a stale guess - and the candidate-blessing branch
         # used to read the freshly-emptied source_files as "nothing anchors this entry" and
         # promote that guess into a REAL anchor.
         _write(repo, "gone.py")

@@ -122,7 +122,7 @@ class TestAuditSessions:
     def test_sentinel_session_ids_never_participate(self, store_dir, sentinel):
         # Same reasoning as the memory-import exclusion: these are LITERALS, not sessions.
         # `unknown` is what an evidence event carries when the host supplied no session id,
-        # `reconcile` what a decision derived from such evidence records — so every repo with
+        # `reconcile` what a decision derived from such evidence records - so every repo with
         # one shares it, and pairing on them would flag those repos forever.
         _write_store(store_dir, "/repo/a", [_decision("a1", sentinel)])
         _write_store(store_dir, "/repo/b", [_decision("b1", sentinel)])

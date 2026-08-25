@@ -179,7 +179,7 @@ def capture_constraint(repo_path: str, raw: str) -> str:
     """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives.
 
     Cursor's evidence is prompt-only: its hooks cannot observe an edit, so this host emits
-    `user_directive` and never `file_changed` — an absent event here means Cursor could not
+    `user_directive` and never `file_changed` - an absent event here means Cursor could not
     see the edit, which is what the spool should say."""
     try:
         repo, repo_source = _repo_from_verbose(raw, repo_path)

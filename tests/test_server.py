@@ -580,7 +580,7 @@ def test_session_id_falls_back_when_env_var_is_empty_string():
 
 
 # ── evaluate_policy ──────────────────────────────────────────────────────────────
-# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing — a `block` is a
+# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing - a `block` is a
 # sentence for the model to relay to the developer, not a refusal, and an `allow` is not
 # permission to stop asking them.
 

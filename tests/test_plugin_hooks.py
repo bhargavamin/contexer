@@ -113,7 +113,7 @@ def adapter_hooks(tmp_path, monkeypatch):
     home so this never touches the real ~/.claude config.
 
     Isolating the home dir alone is NOT enough: claude.install() also runs
-    clean_legacy_repo_settings against store.git_root(os.getcwd()) — the PROCESS cwd's
+    clean_legacy_repo_settings against store.git_root(os.getcwd()) - the PROCESS cwd's
     git root, not the injected home — to clean up a pre-CLI installer's repo-level
     hooks. Left unpatched, a test run from a checkout whose <repo>/.claude/settings.json
     still carries legacy Contexer hook markers would get silently rewritten (the same

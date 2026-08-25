@@ -662,7 +662,7 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     path-like artifact it mentions (_guard_content_artifacts), expanded to its
     possible file spellings (_artifact_path_spellings), canonicalized, and kept
     only if the file exists in the working tree. Deduped (first-seen order)
-    and capped at store.MAX_SOURCE_FILES — the same cap _anchor_sources
+    and capped at store.MAX_SOURCE_FILES - the same cap _anchor_sources
     itself enforces on write."""
     seen: set[str] = set()
     results: list[str] = []
@@ -723,8 +723,8 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
 #   OPEN, never partial-blocks).
 # What a rule MEANS on both paths is `policy`'s: `policy.validate_check` decides
 # what may be armed, `policy.rule_matches` decides what counts as a hit. This
-# module owns only the git-shaped half — which files, read how, budgeted by what,
-# reported where — so the deterministic check exists in exactly one place.
+# module owns only the git-shaped half - which files, read how, budgeted by what,
+# reported where - so the deterministic check exists in exactly one place.
 
 # Wall-clock seconds, across the WHOLE guard_staged call: the deadline is stamped
 # at the top of guard_staged and threaded through BOTH tiers — Tier-2 rule
@@ -740,7 +740,7 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
     (Tier-2) counterpart to Tier-1's advisory pairing. MANAGEMENT path: under
     store_lock, may raise ValueError (see policy.validate_check for the
     machine-checkable refusals; separately refuses an entry that doesn't exist,
-    or one whose entry_status isn't "approved" — an armed rule must already be
+    or one whose entry_status isn't "approved" - an armed rule must already be
     developer-trusted, since arming an unreviewed AI guess would let it block a
     commit no human ever signed off on).
 
@@ -810,7 +810,7 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
 
 def _armed_rules(entries: list[dict]) -> list[dict]:
     """The subset of `entries` that are BOTH carrying a guard_check AND STILL
-    entry_status == "approved" right now — status is re-checked at RUN time,
+    entry_status == "approved" right now - status is re-checked at RUN time,
     never trusted from arm time, so a decision later ignored or superseded
     stops firing without an explicit disarm. Pure, no I/O; the caller gathers
     from repo + global stores by calling this once per store and concatenating
@@ -819,7 +819,7 @@ def _armed_rules(entries: list[dict]) -> list[dict]:
 
 
 def _rule_selects(rule: dict, path: str) -> bool:
-    """Whether one armed ENTRY's `paths` glob applies to `path` — unwrapping the guard_check
+    """Whether one armed ENTRY's `paths` glob applies to `path` - unwrapping the guard_check
     the entry carries and delegating the glob itself to `policy.rule_selects`, which is the
     one definition of it.
 
@@ -839,8 +839,8 @@ def _armed_policy(entry: dict, path: str) -> dict:
 
     Selection stays HERE rather than being handed to `policy.select_policies`, and that is
     deliberate: `select_policies` gates on `policy.is_trusted` (the mirror of
-    `_guard_trusted`), which is TIER-1's rule. Tier 2 gates on `_armed_rules` — approved AND
-    explicitly armed — because arming is itself a deliberate developer act, more deliberate
+    `_guard_trusted`), which is TIER-1's rule. Tier 2 gates on `_armed_rules` - approved AND
+    explicitly armed - because arming is itself a deliberate developer act, more deliberate
     than approval. Routing Tier 2 through the trust gate would silently disarm every rule a
     developer armed on an approved decision whose revision source is `ai`, which is a
     behaviour change, not a refactor.
@@ -866,8 +866,8 @@ def _evaluate_rules(rules: list[dict], path: str,
     """Judge `rules` (as returned by _armed_rules) against ONE staged file's already-read
     content, through `policy.evaluate_policies`. Returns (violation rows, dead-rule rows).
 
-    This is the whole Tier-2 adapter seam: git-shaped work — which entries are armed, which
-    files are staged, reading them, the wall-clock budget — stays in this module, and the
+    This is the whole Tier-2 adapter seam: git-shaped work - which entries are armed, which
+    files are staged, reading them, the wall-clock budget - stays in this module, and the
     judging is the evaluator's. A rule whose guard_check["paths"] glob doesn't fnmatch `path`
     is not offered to it at all (empty paths = applies to every staged file).
 
@@ -875,7 +875,7 @@ def _evaluate_rules(rules: list[dict], path: str,
     it could not run (an unparseable pattern, an unknown check type) as an `unchecked` row
     rather than as a clean pass, and the guard surfaces that to the developer instead of
     swallowing it. A rule that silently never fires is the failure the developer is least
-    able to notice — they believe they are protected and they are not. It is reported, never
+    able to notice - they believe they are protected and they are not. It is reported, never
     blocked on: a rule that cannot run is the guard's own limitation, the same class as an
     exhausted budget.
 
@@ -884,7 +884,7 @@ def _evaluate_rules(rules: list[dict], path: str,
     ITSELF and returns what it judged, where the old inline judging let the exception unwind
     to `guard_staged`'s catch-all, which discarded every violation accumulated across all
     earlier files and rules and exited 0. So a raise here used to fail OPEN and would now
-    fail CLOSED — the accumulated violations survive and the commit is blocked. Nothing can
+    fail CLOSED - the accumulated violations survive and the commit is blocked. Nothing can
     currently reach it: `rule_matches` catches `re.error`/`TypeError`, `_match` cannot exceed
     the armed verdict ceiling, `content` is always a str by the time `_guard_violations` has
     it, and a malformed `guard_check` raises in `_rule_selects` ABOVE this call, where the old
@@ -892,7 +892,7 @@ def _evaluate_rules(rules: list[dict], path: str,
 
     Cost this pays that the old path did not: `evaluate_policies` computes a
     `policy_set_version` (a JSON dump plus a sha256) per call, and `_guard_violations` calls
-    it once per (file, rule), so a 500-file x 5-rule run computes ~2500 of them — on top of
+    it once per (file, rule), so a 500-file x 5-rule run computes ~2500 of them - on top of
     the title derivation in `_armed_policy`, which the old path ran only on a HIT. Both are
     small against a budget where one 1MB `secret` scan costs ~155ms, and the budget tests
     pass; they are named so the next person tuning this knows where the cost sits."""
@@ -932,7 +932,7 @@ def _guard_violations(repo: str, staged: list[str],
     scoped to `src/**/*.py` does not make an unscannable `data/dump.json` look like
     missed coverage.
 
-    The same list also carries DEAD RULES — `{"decision_id", "reason"}` rows for an armed
+    The same list also carries DEAD RULES - `{"decision_id", "reason"}` rows for an armed
     rule `policy.evaluate_policies` could not run at all (see `_evaluate_rules`). Same
     principle, one axis over: a rule that never fires must not read as a rule that found
     nothing. They carry no `file` key, which is what tells the two row kinds apart.
@@ -950,7 +950,7 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
     violations: list[dict] = []
     unchecked: list[dict] = []
     # A dead rule is a property of the RULE, not of any one staged file, so it is reported
-    # once per run keyed on (decision, reason) — otherwise one broken pattern would print a
+    # once per run keyed on (decision, reason) - otherwise one broken pattern would print a
     # line for every staged file it selects.
     dead: dict[tuple, dict] = {}
     # Stop scanning with _GUARD_SCAN_RESERVE left, so the run returns normally (violations
@@ -1031,7 +1031,7 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     like "total_advisories" the key is present only when there is something to
     report, so a clean run's dict shape is unchanged. It never affects the exit
     code: neither a file the guard could not read nor a rule it could not run is
-    a violation to block on — both are the guard's own limitations."""
+    a violation to block on - both are the guard's own limitations."""
     try:
         if os.environ.get("CONTEXER_GUARD") == "0":
             return {"advisories": [], "violations": [], "skipped": "env"}

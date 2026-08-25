@@ -1872,7 +1872,7 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     wrote. An explicit stashed marker, not a wording/content heuristic, so this never
     misfires on an ordinary proposal that happens to mention missing files.
 
-    LEGACY, and staying: `anchors.py` no longer CREATES `clear_anchors` proposals — anchor-loss
+    LEGACY, and staying: `anchors.py` no longer CREATES `clear_anchors` proposals - anchor-loss
     withdrawal moved to the `proposed_lifecycle` lane, where approving retires the decision
     outright instead of keeping it live with a withdrawal clause. This branch remains because a
     store written before that move can still hold one pending, and a proposal that stopped
@@ -1952,8 +1952,8 @@ def touch_pending_review(repo_path: str) -> None:
     reads it to nudge the developer to review pending decisions mid-session. Fail-soft: a
     flag-write error must never break capture.
 
-    Public because it has TWO reader modules — `anchors.verify_anchors` and
-    `lifecycle.propose_lifecycle` — and two readers are an undeclared interface, not coupling."""
+    Public because it has TWO reader modules - `anchors.verify_anchors` and
+    `lifecycle.propose_lifecycle` - and two readers are an undeclared interface, not coupling."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         _pending_review_flag(repo_path).touch()
@@ -1969,7 +1969,7 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     touched, so a store written before this key existed loads and renders unchanged.
 
     This is where a disposition LIVES once reconciliation deletes the raw events it settled
-    (`spool.finalize_candidate_evidence` returns the summary, this preserves it) — the decision
+    (`spool.finalize_candidate_evidence` returns the summary, this preserves it) - the decision
     keeps the receipt for the evidence it came from. A missing entry returns False rather than
     raising: the candidate is settled either way, and only the receipt is lost.
 
@@ -1991,7 +1991,7 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     def _appended(entry: dict) -> None:
         history = entry.get("evidence_summary")
         # Rebuilt rather than appended to: a hand-edited non-list would otherwise raise here,
-        # and this is bookkeeping — it must never be the thing that breaks a store write.
+        # and this is bookkeeping - it must never be the thing that breaks a store write.
         entry["evidence_summary"] = (history if isinstance(history, list) else []) + \
             [dict(summary)]
 
@@ -2275,7 +2275,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
 
     `force_pending` makes a NEWLY CREATED entry land `pending_approval` whatever
     `_classify_level` would have said. It exists for a caller whose captures are INFERRED
-    rather than stated — reconcile.py, deriving decisions from recorded evidence — where the
+    rather than stated - reconcile.py, deriving decisions from recorded evidence - where the
     `suggested` tier is the wrong resting place: a suggested decision injects at session start
     yet never appears in `review_pending`, so it is trusted without ever having been offered
     for review. Bootstrap's medium-tier conventions chose `pending_approval` for exactly this
@@ -2757,7 +2757,7 @@ def format_pending_review(repo_path: str) -> str:
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             if not life:
-                # A live decision whose only pending item is a retirement is already approved —
+                # A live decision whose only pending item is a retirement is already approved -
                 # offering to approve it again would be the one action approve_decision rejects.
                 lines.append(
                     f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
@@ -2795,8 +2795,8 @@ def _deleted_path(repo_path: str) -> Path:
 def read_deleted(repo_path: str) -> tuple[dict, str | None]:
     """(sidecar data, parse error) from ONE read of the tombstone sidecar.
 
-    Public because it has TWO reader modules — `console_api.list_tombstones` and
-    `lifecycle.tombstone_entry` — and two readers are an undeclared interface, not coupling.
+    Public because it has TWO reader modules - `console_api.list_tombstones` and
+    `lifecycle.tombstone_entry` - and two readers are an undeclared interface, not coupling.
 
     Same degrade-but-report split as `load` + `load_diagnostics` for the live store: the data
     is an empty graveyard when the file cannot be parsed, and `error` is the ONLY thing that
@@ -2899,7 +2899,7 @@ def delete_decision(repo_path: str, entry_id: str, actor: str = "ui") -> tuple[b
     (ok, message).
 
     A call site into `lifecycle.tombstone_entry`, so tombstone history is uniform however a
-    decision left the live store — but with `stale_guard=False`, because a developer clicking
+    decision left the live store - but with `stale_guard=False`, because a developer clicking
     Delete is not resolving anyone's retirement proposal. The console's wording is deliberately
     unchanged: terminology moves to lifecycle language on the CLI/MCP surfaces first.
 
@@ -3194,7 +3194,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # COMPLETED lifecycle events only (plan E2): `lifecycle` is written solely by
         # lifecycle.tombstone_entry / restore_decision, i.e. only once a human has actually
         # retired or restored the decision. `proposed_lifecycle` is a different key, is not read
-        # here, and has no wire parameter at all — an unreviewed retirement stays home. Bounded
+        # here, and has no wire parameter at all - an unreviewed retirement stays home. Bounded
         # and scrubbed at this layer so the durable outbox carries exactly what a later drain
         # sends; `remote._wire_args` bounds again as the chokepoint guarantee, and decides there
         # whether the server ever sees it.
@@ -3221,7 +3221,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         "source_files": source_files,
         "source_files_unconfirmed": unconfirmed,
         # Reaches the wire subject to remote._WIRE_LIFECYCLE *and* the server having advertised
-        # `decisionLifecycle.tombstones` — see that constant. `[]` for the ordinary decision
+        # `decisionLifecycle.tombstones` - see that constant. `[]` for the ordinary decision
         # that has never been retired or restored, so downstream builders read it uniformly.
         "lifecycle": lifecycle or [],
         # How many files this decision really governs, when fewer are being sent: either
@@ -4179,7 +4179,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # entrypoint, Cursor emits directives only): this is the one store-side path EVERY host
     # traverses at session start, and session start is not an editor hook, so the spool's
     # never-scan-in-a-hook rule holds. Positioned with `ensure_retrieval_index` and for the
-    # same reason — unconditional on `source`, ahead of the `resume` early-return, since a
+    # same reason - unconditional on `source`, ahead of the `resume` early-return, since a
     # resumed session's spool grows exactly like a fresh one's. `maintain_spool` is
     # self-gating (no spool dir / inside its TTL = no work) and never raises, so the call
     # site is deliberately unguarded on the strength of that promise.
@@ -4861,7 +4861,7 @@ def record_edited_file(repo_path: str, file_path: str) -> str:
     record (falsy path, unresolvable, or outside the repo). The evidence ledger's
     `file_changed` event names that return value rather than canonicalizing the host's raw
     `file_path` a second time, so the event and this sidecar can only ever name the same file
-    — the caller has no second spelling to get wrong, and no reader of `_guard_relpath` is
+    - the caller has no second spelling to get wrong, and no reader of `_guard_relpath` is
     added outside guard_engine. A path that resolved but whose SIDECAR WRITE then failed is
     still returned: the edit happened, and the ledger records it independently of this file."""
     if not file_path:
@@ -6728,7 +6728,7 @@ _CONSOLE_EXPORTS = frozenset({
 })
 # Same mechanism once more for `lifecycle.py`, and deliberately ONE name. `restore_decision`
 # was public on `store` before the lifecycle lane took it, so the facade keeps that spelling
-# resolving for anything outside this repo. Every OTHER lifecycle name is new — it was never
+# resolving for anything outside this repo. Every OTHER lifecycle name is new - it was never
 # on `store`, so there is no back-compat to keep and nothing to re-export: `propose_lifecycle`,
 # `retire_decision`, `dismiss_lifecycle`, `attach_lifecycle_proposal` and
 # `lifecycle_proposal_stale` are imported from the module that owns them by the callers that

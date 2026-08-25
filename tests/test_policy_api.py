@@ -1,4 +1,4 @@
-"""Tests for contexer/policy_api.py — the shared facade both general policy surfaces sit on.
+"""Tests for contexer/policy_api.py - the shared facade both general policy surfaces sit on.
 
 `tests/test_policy.py` already pins what the pure evaluator decides. What can only be pinned
 HERE is everything the facade adds around it: that a malformed request comes back as errors
@@ -8,7 +8,7 @@ tool and the CLI entirely, and that rendering scrubs while evaluation does not.
 
 That last pair is the one that has to be tested together. Scrubbing on the way IN would leave
 a `secret` rule matching `[REDACTED:...]` and finding nothing, and scrubbing nowhere would
-print the key. Only asserting BOTH — verdict `block` AND the key absent from the render —
+print the key. Only asserting BOTH - verdict `block` AND the key absent from the render -
 says the boundary is in the right place.
 """
 import pytest
@@ -83,7 +83,7 @@ class TestValidationNeverRaisesAtTheSurface:
 class TestBoundsHoldBelowTheSurface:
     """The MCP schema and the CLI flags each bound only their own callers. The facade is the
     chokepoint every caller funnels through, which is why the same bounds are applied again
-    here — the `remote.bound_source_files` shape."""
+    here - the `remote.bound_source_files` shape."""
 
     def test_over_length_file_list_is_bounded_for_a_caller_that_skipped_both_surfaces(
             self, tmp_repo):
@@ -166,7 +166,7 @@ class TestGapsAreReportedNeverPassedClean:
         assert result["evaluation_status"] == "partial"
 
     def test_a_malformed_gap_row_still_raises_from_the_evaluator(self, tmp_repo):
-        """policy.evaluate_policies raises on a caller's broken gap row on purpose — that is a
+        """policy.evaluate_policies raises on a caller's broken gap row on purpose - that is a
         bug in the caller, and swallowing it converts it into a false clean verdict. The
         facade must not soften that into a fail-soft no-op."""
         with pytest.raises(ValueError):

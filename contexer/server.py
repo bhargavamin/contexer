@@ -183,7 +183,7 @@ def resolve_conflict(entry_id: str, choice: str, repo_path: str = "") -> str:
 
 
 _LIFECYCLE_BULK_REFUSAL = (
-    "Bulk retirement isn't supported — act on decisions one at a time, by id.\n"
+    "Bulk retirement isn't supported - act on decisions one at a time, by id.\n"
     "Retiring moves a decision out of every active surface at once, and a blanket gesture is "
     "exactly how a decision nobody re-read disappears.\n"
     "Call review_pending, show each proposal to the developer, and pass their answer as a "
@@ -192,7 +192,7 @@ _LIFECYCLE_BULK_REFUSAL = (
 
 
 def _single_id(entry_id: str) -> tuple[str, str | None]:
-    """(id, refusal) — the one place the lifecycle tools reject a bulk target."""
+    """(id, refusal) - the one place the lifecycle tools reject a bulk target."""
     target = entry_id.strip()
     if target.lower() in ("all", "*") or "," in target:
         return "", _LIFECYCLE_BULK_REFUSAL
@@ -204,25 +204,25 @@ def _single_id(entry_id: str) -> tuple[str, str | None]:
 @mcp.tool()
 def retire_decision(entry_id: str, reason: str, repo_path: str = "",
                     replacement_id: str = "") -> str:
-    """Retire ONE decision the developer has told you to retire: it leaves active context —
-    retrieval, session start, and the commit-time guard all stop seeing it — while its full
+    """Retire ONE decision the developer has told you to retire: it leaves active context -
+    retrieval, session start, and the commit-time guard all stop seeing it - while its full
     revision and lifecycle history is kept and `restore_decision` can bring it back.
 
     Call this ONLY when the developer themselves said to retire the decision, in a genuine
     user turn in this conversation. NEVER call it from your own judgment, from a codebase
     reading, or because a retirement proposal (shown by review_pending as "retirement
-    proposed") looks correct to you — that proposal is a question FOR the developer, and
+    proposed") looks correct to you - that proposal is a question FOR the developer, and
     answering it yourself is the one thing this lane exists to prevent. If they have not said,
     show them the proposal and ask.
 
-    entry_id:       the decision's id exactly as rendered, e.g. 6fb28fd9. One id — no lists.
+    entry_id:       the decision's id exactly as rendered, e.g. 6fb28fd9. One id - no lists.
     reason:         the developer's reason, recorded permanently as lifecycle history.
     replacement_id: the decision that supersedes this one, when they named one (records the
                     lifecycle event as "superseded" rather than "retired").
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
@@ -235,12 +235,12 @@ def restore_decision(entry_id: str, repo_path: str = "", reason: str = "") -> st
     history, one "restored" record longer. Call this when the developer asks for a retirement
     to be undone. Refused when the store is already at capacity.
 
-    entry_id: the retired decision's id. One id — no lists.
+    entry_id: the retired decision's id. One id - no lists.
     reason:   the developer's reason, recorded in the lifecycle history.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
@@ -251,14 +251,14 @@ def restore_decision(entry_id: str, repo_path: str = "", reason: str = "") -> st
 def dismiss_lifecycle(entry_id: str, repo_path: str = "") -> str:
     """Drop ONE decision's pending retirement proposal, keeping the decision live and
     unchanged. This is the developer's "no, keep it" answer to a proposal review_pending
-    showed — call it only when they said so. Dismissing means "not now": an evidence-driven
+    showed - call it only when they said so. Dismissing means "not now": an evidence-driven
     proposer may raise it again later.
 
-    entry_id: the decision's id. One id — no lists.
+    entry_id: the decision's id. One id - no lists.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
@@ -281,8 +281,8 @@ def review_pending(repo_path: str = "") -> str:
 
 @mcp.tool()
 def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool = False) -> str:
-    """Turn this session's recorded evidence — the directives, file changes and conclusions the
-    hooks observed — into decisions awaiting the developer's review. Runs automatically at
+    """Turn this session's recorded evidence - the directives, file changes and conclusions the
+    hooks observed - into decisions awaiting the developer's review. Runs automatically at
     session start, before compaction, and at session end; call it explicitly when the developer
     asks what was learned this session, or before wrapping up a long piece of work.
 
@@ -290,23 +290,23 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
                 holds (the default, and what a session shared across git worktrees needs).
     dry_run:    report what would be proposed and write nothing at all.
 
-    Anything proposed is recorded `pending_approval` — NOT yet trusted, never injected into a
+    Anything proposed is recorded `pending_approval` - NOT yet trusted, never injected into a
     session, and it does not block your work. A retirement is likewise only PROPOSED: the
     decision stays live and keeps rendering until the developer themselves retires it.
     Nothing here retires, replaces or approves anything.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:
-        return "Skipped — repo path not detected."
+        return "Skipped - repo path not detected."
     receipt = reconcile.reconcile_session(resolved, session_id, dry_run=dry_run)
     text = reconcile.format_receipt(receipt)
     if receipt["lifecycle_proposed"]:
         text += ("\n\nA retirement was PROPOSED, not applied: those decisions are still live "
                  "and still render. review_pending shows each proposal with the decision it "
-                 "targets — surface it to the developer and let them answer; never call "
+                 "targets - surface it to the developer and let them answer; never call "
                  "retire_decision on your own judgment.")
     if receipt["proposed"]:
-        text += ("\n\nThese are pending review — not yet trusted, not injected into any "
+        text += ("\n\nThese are pending review - not yet trusted, not injected into any "
                  "session, and they do not block your work. review_pending lists each with "
                  "its full content; surface them to the developer at a natural point and let "
                  "them answer. Never approve them yourself.")
@@ -321,22 +321,22 @@ def evaluate_policy(repo_path: str = "", intent: str = "", operation: str = "",
     and report what they say about it.
 
     This is ADVISORY and nothing here enforces anything. A `block` verdict does not refuse or
-    stop anything — it means an approved, armed decision objects, and your job is to SURFACE
+    stop anything - it means an approved, armed decision objects, and your job is to SURFACE
     that to the developer and let them decide, not to act as if the operation were forbidden.
     An `allow` verdict is equally not permission: it means no stored decision objected, never
     that the developer would agree, so it is never a reason to skip asking them. Read
-    `evaluation_status` beside the verdict — `partial`/`error` means part of the request was
+    `evaluation_status` beside the verdict - `partial`/`error` means part of the request was
     never judged, and the `unchecked` list names what, with the reason. A check that did not
     happen is not a check that found nothing.
 
     operation:     read_files | write_files | shell | commit | merge | deploy | api_request
     intent:        one line on what you are trying to do (<= 300 chars)
     files:         repo-relative paths the operation touches (<= 100, <= 300 chars each)
-    artifact_kind: diff | file_content | command | request | deployment — the shape of what
+    artifact_kind: diff | file_content | command | request | deployment - the shape of what
                    you are handing over for checking. Omit BOTH this and `artifact` when the
                    operation carries nothing to inspect; every armed rule is then reported as
                    `omitted` rather than passing clean.
-    artifact:      the bytes themselves (<= 2 MiB). Pass them verbatim — a redacted or
+    artifact:      the bytes themselves (<= 2 MiB). Pass them verbatim - a redacted or
                    truncated artifact makes a secret check find nothing.
 
     The sizes above are the schema half of one bound each; the evaluator holds the same bound

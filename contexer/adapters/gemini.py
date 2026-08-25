@@ -203,7 +203,7 @@ def after_write(repo_path: str, raw: str) -> str:
 
     Repo resolution is `hook_cwd_repo`, NOT `resolve_repo` (Greptile P1, PR #181): this
     is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
-    and `resolve_repo` would fall through to the shared `.current_repo` pointer — which can
+    and `resolve_repo` would fall through to the shared `.current_repo` pointer - which can
     name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
     var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
     are first-class stores keyed by absolute path, so silently recording under whatever repo
@@ -249,7 +249,7 @@ def _reconcile_evidence(repo_path: str) -> None:
     checkpoint events. Fail-soft to the point of swallowing an import error, and cheap in the
     quiet case: `reconcile_session` reads no store until it has unconsumed evidence. The twin
     of `claude._reconcile_evidence`, which rides on `sync_memory` because Claude's three
-    checkpoints all call it — Gemini has no such shared entrypoint, so it is wired per event."""
+    checkpoints all call it - Gemini has no such shared entrypoint, so it is wired per event."""
     try:
         from contexer import reconcile
         repo = store.hook_cwd_repo(repo_path)

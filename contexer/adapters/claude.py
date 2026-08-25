@@ -402,12 +402,12 @@ def sync_memory(repo_path: str) -> int:
 
     Returns the memory-import count, exactly as before. The reconciliation rides along here
     because this is the one entrypoint the installed SessionStart, PreCompact and SessionEnd
-    hooks ALL already call — all three evidence checkpoints, with no hook command, settings or
-    installer change — and the session-start call doubles as the next-session recovery net for
+    hooks ALL already call - all three evidence checkpoints, with no hook command, settings or
+    installer change - and the session-start call doubles as the next-session recovery net for
     a session that ended without one. It runs on every invocation, including the ones where the
     memory fingerprint is unchanged and the import short-circuits: the two have nothing to do
     with each other, and gating one on the other would silence reconciliation on the common
-    path. `reconcile_session` never raises and reads no store — let alone takes the store lock —
+    path. `reconcile_session` never raises and reads no store - let alone takes the store lock -
     until it has unconsumed evidence, so a quiet repo costs two lock-free sidecar reads.
     """
     stored = _import_memory_facts(repo_path)
@@ -418,7 +418,7 @@ def sync_memory(repo_path: str) -> int:
 def _reconcile_evidence(repo_path: str) -> None:
     """Materialize recorded evidence into decisions pending review. Fail-soft to the point of
     swallowing an import error: this is a passenger on `sync_memory`, and a passenger must
-    never cost the session its memory import — let alone its SessionStart output."""
+    never cost the session its memory import - let alone its SessionStart output."""
     try:
         from contexer import reconcile
         repo = store.resolve_repo(store.hook_cwd_repo(repo_path))

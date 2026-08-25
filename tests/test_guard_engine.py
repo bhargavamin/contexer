@@ -1051,7 +1051,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
 class TestApprovedByStampInvalidatedByNonHumanRevision:
     """`approved_by` is an ENTRY-level stamp, but pattern/convention trivial updates via
     `update_context(replace_id=...)` (and memory-sync refreshes) apply IN PLACE as a new
-    current revision (`revisions.append_revision`) — before this fix the entry kept its 'human' stamp
+    current revision (`revisions.append_revision`) - before this fix the entry kept its 'human' stamp
     while the live content became unreviewed AI/tool text, so the guard trusted (and advised
     with) content the developer never actually saw. `revisions.append_revision` now pops `approved_by`
     whenever the new revision's `source` isn't 'human'; a genuine ratification site
@@ -1113,7 +1113,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
     def test_suggested_update_promotion_ordering_pin(self, repo):
         """Ordering pin: `_apply_approval` stamps `approved_by` AFTER `_promote_proposal`
-        (which calls `revisions.append_revision` with the proposal's own source — 'ai' by default,
+        (which calls `revisions.append_revision` with the proposal's own source - 'ai' by default,
         NOT 'human'). If a future change stamped BEFORE promoting again, the chokepoint's
         invalidation would immediately erase the stamp the approval action just set, and
         this assertion would catch it. The promoted revision's own `source` field stays

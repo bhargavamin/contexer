@@ -7,7 +7,7 @@ and nothing else.
 
 The other property under test is that the four hosts emit ONE schema rather than four:
 `file_changed` from Claude/Codex and from Gemini must differ only in `source` and the host's
-own session id, and Cursor — whose hooks cannot observe an edit — must emit no `file_changed`
+own session id, and Cursor - whose hooks cannot observe an edit - must emit no `file_changed`
 at all, so an absent event there means "Cursor could not see it" rather than "nothing happened".
 """
 import json as _json
@@ -58,7 +58,7 @@ class TestFileChangedIsOneSchemaAcrossHosts:
 
     def test_a_path_outside_the_repo_records_nothing_either_way(self, tmp_repo):
         # record_edited_file drops it (it could never pair against a staged path), so there
-        # is no recorded path to key an event on — and validation would reject "../" anyway.
+        # is no recorded path to key an event on - and validation would reject "../" anyway.
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "../outside.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"
         assert store._read_edited_files(tmp_repo) == []
@@ -133,7 +133,7 @@ class TestUserDirectiveEmission:
 
 class TestStoreFailureIsRecordedNotSwallowed:
     """The loss case the spool exists for: capture raised, so no entry proves the directive
-    — the event is still written, flagged `unverified`, and the hook behaves exactly as before."""
+    - the event is still written, flagged `unverified`, and the hook behaves exactly as before."""
 
     def test_claude_hook_output_unchanged_and_event_flagged(self, tmp_repo, monkeypatch):
         monkeypatch.setattr(store, "capture_user_constraint", _boom)

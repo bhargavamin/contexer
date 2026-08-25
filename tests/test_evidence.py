@@ -1,4 +1,4 @@
-"""Tests for contexer/evidence.py — the evidence event schema and its validator.
+"""Tests for contexer/evidence.py - the evidence event schema and its validator.
 
 `validate_event` is a pure function: it returns `(normalized_copy, [])` or `(None, errors)`,
 collects EVERY structural error rather than the first, never raises, and never mutates its
@@ -85,7 +85,7 @@ def test_non_mapping_input_never_raises(bad):
                          ids=["list", "dict", "none", "float", "bytes", "object"])
 def test_hostile_field_value_reports_errors_and_never_raises(field, value):
     """The never-raises contract is module-wide, not just for a non-mapping event: a malformed
-    value in ANY field must come back as an error. `kind` was the one field that raised — its
+    value in ANY field must come back as an error. `kind` was the one field that raised - its
     membership test hashes the raw value, so an unhashable one escaped as TypeError."""
     normalized, errors = evidence.validate_event({**GOOD, field: value})
     assert (normalized is None) == bool(errors)
@@ -186,7 +186,7 @@ def test_validating_a_normalized_event_is_a_no_op():
 
 def test_files_total_does_not_consume_a_caller_attribute_slot():
     """Normalization ADDS `files_total`, so an event using all 20 caller slots must still
-    re-validate — otherwise replaying a normalized event is not the no-op above."""
+    re-validate - otherwise replaying a normalized event is not the no-op above."""
     once, errors = evidence.validate_event(
         _event(files=[f"src/f{i}.py" for i in range(25)],
                attributes={f"k{i}": i for i in range(evidence._MAX_ATTRS)}))

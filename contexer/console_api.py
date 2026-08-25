@@ -93,7 +93,7 @@ def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:
 def _inspect_store_file(path: Path) -> tuple[str, dict | None, str | None]:
     """(repo_path, parsed store or None, error or None) for one store file.
 
-    Deliberately NOT `load`, which degrades a corrupt store to an empty one — the console
+    Deliberately NOT `load`, which degrades a corrupt store to an empty one - the console
     has to tell "unreadable" from "empty". `repo_path` is resolved even when `entries` is
     malformed, so such a store still reports its own error under its own name. It is NOT
     recoverable when the JSON itself will not parse: the repo path lives inside the file and
@@ -237,7 +237,7 @@ def _resolve_store(slug: str) -> tuple[Path, str, str | None] | None:
     THE security boundary for the console: a repo path is never accepted from a request, so no
     crafted URL can make the daemon read or write an arbitrary filesystem location.
 
-    Three spellings resolve to the same store — the file's own name, `repo_slug(repo_path)`, and
+    Three spellings resolve to the same store - the file's own name, `repo_slug(repo_path)`, and
     `_legacy_slug(repo_path)`. The last one is what keeps a slug STABLE across the pre-hash
     rename: `_store_path` renames `someorg_somerepo.json` to `someorg_somerepo-8539fba8.json`
     on the first `load`, so without it a client's slug stopped resolving the moment anything
