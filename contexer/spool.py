@@ -379,8 +379,13 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
 
 def held_candidates(repo_path: str) -> dict:
     """`{candidate_id: meta}` for every held candidate — the "already pending" set, and the
-    bookkeeping a later pass needs to settle each one. An unreadable meta reads as `{}`, which
-    still says the candidate is held."""
+    bookkeeping a later pass needs to settle each one.
+
+    The meta is whatever `_read_meta` answers, so it comes in three shapes: the recorded
+    mapping, `{}` when no `candidate.json` was ever written, and `{"unreadable": True}` when
+    one was written and cannot be read. Every one of them means the candidate is HELD; only
+    the first carries an `entry_id`, and the other two are what `evidence_diagnostics` counts
+    as `held_unattributed`."""
     root = _held_root(repo_path)
     try:
         directories = sorted(root.iterdir())
@@ -516,8 +521,11 @@ def _sweep_events(directory: Path) -> int:
         else:
             survivors += 1
             dated.append((mtime, path))
-    # Stable on ties: at identical mtimes the spool genuinely cannot tell which arrived first,
-    # and it falls back to the listing order rather than inventing a distinction.
+    # RESIDUAL, named rather than glossed: the sort is stable, so two files with the SAME mtime
+    # keep listing order — which is filename order, which is `occurred_at` order, i.e. the very
+    # content influence the distinct-mtime case above removes. At equal mtimes the spool has no
+    # arrival fact left to decide with, and a tie-break invented here would be arbitrary; the
+    # real fix is a monotonic arrival counter stamped at write time, not a cleverer sort.
     for _mtime, path in sorted(dated, key=lambda item: item[0])[:max(0, survivors
                                                                      - _MAX_PENDING_EVENTS)]:
         dropped += _unlink(path)
