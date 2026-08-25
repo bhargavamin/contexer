@@ -10,7 +10,7 @@ creates is REVIEWABLE by construction:
   appears in `review_pending`: trusted without ever having been offered for review;
 * an update lands as a `proposed_revision` on its target, HEAD unmoved until approval;
 * a retirement or replacement lands as a `proposed_lifecycle` on its target — a proposal in the
-  separate lifecycle lane, which retires nothing: only an explicit `store.retire_decision` by a
+  separate lifecycle lane, which retires nothing: only an explicit `lifecycle.retire_decision` by a
   human moves a decision out of active context.
 
 The same discipline governs the way back out: a checkpoint is only ever marked `approved`
@@ -32,7 +32,7 @@ Two properties are load-bearing, and both come from the deterministic candidate 
   receipt event, no disposition flip. It reads the store and reports what a real pass would do.
 """
 
-from contexer import candidates, evidence, store
+from contexer import candidates, evidence, lifecycle, store
 
 # Kinds a candidate can be built out of. The rest of `evidence.EVENT_KINDS` is bookkeeping
 # ABOUT candidates (`session_reconcile`, `candidate_disposition`, `policy_evaluation`), which
@@ -136,7 +136,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
             receipt["lifecycle_proposed"] += 1
             return
         target = str(candidate.get("target_decision_id") or "")
-        result = store.propose_lifecycle(
+        result = lifecycle.propose_lifecycle(
             repo_path, target, "retire",
             f"inferred from session evidence: {candidate.get('title') or ''}".strip(),
             source="ai", replacement_id=candidate.get("replacement_decision_id"))
@@ -215,7 +215,7 @@ def _settle_write_statuses(repo_path: str, writes: dict) -> None:
     The same read stamps `revision_id` on every checkpoint that DID leave a proposal behind, so
     a later pass can tell a promoted proposal (HEAD advanced) from a dismissed one (HEAD
     unchanged) — see `_dispositions`. Lifecycle checkpoints already carry theirs from
-    `store.propose_lifecycle`'s own return and are skipped here.
+    `lifecycle.propose_lifecycle`'s own return and are skipped here.
     """
     pending_ids = {cid for cid, cp in writes.items()
                    if cp.get("status") == "pending" and cp.get("lane") != "lifecycle"}

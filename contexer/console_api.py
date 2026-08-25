@@ -348,7 +348,7 @@ def dashboard_summary(repo_path: str) -> dict:
     pending = [e for e in decisions if store.entry_status(e) == "pending_approval"]
     proposals = [e for e in decisions if e.get("proposed_revision")]
     team = team_snapshot(repo_path)
-    graveyard, tomb_error = store._read_deleted(repo_path)
+    graveyard, tomb_error = store.read_deleted(repo_path)
     tombstoned = graveyard.get("entries", [])
 
     by_subtype: dict[str, int] = {}
@@ -684,7 +684,7 @@ def list_tombstones(repo_path: str) -> dict:
     the reason those do: every other read of the sidecar degrades a corrupt file to an empty
     list, so without this the view renders "nothing deleted" over a file that actually still
     holds tombstones it could not parse. One read."""
-    data, error = store._read_deleted(repo_path)
+    data, error = store.read_deleted(repo_path)
     rows = [{**_console_summary(e), "deleted_at": e.get("deleted_at"),
              "deleted_by": e.get("deleted_by", "ui")}
             for e in data.get("entries", [])]

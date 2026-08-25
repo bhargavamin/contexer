@@ -17,8 +17,8 @@ Shape mirrors `store.verify_scan_conventions` deliberately:
     entry in the store carries `source_files` at all (the common case for every repo
     whose decisions were never anchored);
   - one `load` + one `save` under one `store_lock`, not a write per entry;
-  - proposals are attached via `store.attach_lifecycle_proposal` and armed for review via
-    `store._touch_pending_review`, AFTER the save (same ordering as every other proposal
+  - proposals are attached via `lifecycle.attach_lifecycle_proposal` and armed for review via
+    `store.touch_pending_review`, AFTER the save (same ordering as every other proposal
     site in store.py) — never a direct status flip, and never a retirement.
 
 Per anchored, active-status entry with no proposal already pending, each `source_files`
@@ -33,12 +33,12 @@ The entry-level outcome then follows from what was collected:
   - partial loss (something survives, whether as-is or renamed) -> the anchor list is
     refreshed to the surviving/renamed set in place; still not a review event.
   - total loss (every anchored file is gone, none renamed) -> a `proposed_lifecycle`
-    retirement (`store.attach_lifecycle_proposal`, source "scan") is attached and the
+    retirement (`lifecycle.attach_lifecycle_proposal`, source "scan") is attached and the
     pending-review nudge is armed. The decision's CONTENT is never touched: a retirement
     is a state transition, not a rewording, and encoding it as new decision text was
-    what the plan's C2 lane exists to stop. Approving it (`store.retire_decision`) moves
+    what the plan's C2 lane exists to stop. Approving it (`lifecycle.retire_decision`) moves
     the decision into the tombstone sidecar with its lifecycle history; dismissing it
-    (`store.dismiss_lifecycle`) leaves the entry, `source_files` included, exactly as it
+    (`lifecycle.dismiss_lifecycle`) leaves the entry, `source_files` included, exactly as it
     was, so the next TTL cycle re-proposes — dismiss means "not now", not "never ask
     again", until the developer retires the decision or ignores it.
 
@@ -96,6 +96,7 @@ from pathlib import Path
 
 from contexer import review, revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import sidecars
+from contexer import lifecycle      # module object too, same reason: see docstring above
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 _ANCHOR_VERIFY_TTL = 86400   # 24h — file layouts don't churn fast enough to re-check every
@@ -341,10 +342,10 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     # cycle ask again).
                     if _ANCHOR_WITHDRAWN_MARKER in revisions.current_content(entry):
                         continue  # legacy entry whose content already says this
-                    # In-memory attach, not store.propose_lifecycle: this run already holds
+                    # In-memory attach, not lifecycle.propose_lifecycle: this run already holds
                     # the store lock and saves once at the end, and flock is not reentrant
                     # across two opens of the same file in one process.
-                    if store.attach_lifecycle_proposal(
+                    if lifecycle.attach_lifecycle_proposal(
                             entry, "retire",
                             f"{_ANCHOR_WITHDRAWN_CORE} {', '.join(missing)} no longer exist",
                             source="scan", now=now) is None:
@@ -362,7 +363,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
             if changed:
                 store.save(repo_path, data)
                 if review_needed:
-                    store._touch_pending_review(repo_path)  # a retirement now awaits review
+                    store.touch_pending_review(repo_path)  # a retirement now awaits review
             return {"reanchored": reanchored, "proposed": proposed}
     except Exception:
         return {"reanchored": 0, "proposed": 0}

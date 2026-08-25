@@ -2,7 +2,7 @@ import json
 import os
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import conflicts, reconcile, store
+from contexer import conflicts, lifecycle, reconcile, store
 
 SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or str(uuid.uuid4())
 
@@ -226,7 +226,7 @@ def retire_decision(entry_id: str, reason: str, repo_path: str = "",
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
-    return store.retire_decision(resolved, target, reason, replacement_id or None)[1]
+    return lifecycle.retire_decision(resolved, target, reason, replacement_id or None)[1]
 
 
 @mcp.tool()
@@ -244,7 +244,7 @@ def restore_decision(entry_id: str, repo_path: str = "", reason: str = "") -> st
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
-    return store.restore_decision(resolved, target, reason)[1]
+    return lifecycle.restore_decision(resolved, target, reason)[1]
 
 
 @mcp.tool()
@@ -262,7 +262,7 @@ def dismiss_lifecycle(entry_id: str, repo_path: str = "") -> str:
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
-    return store.dismiss_lifecycle(resolved, target)[1]
+    return lifecycle.dismiss_lifecycle(resolved, target)[1]
 
 
 @mcp.tool()
@@ -300,6 +300,11 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
         return "Skipped — repo path not detected."
     receipt = reconcile.reconcile_session(resolved, session_id, dry_run=dry_run)
     text = reconcile.format_receipt(receipt)
+    if receipt["lifecycle_proposed"]:
+        text += ("\n\nA retirement was PROPOSED, not applied: those decisions are still live "
+                 "and still render. review_pending shows each proposal with the decision it "
+                 "targets — surface it to the developer and let them answer; never call "
+                 "retire_decision on your own judgment.")
     if receipt["proposed"]:
         text += ("\n\nThese are pending review — not yet trusted, not injected into any "
                  "session, and they do not block your work. review_pending lists each with "
