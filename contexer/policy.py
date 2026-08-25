@@ -103,7 +103,7 @@ def _normalized_artifact(request: Mapping, errors: list[str]) -> dict | None:
     size = len(content.encode("utf-8"))
     if size > _MAX_ARTIFACT_BYTES:
         errors.append(f"artifact.content exceeds {_MAX_ARTIFACT_BYTES} bytes ({size})")
-    return {"kind": kind if isinstance(kind, str) else "", "content": content}
+    return {"kind": kind, "content": content}
 
 
 def validate_request(request: Mapping) -> tuple[dict | None, list[str]]:
