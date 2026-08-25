@@ -303,9 +303,9 @@ def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run:
     A dry run excludes them from aggregation exactly the same way (that is what a real pass
     would do) but moves nothing, because a dry run writes nothing anywhere.
 
-    Scoped to the events this pass can see: a claimed event belonging to a session this pass
-    filtered out is finished by the pass that does see it. It is excluded from nothing in the
-    meantime, because it is not in this pass's listing to begin with.
+    Scoped to the events this pass can SEE. A claimed event whose session this pass filtered
+    out is not in its listing at all, so it can neither be aggregated here nor recovered here;
+    the pass that does see it finishes the move.
     """
     claimed = {str(event_id): candidate_id
                for candidate_id, meta in sorted(held.items())
