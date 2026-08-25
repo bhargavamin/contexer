@@ -89,6 +89,17 @@ DUPLICATES = "Postgres backs the decision store; connection pooling handled by p
 UNRELATED = "Always run the linter before pushing a branch to origin."
 
 
+def _held_events(repo, candidate_id):
+    """The raw event files one held candidate holds, oldest first.
+
+    Its `candidate.json` is bookkeeping rather than an event, and `spool._event_files` no
+    longer special-cases the name — in `pending/` or `quarantine/` it can never legitimately
+    occur, so skipping it there left such a file invisible to listing, quarantine and
+    retention at once. The one directory where the name IS legitimate filters it here."""
+    return [p for p in spool._event_files(spool._held_dir(repo, candidate_id))
+            if p.name != spool._META_NAME]
+
+
 def _only_held(repo):
     """The one held candidate's `(candidate_id, meta)` — its dir IS the pending record."""
     ((candidate_id, meta),) = _held(repo).items()
@@ -152,7 +163,7 @@ class TestEndToEnd:
         candidate_id, meta = _only_held(tmp_repo)
         assert meta["entry_id"] == pending["id"]
         assert len(meta["event_ids"]) == 2
-        assert len(spool._event_files(spool._held_dir(tmp_repo, candidate_id))) == 2
+        assert len(_held_events(tmp_repo, candidate_id)) == 2
         assert _pending(tmp_repo) == []
 
         # The developer approves. Nothing hooks approve_decision: the next pass is what
@@ -497,6 +508,44 @@ class TestRetireCandidate:
         assert _held(tmp_repo) == {}                # settled in the same run, nothing awaited
 
 
+class TestProjectionIsDecisionsOnly:
+    """The store holds tasks as well as decisions, and the graveyard holds deleted ones. A
+    deleted task is no more a decision to classify a candidate against than a live one is, so
+    the `type` filter runs on BOTH sides of the projection. Shipped in Task 5 with no test."""
+
+    def _tombstoned_task(self, repo, content):
+        graveyard = store.load_deleted(repo)
+        graveyard["entries"].append({"id": "task-in-the-graveyard", "type": "task",
+                                     "status": "approved", "content": content,
+                                     "timestamp": "2026-01-01T00:00:00+00:00"})
+        store._save_deleted(repo, graveyard)
+
+    def test_a_deleted_task_never_joins_the_projection(self, tmp_repo, monkeypatch):
+        self._tombstoned_task(tmp_repo, STORED)
+        _emit(tmp_repo, "user_directive", UNRELATED)
+
+        seen = []
+        real = candidates.aggregate_candidates
+        monkeypatch.setattr(candidates, "aggregate_candidates",
+                            lambda events, decisions: seen.append(decisions) or
+                            real(events, decisions))
+        reconcile.reconcile_session(tmp_repo)
+
+        (projection,) = seen
+        assert "task-in-the-graveyard" not in [d["id"] for d in projection]
+
+    def test_a_summary_is_never_filed_against_a_deleted_task(self, tmp_repo):
+        """`store.record_evidence_summary` filtered the LIVE store by `type` and the graveyard
+        not at all, so an id the live lookup would have refused was accepted a few lines later
+        purely because the entry had since been deleted."""
+        self._tombstoned_task(tmp_repo, STORED)
+        assert store.record_evidence_summary(
+            tmp_repo, "task-in-the-graveyard",
+            {"candidate_id": "c", "disposition": "approved"}) is False
+        (task,) = store.load_deleted(tmp_repo)["entries"]
+        assert "evidence_summary" not in task
+
+
 class TestDuplicateCandidate:
 
     def test_duplicate_is_held_and_finalized_in_the_same_run(self, tmp_repo):
@@ -594,7 +643,7 @@ class TestIdempotency:
         claimed them — the one state `_finish_interrupted_holds` cannot recognize."""
         candidate_id, meta = _only_held(repo)
         held_dir = spool._held_dir(repo, candidate_id)
-        for path in spool._event_files(held_dir):
+        for path in _held_events(repo, candidate_id):
             path.rename(spool._pending_dir(repo) / path.name)
         (held_dir / spool._META_NAME).write_text(
             json.dumps({k: v for k, v in meta.items() if k != "event_ids"}), encoding="utf-8")
@@ -640,7 +689,7 @@ class TestIdempotency:
         reconcile.reconcile_session(tmp_repo)                 # the pass that wins the race
         (created,) = store.get_pending_decisions(tmp_repo)
         winner, meta = _only_held(tmp_repo)
-        held_files = [p.name for p in spool._event_files(spool._held_dir(tmp_repo, winner))]
+        held_files = [p.name for p in _held_events(tmp_repo, winner)]
 
         monkeypatch.setattr(spool, "list_pending_evidence", lambda *_a, **_k: list(pre_hold))
         monkeypatch.setattr(spool, "held_candidates", lambda *_a, **_k: {})
@@ -651,7 +700,7 @@ class TestIdempotency:
         # Read off the filesystem, not `held_candidates` — it is still patched to the
         # pre-hold view for the length of this test.
         assert [d.name for d in spool._held_root(tmp_repo).iterdir()] == [winner]
-        assert [p.name for p in spool._event_files(spool._held_dir(tmp_repo, winner))] \
+        assert [p.name for p in _held_events(tmp_repo, winner)] \
             == held_files                                    # and no event moved or lost
         assert sorted(meta["event_ids"]) == sorted(e["event_id"] for e in pre_hold)
 
@@ -691,7 +740,7 @@ class TestIdempotency:
         assert len(meta["event_ids"]) == 2
 
         # Simulate the crash: half the batch never made it out of pending/.
-        moved_back = spool._event_files(spool._held_dir(tmp_repo, candidate_id))[0]
+        moved_back = _held_events(tmp_repo, candidate_id)[0]
         moved_back.rename(spool._pending_dir(tmp_repo) / moved_back.name)
         assert len(_pending(tmp_repo)) == 1
 
@@ -699,7 +748,7 @@ class TestIdempotency:
 
         assert (receipt["proposed"], receipt["events_observed"]) == (0, 0)
         assert list(_held(tmp_repo)) == [candidate_id]        # one candidate, not two
-        assert len(spool._event_files(spool._held_dir(tmp_repo, candidate_id))) == 2
+        assert len(_held_events(tmp_repo, candidate_id)) == 2
         assert _pending(tmp_repo) == []
         assert len(store.get_pending_decisions(tmp_repo)) == 1   # and one decision, not two
 
@@ -742,7 +791,7 @@ class TestDryRun:
         _emit(tmp_repo, "file_changed", "auth middleware changed", files=["src/auth.py"])
         reconcile.reconcile_session(tmp_repo)
         candidate_id, _meta = _only_held(tmp_repo)
-        stray = spool._event_files(spool._held_dir(tmp_repo, candidate_id))[0]
+        stray = _held_events(tmp_repo, candidate_id)[0]
         stray.rename(spool._pending_dir(tmp_repo) / stray.name)
         before = _spool_state(tmp_repo)
 

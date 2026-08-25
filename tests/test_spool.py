@@ -256,6 +256,38 @@ def test_an_unreadable_spool_reports_unreadable_not_empty(tmp_repo):
         pending.chmod(0o700)
 
 
+def _refuse_held_only(path):
+    if path.name == "held":
+        raise OSError("cannot stat")
+    return True
+
+
+def test_an_unreadable_spool_reports_zeros_not_the_counts_it_reached(tmp_repo, monkeypatch):
+    """`readable: False` beside a real `pending` count describes PART of the spool as though it
+    described all of it — the same unreadable-versus-empty collapse the flag exists to prevent,
+    one level down. The pending listing here succeeds; only the held one fails."""
+    spool.append_evidence(tmp_repo, _event())
+    assert spool.evidence_diagnostics(tmp_repo)["pending"] == 1
+
+    monkeypatch.setattr(Path, "is_dir", _refuse_held_only)
+    diagnostics = spool.evidence_diagnostics(tmp_repo)
+    assert diagnostics["readable"] is False
+    assert diagnostics["pending"] == 0 and diagnostics["bytes"] == 0
+
+
+def test_a_stray_candidate_json_in_pending_is_quarantined_not_invisible(tmp_repo):
+    """`candidate.json` is a HELD directory's bookkeeping; in `pending/` the name can never
+    legitimately occur. Skipping it by name in every listing left such a file invisible to
+    listing, to quarantine and to retention at once, which is how a stray becomes permanent."""
+    spool.append_evidence(tmp_repo, _event())
+    stray = _pending(tmp_repo) / spool._META_NAME
+    stray.write_text("{ not an event", encoding="utf-8")
+
+    assert len(spool.list_pending_evidence(tmp_repo)) == 1     # the real event still returns
+    assert not stray.exists()
+    assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+
+
 def test_missing_spool_reads_as_empty_and_readable(tmp_repo):
     assert spool.list_pending_evidence(tmp_repo) == []
     diagnostics = spool.evidence_diagnostics(tmp_repo)
@@ -348,6 +380,21 @@ def test_finalize_returns_the_summary_and_removes_the_raw_events(tmp_repo):
     assert datetime.fromisoformat(summary["occurred_at"]).tzinfo is not None
     assert not spool._held_dir(tmp_repo, candidate).exists()
     assert spool.evidence_diagnostics(tmp_repo)["held"] == 0
+
+
+def test_the_byte_total_counts_a_held_candidates_own_bookkeeping(tmp_repo):
+    """`candidate.json` is real disk the spool is responsible for, so a size report that
+    omitted it would understate a repo with many held candidates. It is still not an EVENT,
+    which is the one place the meta is filtered out rather than counted."""
+    candidate = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, candidate, _spool_two(tmp_repo),
+                                  meta={"entry_id": "e1"})
+    held = spool._held_dir(tmp_repo, candidate)
+    assert (held / spool._META_NAME).exists()
+
+    diagnostics = spool.evidence_diagnostics(tmp_repo)
+    assert diagnostics["held_events"] == 2
+    assert diagnostics["bytes"] == sum(p.stat().st_size for p in held.iterdir())
 
 
 def test_finalize_is_idempotent(tmp_repo):
@@ -517,6 +564,20 @@ def test_retention_removes_stale_temp_files_but_not_fresh_ones(tmp_repo):
     assert report["temp_removed"] == 1
     assert fresh.exists() and not stale.exists()
     assert spool.evidence_diagnostics(tmp_repo)["gap"] is None   # debris is not lost evidence
+
+
+def test_retention_removes_gap_write_debris_too(tmp_repo):
+    """`.gap` goes through `store.atomic_write`, whose temp files are named
+    `<name>.<random>.tmp` rather than with this module's own `tmp-` prefix — so a
+    prefix-matched sweep left an interrupted gap write behind for good. The `.tmp` suffix is
+    what the two writers actually share."""
+    spool.append_evidence(tmp_repo, _event())
+    debris = spool._repo_dir(tmp_repo) / ".gap.abc123.tmp"
+    debris.write_text("{ half", encoding="utf-8")
+    _age(debris, 1)
+
+    assert spool.run_retention(tmp_repo)["temp_removed"] == 1
+    assert not debris.exists()
 
 
 def test_a_held_candidate_whose_decision_is_gone_is_finalized(tmp_repo):

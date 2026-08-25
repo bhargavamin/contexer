@@ -1962,6 +1962,12 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     would throw away the one disposition the lifecycle lane exists to record. An unreadable
     tombstone sidecar refuses rather than replacing it, the rule `lifecycle.tombstone_entry`
     already follows.
+
+    BOTH lookups filter `type == "decision"`, and the symmetry is the point: the store holds
+    tasks too, a deleted task is no more a decision than a live one, and an id that would be
+    refused against the live store must not be accepted a few lines later just because the
+    entry has since been deleted. `reconcile._reconcile` draws the same line on both sides of
+    its own projection for the same reason.
     """
     if not entry_id or not isinstance(summary, dict):
         return False
@@ -1982,7 +1988,8 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
             save(repo_path, data)
             return True
         graveyard, error = read_deleted(repo_path)
-        entry = None if error else entry_by_id(graveyard["entries"], entry_id)
+        entry = None if error else entry_by_id(
+            [e for e in graveyard["entries"] if e.get("type") == "decision"], entry_id)
         if entry is None:
             return False
         _appended(entry)

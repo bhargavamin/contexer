@@ -1550,10 +1550,22 @@ def _read_diff_artifact(path: str) -> tuple[str, list]:
     The read is bounded at `policy.MAX_ARTIFACT_BYTES + 1` rather than slurping the file and
     letting validation object afterwards — the point of a cap is to not have the bytes in
     memory. One byte over is enough to know, and reuses the evaluator's own constant rather
-    than restating the number."""
+    than restating the number.
+
+    `-` with a TTY on stdin is REFUSED, the `guard anchors` precedent: `read()` on a terminal
+    blocks until the developer works out that the command is waiting on them and sends EOF,
+    with no prompt and no output to say so. Saying which of the two spellings they wanted is
+    cheaper than a silent hang."""
     from contexer import policy
 
     cap = policy.MAX_ARTIFACT_BYTES
+    # `getattr` rather than a plain call: `sys.stdin` is None under a windowed interpreter and
+    # is a stand-in object with no `isatty` under pytest, and neither of those is a terminal.
+    isatty = getattr(sys.stdin, "isatty", None)
+    if path == "-" and isatty is not None and isatty():
+        _policy_fail("contexer policy evaluate: --diff-file - reads the diff from stdin, but "
+                     "stdin is a terminal. Pipe one in (`git diff | contexer policy evaluate "
+                     "... --diff-file -`) or pass a file path.")
     try:
         if path == "-":
             raw = sys.stdin.buffer.read(cap + 1)

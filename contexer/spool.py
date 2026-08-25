@@ -137,9 +137,13 @@ def _stamp(occurred_at: str) -> str:
 def _event_files(directory: Path) -> list[Path]:
     """Every candidate event file in `directory`, oldest first by filename.
 
-    Temp files are skipped rather than read (a rename may be in flight) and so is a held
-    dir's `candidate.json`. Anything else is INCLUDED even if its name is odd: a listing
-    that silently ignored junk would leave it invisible to quarantine and to retention both.
+    Temp files are skipped rather than read, because a rename may be in flight. EVERYTHING
+    else is included, even a name this layer would never mint: a listing that silently
+    ignored junk would leave it invisible to quarantine AND to retention, which is how a
+    stray file becomes permanent. `candidate.json` is not special-cased here for that reason
+    — in `pending/` or `quarantine/` the name can never legitimately occur, so it should be
+    read, fail validation, and be quarantined like any other malformed file. The one caller
+    that lists a HELD directory, where the name IS legitimate, filters it itself.
 
     An ABSENT directory is an empty listing; any other listing failure is raised. The two are
     not the same fact, and a caller that must tell "nothing spooled" from "could not read the
@@ -150,8 +154,7 @@ def _event_files(directory: Path) -> list[Path]:
     except (FileNotFoundError, NotADirectoryError):
         return []
     return sorted((p for p in entries
-                   if p.is_file() and p.name != _META_NAME
-                   and not p.name.startswith(_TEMP_PREFIX)),
+                   if p.is_file() and not p.name.startswith(_TEMP_PREFIX)),
                   key=lambda p: p.name)
 
 
@@ -449,36 +452,49 @@ def evidence_diagnostics(repo_path: str) -> dict:
     directory that cannot be listed reports `readable=False` — so a reader is never told "no
     evidence" about a spool that could not be read.
 
+    A failed listing therefore returns ZEROS rather than the counts gathered before it failed:
+    a half-count beside `readable: False` is the same unreadable-versus-empty collapse this
+    flag exists to prevent, one level down — a reader that only glances at `pending` would be
+    told a number that describes part of the spool as though it described all of it.
+
+    `bytes` counts every file the spool holds, `candidate.json` included: it is real disk the
+    spool is responsible for, and a size report that quietly omitted its own bookkeeping would
+    understate a repo with many held candidates.
+
     `held_unattributed` is the same honesty applied to the sweep's blind spot: a held candidate
     whose `candidate.json` is missing or unreadable records no `entry_id`, so
     `_sweep_orphan_holds` can never judge it and it is held for good. A caller that forgets to
     pass `meta` therefore accrues held directories nothing will ever clean up — this counter is
     what makes that show up in `contexer status` instead of accumulating silently.
     """
-    out = {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0, "quarantine": 0,
-           "bytes": 0, "gap": _read_gap(repo_path), "readable": True}
+    counts = {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
+              "quarantine": 0, "bytes": 0}
+    readable = True
     try:
         for key, directory in (("pending", _pending_dir(repo_path)),
                                ("quarantine", _quarantine_dir(repo_path))):
             if not directory.is_dir():
                 continue
             files = _event_files(directory)
-            out[key] = len(files)
-            out["bytes"] += _total_bytes(files)
+            counts[key] = len(files)
+            counts["bytes"] += _total_bytes(files)
         root = _held_root(repo_path)
         if root.is_dir():
             for directory in sorted(root.iterdir()):
                 if not directory.is_dir():
                     continue
                 files = _event_files(directory)
-                out["held"] += 1
-                out["held_events"] += len(files)
-                out["bytes"] += _total_bytes(files)
+                counts["held"] += 1
+                # The meta is the one name that legitimately sits beside the events, so it is
+                # excluded from the EVENT count and included in the byte total.
+                counts["held_events"] += sum(1 for p in files if p.name != _META_NAME)
+                counts["bytes"] += _total_bytes(files)
                 if not str(_read_meta(directory).get("entry_id") or ""):
-                    out["held_unattributed"] += 1
+                    counts["held_unattributed"] += 1
     except OSError:
-        out["readable"] = False
-    return out
+        counts = dict.fromkeys(counts, 0)
+        readable = False
+    return {**counts, "gap": _read_gap(repo_path), "readable": readable}
 
 
 # ── retention (reconciliation / maintenance only) ────────────────────────────────
@@ -537,10 +553,16 @@ def _sweep_events(directory: Path) -> int:
 
 def _sweep_temp(root: Path) -> int:
     """Remove temp files left behind by an interrupted write. Anything younger than the age
-    bound may be a rename still in flight, so it is left alone."""
+    bound may be a rename still in flight, so it is left alone.
+
+    Matched on the `.tmp` SUFFIX rather than on `_TEMP_PREFIX`, because two writers leave
+    debris here and only one of them uses that prefix: `_write_json` mints `tmp-*.tmp`, while
+    `.gap` goes through `store.atomic_write`, which mints `<name>.<random>.tmp` — so a crash
+    mid-gap-write left a `.gap.*.tmp` file no sweep would ever remove. The suffix is what both
+    actually share, and no event file ends in it (they are all `.json`)."""
     removed = 0
     cutoff = time.time() - _MAX_TEMP_AGE_SECONDS
-    for path in sorted(root.rglob(f"{_TEMP_PREFIX}*")):
+    for path in sorted(root.rglob("*.tmp")):
         try:
             if not path.is_file() or path.stat().st_mtime >= cutoff:
                 continue
