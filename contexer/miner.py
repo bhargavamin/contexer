@@ -43,7 +43,7 @@ _PRECOMMIT_ID = re.compile(r"^\s*-\s*id:\s*(\S+)", re.M)
 
 
 def _git(repo_path: str, *args: str) -> str | None:
-    """Local twin of store.run_git — kept local so miner.py never imports
+    """Local twin of store.run_git - kept local so miner.py never imports
     contexer.store (mining must stay a leaf dependency)."""
     try:
         out = subprocess.run(

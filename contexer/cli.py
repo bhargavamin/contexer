@@ -27,7 +27,7 @@ Commands:
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
-  retire        Retire one decision — it leaves active context, keeping its history:
+  retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
   ui            Local web console over the stored decisions: ui [--open] [--stop]
@@ -400,7 +400,7 @@ _ORIGIN_LABELS = {
 
 def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
     """The retirement block under a decision's own text in `contexer review`: who proposed it,
-    why, and — when the decision has moved since — that it is stale and cannot be applied."""
+    why, and - when the decision has moved since - that it is stale and cannot be applied."""
     from contexer import lifecycle
 
     print(f"Retirement proposed (source: {life.get('source') or 'unknown'}):")
@@ -409,7 +409,7 @@ def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
     if replacement:
         print(f"\nReplaced by: {replacement}")
     if lifecycle.lifecycle_proposal_stale(entry):
-        print("\n! STALE — proposed against an earlier revision of this decision, which has "
+        print("\n! STALE - proposed against an earlier revision of this decision, which has "
               "changed since.\n  [R] is refused until it is re-proposed against the current "
               "version; [D] still works.")
     if entry.get("proposed_revision"):
@@ -420,7 +420,7 @@ def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
 
 def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, str]:
     """The `[R]etire` sub-flow: confirm the reason, then retire. The proposal's own reason is
-    the default rather than the value — a retirement's reason becomes permanent history, and
+    the default rather than the value - a retirement's reason becomes permanent history, and
     the developer is the one signing it."""
     from contexer import lifecycle
 
@@ -635,14 +635,14 @@ def reinstall() -> None:
 def _gap_phrase(gap: dict) -> str:
     """`.gap` rendered as the CUMULATIVE loss ledger it is (ruling R28), never as a live alarm.
 
-    Nothing clears it, so "3 events lost, last <date>" is the honest reading — a count of what
+    Nothing clears it, so "3 events lost, last <date>" is the honest reading - a count of what
     this spool has dropped since it existed, not a condition to resolve. A damaged marker says
     so rather than reporting a number it cannot stand behind, and `prior_drops_unknown` (the
     count restarted over a damaged marker) is stated because it makes the figure a lower bound.
 
     LOST and EXPIRED are rendered as the different facts they are. Evidence that aged out of
     `pending/` unconsumed is what the queue does on a host that never reconciles (Codex,
-    Cursor) — calling that "lost" told a developer their spool was failing when it was working
+    Cursor) - calling that "lost" told a developer their spool was failing when it was working
     exactly as designed, and buried the failures that ARE worth acting on in the same number.
     """
     if gap.get("unreadable"):
@@ -668,13 +668,13 @@ def _gap_count(gap: dict, key: str) -> int:
 def _evidence_status_lines(repos) -> list[str]:
     """One `evidence:` line per spool that holds something or has recorded a loss.
 
-    Silent for a spool with neither — which is every repo until a host adapter starts emitting
+    Silent for a spool with neither - which is every repo until a host adapter starts emitting
     events, so this adds nothing to today's output. An unreadable spool says so rather than
     reporting zero events: the diagnostics' `readable` flag exists for exactly that.
 
     The repo set is the caller's (store files plus the current-repo pointer) PLUS every spool
     directory on disk, because those two do not agree: a repo whose evidence never produced a
-    store entry — every candidate insufficient, or duplicates before any entry existed — has no
+    store entry - every candidate insufficient, or duplicates before any entry existed - has no
     store file to be found by, and its pending count and `.gap` were invisible in the one
     surface that reports them. Such a spool is listed by its slug, which is all there is: the
     slug does not reverse into a path."""
@@ -1502,7 +1502,7 @@ def _print_guard_unchecked(unchecked: list) -> None:
     different things and one message cannot be true of both: a row with a `file` is a staged
     file that went unscanned, a row with a `decision_id` is an armed RULE that could not run
     at all (an unparseable pattern, an unknown check type). The second is the one a developer
-    cannot otherwise notice — the rule is armed, the commit passes, and nothing ever says the
+    cannot otherwise notice - the rule is armed, the commit passes, and nothing ever says the
     check did not happen."""
     files = [u for u in unchecked if u.get("file")]
     dead = [u for u in unchecked if not u.get("file")]
@@ -1515,12 +1515,12 @@ def _print_guard_unchecked(unchecked: list) -> None:
 
 
 def _guard_gap_names(rows: list, key: str, width: int | None = None) -> str:
-    """`a.py (too-large), b.py (budget), +2 more` — capped at _GUARD_UNCHECKED_SHOWN.
+    """`a.py (too-large), b.py (budget), +2 more` - capped at _GUARD_UNCHECKED_SHOWN.
     `width` clips the name (decision ids render at 8 chars everywhere else).
 
     A row missing its name renders as the reason alone. Only a malformed row can get here,
-    but the caller's partition is an ELSE bucket — a file row whose `file` is empty falls
-    into the rule line — and `str(None)` would print a literal `None (too-large)` there."""
+    but the caller's partition is an ELSE bucket - a file row whose `file` is empty falls
+    into the rule line - and `str(None)` would print a literal `None (too-large)` there."""
     def _one(row) -> str:
         label = str(row.get(key) or "")[:width]
         reason = f"({row.get('reason')})"
@@ -1568,7 +1568,7 @@ def _policy_fail(message: str) -> None:
 
 
 def _read_diff_artifact(path: str) -> tuple[str, list]:
-    """`(content, gaps)` for `--diff-file` — `-` reads stdin.
+    """`(content, gaps)` for `--diff-file` - `-` reads stdin.
 
     Exactly one side is meaningful. A gap is a `policy.UNCHECKED_REASONS` row naming why the
     bytes could not be handed over, and the caller must then evaluate with NO artifact: an
@@ -1576,7 +1576,7 @@ def _read_diff_artifact(path: str) -> tuple[str, list]:
     nobody read, which is the `_staged_content` lesson the guard already paid for.
 
     The read is bounded at `policy.MAX_ARTIFACT_BYTES + 1` rather than slurping the file and
-    letting validation object afterwards — the point of a cap is to not have the bytes in
+    letting validation object afterwards - the point of a cap is to not have the bytes in
     memory. One byte over is enough to know, and reuses the evaluator's own constant rather
     than restating the number.
 
@@ -1611,7 +1611,7 @@ def _read_diff_artifact(path: str) -> tuple[str, list]:
 
 
 def _policy_evaluate(rest: list) -> None:
-    """`contexer policy evaluate` — report what the approved decisions say about one
+    """`contexer policy evaluate` - report what the approved decisions say about one
     operation. A REPORTER: `--exit-code` is the only way a `block` verdict changes the exit
     status, because nothing this command does enforces anything."""
     from contexer import policy_api
@@ -1657,12 +1657,12 @@ def _policy_evaluate(rest: list) -> None:
 
     result = policy_api.evaluate_operation(
         _cli_repo(), intent=intent, operation=operation, files=files,
-        # A gap means the artifact was NOT handed over, so no kind is named either — the
+        # A gap means the artifact was NOT handed over, so no kind is named either - the
         # armed policies then report `omitted` beside the gap instead of judging "".
         artifact_kind="diff" if (diff_file and not gaps) else "",
         artifact=content, unchecked=gaps)
 
-    # `--json` holds for a refused request too — a machine consumer gets one shape either way.
+    # `--json` holds for a refused request too - a machine consumer gets one shape either way.
     # Scrubbed BEFORE encoding, never after: JSON escaping rewrites the quotes redact's
     # keyword-gated pattern matches on, so a dump-then-scrub emits a quoted secret verbatim
     # (see policy_api.scrubbed_result).
@@ -1670,7 +1670,7 @@ def _policy_evaluate(rest: list) -> None:
             if as_json else policy_api.format_result(result, content))
     print(text, file=sys.stderr if result["errors"] else sys.stdout)
 
-    # A refused request exits 1 because nothing was evaluated — that is a usage failure, not
+    # A refused request exits 1 because nothing was evaluated - that is a usage failure, not
     # a verdict. A verdict never moves the exit code unless the developer opted in.
     if result["errors"] or (want_exit_code and result["verdict"] == "block"):
         sys.exit(1)
@@ -1678,7 +1678,7 @@ def _policy_evaluate(rest: list) -> None:
 
 def policy_cmd(rest: list) -> None:
     """`contexer policy evaluate ...`. Any other subcommand exits 1 rather than being
-    ignored — the `guard anchors` rule, so a mistyped word can never read as consent to
+    ignored - the `guard anchors` rule, so a mistyped word can never read as consent to
     something this command does not do."""
     if not rest or rest[0] != "evaluate":
         _policy_fail(f"Unknown policy subcommand: {' '.join(rest) or '(none)'}")
@@ -1700,7 +1700,7 @@ def scope_audit_cmd(rest: list) -> None:
 
 
 def reconcile_session_cmd(rest: list) -> None:
-    """`contexer reconcile-session [--session ID] [--dry-run]` — turn recorded evidence into
+    """`contexer reconcile-session [--session ID] [--dry-run]` - turn recorded evidence into
     decisions pending review, and print the receipt.
 
     Always exits 0: `reconcile_session` never raises and reports what it could not do as
@@ -1712,7 +1712,7 @@ def reconcile_session_cmd(rest: list) -> None:
         session = args[index + 1] if index + 1 < len(args) else ""
         # A flag is never a session id: `--session --dry-run` used to swallow the flag as the
         # VALUE, silently scoping the pass to a session that cannot exist AND dropping the
-        # dry run — a write where the developer asked for none.
+        # dry run - a write where the developer asked for none.
         if not session or session.startswith("-"):
             print("Missing value for --session.\n"
                   "Usage: contexer reconcile-session [--session ID] [--dry-run]",
@@ -1730,7 +1730,7 @@ def reconcile_session_cmd(rest: list) -> None:
     from contexer import reconcile
     repo = _cli_repo()
     if not repo:
-        print("No repo detected — run this inside a project directory.", file=sys.stderr)
+        print("No repo detected - run this inside a project directory.", file=sys.stderr)
         return
     _safe_print(reconcile.format_receipt(
         reconcile.reconcile_session(repo, session, dry_run=dry_run)))
@@ -1738,7 +1738,7 @@ def reconcile_session_cmd(rest: list) -> None:
 
 def _flag_value(args: list, flag: str, usage: str) -> str:
     """Pull `--flag VALUE` out of `args` in place, exiting with `usage` on a missing or
-    flag-shaped value — the reconcile-session rule, since `--reason --replaced-by x` swallowing
+    flag-shaped value - the reconcile-session rule, since `--reason --replaced-by x` swallowing
     a flag as the VALUE is how a retirement gets recorded with a nonsense reason."""
     if flag not in args:
         return ""
@@ -1771,7 +1771,7 @@ def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
     from contexer import lifecycle
     repo = _cli_repo()
     if not repo:
-        print("No repo detected — run this inside a project directory.", file=sys.stderr)
+        print("No repo detected - run this inside a project directory.", file=sys.stderr)
         sys.exit(1)
     ok, message = (lifecycle.retire_decision(repo, args[0], reason, replacement) if retiring
                    else lifecycle.restore_decision(repo, args[0], reason))

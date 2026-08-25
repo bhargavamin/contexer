@@ -1,18 +1,18 @@
 """Evidence event schema, pure validation, and the host-hook emission surface.
 
-An evidence event is one observed fact about a session — a directive the developer stated, a
-file that changed, a conclusion an agent reached — recorded so a later policy pass can decide
+An evidence event is one observed fact about a session - a directive the developer stated, a
+file that changed, a conclusion an agent reached - recorded so a later policy pass can decide
 what deserves to become a decision. `validate_event` is a pure function and the ONLY schema
 gate: storage never re-asserts flatness or caps, it validates once and writes what it gets.
 
 STORAGE LIVES IN `spool.py`, not here. This module is the schema plus what a host adapter
 calls; the spool owns every filesystem concern (per-event files, holds, retention, `.gap`).
 `emit_hook_event` reaches it through a function-level import, which is what keeps the
-dependency one-way at import time — `spool` imports this module for `validate_event`.
+dependency one-way at import time - `spool` imports this module for `validate_event`.
 
 A leaf module: it imports `redact` (itself a leaf) and reaches `store` through the MODULE
 OBJECT at call time (`store.capture_user_constraint`, never `from contexer.store import ...`)
-— the same load-order discipline `guard_engine.py` documents, so store.py never needs this
+- the same load-order discipline `guard_engine.py` documents, so store.py never needs this
 module at import time and a test patching `contexer.store` is seen here.
 
 The schema is FROZEN per version: an unknown top-level key is an error rather than being
@@ -42,7 +42,7 @@ EVENT_KINDS = frozenset({
 
 # Measured implementation constants, not product promises: bounds that keep one event cheap
 # to append and to read back. Exceeding a bound is either an error (the event size) or a
-# recorded, bounded loss (summary/files/attribute values) — never a silent truncation.
+# recorded, bounded loss (summary/files/attribute values) - never a silent truncation.
 _MAX_EVENT_BYTES = 8192
 _MAX_SUMMARY_CHARS = 500
 _MAX_FILES = 20
@@ -121,7 +121,7 @@ def _normalized_attributes(event: Mapping, errors: list[str]) -> dict:
         errors.append("attributes must be a flat dict")
         return {}
     # `files_total` is not counted: normalization ADDS it, so counting it would make
-    # re-validating a normalized event that used all 20 caller slots an error — the
+    # re-validating a normalized event that used all 20 caller slots an error - the
     # no-op-on-replay property this whole function promises.
     counted = sum(1 for k in value if k != "files_total")
     if counted > _MAX_ATTRS:
@@ -243,7 +243,7 @@ def emit_hook_event(repo_path: str, kind: str, *, session_id: str = "", source: 
     `spool.append_evidence`'s result. NEVER raises: that call already promises as much, and
     the dict build is wrapped too, so a call site inside a hook cannot fail over the spool.
 
-    `repo_key` is the repo the CALLER already resolved for its existing work — never
+    `repo_key` is the repo the CALLER already resolved for its existing work - never
     re-resolved here. An event keyed through a different chain than the spool it lands in
     is exactly the writer/reader split this repo has shipped twice (post_write's slug, the
     team-poll session id), and re-resolving inside the emitter would invite a third.
@@ -254,7 +254,7 @@ def emit_hook_event(repo_path: str, kind: str, *, session_id: str = "", source: 
     try:
         # Function-level so the dependency is one-way at import time: `spool` imports this
         # module for `validate_event`, and a top-level import back would couple their load
-        # order. Inside the try like everything else here — the never-raises contract covers
+        # order. Inside the try like everything else here - the never-raises contract covers
         # the import too.
         from contexer import spool
 
@@ -276,14 +276,14 @@ def emit_hook_event(repo_path: str, kind: str, *, session_id: str = "", source: 
 
 def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
                       *, near: list | None = None, repo_source: str = "") -> tuple:
-    """`store.capture_user_constraint` plus the `user_directive` event for it — the one
+    """`store.capture_user_constraint` plus the `user_directive` event for it - the one
     definition every host's per-prompt constraint hook shares.
 
     Returns and raises EXACTLY what the store call does, so no hook's existing behaviour
     changes. Two gates, each honest about what is actually known: on the normal path the
     event is emitted only when the store reports it stored or updated an entry (a detected
     directive that deduped against an existing one is a no-op there and stays one here), and
-    when the store RAISES — the loss this ledger exists to record — the event is emitted only
+    when the store RAISES - the loss this ledger exists to record - the event is emitted only
     if the store's own detector says the prompt was a directive, marked `unverified` because
     no entry exists to prove it. The detector is reached through its public alias; a second
     copy of "what counts as a directive" would drift from the first.

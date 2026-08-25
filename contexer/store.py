@@ -204,7 +204,7 @@ def _canonical_store_key(path: str) -> str:
     `--show-toplevel`, so without this every worktree got its own store file.
 
     Rules, in order:
-    - "" passes through untouched — `repo_slug("")` is used for global-store contexts, and
+    - "" passes through untouched - `repo_slug("")` is used for global-store contexts, and
       os.path.join("", ".git") would stat `.git` relative to CWD, collapsing the GLOBAL
       store key into the repo store whenever cwd is itself a worktree.
     - Fast path: no regular `.git` FILE at `path` → return unchanged (main repos have a
@@ -278,13 +278,13 @@ def _legacy_raw_slug(repo_path: str) -> str:
 def _legacy_slug(repo_path: str) -> str:
     # Pre-injective scheme: kept literal `_`/`-`, so `/a/my.repo`, `/a/my_repo`, and
     # `/a/my repo` all collapsed to the same file. Retained only to migrate old stores.
-    # Canonicalizes identically to repo_slug — otherwise the pre-hash migration compare in
+    # Canonicalizes identically to repo_slug - otherwise the pre-hash migration compare in
     # _store_path and console_api._resolve_store's reverse mapping go inconsistent.
     return _legacy_raw_slug(_canonical_store_key(repo_path))
 
 
 def _raw_slug(repo_path: str) -> str:
-    # The OLD repo_slug behavior — NO worktree canonicalization. Used only by
+    # The OLD repo_slug behavior - NO worktree canonicalization. Used only by
     # migrate_worktree_strays to locate stray store files keyed under a worktree's
     # own physical path by pre-fix versions.
     digest = hashlib.sha1(repo_path.encode("utf-8")).hexdigest()[:8]
@@ -338,7 +338,7 @@ def load(repo_path: str) -> dict:
     path = _store_path(repo_path)
     if path.exists():
         try:
-            # encoding pinned to match atomic_write — never the locale default
+            # encoding pinned to match atomic_write - never the locale default
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             # Treat a corrupted or unreadable file as empty — recovers from concurrent-write races.
@@ -372,7 +372,7 @@ def atomic_write(path: Path, text: str) -> None:
 def save(repo_path: str, data: dict) -> None:
     # Record the CANONICAL repo path so a store written from any linked worktree stops
     # flip-flopping its recorded path between last-writer worktrees. (The global store
-    # never routes through here — save_global writes it directly.)
+    # never routes through here - save_global writes it directly.)
     data["repo_path"] = _canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
     atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
@@ -481,7 +481,7 @@ def update_global_decision(content: str, session_id: str, subtype: str = "", tit
     `created_by` is the provenance, not the caller's identity: the MCP tool leaves the `ai`
     default (the agent authored the rule), the console passes `human` (a developer typed it).
     It must be threaded rather than defaulted for both, because it reaches the entry, its first
-    revision's `source`, and `revisions.compute_confidence`'s "Stated by developer" factor — a
+    revision's `source`, and `revisions.compute_confidence`'s "Stated by developer" factor - a
     hand-written rule left as `ai` renders as "by ai" and scores 20 points short.
 
     Refuses when `_global.json` cannot be parsed, exactly as `delete_decision` refuses an
@@ -722,12 +722,12 @@ def title_and_body(entry: dict, content: str | None = None) -> tuple[str, str | 
     same bullet. Stripping the matched prefix keeps the body line additive (only the
     reasoning the title didn't already say) instead of restating the title before it.
 
-    Scoped to titles that MATCH what revisions.derive_title would produce for this body — that
+    Scoped to titles that MATCH what revisions.derive_title would produce for this body - that
     algorithm always cuts on a sentence boundary (a full sentence, or the whole content
     when short), so the stripped prefix is a clean unit. This is NOT the same as "no
     explicit title": _new_decision_entry back-fills entry["title"] with the derived
     value even when nothing was authored, so a truthy entry.get("title") can't tell
-    derived apart from authored — comparing against revisions.derive_title(body) can. An
+    derived apart from authored - comparing against revisions.derive_title(body) can. An
     AUTHORED title that differs from the derived one carries no clean-boundary
     guarantee — a human can title a decision with an arbitrary short fragment that
     happens to be a literal prefix of the content ("Use Postgres" as a title for "Use
@@ -1419,7 +1419,7 @@ def capture_user_constraint(
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
                                     created_by="human", status=status)
-        # Which signal chose this store — see resolve_repo_verbose. This surface matters
+        # Which signal chose this store - see resolve_repo_verbose. This surface matters
         # MORE than update_context's, not less: it is driven from a per-prompt HOOK process,
         # which has no MCP server binding of its own and so is the path most likely to fall
         # through to the shared .current_repo pointer, the very branch under suspicion.
@@ -1856,7 +1856,7 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     wrote. An explicit stashed marker, not a wording/content heuristic, so this never
     misfires on an ordinary proposal that happens to mention missing files.
 
-    LEGACY, and staying: `anchors.py` no longer CREATES `clear_anchors` proposals — anchor-loss
+    LEGACY, and staying: `anchors.py` no longer CREATES `clear_anchors` proposals - anchor-loss
     withdrawal moved to the `proposed_lifecycle` lane, where approving retires the decision
     outright instead of keeping it live with a withdrawal clause. This branch remains because a
     store written before that move can still hold one pending, and a proposal that stopped
@@ -1936,8 +1936,8 @@ def touch_pending_review(repo_path: str) -> None:
     reads it to nudge the developer to review pending decisions mid-session. Fail-soft: a
     flag-write error must never break capture.
 
-    Public because it has TWO reader modules — `anchors.verify_anchors` and
-    `lifecycle.propose_lifecycle` — and two readers are an undeclared interface, not coupling."""
+    Public because it has TWO reader modules - `anchors.verify_anchors` and
+    `lifecycle.propose_lifecycle` - and two readers are an undeclared interface, not coupling."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         _pending_review_flag(repo_path).touch()
@@ -1953,7 +1953,7 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     touched, so a store written before this key existed loads and renders unchanged.
 
     This is where a disposition LIVES once reconciliation deletes the raw events it settled
-    (`spool.finalize_candidate_evidence` returns the summary, this preserves it) — the decision
+    (`spool.finalize_candidate_evidence` returns the summary, this preserves it) - the decision
     keeps the receipt for the evidence it came from. A missing entry returns False rather than
     raising: the candidate is settled either way, and only the receipt is lost.
 
@@ -1975,7 +1975,7 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
     def _appended(entry: dict) -> None:
         history = entry.get("evidence_summary")
         # Rebuilt rather than appended to: a hand-edited non-list would otherwise raise here,
-        # and this is bookkeeping — it must never be the thing that breaks a store write.
+        # and this is bookkeeping - it must never be the thing that breaks a store write.
         entry["evidence_summary"] = (history if isinstance(history, list) else []) + \
             [dict(summary)]
 
@@ -2218,7 +2218,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
 
     `force_pending` makes a NEWLY CREATED entry land `pending_approval` whatever
     `_classify_level` would have said. It exists for a caller whose captures are INFERRED
-    rather than stated — reconcile.py, deriving decisions from recorded evidence — where the
+    rather than stated - reconcile.py, deriving decisions from recorded evidence - where the
     `suggested` tier is the wrong resting place: a suggested decision injects at session start
     yet never appears in `review_pending`, so it is trusted without ever having been offered
     for review. Bootstrap's medium-tier conventions chose `pending_approval` for exactly this
@@ -2498,7 +2498,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     """Apply ONE approval action to `data` in memory — no load, no save (the caller owns
     those). NOT lock-free, though: an approve/edit that anchors (`_anchor_sources`, via
     `_promote_proposal` or directly below) shells out to `git rev-parse HEAD`, and its sole
-    caller (`approve_decision`) invokes this only from inside its own `store_lock(...)` block — so
+    caller (`approve_decision`) invokes this only from inside its own `store_lock(...)` block - so
     that git subprocess runs under the store lock, not lock-free. Returns (success, message,
     changed); `changed` lets the caller save only when something mutated. Resolves an exact id
     first, then an 8-char prefix (consistent with replace_id / get_shareable).
@@ -2700,7 +2700,7 @@ def format_pending_review(repo_path: str) -> str:
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
             if not life:
-                # A live decision whose only pending item is a retirement is already approved —
+                # A live decision whose only pending item is a retirement is already approved -
                 # offering to approve it again would be the one action approve_decision rejects.
                 lines.append(
                     f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
@@ -2738,8 +2738,8 @@ def _deleted_path(repo_path: str) -> Path:
 def read_deleted(repo_path: str) -> tuple[dict, str | None]:
     """(sidecar data, parse error) from ONE read of the tombstone sidecar.
 
-    Public because it has TWO reader modules — `console_api.list_tombstones` and
-    `lifecycle.tombstone_entry` — and two readers are an undeclared interface, not coupling.
+    Public because it has TWO reader modules - `console_api.list_tombstones` and
+    `lifecycle.tombstone_entry` - and two readers are an undeclared interface, not coupling.
 
     Same degrade-but-report split as `load` + `load_diagnostics` for the live store: the data
     is an empty graveyard when the file cannot be parsed, and `error` is the ONLY thing that
@@ -2842,7 +2842,7 @@ def delete_decision(repo_path: str, entry_id: str, actor: str = "ui") -> tuple[b
     (ok, message).
 
     A call site into `lifecycle.tombstone_entry`, so tombstone history is uniform however a
-    decision left the live store — but with `stale_guard=False`, because a developer clicking
+    decision left the live store - but with `stale_guard=False`, because a developer clicking
     Delete is not resolving anyone's retirement proposal. The console's wording is deliberately
     unchanged: terminology moves to lifecycle language on the CLI/MCP surfaces first.
 
@@ -3136,7 +3136,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # COMPLETED lifecycle events only (plan E2): `lifecycle` is written solely by
         # lifecycle.tombstone_entry / restore_decision, i.e. only once a human has actually
         # retired or restored the decision. `proposed_lifecycle` is a different key, is not read
-        # here, and has no wire parameter at all — an unreviewed retirement stays home. Bounded
+        # here, and has no wire parameter at all - an unreviewed retirement stays home. Bounded
         # and scrubbed at this layer so the durable outbox carries exactly what a later drain
         # sends; `remote._wire_args` bounds again as the chokepoint guarantee, and decides there
         # whether the server ever sees it.
@@ -3163,7 +3163,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         "source_files": source_files,
         "source_files_unconfirmed": unconfirmed,
         # Reaches the wire subject to remote._WIRE_LIFECYCLE *and* the server having advertised
-        # `decisionLifecycle.tombstones` — see that constant. `[]` for the ordinary decision
+        # `decisionLifecycle.tombstones` - see that constant. `[]` for the ordinary decision
         # that has never been retired or restored, so downstream builders read it uniformly.
         "lifecycle": lifecycle or [],
         # How many files this decision really governs, when fewer are being sent: either
@@ -3245,7 +3245,7 @@ _SHARE_SECRETS_HINT = "Don't share credentials, API keys, or other secrets"
 def _share_item_line(proj: dict, maxlen: int = 0) -> str:
     """One '<id8> [type] title' preview line for a share projection, with the content on an
     indented quoted line below — skipped when it only repeats the title (same dedup rule as
-    title_and_body, including its COLLAPSED-whitespace comparison — a title stays a single
+    title_and_body, including its COLLAPSED-whitespace comparison - a title stays a single
     stripped line while content may carry newlines/runs of spaces, so comparing raw strings
     would show a spurious body line even when the two are the same text), so the preview
     matches exactly what the wire will send. Content truncated to `maxlen` (0 = full); callers
@@ -4111,7 +4111,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         pass
     # Self-heal a missing / corrupt / wrong-version retrieval index before this session
     # routes its first prompt (a readable v2 index whose CONTENT has drifted is not detected
-    # here — that is save's job). Deliberately ahead of the `resume` early-return below and
+    # here - that is save's job). Deliberately ahead of the `resume` early-return below and
     # unconditional on `source`: a resumed or compacted session injects nothing here, but its
     # LATER prompts still go through the router, so it needs a usable index just as much as a
     # fresh one. Fail-soft end to end (log write included), and a no-op read when the index
@@ -4121,7 +4121,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # entrypoint, Cursor emits directives only): this is the one store-side path EVERY host
     # traverses at session start, and session start is not an editor hook, so the spool's
     # never-scan-in-a-hook rule holds. Positioned with `ensure_retrieval_index` and for the
-    # same reason — unconditional on `source`, ahead of the `resume` early-return, since a
+    # same reason - unconditional on `source`, ahead of the `resume` early-return, since a
     # resumed session's spool grows exactly like a fresh one's. `maintain_spool` is
     # self-gating (no spool dir / inside its TTL = no work) and never raises, so the call
     # site is deliberately unguarded on the strength of that promise.
@@ -4529,7 +4529,7 @@ _OVERVIEW_GENERIC_WORDS = frozenset({
 # ── Retrieval V1: topic router (lexical BM25 index + working set + injection ladder) ──
 #
 # The scoring half — tokenization, topic aliases, BM25 tuning/ranking, and artifact
-# extraction — lives in contexer/retrieval.py, and is reached QUALIFIED (retrieval._X).
+# extraction - lives in contexer/retrieval.py, and is reached QUALIFIED (retrieval._X).
 # This block used to alias nine of those private names onto store. Seven had no reader in
 # this file at all: they were re-export, so guard_engine could read a compiled regex as
 # store._ARTIFACT_PATH_RE (leaf -> store alias -> leaf private, three hops) and so the
@@ -4803,7 +4803,7 @@ def record_edited_file(repo_path: str, file_path: str) -> str:
     record (falsy path, unresolvable, or outside the repo). The evidence ledger's
     `file_changed` event names that return value rather than canonicalizing the host's raw
     `file_path` a second time, so the event and this sidecar can only ever name the same file
-    — the caller has no second spelling to get wrong, and no reader of `_guard_relpath` is
+    - the caller has no second spelling to get wrong, and no reader of `_guard_relpath` is
     added outside guard_engine. A path that resolved but whose SIDECAR WRITE then failed is
     still returned: the edit happened, and the ledger records it independently of this file."""
     if not file_path:
@@ -6660,7 +6660,7 @@ _CONSOLE_EXPORTS = frozenset({
 })
 # Same mechanism once more for `lifecycle.py`, and deliberately ONE name. `restore_decision`
 # was public on `store` before the lifecycle lane took it, so the facade keeps that spelling
-# resolving for anything outside this repo. Every OTHER lifecycle name is new — it was never
+# resolving for anything outside this repo. Every OTHER lifecycle name is new - it was never
 # on `store`, so there is no back-compat to keep and nothing to re-export: `propose_lifecycle`,
 # `retire_decision`, `dismiss_lifecycle`, `attach_lifecycle_proposal` and
 # `lifecycle_proposal_stale` are imported from the module that owns them by the callers that

@@ -529,7 +529,7 @@ def test_update_context_bounces_a_multi_section_document(tmp_repo, monkeypatch):
 
 
 # ── evaluate_policy ──────────────────────────────────────────────────────────────
-# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing — a `block` is a
+# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing - a `block` is a
 # sentence for the model to relay to the developer, not a refusal, and an `allow` is not
 # permission to stop asking them.
 

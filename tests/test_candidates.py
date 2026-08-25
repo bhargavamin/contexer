@@ -1,4 +1,4 @@
-"""Tests for contexer/candidates.py — deterministic grouping and scoring of evidence.
+"""Tests for contexer/candidates.py - deterministic grouping and scoring of evidence.
 
 Two properties carry this module and are asserted first: the same event set in ANY input
 order produces byte-identical output, and every `_SCORES` weight is explained by a test that
@@ -30,7 +30,7 @@ _UNRELATED = "graphql resolvers batch loader caching layer"
 def _ev(kind, summary="", *, session="s1", at="2026-08-24T10:00:00+00:00", files=None,
         attributes=None, event_id=None):
     """One evidence event. The default id is a uuid5 of the content, so an event keeps the
-    same id however the test happens to build it — shuffling a list must not renumber it."""
+    same id however the test happens to build it - shuffling a list must not renumber it."""
     body = f"{kind}|{summary}|{session}|{at}|{files}|{attributes}"
     return {
         "schema_version": evidence.SCHEMA_VERSION,
@@ -61,7 +61,7 @@ def _only(result):
 # ── the seam with Task 1 ─────────────────────────────────────────────────────────
 
 def test_builder_events_are_real_validated_evidence_events():
-    """The aggregator reads what `evidence.validate_event` emits — if the builder above drifts
+    """The aggregator reads what `evidence.validate_event` emits - if the builder above drifts
     from that shape, every assertion below is testing a fiction."""
     normalized, errors = evidence.validate_event(
         _ev("file_changed", "touched the store", files=["contexer/store.py"]))
@@ -128,7 +128,7 @@ def test_candidates_are_sorted_by_score_then_id():
 
 def test_equal_scores_break_the_tie_on_candidate_id():
     """The output order is load-bearing, so equal scores must not fall back to the order the
-    groups happened to be created in — which is the arrival order of their seeds."""
+    groups happened to be created in - which is the arrival order of their seeds."""
     events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
               _ev("user_directive", _UNRELATED, at="2026-08-24T10:01:00+00:00")]
     got = candidates.aggregate_candidates(events, [])["candidates"]
@@ -199,7 +199,7 @@ def test_repeated_independently_is_awarded_once_per_distinct_extra_session():
 
 
 def test_files_changed_corroborates_but_cannot_carry_a_candidate():
-    """10 lifts an explained conclusion clear of the bar without ever reaching it alone — a
+    """10 lifts an explained conclusion clear of the bar without ever reaching it alone - a
     file change is evidence that something happened, never evidence of what was decided."""
     assert candidates._SCORES["files_changed"] == 10
     events = [_ev("agent_conclusion", "The ledger writes atomically. Torn reads are the risk.",
@@ -246,7 +246,7 @@ def test_contradiction_penalty_drops_a_directive_below_the_bar_and_is_recorded()
 def test_a_negating_seed_over_the_normal_merge_bar_is_still_a_contradiction():
     """RATIFIED behaviour, and the case that deviates from the brief's letter: 0.5 is a FLOOR
     for a negating seed, not a ceiling. `_NEGATED_ABOVE_MERGE` clears the ordinary 0.7 merge
-    bar (6 of 7 tokens shared), so it would have merged anyway — a near-verbatim reversal is a
+    bar (6 of 7 tokens shared), so it would have merged anyway - a near-verbatim reversal is a
     STRONGER contradiction than a loosely-worded one, and scoring it as a plain restatement
     (+0, or worse +15 from another session) would rank a reversed decision as corroborated."""
     events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
@@ -324,7 +324,7 @@ def test_a_repeated_path_is_recorded_once():
 
 
 def test_test_result_paths_do_not_become_source_files():
-    """A test's own path names the test, not what was decided — anchoring a candidate to it
+    """A test's own path names the test, not what was decided - anchoring a candidate to it
     would point review at the wrong file."""
     events = [_ev("agent_conclusion", "Postgres backs the ledger",
                   at="2026-08-24T10:00:00+00:00"),
@@ -335,7 +335,7 @@ def test_test_result_paths_do_not_become_source_files():
 
 def test_a_decision_repeated_event_can_open_a_group_at_the_repetition_weight():
     """A repetition IS the "same conclusion repeated" signal, so it carries that weight even
-    when it opens the group — and 15 alone stays below the bar, as it does anywhere else."""
+    when it opens the group - and 15 alone stays below the bar, as it does anywhere else."""
     got = _only(candidates.aggregate_candidates(
         [_ev("decision_repeated", _SEED, attributes={"decision_id": "dec-1"})], []))
     assert got["score"] == candidates._SCORES["repeated_independently"]

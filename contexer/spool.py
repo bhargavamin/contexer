@@ -10,22 +10,22 @@ Storage for the evidence ledger, laid out as a spool rather than a sidecar docum
 
 Why per-event files: a host hook appends on every prompt and every tool use, and the one
 property that keeps that affordable is that **the cost of event N does not depend on events
-1..N-1**. `append_evidence` writes exactly one file — it never lists, reads, parses, counts
+1..N-1**. `append_evidence` writes exactly one file - it never lists, reads, parses, counts
 or rewrites the spool, and it takes NO lock of any kind. A uuid event id in the filename is
 what removes writer contention: two concurrent writers cannot name the same target, so there
 is nothing to serialize and nothing to lose.
 
-Retention, orphan sweeps and quarantine moves are the opposite kind of work — they scan — so
+Retention, orphan sweeps and quarantine moves are the opposite kind of work - they scan - so
 they run ONLY from reconciliation or maintenance (`run_retention`), never from an editor hook.
 
-A leaf module: it imports `evidence` for the one schema gate (`validate_event` — validation
+A leaf module: it imports `evidence` for the one schema gate (`validate_event` - validation
 lives there and is never reimplemented here) and reaches `store` through the MODULE OBJECT at
 call time (`store.STORE_DIR`, `store.repo_slug`, `store.load`), the load-order discipline
 `guard_engine.py` documents, so store.py never needs this module at import time and a test
 patching `contexer.store.STORE_DIR` is seen here.
 
 `.gap` is an honesty marker, not a queue: it records what left the spool without being
-consumed, and nothing here ever clears it — a successful run does not un-lose an event, so
+consumed, and nothing here ever clears it - a successful run does not un-lose an event, so
 only explicit maintenance may acknowledge one. It keeps TWO counts, because "we failed to
 record this" (`drops`) and "this aged out unconsumed" (`expired`) are different news for a
 developer and only the first is a bug (see `_bump_gap`).
@@ -61,7 +61,7 @@ _MAINTENANCE_TTL = 86400
 
 _DIR_MODE = 0o700
 # Every spool file is created by `tempfile.mkstemp`, which is 0600 umask-independently, and
-# `os.replace` preserves the mode — so 0600 is never re-asserted after the rename.
+# `os.replace` preserves the mode - so 0600 is never re-asserted after the rename.
 _TEMP_PREFIX = "tmp-"
 _META_NAME = "candidate.json"
 
@@ -89,7 +89,7 @@ def _evidence_root() -> Path:
 def _repo_dir(repo_path: str, slug: str = "") -> Path:
     # `store.repo_slug` and nothing else: the readers resolve the same way, so a linked
     # worktree and its main worktree address one spool (the identity-agreement rule). An
-    # explicit `slug` is for the one reader that has no repo path to resolve — see
+    # explicit `slug` is for the one reader that has no repo path to resolve - see
     # `spool_slugs`.
     return _evidence_root() / (slug or store.repo_slug(repo_path))
 
@@ -121,7 +121,7 @@ def spool_slugs() -> list[str]:
     evidence never produced a store entry (every candidate insufficient, or duplicates before
     any entry existed) has no store file for `contexer status` to find it by, so its pending
     count and its `.gap` were invisible in the one surface meant to report them. The slug is
-    what the developer is shown for such a repo — less readable than a path, and the only
+    what the developer is shown for such a repo - less readable than a path, and the only
     honest thing on offer."""
     try:
         return sorted(p.name for p in _evidence_root().iterdir() if p.is_dir())
@@ -133,7 +133,7 @@ def _checked_id(value: object, label: str) -> str:
     """`value` if it is a safe path component, else ValueError.
 
     Raising is right here and does not weaken the never-raises contract elsewhere: only the
-    reconciliation-side entry points take an id, and a malformed one is a caller bug — the
+    reconciliation-side entry points take an id, and a malformed one is a caller bug - the
     hook-facing `append_evidence` never names a path component at all.
     """
     if not isinstance(value, str) or not _ID_SHAPE.fullmatch(value):
@@ -143,7 +143,7 @@ def _checked_id(value: object, label: str) -> str:
 
 def _ensure_dir(path: Path) -> Path:
     """`mkdir -p` at 0700 on every level, including the ones `Path.mkdir(parents=True)` would
-    create at the default mode — the spool holds verbatim prompt text, so 0700 is the point."""
+    create at the default mode - the spool holds verbatim prompt text, so 0700 is the point."""
     chain = [path]
     while chain[-1] != store.STORE_DIR and chain[-1].parent != chain[-1]:
         chain.append(chain[-1].parent)
@@ -181,7 +181,7 @@ def _event_files(directory: Path) -> list[Path]:
 
     An ABSENT directory is an empty listing; any other listing failure is raised. The two are
     not the same fact, and a caller that must tell "nothing spooled" from "could not read the
-    spool" — `evidence_diagnostics` — can only do so if this does not collapse them.
+    spool" - `evidence_diagnostics` - can only do so if this does not collapse them.
     """
     try:
         entries = list(directory.iterdir())
@@ -196,7 +196,7 @@ def _write_json(directory: Path, name: str, payload) -> None:
     """Write one file atomically: temp file in the SAME directory, then `os.replace`.
 
     Same directory means same filesystem, so the rename is atomic and a reader never sees a
-    partial file — it sees the old name or the new one, never a half-written event.
+    partial file - it sees the old name or the new one, never a half-written event.
     """
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=_TEMP_PREFIX, suffix=".tmp")
     try:
@@ -215,7 +215,7 @@ def _read_gap(repo_path: str, slug: str = "") -> dict | None:
 
     The three-way answer is the point (ruling R28): `.gap` is a CUMULATIVE loss ledger, not a
     resettable alarm, so collapsing "no loss ever recorded" into "the record of the loss is
-    damaged" would let a reader report a clean spool over a marker that says otherwise — and
+    damaged" would let a reader report a clean spool over a marker that says otherwise - and
     would let the next bump restart the count from one. Same degrade-but-report split
     `store._read_global` carries, and the same one `_event_files` draws for a directory.
     """
@@ -243,16 +243,16 @@ def _bump_gap(repo_path: str, reason: str, drops: int = 1, field: str = "drops")
     TWO counters, and which one is bumped is decided by the CALLER's own path, never by
     looking at the events (ruling R29 forbids retention reading content):
 
-    * `drops` is genuine LOSS — a write that failed, a quarantined event that aged out. We
+    * `drops` is genuine LOSS - a write that failed, a quarantined event that aged out. We
       tried to record this and could not.
     * `expired` is evidence that aged out of `pending/` UNCONSUMED. On a host that never
       reconciles (Codex reaches no reconciliation entrypoint; Cursor emits directives only)
-      that is the DESIGNED end of the queue, not a failure — and counting it as loss made
+      that is the DESIGNED end of the queue, not a failure - and counting it as loss made
       `contexer status` report "N events lost" on a repo that lost nothing, in the one surface
       built to be honest about loss.
 
     A DAMAGED marker is never overwritten with a fresh count of one. The counts it recorded are
-    unrecoverable, so they restart — but `prior_drops_unknown` is stamped and carried forward
+    unrecoverable, so they restart - but `prior_drops_unknown` is stamped and carried forward
     for good, which keeps the ledger honest about being a lower bound instead of quietly
     reporting `drops: 1` over a marker that had said 47.
     """
@@ -279,7 +279,7 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
     """Spool one event. `{"status": ..., "errors": [...]}`, status `stored` | `dropped_error`
     | `rejected_invalid`.
 
-    NEVER raises — host hooks call this on every prompt and tool use. Writes exactly ONE file
+    NEVER raises - host hooks call this on every prompt and tool use. Writes exactly ONE file
     and reads nothing: no listing, no count, no lock, so cost is independent of how much the
     spool already holds. An I/O failure drops the event and bumps `.gap` (recorded loss); an
     invalid event is rejected WITHOUT a gap bump, since a schema rejection is a caller bug
@@ -337,7 +337,7 @@ def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
     path, so a repo_key filter would hide exactly what reconciliation exists to consume.
 
     An unreadable spool reads as empty HERE, deliberately: this is the consume path, and it
-    is `evidence_diagnostics(...)["readable"]` — not a silent empty list — that a caller asks
+    is `evidence_diagnostics(...)["readable"]` - not a silent empty list - that a caller asks
     before treating "no events" as "nothing happened".
     """
     events = []
@@ -360,7 +360,7 @@ def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
 
 def _read_meta(held: Path) -> dict:
     """A held candidate's bookkeeping. `{}` when it was never written, `{"unreadable": True}`
-    when it was written and cannot be read — the same three-way split `_read_gap` draws, and
+    when it was written and cannot be read - the same three-way split `_read_gap` draws, and
     for the same reason: neither shape carries an `entry_id`, so the sweep skips both, and
     only the count in `evidence_diagnostics` tells the developer which one it is."""
     try:
@@ -386,7 +386,7 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
     A source that is already gone while the target exists counts as ALREADY MOVED rather than
     an error: that is exactly the state a crash between two `os.replace` calls leaves, and the
     next run finishing the moves is the recovery. A source gone with no target is REPORTED,
-    never raised — the event was evicted or never spooled, and the caller decides.
+    never raised - the event was evicted or never spooled, and the caller decides.
 
     Each event is attempted INDEPENDENTLY: a transient failure on one move must not leave the
     events behind it unattempted, which would silently shrink the batch to whatever preceded
@@ -398,7 +398,7 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
     what lets `run_retention` tell an unsettled candidate from an orphaned one.
     """
     # Shape-checked BEFORE the try, so a bad id is a raised caller bug rather than one more
-    # soft error line — everything inside the try is I/O, which is what degrades.
+    # soft error line - everything inside the try is I/O, which is what degrades.
     _checked_id(candidate_id, "candidate_id")
     ids = [_checked_id(event_id, "event_id") for event_id in event_ids]
     result = {"status": "ok", "moved": 0, "already_held": 0, "missing": [], "failed": [],
@@ -433,7 +433,7 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
 
 
 def held_candidates(repo_path: str) -> dict:
-    """`{candidate_id: meta}` for every held candidate — the "already pending" set, and the
+    """`{candidate_id: meta}` for every held candidate - the "already pending" set, and the
     bookkeeping a later pass needs to settle each one.
 
     The meta is whatever `_read_meta` answers, so it comes in three shapes: the recorded
@@ -453,7 +453,7 @@ def held_candidates(repo_path: str) -> dict:
 def finalize_candidate_evidence(repo_path: str, candidate_id: str, disposition: str) -> dict:
     """Settle a candidate: return the compact summary and delete its raw held events.
 
-    `{"candidate_id", "disposition", "event_ids", "occurred_at"}` — the summary is the whole
+    `{"candidate_id", "disposition", "event_ids", "occurred_at"}` - the summary is the whole
     point, because the CALLER preserves it in the decision's own history, which is where a
     disposition belongs once the raw evidence is gone. `occurred_at` is when the candidate was
     SETTLED; the events' own times are already inside the decision they became.
@@ -497,11 +497,11 @@ def _total_bytes(paths: list[Path]) -> int:
 def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     """What the spool holds, for `contexer status`. Lock-free.
 
-    `slug` addresses a spool whose repo path is not known — see `spool_slugs`. It is the only
+    `slug` addresses a spool whose repo path is not known - see `spool_slugs`. It is the only
     reader that takes one, and it never resolves a path when given one.
 
     `readable` is the honest half: an absent spool reports zeros with `readable=True`, while a
-    directory that cannot be listed reports `readable=False` — so a reader is never told "no
+    directory that cannot be listed reports `readable=False` - so a reader is never told "no
     evidence" about a spool that could not be read.
 
     A failed listing therefore returns ZEROS rather than the counts gathered before it failed:
@@ -516,7 +516,7 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     `held_unattributed` is the same honesty applied to the sweep's blind spot: a held candidate
     whose `candidate.json` is missing or unreadable records no `entry_id`, so
     `_sweep_orphan_holds` can never judge it and it is held for good. A caller that forgets to
-    pass `meta` therefore accrues held directories nothing will ever clean up — this counter is
+    pass `meta` therefore accrues held directories nothing will ever clean up - this counter is
     what makes that show up in `contexer status` instead of accumulating silently.
     """
     counts = {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
@@ -571,7 +571,7 @@ def _sweep_events(directory: Path) -> int:
 
     The trade-off this accepts: eviction order (arrival) and listing order (event time) can
     disagree, so a full spool can drop from the MIDDLE of what a reader would consume. That is
-    the right way round — listing order is consume ergonomics, retention is about which
+    the right way round - listing order is consume ergonomics, retention is about which
     evidence is genuinely stalest, and only one of the two can be decided by the writer.
 
     A file that cannot be stat-ed is KEPT by both caps: fail-soft means never dropping
@@ -593,7 +593,7 @@ def _sweep_events(directory: Path) -> int:
             survivors += 1
             dated.append((mtime, path))
     # RESIDUAL, named rather than glossed: the sort is stable, so two files with the SAME mtime
-    # keep listing order — which is filename order, which is `occurred_at` order, i.e. the very
+    # keep listing order - which is filename order, which is `occurred_at` order, i.e. the very
     # content influence the distinct-mtime case above removes. At equal mtimes the spool has no
     # arrival fact left to decide with, and a tie-break invented here would be arbitrary; the
     # real fix is a monotonic arrival counter stamped at write time, not a cleverer sort.
@@ -629,14 +629,14 @@ def _sweep_orphan_holds(repo_path: str) -> list:
 
     Its events would otherwise be held forever: nothing re-aggregates them (they are out of
     `pending/`) and nothing will ever finalize them (the decision they were reviewed as is
-    gone). Deliberately NO store lock — a stale read costs one deferred sweep, never
+    gone). Deliberately NO store lock - a stale read costs one deferred sweep, never
     correctness, and a candidate whose meta names no entry is left alone rather than guessed
     at, which is what keeps "held is exempt while unsettled" true.
 
     A TOMBSTONED decision is not gone, and the distinction is ruling R25's: a retired decision
     is exactly the outcome a lifecycle candidate PROPOSED, so reconciliation settles that hold
     `approved` and writes the summary onto the tombstone. This sweep can only ever say
-    `dismissed`, and it writes no summary at all — so treating a tombstoned entry as an orphan
+    `dismissed`, and it writes no summary at all - so treating a tombstoned entry as an orphan
     would race reconciliation for the one disposition the lifecycle lane exists to record and
     destroy it. Left held; the next reconciliation pass settles it properly. Once the tombstone
     itself is evicted, the decision really is gone and the hold is swept then.
@@ -662,7 +662,7 @@ def run_retention(repo_path: str) -> dict:
     """Bound the spool. `{"dropped_pending", "dropped_quarantine", "temp_removed",
     "finalized_orphans", "errors"}`.
 
-    The ONLY caller-facing retention entry point, and it SCANS — so it runs from
+    The ONLY caller-facing retention entry point, and it SCANS - so it runs from
     reconciliation or maintenance and never from an editor hook. Held events are exempt while
     their candidate is unsettled.
 
@@ -703,14 +703,14 @@ def maintain_spool(repo_path: str, force: bool = False) -> dict:
     """Retention for a host that never reconciles. The retention report, or `{}` when the run
     was skipped. NEVER raises.
 
-    An emit-only host — Codex reaches no reconciliation entrypoint, Cursor emits directives
-    only — would otherwise grow `pending/` for good, since `run_retention`'s only other caller
+    An emit-only host - Codex reaches no reconciliation entrypoint, Cursor emits directives
+    only - would otherwise grow `pending/` for good, since `run_retention`'s only other caller
     is reconciliation. Session start is not an editor hook, so the never-scan-in-a-hook rule
     holds; but it IS every session, so the scan is gated twice: nothing happens at all until a
     spool directory exists, and after that at most once per `_MAINTENANCE_TTL`.
 
     The TTL is not only about cost. `_sweep_orphan_holds` judges a held candidate against the
-    LIVE store, where a retired decision is absent — which reconciliation reads as its
+    LIVE store, where a retired decision is absent - which reconciliation reads as its
     lifecycle candidate being approved and this sweep would settle as dismissed. Reconciliation
     settles its own holds first on every pass it runs, so keeping this sweep to once a day is
     what keeps it the safety net it is meant to be rather than a racing second judge.

@@ -4813,7 +4813,7 @@ class TestEditedFilesSignal:
         def _boom(*a):
             raise OSError("disk full")
         monkeypatch.setattr(store, "atomic_write", _boom)
-        # Must not raise — and still names the path, since the EDIT happened even though the
+        # Must not raise - and still names the path, since the EDIT happened even though the
         # sidecar could not be written; the evidence ledger records it independently.
         assert store.record_edited_file(tmp_repo, "a.py") == "a.py"
         assert store._read_edited_files(tmp_repo) == []

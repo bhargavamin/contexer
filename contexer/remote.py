@@ -72,36 +72,36 @@ _WIRE_SOURCE_FILES_MAX_ITEMS = 10
 _WIRE_SOURCE_FILES_MAX_LEN = 300
 
 # GATE (plan E1/E2): the same shape as `_WIRE_SOURCE_FILES` above, and it ships CLOSED for the
-# same reason that one did — `source_files` stayed local until the server had accepted the field
+# same reason that one did - `source_files` stayed local until the server had accepted the field
 # and a human had verified it end to end against a live endpoint.
 #
 # Two DIFFERENT risks gate lifecycle egress, and neither one covers the other:
-#   * does this server support it at all — answered at runtime by capability discovery
+#   * does this server support it at all - answered at runtime by capability discovery
 #     (`decisionLifecycle`, below). An old server never advertises, so it never receives.
-#   * do we know the field SPELLING the advertising server expects — answered only by a human
+#   * do we know the field SPELLING the advertising server expects - answered only by a human
 #     who has read the server's schema. Nothing in this repo can answer it: the contexer-teams
 #     push schema is server-controlled and not vendored here, and the existing wire already
 #     mixes conventions (`decisionId` camelCase beside `source_files` snake_case), so the name
 #     is not derivable from the ones already on the wire.
-# Getting the second one wrong is not a failed test, it is a permanently stuck outbox row — so
+# Getting the second one wrong is not a failed test, it is a permanently stuck outbox row - so
 # everything this gate covers is UNVERIFIED and stays off the wire. Everything else in the
 # negotiation is live: discovery parses, the projection bounds, the outbox carries.
 #
-# PRE-FLIP CHECKLIST — all five, in order, before this becomes True. Stated in full here rather
+# PRE-FLIP CHECKLIST - all five, in order, before this becomes True. Stated in full here rather
 # than as "confirm it the way `_WIRE_SOURCE_FILES` was confirmed", because this gate covers a
 # strictly BIGGER set of unknowns than that one did (three guessed names and two closed
 # vocabularies, against one name there) and a maintainer who greps `_WIRE_LIFECYCLE` must be
 # able to decide safely from this comment alone:
 #   1. The record-list field name. Guessed `lifecycle` (see `_wire_args`), by analogy with
 #      `source_files`, the most recently added field.
-#   2. The revision-identity field name. Guessed `revision_id` — and this is the WEAKEST of the
+#   2. The revision-identity field name. Guessed `revision_id` - and this is the WEAKEST of the
 #      three, because the counter-evidence is in this very file: `asubmit_team_decision` spells
 #      the same conceptual field `"revisionId"` (grep it, ~line 665). If only one name gets
 #      confirmed, confirm this one.
 #   3. The record's OWN key names: `event_id` / `kind` / `occurred_at` / `actor` / `reason` /
 #      `revision_id` / `replacement_decision_id` (see `bound_lifecycle`), guessed by mirroring
 #      the local `lifecycle.lifecycle_record` shape.
-#   4. Both CLOSED VOCABULARIES against the server's real enums — `_WIRE_LIFECYCLE_KINDS` and
+#   4. Both CLOSED VOCABULARIES against the server's real enums - `_WIRE_LIFECYCLE_KINDS` and
 #      `_WIRE_LIFECYCLE_ACTORS`. A value the server's enum rejects is a -32602 exactly like a
 #      bad field name; `source="plan"` was a rejected VALUE, not a rejected key.
 #   5. The server's own `INPUT_LIMITS` for event count, reason length and id length. The
@@ -112,12 +112,12 @@ _WIRE_SOURCE_FILES_MAX_LEN = 300
 # the singular `push_decision` or the batch `push_decisions`, and that the data actually lands
 # and renders rather than storing NULL.
 #
-# Flipping this is a one-line change, and deliberately NOT a config toggle — a toggle can be
+# Flipping this is a one-line change, and deliberately NOT a config toggle - a toggle can be
 # flipped on against a server that rejects the field, which is the failure mode itself.
 _WIRE_LIFECYCLE = False
 
 # Wire bounds for the lifecycle record list. `reason` is free human prose (scrubbed, then
-# truncated rather than dropped — dropping the whole record over a long reason would lose the
+# truncated rather than dropped - dropping the whole record over a long reason would lose the
 # event, and dropping just the reason would lose the why). `kind` and `actor` are CLOSED
 # vocabularies checked against these tuples rather than passed through: an unknown enum value is
 # the `source="plan"` failure in miniature, and an actor is supposed to be a CATEGORY, so an
@@ -126,7 +126,7 @@ _WIRE_LIFECYCLE = False
 # DELIBERATELY NOT `lifecycle.RECORD_KINDS`, even though the three spellings match today. That
 # constant is the LOCAL vocabulary, owned by the module that writes the records; this tuple is
 # a GUESS at the SERVER's enum (see item 4 above), and the two only happen to agree. Deriving
-# one from the other would make a local rename silently change what goes over the wire — the
+# one from the other would make a local rename silently change what goes over the wire - the
 # `source="plan"` failure exactly, where a value the server's enum rejects poisons the outbox
 # with a permanent -32602. They stay independent until someone reads the server's schema.
 _WIRE_LIFECYCLE_KINDS = ("retired", "restored", "superseded")
@@ -154,7 +154,7 @@ def bound_source_files(source_files: list[str]) -> list[str]:
 def _bounded_token(value) -> str:
     """One lifecycle id or timestamp, or "" when it is missing or implausibly long. These are
     machine-generated tokens, so an over-long one is corrupt data rather than a long name and is
-    DROPPED rather than truncated — a truncated id would still LOOK like an id while silently
+    DROPPED rather than truncated - a truncated id would still LOOK like an id while silently
     pointing at nothing, which is worse than an absent one."""
     text = str(value or "")
     return text if 0 < len(text) <= _WIRE_LIFECYCLE_MAX_ID else ""
@@ -167,7 +167,7 @@ def bound_lifecycle(records: list, *, reasons: bool = True,
     ONE definition called from BOTH layers, the same two-layer shape `bound_source_files` and
     redaction already have: `store._share_projection` applies it so the durable outbox carries
     exactly what a later drain will send, and `_wire_args` applies it again as the hard
-    guarantee, because it is the only chokepoint every push funnels through — a row queued
+    guarantee, because it is the only chokepoint every push funnels through - a row queued
     before this existed never passed through a projection at all.
 
     Whitelist-first is the privacy boundary, not tidiness: this builds a NEW dict out of six
@@ -177,7 +177,7 @@ def bound_lifecycle(records: list, *, reasons: bool = True,
     string. `reasons=False` is the `retirementReasons` sub-capability being absent: the events
     still go, without their prose.
 
-    Only records the local lifecycle actually completes are representable — `proposed_lifecycle`
+    Only records the local lifecycle actually completes are representable - `proposed_lifecycle`
     is a different key on the entry and is never read here or anywhere on the wire path."""
     out: list[dict] = []
     for rec in records or []:
@@ -235,13 +235,13 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
 
     `revision_id` and `lifecycle` (plan E1/E2) egress only when BOTH the `_WIRE_LIFECYCLE`
     constant above is open AND `lifecycle_caps` says this server advertised the matching
-    sub-capability, and each sub-capability is honoured on its own — `tombstones` without
+    sub-capability, and each sub-capability is honoured on its own - `tombstones` without
     `retirementReasons` sends the events with their prose stripped. Like `source_files`, the
     decision is made HERE, at call time, never captured by a caller: `lifecycle_caps` is
     resolved by the pushing store immediately before the call, so an outbox row queued before
     this client had ever spoken to the server drains under whatever is known AT DRAIN TIME, in
     both directions. `lifecycle_caps=None` means "not supported / not discovered / discovery
-    failed", and all three land in the same place, which is the old shape — an unknown server
+    failed", and all three land in the same place, which is the old shape - an unknown server
     is an old server."""
     scrub = _redaction_enabled() if redact_on is None else redact_on
     if scrub:
@@ -284,10 +284,10 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
             # UNVERIFIED spelling, and the weakest of the three guesses: `asubmit_team_decision`
             # below spells the same conceptual field `"revisionId"` (camelCase) at its own tool
             # top level, so this could as easily be that. Item 2 of the `_WIRE_LIFECYCLE`
-            # pre-flip checklist — confirm this one first.
+            # pre-flip checklist - confirm this one first.
             args["revision_id"] = revision_id
         if lifecycle_caps.tombstones and lifecycle:
-            # UNVERIFIED spelling — item 1 of the `_WIRE_LIFECYCLE` pre-flip checklist.
+            # UNVERIFIED spelling - item 1 of the `_WIRE_LIFECYCLE` pre-flip checklist.
             events = bound_lifecycle(lifecycle, reasons=lifecycle_caps.retirement_reasons,
                                      redact_on=scrub)
             if events:   # an all-unknown-kind list omits the key, never sends []
@@ -416,7 +416,7 @@ class DecisionLifecycleCapabilities:
 class ServerCapabilities:
     decision_reconciliation: DecisionReconciliationCapabilities | None
     # Defaulted so every existing construction site (tests, share.py's fallbacks) keeps working
-    # and lands on "not advertised" — which is the same place discovery failure lands.
+    # and lands on "not advertised" - which is the same place discovery failure lands.
     decision_lifecycle: DecisionLifecycleCapabilities | None = None
 
 
@@ -465,7 +465,7 @@ class RemoteStore:
         # Carried only when built via from_profile — the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
-        # _UNDISCOVERED, or a DecisionLifecycleCapabilities, or None — and None is a REAL answer
+        # _UNDISCOVERED, or a DecisionLifecycleCapabilities, or None - and None is a REAL answer
         # here ("this server does not do lifecycle"), which is why the sentinel exists at all:
         # without it a not-advertising server would be re-probed on every push.
         self._lifecycle_caps = _UNDISCOVERED
@@ -606,7 +606,7 @@ class RemoteStore:
         """Discover optional server protocols before creating durable operations.
 
         Each block is parsed independently: a server advertising one and not the other must not
-        lose the one it does advertise. An absent or non-dict block is None — never a
+        lose the one it does advertise. An absent or non-dict block is None - never a
         default-True shape, since an unknown server is an old server."""
         result = await self._ainvoke("get_capabilities", {})
         structured = getattr(result, "structuredContent", None) or {}
@@ -636,12 +636,12 @@ class RemoteStore:
         """The lifecycle capability governing THIS push, discovered lazily and memoized.
 
         Discovery costs a round trip, so it is skipped entirely unless a row actually carries
-        something the capability would gate — the overwhelmingly common push (a live decision
+        something the capability would gate - the overwhelmingly common push (a live decision
         with no lifecycle history) stays exactly as cheap as it was, and with the gate constant
         closed nothing here ever runs at all.
 
-        Any failure — an old server with no `get_capabilities` tool, a timeout, a rejected
-        token — resolves to None, i.e. the old shape. That direction is the whole rule: a push
+        Any failure - an old server with no `get_capabilities` tool, a timeout, a rejected
+        token - resolves to None, i.e. the old shape. That direction is the whole rule: a push
         must never be upgraded by a discovery attempt that did not actually succeed."""
         if not _WIRE_LIFECYCLE or not any(r.get("lifecycle") or r.get("revision_id")
                                           for r in rows):

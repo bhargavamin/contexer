@@ -2,13 +2,13 @@
 
 `tests/test_guard_engine.py` is the guard's SPECIFICATION and is deliberately left
 byte-for-byte untouched by the refactor that made `guard_staged` a git adapter over
-`policy.evaluate_policies` — if a row of it had to change, the refactor changed behaviour.
+`policy.evaluate_policies` - if a row of it had to change, the refactor changed behaviour.
 This file pins what that suite cannot: that the routing actually happens (so a future edit
 cannot quietly re-inline the judging), the one piece of NEW behaviour the routing bought
 (a dead armed rule is surfaced instead of passing as clean), and the two parity rows the
 existing suite covers only below `guard_staged`.
 
-Parity matrix — where each scenario is pinned. Rows already covered are NOT duplicated:
+Parity matrix - where each scenario is pinned. Rows already covered are NOT duplicated:
 
     clean run ................. test_guard_engine TestUncheckedIsReported::
                                test_clean_run_omits_the_key_entirely
@@ -36,7 +36,7 @@ from tests.conftest import _git, _seed_entry, _write
 
 def _arm_raw(repo_dir, entry, check):
     """Write a guard_check straight onto a stored entry, bypassing `arm_guard`'s
-    validation — which is the only way a rule that cannot run exists at all. A store is a
+    validation - which is the only way a rule that cannot run exists at all. A store is a
     JSON file a human (or a botched migration) can edit."""
     data = store.load(str(repo_dir))
     store.entry_by_id(data["entries"], entry["id"])["guard_check"] = check
@@ -76,7 +76,7 @@ class TestGuardStagedRoutesThroughTheEvaluator:
         assert policies[0]["title"] == "No TODOs"
         assert policies[0]["rule"]["pattern"] == "TODO"
         assert policies[0]["matched_files"] == ["a.py"]
-        # The staged bytes, as an artifact — the adapter reads git, the evaluator judges
+        # The staged bytes, as an artifact - the adapter reads git, the evaluator judges
         # content and never learns what a repository is.
         assert request["artifact"] == {"kind": "file_content",
                                        "content": "# TODO fix this\n"}
@@ -144,7 +144,7 @@ class TestDeadArmedRuleIsSurfaced:
 
     def test_a_dead_rule_never_blocks_and_is_not_an_error(self, repo):
         """Ratified invariant: the run path never blocks a commit on the guard's OWN
-        limitation. A rule that cannot run is the same class as an exhausted budget —
+        limitation. A rule that cannot run is the same class as an exhausted budget -
         named, not enforced."""
         entry = _seed_entry(repo, "Weird rule")
         _arm_raw(repo, entry, {"type": "regex", "pattern": "(unclosed", "flags": "",

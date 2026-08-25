@@ -19,7 +19,7 @@ Shape mirrors `store.verify_scan_conventions` deliberately:
   - one `load` + one `save` under one `store_lock`, not a write per entry;
   - proposals are attached via `lifecycle.attach_lifecycle_proposal` and armed for review via
     `store.touch_pending_review`, AFTER the save (same ordering as every other proposal
-    site in store.py) — never a direct status flip, and never a retirement.
+    site in store.py) - never a direct status flip, and never a retirement.
 
 Per anchored, active-status entry with no proposal already pending, each `source_files`
 path is classified against the working tree:
@@ -39,14 +39,14 @@ The entry-level outcome then follows from what was collected:
     what the plan's C2 lane exists to stop. Approving it (`lifecycle.retire_decision`) moves
     the decision into the tombstone sidecar with its lifecycle history; dismissing it
     (`lifecycle.dismiss_lifecycle`) leaves the entry, `source_files` included, exactly as it
-    was, so the next TTL cycle re-proposes — dismiss means "not now", not "never ask
+    was, so the next TTL cycle re-proposes - dismiss means "not now", not "never ask
     again", until the developer retires the decision or ignores it.
 
     Dedupe is structural rather than a reason comparison: an entry already carrying a
     `proposed_lifecycle` is not a participant at all, so a sitting proposal can never be
     duplicated. The older content-marker guard stays for one narrow case it still
-    answers — a LEGACY entry whose live content already carries the withdrawal clause an
-    approved pre-lane proposal wrote — since re-proposing retirement for text that
+    answers - a LEGACY entry whose live content already carries the withdrawal clause an
+    approved pre-lane proposal wrote - since re-proposing retirement for text that
     already says its anchors were withdrawn is noise.
 
 Contexer NEVER retires an anchored decision on its own: the total-loss path only ever
@@ -116,7 +116,7 @@ _ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store.MAX_SOURCE_FILES + 1
 # one of its (at most MAX_SOURCE_FILES) anchored paths missing, and each of those paths
 # potentially needing the full rename chain (up to _RENAME_CHAIN_MAX hops, 2 calls per hop
 # — `log` + `show`) before resolving or giving up, plus at most one `rev-parse HEAD` for
-# the outcome — so a budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 1` guarantees
+# the outcome - so a budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 1` guarantees
 # the FIRST entry of every run always completes. That guarantee is what makes the run make
 # forward progress: a smaller budget lets a single fat entry exhaust it inside its own file
 # loop, so that entry — and every entry after it — is skipped on every run, forever,
@@ -225,7 +225,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
 
     Participants: `type == "decision"`, non-empty `source_files`, `entry_status` in
     ("approved", "suggested") — the same "active status" set `_rehydrate_working_set`
-    uses — and neither a `proposed_revision` nor a `proposed_lifecycle` already pending (an
+    uses - and neither a `proposed_revision` nor a `proposed_lifecycle` already pending (an
     entry mid-review is skipped outright, never piled onto with a second proposal; that is
     also what makes retirement-proposal dedupe structural rather than a text comparison).
 
@@ -327,7 +327,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                         continue
 
                     # Total loss: every anchored file is gone, none renamed. Propose,
-                    # never apply — the decision keeps rendering exactly as it does now
+                    # never apply - the decision keeps rendering exactly as it does now
                     # until a human answers (retire_decision tombstones it with its
                     # history, dismiss_lifecycle keeps it live and lets the next TTL
                     # cycle ask again).

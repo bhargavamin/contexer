@@ -1,14 +1,14 @@
 """Deterministic grouping and scoring of evidence events into decision candidates.
 
 A candidate is a PROPOSAL: the group of evidence events that, taken together, look like one
-engineering decision worth a developer's attention. This module is pure — it reads validated
+engineering decision worth a developer's attention. This module is pure - it reads validated
 events (`evidence.validate_event` shapes) plus a read-only projection of the existing
 decisions, and returns dicts. It writes nothing and imports nothing that does; the only
 import is `retrieval`, itself a leaf, for the ONE tokenizer this repo has.
 
 `score` is an AGGREGATION-RANKING INPUT, never a confidence that a statement is true. 50 for
 a user directive means "a developer said this out loud, put it near the top of the review
-queue" — not "this is 50% likely to be correct". Nothing here approves, enforces, retires or
+queue" - not "this is 50% likely to be correct". Nothing here approves, enforces, retires or
 materializes anything: the review flow is the only gate.
 
 Idempotency is the load-bearing property. `candidate_id` is a uuid5 over the candidate's kind,
@@ -28,7 +28,7 @@ from contexer import retrieval
 _CANDIDATE_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://contexer.dev/evidence/candidate")
 
 # A seed carries a SEMANTIC STATEMENT (something was decided/said); support events corroborate
-# one. Kinds in neither set never group — they are ledger bookkeeping about candidates, not
+# one. Kinds in neither set never group - they are ledger bookkeeping about candidates, not
 # evidence for one.
 SEED_KINDS = frozenset({"user_directive", "agent_conclusion", "decision_repeated"})
 SUPPORT_KINDS = frozenset({"file_changed", "test_result", "diff_observed"})
@@ -93,7 +93,7 @@ def _negates(text: str) -> bool:
 def _has_rationale(summary: str) -> bool:
     """A DETERMINISTIC PROXY for "this conclusion explains itself": two or more
     sentence-ending periods, or an explicit causal connective. It is a shape test, not
-    comprehension — a two-sentence statement of fact scores as rationale, and a one-sentence
+    comprehension - a two-sentence statement of fact scores as rationale, and a one-sentence
     explanation without "because" does not."""
     low = (summary or "").lower()
     return low.count(".") >= 2 or "because" in low or "so that" in low
@@ -113,7 +113,7 @@ def _subtype_for(seed) -> str:
 # ── grouping ─────────────────────────────────────────────────────────────────────
 
 def _ordered(events) -> list:
-    """Events by (occurred_at, event_id) — the one read order, so grouping cannot depend on
+    """Events by (occurred_at, event_id) - the one read order, so grouping cannot depend on
     how the caller happened to hold the list."""
     return sorted((e for e in events if isinstance(e, dict)),
                   key=lambda e: (str(e.get("occurred_at") or ""), str(e.get("event_id") or "")))
@@ -135,7 +135,7 @@ def _merge_target(seed, groups):
     """The group this later seed joins, or None to start its own.
 
     Two bars: a restatement merges above `_MERGE_OVERLAP`, and a seed carrying a negation
-    marker merges above the lower `_CONTRADICTION_OVERLAP` — a rebuttal shares fewer words
+    marker merges above the lower `_CONTRADICTION_OVERLAP` - a rebuttal shares fewer words
     with what it rebuts, and burying it in its own group would hide the disagreement from the
     developer instead of scoring it. Whichever bar it crossed, a merged negating seed is
     counted as a contradiction by `_score_group`.
@@ -166,7 +166,7 @@ def _attach_target(event, groups):
     Same session AND (a file in common with the group's files so far, OR the group has no
     files yet and this is a test result). Consequence, stated rather than worked around: the
     seed is always the group's earliest event, so a file change recorded BEFORE the statement
-    it belongs to attaches to nothing and lands in the leftover set — which is exactly the
+    it belongs to attaches to nothing and lands in the leftover set - which is exactly the
     plan's "only a file changed, with no semantic statement" row.
     """
     files = _event_files(event)
@@ -308,7 +308,7 @@ def _classify(content, group, decisions) -> tuple:
     # surfaced fresh for review rather than silently matched back onto the tombstone.
     dead_id, dead_overlap = _best_match(content, retired)
     if dead_overlap > _DUPLICATE_OVERLAP:
-        notes.append(f"restates {dead_id}, which was retired or ignored — review it as new")
+        notes.append(f"restates {dead_id}, which was retired or ignored - review it as new")
 
     target, overlap = _best_match(content, live)
     if overlap > _DUPLICATE_OVERLAP:
@@ -332,7 +332,7 @@ def _candidate_id(kind, target_decision_id, events) -> str:
     Deterministic by construction, which is what the storage layer leans on: `held/<id>/` IS
     the "already pending" record, so two passes over the same evidence must name the same
     directory. The kind and target join the seed because they are what the candidate PROPOSES
-    — the same events read as `update the auth decision` and as `retire it` are two different
+    - the same events read as `update the auth decision` and as `retire it` are two different
     proposals, and one directory could only ever hold one of them.
     """
     return str(uuid.uuid5(_CANDIDATE_NAMESPACE, "\n".join([
@@ -398,7 +398,7 @@ def aggregate_candidates(events: list, decisions: list) -> dict:
     `{"candidates": [...], "diagnostics": {...}}`.
 
     `events` are normalized evidence events; `decisions` is a read-only projection
-    (`id`/`status`/`tombstoned`/`content`/... — never mutated, never written back).
+    (`id`/`status`/`tombstoned`/`content`/... - never mutated, never written back).
     """
     groups, leftovers, ignored, merged = _group(events or [])
     decisions = [d for d in (decisions or []) if isinstance(d, dict)]

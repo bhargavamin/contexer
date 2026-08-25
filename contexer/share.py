@@ -962,7 +962,7 @@ def _payload(dec: dict, key) -> dict:
     """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
     title so a queued offline share still sends it once drained (_entry_push_kwargs reads
     it back off this same row). Also carries `source_files` (issue #174 Task 5) and
-    `revision_id`/`lifecycle` (plan E1/E2) the same way — stored in the outbox regardless of the
+    `revision_id`/`lifecycle` (plan E1/E2) the same way - stored in the outbox regardless of the
     current wire gate or of what any server has advertised, so `_entry_push_kwargs` +
     `remote._wire_args` decide at DRAIN time whether they actually egress."""
     return {

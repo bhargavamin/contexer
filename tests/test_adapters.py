@@ -276,7 +276,7 @@ class TestClaudePostWriteRepoResolutionParity:
 
     def test_post_write_prefix_matches_sibling_user_prompt_submit_hooks(self, tmp_path, monkeypatch):
         # Patching HOME alone isn't enough: cli.install() -> claude.install(home) also
-        # runs clean_legacy_repo_settings against store.git_root(os.getcwd()) — the
+        # runs clean_legacy_repo_settings against store.git_root(os.getcwd()) - the
         # PROCESS cwd's git root, unaffected by HOME — to strip a pre-CLI installer's
         # repo-level hooks. Left unpatched, running this test from a checkout whose
         # <repo>/.claude/settings.json carries legacy Contexer markers would rewrite

@@ -521,7 +521,7 @@ class TestCodexPostWriteRepoResolutionParity:
         # claude.py's own post_write_cmd is generated the same way — reconstruct it via a
         # real claude.install() and compare prefixes rather than duplicating the literal.
         # claude_adapter.install() also runs clean_legacy_repo_settings against
-        # store.git_root(os.getcwd()) — the PROCESS cwd's git root, unaffected by
+        # store.git_root(os.getcwd()) - the PROCESS cwd's git root, unaffected by
         # claude_home — so chdir into an untracked temp dir before calling it, exactly
         # like the parity fixtures in test_plugin_hooks.py / test_adapters.py; otherwise
         # this could silently rewrite the real checkout's <repo>/.claude/settings.json.

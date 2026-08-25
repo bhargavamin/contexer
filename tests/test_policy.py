@@ -1,7 +1,7 @@
-"""Tests for contexer/policy.py — request validation, policy selection, and result shapes.
+"""Tests for contexer/policy.py - request validation, policy selection, and result shapes.
 
 Two properties carry this module. Selection is a GATE: a decision that has not been approved,
-or that no human ever vouched for, must not appear in the set at all — so every status and
+or that no human ever vouched for, must not appear in the set at all - so every status and
 every provenance gets its own test rather than one representative case. And
 `policy_set_version` must name a set independently of how the caller happened to hold it,
 because a verdict is only tied to its policies if the same set always hashes the same.
@@ -53,12 +53,12 @@ def _armed(paths="", pattern="TODO"):
 
 
 def _diff(content):
-    """The artifact a commit-shaped request carries — the bytes the evaluator judges."""
+    """The artifact a commit-shaped request carries - the bytes the evaluator judges."""
     return {"kind": "diff", "content": content}
 
 
 def _broken(did="d1"):
-    """A selected policy whose `rule` is not a mapping at all — the shape a hand-corrupted
+    """A selected policy whose `rule` is not a mapping at all - the shape a hand-corrupted
     store produces, and the one thing that makes the evaluator break mid-set."""
     return {"decision_id": did, "revision_id": "r1", "kind": "armed", "title": "",
             "rule": "not a mapping", "matched_files": []}
@@ -215,7 +215,7 @@ class TestSelectionStatusGate:
         assert len(policy.select_policies([entry], _request())) == 1
 
     def test_an_explicitly_empty_status_is_malformed_and_does_not_select(self):
-        # `.get("status", "approved")`, not `.get("status") or "approved"` — the guard's own
+        # `.get("status", "approved")`, not `.get("status") or "approved"` - the guard's own
         # spelling. An empty string is a broken write, not a legacy entry, and reading it as
         # approved would let one enforce policy.
         assert policy.select_policies([_entry(status="", guard_check=_armed())],
@@ -273,14 +273,14 @@ class TestSelectionTrustGate:
 
 
 class TestTrustRuleParityWithTheGuard:
-    """`policy.is_trusted` RESTATES `guard_engine._guard_trusted` — policy.py is a leaf and
+    """`policy.is_trusted` RESTATES `guard_engine._guard_trusted` - policy.py is a leaf and
     cannot import the guard, so the rule exists in two files and nothing but this test stops
     them drifting apart. A drift here is not cosmetic: the two would disagree about which
     decisions may enforce, so the same entry could block a commit and be invisible to the
     policy plane, or the reverse.
 
-    Exhaustive rather than representative, because a mirror fails at the CORNER — the falsy
-    `source` fallback, the `approved_by` override, the missing-status legacy default — and a
+    Exhaustive rather than representative, because a mirror fails at the CORNER - the falsy
+    `source` fallback, the `approved_by` override, the missing-status legacy default - and a
     handful of hand-picked rows is exactly what would still pass while a corner rotted.
     """
 
@@ -461,7 +461,7 @@ class TestPolicySetVersion:
 
 class TestValidateCheck:
     """Arm time. Every refusal raises the SAME message, so these tests pin WHAT is refused
-    rather than how it is phrased — the phrasing is deliberately uninformative."""
+    rather than how it is phrased - the phrasing is deliberately uninformative."""
 
     def test_the_only_two_check_types_are_regex_and_secret(self):
         assert policy.CHECK_TYPES == frozenset({"regex", "secret"})
@@ -492,7 +492,7 @@ class TestValidateCheck:
 
 
 class TestRuleMatches:
-    """Run time. `(lines, reason)` — a reason means the rule could NOT be evaluated, which is
+    """Run time. `(lines, reason)` - a reason means the rule could NOT be evaluated, which is
     the distinction the guard learned the hard way: "not checked" must never read as "clean"."""
 
     def test_a_regex_reports_the_exact_line_of_each_hit(self):
@@ -510,7 +510,7 @@ class TestRuleMatches:
 
     @pytest.mark.parametrize("pattern", ["([oops", None, 7])
     def test_an_unparseable_pattern_is_unchecked_not_clean(self, pattern):
-        # Defensive — `validate_check` refuses one at arm time — but a store is a JSON file a
+        # Defensive - `validate_check` refuses one at arm time - but a store is a JSON file a
         # human can edit, and a rule that silently never fires is the worst of both worlds. A
         # JSON `null` is the non-string case: letting its TypeError escape would take down the
         # caller's whole run over one corrupt rule.
@@ -692,7 +692,7 @@ class TestEvaluatePolicies:
 
     def test_an_error_lists_the_policy_it_broke_on_and_every_one_after_it(self):
         # `error` says only THAT the run broke. Without these rows a caller reading `unchecked`
-        # to learn what it got no answer about sees an empty list — a gap reading as clean.
+        # to learn what it got no answer about sees an empty list - a gap reading as clean.
         after = policy.select_policies([_entry("d3", guard_check=_armed(pattern="TODO"))],
                                        _request())
         result = policy.evaluate_policies([_broken("d2")] + after,

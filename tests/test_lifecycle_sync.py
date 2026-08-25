@@ -5,7 +5,7 @@ test_remote/test_share/test_team_context: what the server is asked (E1), what ma
 machine (E2), and what a team tombstone does to the local decision (E3).
 
 The network seam is `remote._acall_tool`, monkeypatched exactly as `tests/test_remote.py`
-patches it, so every assertion here is against the REAL `_wire_args` output — never a
+patches it, so every assertion here is against the REAL `_wire_args` output - never a
 projection. That distinction is the point of the E2 block: a projection can be honest and the
 wire still leak, so the never-sync items are pinned where the bytes actually go.
 
@@ -80,7 +80,7 @@ def _legacy_args():
 
 @pytest.fixture
 def wire_open(monkeypatch):
-    """Open the constant gate — the mechanism under test is what the server negotiates."""
+    """Open the constant gate - the mechanism under test is what the server negotiates."""
     monkeypatch.setattr(remote, "_WIRE_LIFECYCLE", True)
 
 
@@ -180,7 +180,7 @@ def test_tombstones_without_revisions_sends_no_revision_id(wire_open, monkeypatc
 
 def test_closed_gate_ships_legacy_shape_even_to_an_advertising_server(monkeypatch):
     # The shipped default. `_WIRE_LIFECYCLE` answers a different question from capability
-    # discovery — "do we know the field spelling" — so an advertising server changes nothing
+    # discovery - "do we know the field spelling" - so an advertising server changes nothing
     # until a human opens it, and the probe is not even made.
     assert remote._WIRE_LIFECYCLE is False
     seen = _caps_seam(monkeypatch, {"decisionLifecycle": _LIFECYCLE_CAPS})
@@ -281,7 +281,7 @@ def test_bound_lifecycle_survives_a_non_dict_record():
 
 def _wire_for(repo, entry_id, *, caps=_LIFECYCLE_CAPS, wire_open=True, monkeypatch=None):
     """The actual push payload for one stored decision, with the gate open and a fully
-    advertising server — the most permissive configuration this client has, so anything absent
+    advertising server - the most permissive configuration this client has, so anything absent
     here can never egress in any configuration."""
     monkeypatch.setattr(remote, "_WIRE_LIFECYCLE", wire_open)
     seen = _caps_seam(monkeypatch, {"decisionLifecycle": caps} if caps else {})
@@ -293,7 +293,7 @@ def _wire_for(repo, entry_id, *, caps=_LIFECYCLE_CAPS, wire_open=True, monkeypat
 
 
 def _payload_text(args) -> str:
-    """The whole payload as one searchable string — a leak in any nested field shows up."""
+    """The whole payload as one searchable string - a leak in any nested field shows up."""
     return repr(args)
 
 
@@ -352,7 +352,7 @@ def test_anchor_candidates_key_never_reaches_the_wire(tmp_repo, monkeypatch):
 def test_raw_evidence_spool_never_reaches_the_wire(tmp_repo, monkeypatch):
     # Raw events, held evidence, `.gap` and receipts are a separate store entirely: nothing on
     # the wire path reads the spool, and this pins that a spooled event stays home. The
-    # `.reconcile_<slug>.jsonl` receipt log is named explicitly beside it — same rule, different
+    # `.reconcile_<slug>.jsonl` receipt log is named explicitly beside it - same rule, different
     # file, and it is the one an "evidence spool" sentinel would otherwise miss by name.
     spool.append_evidence(tmp_repo, {
         "schema_version": 1, "event_id": str(uuid.uuid4()), "session_id": "sess-1",
@@ -435,7 +435,7 @@ def test_the_queued_row_is_already_bounded_and_scrubbed(tmp_repo):
     # The projection half of the two-layer bound: the durable outbox must hold exactly what a
     # drain will send, not the raw on-disk record. `_wire_args` bounds again as the guarantee,
     # but a row that sat in the outbox with an unscrubbed secret in it was already a leak of a
-    # different kind — the outbox is a file, and it outlives the push.
+    # different kind - the outbox is a file, and it outlives the push.
     did = _seed(tmp_repo)
     data = store.load(tmp_repo)
     entry = next(e for e in data["entries"] if e["id"] == did)

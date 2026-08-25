@@ -42,13 +42,13 @@ _MAX_ENTRIES_SHOWN = 10       # per store, per session — every human surface h
 
 def _text(value: object) -> str:
     """A string, whatever the store actually held. Entries are read RAW here — never through
-    `load` — so a field can be a JSON null, a number, or a list, and every one of those
+    `load` - so a field can be a JSON null, a number, or a list, and every one of those
     reaches a sort key or a slice further down."""
     return value if isinstance(value, str) else ""
 
 
 # Session ids that are LITERALS rather than sessions, so sharing one across two repos says
-# nothing about where a writer was aiming — the same reasoning that excludes memory imports
+# nothing about where a writer was aiming - the same reasoning that excludes memory imports
 # below (whose own sentinel stays with `_is_memory_import`, its owner). `unknown` is what
 # `evidence.emit_hook_event` writes when the host supplied no session id; `reconcile` is what
 # `reconcile.py` stamps on a decision whose evidence named none. Both are shared by every repo
@@ -104,7 +104,7 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
         # Per-entry guard, not just around the parse: these entries are RAW json, never run
         # through load's _migrate_entries, so revision-model helpers can meet shapes they
         # were never handed in a live store (`{"revisions": ["oops"]}` raises inside
-        # revisions.current_content). A malformed entry must cost its own title, not the whole audit —
+        # revisions.current_content). A malformed entry must cost its own title, not the whole audit -
         # `_run_guarded` would otherwise surface a traceback from a read-only report.
         try:
             title = e.get("title") or revisions.derive_title(revisions.current_content(e))

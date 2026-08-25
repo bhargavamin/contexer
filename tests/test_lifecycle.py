@@ -5,7 +5,7 @@ Three properties carry this feature, and each is asserted from several angles:
 
 * **The two proposal lanes are independent.** A content correction and a retirement are
   different questions about the same decision. Neither may displace the other, and resolving
-  one must leave the other untouched — the whole reason the plan refused to reuse the single
+  one must leave the other untouched - the whole reason the plan refused to reuse the single
   `proposed_revision` slot.
 * **Nothing is retired without a human.** A proposal changes nothing a session can see; only
   `retire_decision` moves a decision out of active context, and a proposal judged against a
@@ -49,7 +49,7 @@ def _entry(repo: str, eid: str) -> dict:
 
 def _approved(repo: str, content: str = STANDING, subtype: str = "architecture",
               session: str = "s1") -> str:
-    """One live, approved decision — the only shape a lifecycle proposal may attach to."""
+    """One live, approved decision - the only shape a lifecycle proposal may attach to."""
     ok, eid = store.update_decision(repo, content, session, subtype)
     assert ok and eid
     data = store.load(repo)
@@ -153,7 +153,7 @@ class TestTrustOrder:
 
         entry = _entry(tmp_repo, eid)
         assert entry["proposed_lifecycle"]["reason"] == "I want this gone"
-        # Displaced, not discarded — the same archival shape `superseded_proposals` has.
+        # Displaced, not discarded - the same archival shape `superseded_proposals` has.
         (archived,) = entry["superseded_lifecycle"]
         assert archived["reason"] == "inferred from evidence"
         assert archived["superseded_at"]
@@ -375,7 +375,7 @@ class TestRetireAndRestore:
         assert [t["id"] for t in store.list_deleted(tmp_repo)] == [eid]
 
     def test_the_console_delete_records_the_same_history(self, tmp_repo):
-        # Uniform history however a decision left the live store — the console's wording is
+        # Uniform history however a decision left the live store - the console's wording is
         # deliberately unchanged, only what it records.
         eid = _approved(tmp_repo)
         ok, message = store.delete_decision(tmp_repo, eid)
@@ -403,7 +403,7 @@ class TestExclusion:
     in the first place, and would then pin nothing at all."""
 
     def _anchored(self, repo: str) -> str:
-        """One live, guard-trusted, anchored constraint — visible to every surface below."""
+        """One live, guard-trusted, anchored constraint - visible to every surface below."""
         eid = _approved(repo, f"{STANDING}; see src/app.py", subtype="constraint")
         data = store.load(repo)
         next(e for e in data["entries"] if e["id"] == eid).update(
@@ -485,7 +485,7 @@ class TestTombstoneReaders:
         assert store._deleted_path(tmp_repo).exists()   # the file it reads raw is really there
 
         rows = scope_audit.audit_sessions()
-        # A tombstone file must never read as a SECOND store for the same repo — the whole
+        # A tombstone file must never read as a SECOND store for the same repo - the whole
         # reason `store.store_files()` is the enumeration rather than a local re-glob. It
         # reads tombstones RAW, so the new keys must simply be invisible to it.
         assert rows == []
@@ -589,7 +589,7 @@ class TestMcpTools:
         assert "never retire a decision on your own judgment" in out
 
     def test_an_already_live_decision_is_not_offered_for_approval(self, repo):
-        # It is already approved — `approve_decision` would reject the very action offered.
+        # It is already approved - `approve_decision` would reject the very action offered.
         eid = _approved(repo)
         _propose(repo, eid)
         assert "approve_decision(" not in server.review_pending()
@@ -706,7 +706,7 @@ OWNED = frozenset({
 class TestExtractionSeam:
     """`lifecycle.py` follows conflicts.py's discipline: it reads store through the MODULE
     OBJECT at call time, store.py needs it only at call time too, and the facade re-exports
-    exactly one name — the one that WAS public on store before the extraction."""
+    exactly one name - the one that WAS public on store before the extraction."""
 
     def test_lifecycle_owns_every_name_and_store_defines_none_of_them(self):
         tree = ast.parse(pathlib.Path(store.__file__).read_text(encoding="utf-8"))

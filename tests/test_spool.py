@@ -1,14 +1,14 @@
-"""Tests for contexer/spool.py — the per-event evidence spool.
+"""Tests for contexer/spool.py - the per-event evidence spool.
 
 The properties asserted here are the ones the design is FOR, not incidental behaviour:
 
-* a write is one file and nothing else — no listing, no lock, no contention, so two racing
+* a write is one file and nothing else - no listing, no lock, no contention, so two racing
   hook writers both land;
-* a write is atomic — a reader sees the whole event or no event, never a torn one;
+* a write is atomic - a reader sees the whole event or no event, never a torn one;
 * one bad file never hides its valid siblings (it is quarantined as it is met);
 * loss is RECORDED (`.gap`) rather than silent, whether it came from a failed write or a
   retention drop;
-* retention ages a file by its own MTIME, never by the timestamp inside its name — an event
+* retention ages a file by its own MTIME, never by the timestamp inside its name - an event
   must not get to decide how long it is kept;
 * held events are exempt while their candidate is unsettled, and an id that becomes a path
   component is shape-checked before the join.
@@ -53,7 +53,7 @@ def _pending(repo):
 
 
 def _age(path, days):
-    """Backdate a file's MTIME — the only thing retention is allowed to age it by."""
+    """Backdate a file's MTIME - the only thing retention is allowed to age it by."""
     old = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
     os.utime(path, (old, old))
 
@@ -94,7 +94,7 @@ def test_invalid_event_is_rejected_without_a_gap(tmp_repo):
 
 def test_a_failed_rename_leaves_no_partial_file_and_records_the_gap(tmp_repo, monkeypatch):
     """Atomicity: content is written to a temp file and PUBLISHED by the rename, so a rename
-    that never happens leaves nothing visible — and the lost event is recorded, not silent."""
+    that never happens leaves nothing visible - and the lost event is recorded, not silent."""
     spool.append_evidence(tmp_repo, _event())              # create the dir first
     real_replace = os.replace
 
@@ -182,7 +182,7 @@ def test_the_spool_takes_no_locks_at_all():
 
 def test_append_never_lists_the_spool(tmp_repo, monkeypatch):
     """The cost of event N must not depend on events 1..N-1, which holds only while the write
-    path never enumerates what is already there — so make enumerating fail and write anyway."""
+    path never enumerates what is already there - so make enumerating fail and write anyway."""
     spool.append_evidence(tmp_repo, _event())
 
     def boom(*_args, **_kwargs):
@@ -340,7 +340,7 @@ def test_hold_reports_a_missing_event_instead_of_raising(tmp_repo):
 
 
 def test_one_failed_move_does_not_abandon_the_rest_of_the_batch(tmp_repo, monkeypatch):
-    """A transient failure on one event must not leave the events behind it unattempted — that
+    """A transient failure on one event must not leave the events behind it unattempted - that
     would silently shrink the batch to whatever preceded the first bad file."""
     ids = [_event()["event_id"] for _ in range(3)]
     for event_id in ids:
@@ -437,14 +437,14 @@ def test_retention_drops_past_the_count_cap_oldest_first(tmp_repo, monkeypatch):
     assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["day 3", "day 2"]
     gap = spool.evidence_diagnostics(tmp_repo)["gap"]
     # Aged out of `pending/` unconsumed is NOT the same fact as evidence we failed to record,
-    # so it lands in its own counter and `drops` stays clean — see the A3 test below.
+    # so it lands in its own counter and `drops` stays clean - see the A3 test below.
     assert gap["expired"] == 2 and gap["drops"] == 0
     assert gap["last_reason"] == "retention_unconsumed"
 
 
 def test_the_count_cap_evicts_by_arrival_not_by_the_events_own_stamp(tmp_repo, monkeypatch):
     """Ruling R29: content must not decide retention. The event that ARRIVED first goes, even
-    though its own `occurred_at` puts it last in the listing — a clock-skewed or hand-written
+    though its own `occurred_at` puts it last in the listing - a clock-skewed or hand-written
     `2030` stamp would otherwise outlive every honestly-stamped event beside it."""
     monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1)
     spool.append_evidence(tmp_repo, _event(occurred_at="2030-01-01T00:00:00+00:00",
@@ -462,7 +462,7 @@ def test_the_count_cap_evicts_by_arrival_not_by_the_events_own_stamp(tmp_repo, m
 
 def test_identical_mtimes_still_let_the_events_own_stamp_decide(tmp_repo, monkeypatch):
     """The documented residual, named for what it is: at the same mtime the sort is stable, so
-    the tie is decided by listing order — filename order — which is the event's own
+    the tie is decided by listing order - filename order - which is the event's own
     `occurred_at`. That is exactly the content influence R29 removes from the distinct-mtime
     case, and it is NOT removed here: the spool has no arrival fact left to decide with, and a
     monotonic arrival counter stamped at write time is the upgrade path. Pinned so the residual
@@ -476,7 +476,7 @@ def test_identical_mtimes_still_let_the_events_own_stamp_decide(tmp_repo, monkey
 
     spool.run_retention(tmp_repo)
 
-    # The event's own stamp picked the victim — the residual, not the desired behaviour.
+    # The event's own stamp picked the victim - the residual, not the desired behaviour.
     assert [e["summary"] for e in spool.list_pending_evidence(tmp_repo)] == ["stamped newer"]
 
 
@@ -493,7 +493,7 @@ def test_retention_drops_past_the_age_cap(tmp_repo):
 
 def test_age_is_the_files_mtime_never_the_stamp_in_its_own_name(tmp_repo):
     """Mitigation 5: the filename stamp comes from the event's own `occurred_at`, so ageing by
-    it would let an event decide how long it is kept — a backdated event would evict itself."""
+    it would let an event decide how long it is kept - a backdated event would evict itself."""
     spool.append_evidence(tmp_repo, _event(occurred_at="2001-01-01T00:00:00+00:00",
                                            summary="ancient name, fresh file"))
     assert next(iter(_pending(tmp_repo).iterdir())).name.startswith("20010101")
@@ -512,7 +512,7 @@ def test_a_file_that_cannot_be_stat_ed_is_kept(tmp_repo, monkeypatch):
 
     def flaky(self, *args, **kwargs):
         # Fail only the AGE read. The listing stats each file once to classify it, and a file
-        # that failed THAT stat would never be listed at all — a different branch entirely.
+        # that failed THAT stat would never be listed at all - a different branch entirely.
         if self.suffix == ".json" and self.parent.name == "pending" and self in seen:
             raise OSError("no stat")
         seen.add(self)
@@ -526,7 +526,7 @@ def test_a_file_that_cannot_be_stat_ed_is_kept(tmp_repo, monkeypatch):
 
 def test_held_events_are_exempt_from_retention(tmp_repo, monkeypatch):
     monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 0)
-    store.update_decision(tmp_repo, "use JWTs instead of server sessions — stateless", "s1")
+    store.update_decision(tmp_repo, "use JWTs instead of server sessions - stateless", "s1")
     live_id = store.load(tmp_repo)["entries"][0]["id"]
     ids = _spool_two(tmp_repo)
     candidate = str(uuid.uuid4())
@@ -586,7 +586,7 @@ def test_retention_removes_gap_write_debris_too(tmp_repo):
 
 
 def test_a_held_candidate_whose_decision_is_gone_is_finalized(tmp_repo):
-    store.update_decision(tmp_repo, "use JWTs instead of server sessions — stateless", "s1")
+    store.update_decision(tmp_repo, "use JWTs instead of server sessions - stateless", "s1")
     live_id = store.load(tmp_repo)["entries"][0]["id"]
     live, orphan = str(uuid.uuid4()), str(uuid.uuid4())
     spool.hold_candidate_evidence(tmp_repo, live, _spool_two(tmp_repo),
@@ -601,7 +601,7 @@ def test_a_held_candidate_whose_decision_is_gone_is_finalized(tmp_repo):
 
 
 def test_a_held_candidate_with_no_recorded_entry_is_left_alone_but_counted(tmp_repo):
-    """Held is exempt while unsettled, and a candidate naming no entry cannot be judged — so it
+    """Held is exempt while unsettled, and a candidate naming no entry cannot be judged - so it
     is left rather than guessed at. It is also held FOREVER, since no sweep can ever reach it,
     which is why `contexer status` has to be able to see it accruing."""
     candidate = str(uuid.uuid4())
@@ -630,7 +630,7 @@ def test_an_attributed_held_candidate_is_not_counted_as_unattributed(tmp_repo):
 
 
 def test_an_unreadable_store_defers_the_orphan_sweep_rather_than_failing(tmp_repo, monkeypatch):
-    """The sweep asks the store who is still live and takes no lock to do it — so a store it
+    """The sweep asks the store who is still live and takes no lock to do it - so a store it
     cannot read costs one deferred sweep, never a held candidate finalized on a guess."""
     candidate = str(uuid.uuid4())
     spool.hold_candidate_evidence(tmp_repo, candidate, _spool_two(tmp_repo),
@@ -664,7 +664,7 @@ def test_maintain_spool_runs_retention_once_per_ttl(tmp_repo):
     assert spool.maintain_spool(tmp_repo)["dropped_pending"] == 1
     assert spool.list_pending_evidence(tmp_repo) == []
 
-    # A second call inside the TTL does no work at all — not even a listing.
+    # A second call inside the TTL does no work at all - not even a listing.
     spool.append_evidence(tmp_repo, _event(summary="fresh"))
     _age(next(iter(_pending(tmp_repo).iterdir())), spool._MAX_PENDING_AGE_DAYS + 1)
     assert spool.maintain_spool(tmp_repo) == {}
@@ -720,7 +720,7 @@ def test_status_counts_what_the_spool_holds(tmp_repo):
 
 
 def test_status_reads_the_gap_as_a_cumulative_loss_ledger_not_an_alarm(tmp_repo):
-    """Ruling R28: nothing clears `.gap`, so it reports what this spool has LOST — a count and
+    """Ruling R28: nothing clears `.gap`, so it reports what this spool has LOST - a count and
     a date, never a condition the developer is being asked to resolve."""
     spool.append_evidence(tmp_repo, _event())
     spool._bump_gap(tmp_repo, "write_error", 3)
@@ -761,7 +761,7 @@ def test_status_says_a_spool_is_unreadable_rather_than_empty(tmp_repo, monkeypat
 
 def test_status_tells_evidence_that_aged_out_from_evidence_that_was_lost(tmp_repo):
     """The two are different news. Pending events age out unconsumed on a host that never
-    reconciles (Codex, Cursor) — that is the queue working as designed, and reporting it as
+    reconciles (Codex, Cursor) - that is the queue working as designed, and reporting it as
     "lost" both accused a healthy spool of failing and buried the real failures beside it."""
     spool.append_evidence(tmp_repo, _event())
     spool._bump_gap(tmp_repo, "retention_unconsumed", 4, field="expired")
@@ -775,8 +775,8 @@ def test_status_tells_evidence_that_aged_out_from_evidence_that_was_lost(tmp_rep
 
 
 def test_status_reports_a_spool_no_store_file_names(tmp_repo):
-    """A repo whose evidence never produced a store entry — every candidate insufficient, or
-    duplicates before any entry existed — is not in the store-file set `contexer status` builds
+    """A repo whose evidence never produced a store entry - every candidate insufficient, or
+    duplicates before any entry existed - is not in the store-file set `contexer status` builds
     its repo list from, so its pending count and its `.gap` were invisible in the one surface
     meant to report them. Listed by slug, which is all there is: a slug does not reverse."""
     from contexer import cli
