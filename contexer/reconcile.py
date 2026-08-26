@@ -1249,6 +1249,17 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
 
     NEVER raises: every caller is a host hook or a report surface, and a reconciliation that
     could not finish is a receipt marked `incomplete`, never a broken session start.
+
+    COST AT THE CEILING, measured rather than estimated, because this now runs at every host's
+    session start: a spool holding `spool._MAX_PENDING_EVENTS` = 1000 events in the realistic
+    shape (100 distinct statements plus 900 corroborating edits) takes **751ms** end to end and
+    produces 100 review items. Only ~106ms of that is aggregation, which is the half Task 06
+    gates at `_AGGREGATION_GATE_MS`; the remaining ~645ms is 100 holds plus 100 `store.save`
+    calls, each rebuilding the BM25 retrieval sidecar at its tail. It is a ONE-TIME drain (the
+    next start over the same, now-held, spool measured under 42ms) and it needs a spool that
+    genuinely accumulated 1000 events, which is why ruling P4's refusal of a numeric has-work
+    budget stands: the number is disclosed here and in OUTSTANDING-ISSUES item 10 rather than
+    enforced, so a maintainer meets it before a developer does.
     """
     receipt = _receipt(dry_run, host)
     try:
