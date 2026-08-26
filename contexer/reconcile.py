@@ -320,18 +320,28 @@ def _dispositions(held: dict, entries: list, retired_ids: set, tombstones: list 
             # tombstone sidecar carrying a retirement record, which every rule under here reads
             # as "the decision left" - the opposite of what a reconsideration is asking.
             target = entry if entry is not None else tombstoned.get(entry_id)
+            basis = str(meta.get("basis_revision_id") or "")
+            sitting = (target or {}).get("proposed_reconsideration") or {}
+            answer = _reconsideration_answer(target, candidate_id, basis)
             if target is None:
                 status = "dismissed"                    # evicted: nothing left to answer
-            elif target.get("proposed_reconsideration"):
-                continue                                # the question still sits, unanswered
-            elif _restored_on_basis(target, str(meta.get("basis_revision_id") or "")):
-                status = "approved"
-            elif _reconsideration_dismissed(target, candidate_id):
+            elif str(sitting.get("candidate_id") or "") == candidate_id:
+                # THIS candidate's own question is what is on the table. Tested by candidate
+                # id rather than by the slot merely being occupied: a slot filled by a LATER
+                # restatement says nothing about a candidate the developer already answered.
+                continue
+            elif answer == "dismissed":
+                # The RECEIPT first, always. A `restored` record is written by three different
+                # acts and says nothing about which; a receipt naming this candidate, or the
+                # one that held the slot at this basis, is unambiguous - so reading the record
+                # first filed `approved` over an explicit dismissal.
                 status = "dismissed"
+            elif answer == "approved" and _restored_on_basis(target, basis):
+                status = "approved"
             else:
-                # Neither receipt is durable yet - the answer landed between the two writes, or
-                # the proposal was displaced. Held, which is what keeps its evidence exempt
-                # from retention until something can actually speak for it.
+                # No durable answer yet - it landed between the two writes, or the question is
+                # displaced and the sitting one is still unanswered. Held, which is what keeps
+                # its evidence exempt from retention until something can speak for it.
                 continue
             flips[candidate_id] = status
             continue
@@ -394,10 +404,13 @@ def _restored_on_basis(entry: dict | None, basis: str) -> bool:
     """True when this decision carries a COMPLETED `restored` record for the revision the
     reconsideration was judged against.
 
-    The only approval signal this lane accepts. Not "the decision is live again": a decision
-    can come back through `restore_decision`, a console edit, or a developer un-ignoring it,
-    and none of those is an answer to THIS question. The basis is what ties the record to the
-    proposal a human was actually shown.
+    HALF of the approval signal, never the whole of it. This record shape is exactly what
+    `lifecycle.restore_decision` writes - the `restore_decision` MCP tool, `contexer restore`,
+    and this lane's own restore all produce the same `restored` at the same revision - so it
+    cannot say WHICH act produced it. The receipt below is what says that, and `_dispositions`
+    requires both: an answer naming this candidate, and a completed restoration to go with it.
+    Reading this record alone recorded `approved` for a question the developer had explicitly
+    dismissed, which is the fabricated-approval class the whole function guards.
     """
     return bool(entry) and any(
         isinstance(record, dict) and record.get("kind") == "restored"
@@ -405,12 +418,35 @@ def _restored_on_basis(entry: dict | None, basis: str) -> bool:
         for record in (entry.get("lifecycle") or []))
 
 
-def _reconsideration_dismissed(entry: dict | None, candidate_id: str) -> bool:
-    """True when the decision carries a durable dismissal receipt for THIS candidate."""
-    return bool(entry) and any(
-        isinstance(row, dict) and row.get("disposition") == "dismissed"
-        and str(row.get("candidate_id") or "") == candidate_id
-        for row in (entry.get("reconsideration_history") or []))
+def _reconsideration_answer(entry: dict | None, candidate_id: str, basis: str) -> str:
+    """The developer's recorded answer to this candidate's question - `"approved"`,
+    `"dismissed"`, or `""` for none yet.
+
+    Two ways a receipt speaks for a candidate, and the second is what stops a displaced one
+    being stranded. An entry has ONE reconsideration slot, so a second directive restating the
+    same decision while the first question still sits is HELD rather than proposed - and when
+    the developer answers, the receipt names only the candidate that held the slot. The held
+    one asked the SAME question about the SAME decision at the SAME revision and was answered
+    by the same act, so a receipt at a matching `basis_revision_id` settles it too. Without
+    that it stays held for good with no receipt anywhere, and invisible to
+    `evidence_diagnostics`' `held_unattributed` because it does name an entry.
+
+    A candidate's own receipt always wins over a same-basis one. A receipt at a DIFFERENT basis
+    answers a different question and never speaks here, which leaves such a candidate held -
+    the same "cannot judge it, so do not guess" rule every other branch follows.
+    """
+    own = shared = ""
+    for row in (entry or {}).get("reconsideration_history") or []:
+        if not isinstance(row, dict):
+            continue
+        disposition = str(row.get("disposition") or "")
+        if disposition not in spool.DISPOSITIONS:
+            continue
+        if str(row.get("candidate_id") or "") == candidate_id:
+            own = disposition
+        elif basis and str(row.get("basis_revision_id") or "") == str(basis):
+            shared = disposition
+    return own or shared
 
 
 def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,

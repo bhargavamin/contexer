@@ -2831,8 +2831,12 @@ def get_pending_decisions(repo_path: str) -> list[dict]:
     ]
     # Only the RETIRED half is added here: the ignored half is already in `live` above, and
     # `deleted_at` is exactly what separates a tombstoned entry from one that never left.
+    # Deduped by id as well, because an interrupted restoration leaves the same decision in
+    # both files with the stamp still on the live copy - one decision, one review item, which
+    # is what this function's contract promises.
+    seen = {str(e.get("id") or "") for e in live}
     return live + [e for e in lifecycle.pending_reconsiderations(repo_path)
-                   if e.get("deleted_at")]
+                   if e.get("deleted_at") and str(e.get("id") or "") not in seen]
 
 
 def format_pending_review(repo_path: str) -> str:
@@ -2922,7 +2926,17 @@ MAX_TOMBSTONES = MAX_ENTRIES      # sidecar cap; see _keep_recent_tombstones for
 
 
 def _deleted_path(repo_path: str) -> Path:
-    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    # Best-effort create, the third of the family with `_store_path`/`_global_path` and for the
+    # identical reason (#152): a READER only needs the path, and on a host where ~/.contexer can
+    # be neither created nor written, raising here crashes a hook that merely wanted to load.
+    # This one kept its bare mkdir because every reader of the tombstone sidecar used to sit on
+    # a write path - until the reconsideration lane put one on session start, where an
+    # unwritable STORE_DIR then cost the session its whole context injection. Writers still
+    # surface the failure at their own write (`_save_deleted` does its own).
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    except OSError:
+        pass
     return STORE_DIR / f"{repo_slug(repo_path)}.deleted.json"
 
 
@@ -4285,6 +4299,30 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     }, repo_path, console_url)
 
 
+def _pending_review_notice(total: int) -> str:
+    """The count-only session-start pointer at the review queue.
+
+    Count, never content, deliberately: a startup must not dump every pending decision's text.
+    The identified list is pulled on demand via `review_pending` (in-session) or
+    `contexer review` (terminal), and the per-decision content is surfaced at capture time.
+
+    ONE definition because there are now two call sites. A repo whose only pending item is a
+    reconsideration on a RETIRED decision has no live decisions at all, so it takes the
+    no-context branch, and a second copy of this text there would be a second copy to keep in
+    step with this one."""
+    notice = (
+        f"{_pl(total, 'decision')} pending your review (recorded, not yet "
+        "trusted — not listed here to keep startup light). Offer to show them to the "
+        "developer when appropriate: call review_pending to list them, then "
+        "approve_decision — or they can run `contexer review` in a terminal."
+    )
+    if total >= _BACKLOG_ESCALATE:
+        notice += (" This backlog is growing — proactively offer to work through it this "
+                   "session, one decision at a time (there is no bulk approve; a blanket "
+                   "clear would trust whatever misfired into the queue).")
+    return notice
+
+
 def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
     """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
@@ -4401,6 +4439,13 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except Exception:
         pass  # verification is opportunistic; a session start must never fail on it
 
+    # Read before the no-context branch below, because the reconsideration lane is the one
+    # that can be non-empty when `decisions` is empty: a repo whose only decision was RETIRED
+    # holds it in the tombstone sidecar, and a question about it still waits on the developer.
+    from contexer import lifecycle       # function-level: same cycle rule as every other
+                                         # store.py call site into this module
+    reconsidering = lifecycle.pending_reconsiderations(repo_path)
+
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
             return {"status": "", "context": ""}
@@ -4416,6 +4461,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                     sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(lines)
+        if reconsidering:
+            sys_parts.append(_pending_review_notice(len(reconsidering)))
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
             "status": f"Contexer: no context stored{global_note} — setup offer on next prompt",
@@ -4484,23 +4531,17 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             "Call get_context BEFORE reading files for any question about architecture, "
             "design decisions, rationale, or patterns."
         )
-    # Count-only, deliberately terse: a startup should not dump every pending decision's
-    # content (overwhelming). The identified list is pulled on demand via `review_pending`
-    # (in-session) or `contexer review` (terminal); the per-decision content is surfaced at
-    # capture time, not here.
-    total_pending = len(pending) + len(with_proposals)
+    # The reconsideration lane is counted here too, and it is the one that also lives OUTSIDE
+    # `decisions`: an ignored twin sits in that list with an inactive status (so neither filter
+    # above matches it) and a retired one is in the tombstone sidecar entirely. It was the only
+    # proposal lane invisible at session start, and the mid-session nudge is fire-once - so a
+    # question the developer did not act on that one time was never raised again. Deduped by
+    # id, since an ignored entry can carry a Suggested Update as well.
+    counted = {str(d.get("id") or "") for d in pending + with_proposals}
+    total_pending = len(pending) + len(with_proposals) + sum(
+        1 for e in reconsidering if str(e.get("id") or "") not in counted)
     if total_pending:
-        notice = (
-            f"{_pl(total_pending, 'decision')} pending your review (recorded, not yet "
-            "trusted — not listed here to keep startup light). Offer to show them to the "
-            "developer when appropriate: call review_pending to list them, then "
-            "approve_decision — or they can run `contexer review` in a terminal."
-        )
-        if total_pending >= _BACKLOG_ESCALATE:
-            notice += (" This backlog is growing — proactively offer to work through it this "
-                       "session, one decision at a time (there is no bulk approve; a blanket "
-                       "clear would trust whatever misfired into the queue).")
-        sys_parts.append(notice)
+        sys_parts.append(_pending_review_notice(total_pending))
 
     # B1: size-gated standing topic map — a one-line overview once the store is big
     # enough that "call get_context before reading files" alone stops being actionable.
