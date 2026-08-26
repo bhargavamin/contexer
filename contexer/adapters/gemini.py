@@ -300,7 +300,7 @@ def _cmd(entry: str) -> str:
     python = sys.executable
     return (
         "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "
-        f'"{python}" -c "from contexer.adapters import gemini; import sys; '
+        f'"{python}" -P -c "from contexer.adapters import gemini; import sys; '
         f'print(gemini.{entry}(sys.argv[1], sys.stdin.read()))" "$REPO"'
     )
 

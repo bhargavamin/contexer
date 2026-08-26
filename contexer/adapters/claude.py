@@ -17,6 +17,7 @@ from contexer.adapters.base import (
     _load,
     _load_safe,
     _save,
+    _strip_stale,
 )
 
 NAME = "claude"
@@ -516,7 +517,7 @@ def install(home: Path) -> list[str]:
         # A `pwd` fallback could write a non-repo dir into the shared .current_repo.
         return (
             f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-            f'"{python}" -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
+            f'"{python}" -P -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
         )
 
     ss_code = (
@@ -553,7 +554,7 @@ def install(home: Path) -> list[str]:
     def _sync(tail: str) -> str:
         return (
             'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-            f'"{python}" -c "from contexer.adapters import claude; import sys; '
+            f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
             'claude.sync_memory(sys.argv[1])" "$REPO"; '
             f"echo '{tail}' # {_HOOK_SENTINEL}"
         )
@@ -611,20 +612,20 @@ def install(home: Path) -> list[str]:
     )
 
     cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-               f'"{python}" -c "from contexer.adapters import claude; import sys; '
+               f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                f'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
     cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-               f'"{python}" -c "from contexer.adapters import claude; import sys; '
+               f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                f'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # Nudge to review decisions pending the developer (dropped by store.update_decision). A Python
     # entrypoint (not pure shell) so it is per-repo and can verify the store still has something
     # pending — no false nudge for an already-approved or cross-repo flag.
     review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                  f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                   f'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # PostToolUse (Write|Edit): records edited files into the per-session sidecar (issue
@@ -633,7 +634,7 @@ def install(home: Path) -> list[str]:
     # (cap_con/cap_rat/cap_poll/review_cmd) — see post_write's docstring for why a
     # cwd-vs-toplevel mismatch here would silently kill the feature.
     post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                       f'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       f'# {_HOOK_SENTINEL} .pending_capture')
 
@@ -676,6 +677,15 @@ def install(home: Path) -> list[str]:
             and _in_groups(ss, "anchor_repo") and _in_commands(ss, "'claude'")):
         ss = _filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
+    # Converge on the exact current command (`_strip_stale`, the gemini.py "Fix 2" shape):
+    # the marker gates above only know the historical shapes somebody enumerated, and a
+    # drift they don't name — the -P flag (without which `python -c` prepends cwd to
+    # sys.path, so a session opened at the root of a checked-out contexer repo shadows the
+    # installed package with that repo's own contexer/ source: stale code, or a crash on a
+    # signature the shadowed copy predates) — left every installed hook running the old
+    # command forever while install reported success.
+    ss = _strip_stale(ss, ["get_session_start_context"], _py(ss_code))
+    hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...",
@@ -683,6 +693,9 @@ def install(home: Path) -> list[str]:
 
     # SessionEnd: flush memory-tool facts on clean exit (deterministic — needs no model).
     se = hooks.setdefault("SessionEnd", [])
+    # Converge on the exact current command (see the SessionStart note above).
+    se = _strip_stale(se, ["sync_memory"], sessionend_cmd)
+    hooks["SessionEnd"] = se
     if not _in_groups(se, "sync_memory"):
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
@@ -710,6 +723,9 @@ def install(home: Path) -> list[str]:
     if _in_groups(put, "claude.post_write") and not _in_groups(put, "show-toplevel"):
         put = _filter_groups(put, ["claude.post_write"])
         hooks["PostToolUse"] = put
+    # Converge on the exact current command (see the SessionStart note above).
+    put = _strip_stale(put, ["claude.post_write"], post_write_cmd)
+    hooks["PostToolUse"] = put
     if not _in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": post_write_cmd}]})
@@ -735,6 +751,9 @@ def install(home: Path) -> list[str]:
     if _in_groups(pc, "compaction starting") and not _in_groups(pc, "sync_memory"):
         pc = _filter_groups(pc, ["compaction starting"])
         hooks["PreCompact"] = pc
+    # Converge on the exact current command (see the SessionStart note above).
+    pc = _strip_stale(pc, ["compaction starting"], precompact_cmd)
+    hooks["PreCompact"] = pc
     if not _in_groups(pc, "compaction starting"):
         pc.append({"hooks": [{"type": "command",
             "statusMessage": "Saving decisions before compact...",
@@ -798,6 +817,9 @@ def install(home: Path) -> list[str]:
     if _in_groups(ups, "get_bootstrap_context_prompt") and not _in_groups(ups, "prompt_from_hook_stdin"):
         ups = _filter_groups(ups, ["get_bootstrap_context_prompt"])
         hooks["UserPromptSubmit"] = ups
+    # Converge on the exact current command (see the SessionStart note above).
+    ups = _strip_stale(ups, ["get_bootstrap_context_prompt"], _py(boot_code))
+    hooks["UserPromptSubmit"] = ups
 
     if not _in_groups(ups, "get_bootstrap_context_prompt"):
         ups.append({"hooks": [{"type": "command", "once": True,
@@ -815,6 +837,24 @@ def install(home: Path) -> list[str]:
     if _in_groups(ups, "Reminder: if you make a significant decision"):
         ups = _filter_groups(ups, ["Reminder: if you make a significant decision"])
         hooks["UserPromptSubmit"] = ups
+
+    # Migrate: these four hooks predating -P (see the post_write migration above for why
+    # cwd-shadowing an older contexer/ source directory matters) had no prior upgrade path
+    # at all — each ran unchanged from first install until now, so this is their first.
+    # `_strip_stale`, not a marker-presence check: `ups` holds several distinct hooks in
+    # one list (boot_code among them, migrated above), and `_in_groups(ups, "-P -c")`
+    # would read as globally satisfied the moment ANY one of them picks up -P, leaving
+    # the other three permanently unmigrated. `_strip_stale` compares each GROUP's own
+    # command against its own freshly-built current_cmd, so one hook's fix cannot mask
+    # another's staleness.
+    for marker, current_cmd in (
+        ("claude.capture_constraint", cap_con),
+        ("claude.rationale", cap_rat),
+        ("claude.team_poll", cap_poll),
+        ("claude.review_nudge", review_cmd),
+    ):
+        ups = _strip_stale(ups, [marker], current_cmd)
+    hooks["UserPromptSubmit"] = ups
 
     if not _in_groups(ups, "claude.capture_constraint"):
         ups.append({"hooks": [{"type": "command",
