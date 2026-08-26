@@ -1160,12 +1160,30 @@ def test_no_module_outside_the_aggregator_and_its_ledger_reads_a_possible_source
     `files.confirmed`, never survives an approval as `source_files`, and is filtered out of the
     possible list the moment it becomes confirmed. Widen this set again only with the same
     pairing: a render-only reader plus a behavioural test that pins where the path CANNOT go.
+
+    ONE SPELLING, all the way to the edge. `review_impact`'s dict carries the paths under the
+    key `possible_source_files`, not a shorter local name, precisely so this scan still sees
+    every reader: a rename at the module boundary would have created a second spelling that
+    nothing greps for, which is a WEAKER ban than the absolute one this narrowed. The web
+    console is served the RENDERED LINES rather than the dict for the same reason - the paths
+    reach the browser already labelled "NOT anchored on approval", with no key there for a
+    future handler to route into `source_files`, which is what the sweep below checks.
     """
     owners = {"candidates.py", "reconcile.py", "review_impact.py"}
     readers = [path.name for path in sorted(Path(store.__file__).parent.rglob("*.py"))
                if path.name not in owners
                and "possible_source_files" in path.read_text(encoding="utf-8")]
     assert readers == []
+
+    # The non-Python egress the substring scan above cannot reach. Assets are scanned for BOTH
+    # the owner spelling and the shorter one a projection might invent, so neither a rename here
+    # nor a new console handler can start carrying an uncertain path without failing this.
+    assets = sorted((Path(store.__file__).parent / "ui").rglob("*.js"))
+    assert assets, "the console assets moved; this sweep is now checking nothing"
+    for path in assets:
+        text = path.read_text(encoding="utf-8")
+        for spelling in ("possible_source_files", "files.possible", '["possible"]'):
+            assert spelling not in text, f"{path.name} reads uncertain paths ({spelling})"
 
 
 def test_raw_held_evidence_survives_a_failed_summary_write(tmp_repo, monkeypatch):

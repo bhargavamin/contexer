@@ -1532,6 +1532,23 @@
 
     const body = editing ? editForm(slug, d) : readBody(d, factors, conf);
 
+    // The shared review block (Task 07): the SAME lines `review_pending` and `contexer review`
+    // print, rendered as lines rather than re-assembled here, so the console cannot phrase a
+    // category its own way and cannot silently stop showing one. Lines, not the structured
+    // dict, is also what keeps the uncertain paths out of this file entirely - they arrive
+    // already labelled "NOT anchored on approval" and there is nothing here to route anywhere.
+    const impact = asList(d.impact_lines, "impact_lines");
+    const impactBlock = impact.length
+      ? h("div", { class: "block" }, [
+          h("div", { class: "block-label", text: "What approving this does" }),
+          h(
+            "ul",
+            { class: "factors" },
+            impact.map((line) => h("li", { text: String(line) }))
+          ),
+        ])
+      : null;
+
     const proposal = d.proposed_revision
       ? h("div", { class: "block" }, [
           h("div", { class: "block-label", text: "Proposed update awaiting review" }),
@@ -1684,6 +1701,7 @@
         h("span", { text: "v" + num(d.revision) }),
       ]),
       body,
+      impactBlock,
       proposal,
       revBlock,
       actions,

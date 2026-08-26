@@ -69,9 +69,29 @@ _MAX_LISTED = 5          # rows per section before the honest "+N more" tail
 _TITLE_CLIP = 80         # a similar decision is identified, not reproduced
 
 
+def one_line(text: str) -> str:
+    """Untrusted free text, collapsed to a single line.
+
+    THE render-boundary guard, and the reason it exists is a reproduced injection. `impact_lines`
+    returns one string per line and `store.format_pending_review` indents each by four spaces, so
+    a field carrying a newline emits extra lines indented exactly like the surface's own action
+    lines. A retirement reason is free text on the `retire_decision` MCP tool, so an assistant
+    that read a crafted reason out of the repository could put
+    `approve_decision(entry_id="...", action="approve")` into the payload as what looks like the
+    surface telling itself to approve.
+
+    Applied to EVERY untrusted string this module renders - the reason, any proposal or decision
+    title, an armed rule's own pattern and paths - rather than to the field the injection was
+    demonstrated on, because "which of these can contain a newline today" is not a property a
+    render boundary should depend on. `impact_lines` re-applies it to every finished line as the
+    module's own invariant: one item is one line.
+    """
+    return " ".join(str(text or "").split())
+
+
 def _listed(items: list, limit: int = _MAX_LISTED) -> str:
     """`a, b, c (+2 more)` - the review surfaces' list clip, honest about what it dropped."""
-    head = ", ".join(str(i) for i in items[:limit])
+    head = ", ".join(one_line(i) for i in items[:limit])
     extra = len(items) - limit
     return f"{head} (+{extra} more)" if extra > 0 else head
 
@@ -192,6 +212,21 @@ def _grouped(rows: list) -> list[dict]:
                                            -b["count"], b["relation"]))]
 
 
+# The lanes whose answer is a MOVE rather than a content approval. Neither
+# `lifecycle.reconsider_decision` nor `lifecycle.retire_decision` calls `store._anchor_sources`
+# (grep: `_anchor_sources` does not appear in lifecycle.py at all), so nothing they do writes
+# `source_files` and a "would anchor" line on either is a promise the code never keeps.
+_NON_ANCHORING_SLOTS = ("proposed_reconsideration", "proposed_lifecycle")
+
+
+def _origin_label(source) -> str:
+    """One provenance value in the developer's terms; an unknown one keeps its raw spelling
+    rather than vanishing, since "captured by something this version does not know" is still
+    more than nothing."""
+    raw = one_line(source)
+    return ORIGIN_LABELS.get(raw, raw)
+
+
 def _confirmed_anchors(entry: dict) -> list[str]:
     """Exactly the files `_apply_approval` would write as `source_files`, in its own
     precedence order: a proposal's own stashed anchor, else the capture-time candidates.
@@ -199,11 +234,37 @@ def _confirmed_anchors(entry: dict) -> list[str]:
     Never `possible_source_files` and never a similar decision's files - this list is what the
     action confirmation repeats back, so anything speculative in it would be a wrong anchor
     signed by a human who was told it was confirmed.
+
+    LANE-AWARE, because `_apply_approval` is not the only answer a review has. Restoring an
+    inactive decision and retiring a live one are state MOVES: they run through
+    `lifecycle.py`, which anchors nothing, and a reconsideration proposal genuinely carries
+    `source_files` (reconcile passes the candidate's confirmed files), so ranking it first here
+    printed "Will anchor on approval: src/generated/client.ts" about a restore that writes no
+    anchor at all. Those files are real evidence and are rendered as `_evidence_files` under a
+    label that promises nothing; a retirement's fall-through to `anchor_candidates` was the
+    same false claim one lane over, with a staler input.
     """
     prop = _pending_proposal(entry)
+    if prop.get("slot") in _NON_ANCHORING_SLOTS:
+        return []
     if prop.get("source_files"):
         return [str(f) for f in prop["source_files"]]
     return [str(f) for f in entry.get("anchor_candidates") or []]
+
+
+def _evidence_files(entry: dict) -> list[str]:
+    """The files a NON-ANCHORING proposal was observed with: confirmed evidence, not an anchor.
+
+    The distinction this whole block exists to keep: they are confirmed (a structural link, not
+    a temporal guess), so they belong beside the decision, and they are not anchors, because the
+    action being offered writes none. Empty for every lane whose answer does anchor - there the
+    files are already the `Would anchor` line and saying them twice would blur the two labels
+    back together.
+    """
+    prop = _pending_proposal(entry)
+    if prop.get("slot") not in _NON_ANCHORING_SLOTS:
+        return []
+    return [str(f) for f in prop.get("source_files") or []]
 
 
 def _possible_files(entry: dict, meta: dict) -> list[str]:
@@ -211,9 +272,10 @@ def _possible_files(entry: dict, meta: dict) -> list[str]:
 
     They are deliberately absent from every proposal (Task 04 ruling): a backward temporal link
     is not evidence, so nothing that could become an anchor is allowed to carry it. Anything
-    already confirmed is filtered out - a path that earned its way into the anchor list is not
-    also a maybe."""
-    confirmed = set(_confirmed_anchors(entry)) | set(entry.get("source_files") or [])
+    already CONFIRMED is filtered out, by either label - a path that earned its way into the
+    anchor list, or into the evidence list, is not also a maybe."""
+    confirmed = (set(_confirmed_anchors(entry)) | set(_evidence_files(entry))
+                 | set(entry.get("source_files") or []))
     return [str(f) for f in (meta.get("candidate") or {}).get("possible_source_files") or []
             if str(f) not in confirmed]
 
@@ -235,7 +297,9 @@ def _inactive_history(entry: dict) -> dict:
     return {
         "state": state,
         "since": str(record.get("occurred_at") or entry.get("deleted_at") or "")[:10],
-        "reason": store.clip_body(str(record.get("reason") or ""), 200),
+        # Untrusted free text: `retire_decision`'s `reason` is an MCP tool parameter, so it is
+        # collapsed to one line BEFORE clipping (see `one_line`) rather than after.
+        "reason": store.clip_body(one_line(record.get("reason")), 200),
         "replacement": str(record.get("replacement_decision_id") or "")[:8],
         "dismissed": len(dismissed),
         "last_dismissed": str((dismissed[-1].get("occurred_at") if dismissed else "") or "")[:10],
@@ -277,9 +341,9 @@ def _armed_rule(entry: dict) -> dict:
         if not guard_engine._armed_rules([entry]):
             return {}
         check = entry.get("guard_check") or {}
-        return {"type": str(check.get("type") or ""), "pattern": str(check.get("pattern") or ""),
-                "paths": str(check.get("paths") or ""),
-                "message": store.clip_body(str(check.get("message") or ""), 200)}
+        return {"type": one_line(check.get("type")), "pattern": one_line(check.get("pattern")),
+                "paths": one_line(check.get("paths")),
+                "message": store.clip_body(one_line(check.get("message")), 200)}
     except Exception:
         return {}
 
@@ -321,30 +385,48 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
     candidate = meta.get("candidate") or {}
     prop = _pending_proposal(entry)
     possible = _possible_files(entry, meta)
+    # The thing under review is the PROPOSAL when one is sitting, so its provenance is the
+    # proposal's own `source`. Reading the entry's `created_by` told a developer that an
+    # ai-written rewrite of their own decision came from "your prompt" - the standing entry's
+    # provenance attached to text they never wrote, which is the exact mistaken approval this
+    # block exists to prevent. The standing origin is kept beside it, never replaced by it.
+    standing = _origin_label(entry.get("created_by"))
+    proposed = _origin_label(prop.get("source")) if prop else ""
     return {
         "identity": {
             "id": str(entry.get("id") or ""),
-            "title": prop.get("title") or entry.get("title") or "",
+            "title": one_line(prop.get("title") or entry.get("title") or ""),
             "subtype": entry.get("subtype") or "decision",
             "status": store.entry_status(entry),
-            "origin": ORIGIN_LABELS.get(str(entry.get("created_by") or ""),
-                                        str(entry.get("created_by") or "")),
+            "origin": proposed or standing,
+            "standing_origin": standing,
             "lane": prop.get("slot", ""),
         },
         # Labelled at the point of rendering, never as a bare number: it ranks a review queue
         # and says nothing about whether the statement is true (candidates.py's own rule).
         "priority": {"score": candidate.get("score"),
                      "label": "review priority (ranking only, not a probability)"},
+        # THREE tiers, not two. Task 03 made `supporting` a separate certainty on purpose
+        # (repetition / causal_forward / validation), and folding it into "confirmed" reported
+        # an inference as an observation - 30 edits that merely followed a directive read as 30
+        # confirmations of it, which is the observed-versus-inferred line this whole block is
+        # for. Uncertain rows come from `uncertain_signals` plus any signal row whose own
+        # certainty says so (a red test run is `validation` at `uncertain`).
         "evidence": {
-            "confirmed": _grouped([r for r in candidate.get("signals") or []
-                                   if r.get("certainty") != "uncertain"]),
-            "uncertain": _grouped([r for r in candidate.get("signals") or []
-                                   if r.get("certainty") == "uncertain"]
+            "confirmed": _grouped(_tier(candidate, "confirmed")),
+            "supporting": _grouped(_tier(candidate, "supporting")),
+            "uncertain": _grouped(_tier(candidate, "uncertain")
                                   + list(candidate.get("uncertain_signals") or [])),
             "receipts": len(entry.get("evidence_summary") or []),
             "dropped": int(entry.get("evidence_summary_dropped") or 0),
         },
-        "files": {"confirmed": _confirmed_anchors(entry), "possible": possible},
+        # `possible_source_files` keeps the aggregator's own spelling all the way to the edge.
+        # It is the name `tests/test_evidence_hardening_replays.py`'s structural scan watches,
+        # so a future reader anywhere in the package is caught by a test that already exists -
+        # renaming it to `possible` here would have created a second spelling that no guard
+        # looks for, which is a weaker ban than the one this task narrowed.
+        "files": {"confirmed": _confirmed_anchors(entry), "evidence": _evidence_files(entry),
+                  "possible_source_files": possible},
         "coverage": list(context.get("coverage") or []),
         "related": {
             "similar": store.similar_decisions(entry, context.get("decisions") or []),
@@ -356,6 +438,14 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
                    "how_to_arm": POLICY_HOW_TO_ARM, "armed": _armed_rule(entry)},
         "diagnostics": _displaced(entry, context),
     }
+
+
+def _tier(candidate: dict, certainty: str) -> list:
+    """One certainty tier's signal rows. A row with no certainty recorded (a manifest written
+    before Task 03's typing) counts as `confirmed` for nothing - it lands in no tier rather
+    than being promoted into one."""
+    return [row for row in candidate.get("signals") or []
+            if isinstance(row, dict) and row.get("certainty") == certainty]
 
 
 def _has_conflict(entry: dict) -> bool:
@@ -377,18 +467,34 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
     so `review_pending` threads a set through and prints each host's line once instead of 25
     times. The interactive surfaces pass nothing - a terminal screen and a console card are
     each read on their own, where the line is a fact the reader has not just seen.
+
+    Every finished line goes through `one_line`: one item is one line, and the surfaces indent
+    what they are given, so a field carrying a newline would emit forged lines dressed as the
+    surface's own. The fields are collapsed where they enter the dict too - this is the
+    invariant, not the only guard.
     """
     lines = []
     identity = impact.get("identity") or {}
     if identity.get("origin"):
-        lines.append(f"Origin: {identity['origin']}")
+        standing = identity.get("standing_origin") or ""
+        # Both, whenever the proposal and the standing decision disagree: "this rewrite came
+        # from the assistant, the decision under it came from you" is one fact a reviewer needs
+        # whole, and either half alone misattributes something.
+        detail = (f"{identity['origin']} (the version under review); "
+                  f"the standing decision came from {standing}"
+                  if standing and standing != identity["origin"] else identity["origin"])
+        lines.append(f"Origin: {detail}")
     score = (impact.get("priority") or {}).get("score")
     if score is not None:
         lines.append(f"Review priority: {score} - "
                      "ranking only, not a probability that this is correct")
 
     evidence = impact.get("evidence") or {}
-    for key, label in (("confirmed", "Confirmed evidence"), ("uncertain", "Possibly related")):
+    # Three headings for three tiers. "Supporting" is not "Confirmed": a test run and an edit
+    # that merely followed a directive corroborate it, they do not witness it.
+    for key, label in (("confirmed", "Confirmed evidence"),
+                       ("supporting", "Supporting evidence"),
+                       ("uncertain", "Possibly related")):
         rows = evidence.get(key) or []
         if rows:
             lines.append(f"{label}: " + _listed(
@@ -401,9 +507,12 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
     files = impact.get("files") or {}
     if files.get("confirmed"):
         lines.append(f"Would anchor: {_listed(files['confirmed'])}")
-    if files.get("possible"):
-        lines.append(f"Possible files: {_listed(files['possible'])} - NOT anchored on "
-                     "approval; the link is uncertain")
+    if files.get("evidence"):
+        lines.append(f"Evidence files: {_listed(files['evidence'])} - observed with this "
+                     "restatement; answering it does NOT anchor them")
+    if files.get("possible_source_files"):
+        lines.append(f"Possible files: {_listed(files['possible_source_files'])} - NOT anchored "
+                     "on approval; the link is uncertain")
     for line in impact.get("coverage") or []:
         if seen_coverage is not None:
             if line in seen_coverage:
@@ -414,7 +523,7 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
     related = impact.get("related") or {}
     if related.get("similar"):
         lines.append("Similar decisions: " + _listed(
-            [f"{s['id'][:8]} \"{store.clip_body(s['title'], _TITLE_CLIP)}\""
+            [f"{s['id'][:8]} \"{store.clip_body(one_line(s['title']), _TITLE_CLIP)}\""
              + (" [open conflict]" if s.get("conflict") else "") for s in related["similar"]]))
     if related.get("conflict"):
         lines.append("Open conflict: this decision already carries an unreviewed update; "
@@ -446,26 +555,31 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
     lines.append(policy.get("knowledge", POLICY_KNOWLEDGE))
     armed = policy.get("armed") or {}
     if armed:
+        # Built from the parts that EXIST rather than from a fixed shape with holes punched in
+        # it: a `secret` rule takes no pattern and often no paths, and the fixed shape rendered
+        # `armed secret rule ()` and `(, paths src/*.py)`.
+        detail = [f"{key} {armed[key]}" for key in ("pattern", "paths") if armed.get(key)]
+        scope = f" ({', '.join(detail)})" if detail else ""
         lines.append(f"Blocking after approval: this decision ALREADY has an armed "
-                     f"{armed.get('type') or 'guard'} rule"
-                     + (f" (pattern {armed['pattern']}" if armed.get("pattern") else " (")
-                     + (f", paths {armed['paths']}" if armed.get("paths") else "") + ")"
-                     + ". The approved revision on record stays operative until you review "
-                       "this update; approving does not change the rule.")
+                     f"{armed.get('type') or 'guard'} rule{scope}. The approved revision on "
+                     "record stays operative until you review this update; approving does not "
+                     "change the rule.")
     else:
         lines.append(policy.get("blocking", POLICY_BLOCKING))
     lines.append(policy.get("how_to_arm", POLICY_HOW_TO_ARM))
     for note in impact.get("diagnostics") or []:
         lines.append(f"Held evidence: {note}")
-    return lines
+    return [one_line(line) for line in lines]
 
 
 def anchor_confirmation(entry: dict) -> str:
     """The one sentence an action confirmation repeats back before it writes an anchor.
 
     Confirmed files only, spelled out in full rather than counted: the informed-signature rule
-    is about the developer having SEEN the paths at the moment they signed."""
+    is about the developer having SEEN the paths at the moment they signed. `_confirmed_anchors`
+    is lane-aware, so a restore or a retirement - neither of which anchors anything - says so
+    rather than reading back the evidence files as if they were about to be written."""
     files = _confirmed_anchors(entry)
     if not files:
         return "No files will be anchored by this approval."
-    return f"Will anchor on approval: {', '.join(files)}"
+    return one_line(f"Will anchor on approval: {', '.join(files)}")
