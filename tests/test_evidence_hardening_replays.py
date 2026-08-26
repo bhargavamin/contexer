@@ -429,16 +429,97 @@ def test_a_recurrence_from_another_session_shows_in_review_without_approving_any
     assert rows["Seen"] == "2 times across 2 sessions"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 2: `agent_conclusion` has no production emitter. The kind appears "
-    "only in evidence.EVENT_KINDS and in candidates' scoring table, so `user_directive` is "
-    "the only seed a real session can ever produce."))
 def test_some_production_module_emits_an_agent_conclusion():
+    """Outstanding issue 2, closed: `record_agent_conclusion` is a real MCP tool, so the kind
+    is reachable in a live session instead of existing only in the schema and the scoring
+    table. The xfail marker it carried is gone."""
     owners = {"evidence.py", "candidates.py"}
     emitters = [path.name for path in sorted(Path(store.__file__).parent.rglob("*.py"))
                 if path.name not in owners
                 and "agent_conclusion" in path.read_text(encoding="utf-8")]
     assert emitters, "no module outside the schema and the scoring table names the kind"
+
+
+# ── scenario 6 through the real emitter (outstanding issue 2) ───────────────────
+
+CONCLUSION = "The generated client is rebuilt from openapi/schema.yaml by the codegen step"
+WHY = "A hand edit is overwritten on the next build."
+
+
+def test_a_bare_agent_conclusion_stays_below_the_review_bar(tmp_repo):
+    """The emitter is a door, not a promotion. An unexplained conclusion scores 15 against a
+    bar of 25, so it is recorded, kept, and proposed to nobody."""
+    assert evidence.record_agent_conclusion(tmp_repo, CONCLUSION, session_id="sess-a")[0]
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert (receipt["proposed"], receipt["insufficient"]) == (0, 1)
+    assert store.load(tmp_repo)["entries"] == []
+
+
+def test_an_explained_conclusion_is_proposed_for_review_and_nothing_more(tmp_repo):
+    """Scenario 6's shape, produced by the production emitter rather than a fixture: it
+    reaches the bar on its own, and reaching the bar means PENDING - never trusted, never
+    approved, never anchored."""
+    ok, message = evidence.record_agent_conclusion(tmp_repo, CONCLUSION, rationale=WHY,
+                                                   session_id="sess-a")
+    assert ok and "review" in message
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert receipt["proposed"] == 1
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert store.entry_status(entry) == "pending_approval"
+    assert not entry.get("approved_by")
+    assert not entry.get("source_files"), "a reported conclusion never anchors a file"
+    assert not entry.get("guard_check"), "and never arms a policy"
+
+
+def test_a_bare_conclusion_plus_an_observed_edit_reaches_the_bar(tmp_repo):
+    """The half the coverage block is honest about: what the agent SAYS is 15, and what a
+    hook actually OBSERVED is the other 10. Structural evidence is what promotes it."""
+    evidence.record_agent_conclusion(tmp_repo, CONCLUSION, files=[GENERATED],
+                                     session_id="sess-a")
+    evidence.emit_hook_event(tmp_repo, "file_changed", session_id="sess-a",
+                             source="post_tool_use", files=[GENERATED])
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert (receipt["proposed"], receipt["insufficient"]) == (1, 0)
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert store.entry_status(entry) == "pending_approval"
+
+
+def test_a_capture_the_lint_bounced_cannot_re_enter_as_evidence(tmp_repo):
+    """The bypass this door would otherwise open. `capture_lint` guards the two write tools;
+    reconciliation materializes through `store.update_decision`, which is NOT linted - so a
+    bounced narrative re-submitted here would land pending review in exactly the shape the
+    lint exists to reshape. It is refused at the emitter, and the bounce names THIS tool."""
+    narrative = ("Investigated the flaky pairing test for two hours today. "
+                 + "Then I read the guard engine and traced every caller. " * 8)
+    assert store.capture_lint(narrative, created_by="ai"), "precondition: update_context bounces it"
+
+    ok, message = evidence.record_agent_conclusion(tmp_repo, narrative, session_id="sess-a")
+
+    assert not ok
+    assert "record_agent_conclusion" in message and "update_context" not in message
+    assert spool.list_pending_evidence(tmp_repo) == []
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+    assert store.load(tmp_repo)["entries"] == []
+
+
+def test_the_coverage_block_on_a_pass_says_what_the_host_could_see(tmp_repo):
+    """A receipt reports what was found beside what could be found at all. Cursor observes no
+    edit, so a pass on a Cursor session says so rather than reporting a quiet session."""
+    evidence.record_agent_conclusion(tmp_repo, CONCLUSION, rationale=WHY, session_id="sess-a")
+
+    receipt = reconcile.reconcile_session(tmp_repo, host="cursor")
+
+    assert receipt["coverage"] == {
+        "host": "cursor", "user_directives": "captured", "file_changes": "unavailable",
+        "assistant_conclusions": "model_reported", "test_results": "unavailable",
+        "diffs": "unavailable", "reconciliation": "complete", "dropped_events": 0}
+    assert "file changes unavailable" in reconcile.format_receipt(receipt)
 
 
 @pytest.mark.parametrize("host", ["codex", "cursor", "gemini"])

@@ -25,6 +25,18 @@ from contexer import store as _store   # module object, not a `from`-import: a v
 
 NAME = "codex"
 
+# Codex runs claude.capture_constraint and claude.post_write verbatim, so this map must equal
+# claude's. Restated rather than aliased (CLAUDE.md module boundaries: no module copies another
+# module's names onto itself) and pinned equal by a parity test, the same shape
+# `policy.select_policies` and `guard_engine._guard_trusted` already carry.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # claude.capture_constraint, UserPromptSubmit
+    "file_changes": "captured",                 # claude.post_write, PostToolUse(Write|Edit)
+    "assistant_conclusions": "model_reported",  # the MCP tool, agent-invoked
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
+
 
 def is_present(home: Path) -> bool:
     return (home / ".codex").exists()

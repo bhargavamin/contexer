@@ -21,6 +21,19 @@ from contexer.adapters.base import (
 
 NAME = "claude"
 
+# What THIS host's installed hooks can observe (evidence.host_coverage renders it, and only
+# ever downgrades it at runtime). Codex reuses `capture_constraint` and `post_write`
+# verbatim, so its own map is identical by construction rather than by coincidence.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, UserPromptSubmit
+    "file_changes": "captured",                 # post_write, PostToolUse(Write|Edit)
+    # No hook on any host hands Contexer the assistant's own response, so a conclusion is
+    # only ever what the agent chose to report through `record_agent_conclusion`.
+    "assistant_conclusions": "model_reported",
+    "test_results": "unavailable",              # reserved kind, no emitter
+    "diffs": "unavailable",                     # reserved kind, no emitter
+}
+
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
 # Contexer identity survives any change to its command text. Lets reinstall/uninstall
@@ -422,7 +435,9 @@ def _reconcile_evidence(repo_path: str) -> None:
         from contexer import reconcile
         repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
         if repo:
-            reconcile.reconcile_session(repo)
+            # Codex reuses this entrypoint through its own hooks, but the coverage block
+            # names the host whose adapter OWNS the checkpoint, which is this one.
+            reconcile.reconcile_session(repo, host=NAME)
     except Exception:
         pass
 

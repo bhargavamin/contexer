@@ -592,6 +592,16 @@ class TestStatusMultiTarget:
         out = capsys.readouterr().out
         assert "[cursor]" in out
 
+    def test_status_reports_what_cursor_can_and_cannot_observe(self, cursor_installed_home,
+                                                               capsys):
+        # The human-readable half of the coverage block. Cursor has no write hook, so status
+        # says `file changes unavailable` rather than letting a zero-event spool read as a
+        # quiet session - and never dresses an agent-reported conclusion up as an observed one.
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "coverage:     cursor: directives captured, file changes unavailable" in out
+        assert "conclusions agent-reported" in out
+
     def test_cursor_only_install_not_reported_missing(self, cursor_installed_home, capsys):
         status(["--target", "cursor"])
         out = capsys.readouterr().out

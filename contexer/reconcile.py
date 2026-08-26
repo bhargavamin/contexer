@@ -88,7 +88,7 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from contexer import candidates, lifecycle, spool, store
+from contexer import candidates, evidence, lifecycle, spool, store
 
 # Kinds a candidate can be built out of. The rest of `evidence.EVENT_KINDS` is bookkeeping
 # ABOUT candidates (`policy_evaluation`, `session_reconcile`), which never groups into one, so
@@ -118,10 +118,23 @@ _RETIRED_KINDS = lifecycle.RETIRED_KINDS
 _FALLBACK_SESSION = "reconcile"
 
 
-def _receipt(dry_run: bool) -> dict:
+def _receipt(dry_run: bool, host: str = "") -> dict:
     return {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0, "reconsidered": 0,
             "already_pending": 0, "duplicates": 0, "insufficient": 0, "incomplete": False,
-            "skipped": False, "dry_run": bool(dry_run)}
+            "skipped": False, "dry_run": bool(dry_run),
+            "coverage": evidence.host_coverage(host)}
+
+
+def _recoverage(receipt: dict, state: str, dropped: int = 0) -> None:
+    """Restate the coverage block for the status this pass actually reached.
+
+    Rebuilt rather than mutated so the vocabulary and the never-upgrade rule stay in
+    `evidence.host_coverage`: the host name round-trips through it (an unknown one is already
+    `manual`, which resolves to `manual` again) and the drop count only ever accumulates."""
+    block = receipt["coverage"]
+    receipt["coverage"] = evidence.host_coverage(
+        block["host"], reconciliation=state,
+        dropped_events=block["dropped_events"] + dropped)
 
 
 @contextmanager
@@ -1171,7 +1184,11 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
         meta = held[candidate_id]
         _finalize(repo_path, candidate_id, disposition, str(meta.get("entry_id") or ""),
                   snap["filable"], meta.get("event_ids") or [], snap["recorded"], receipt)
-    spool.run_retention(repo_path)
+    retention = spool.run_retention(repo_path)
+    # Evidence evicted THIS pass, counted where the eviction happens rather than off the
+    # cumulative `.gap` ledger: a coverage block reports the run it belongs to.
+    _recoverage(receipt, "partial" if receipt["incomplete"] else "complete",
+                retention["dropped_pending"] + retention["dropped_quarantine"])
     if not (writes or flips):
         # Nothing happened, so nothing is recorded. A pass that logged its receipt
         # unconditionally would write one line per SessionStart, PreCompact and SessionEnd
@@ -1182,14 +1199,20 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
     return receipt
 
 
-def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = False) -> dict:
+def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = False,
+                      host: str = "") -> dict:
     """Materialize this repo's unconsumed evidence as decisions pending review.
 
     `session_id` scopes which events participate (`""` = the whole spool, which is what a
     worktree-shared spool needs). Returns the receipt:
 
         {"events_observed", "proposed", "lifecycle_proposed", "reconsidered",
-         "already_pending", "duplicates", "insufficient", "incomplete", "skipped", "dry_run"}
+         "already_pending", "duplicates", "insufficient", "incomplete", "skipped", "dry_run",
+         "coverage"}
+
+    `host` names the adapter whose checkpoint called this, for the receipt's `coverage` block
+    (what that host can actually observe, plus this pass's own status and drop count). A
+    caller with no host - the MCP tool, the CLI - reports `manual` rather than guessing.
 
     `already_pending` counts both shapes of "this is already waiting on the developer": a
     candidate whose own held directory exists, and a duplicate of a decision that is itself
@@ -1203,12 +1226,18 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
     NEVER raises: every caller is a host hook or a report surface, and a reconciliation that
     could not finish is a receipt marked `incomplete`, never a broken session start.
     """
-    receipt = _receipt(dry_run)
+    receipt = _receipt(dry_run, host)
     try:
-        return _reconcile(repo_path, session_id, dry_run, receipt)
+        receipt = _reconcile(repo_path, session_id, dry_run, receipt)
     except Exception:                  # broad on purpose: the never-raises contract
         receipt["incomplete"] = True
+        _recoverage(receipt, "error")
         return receipt
+    if receipt["skipped"]:
+        _recoverage(receipt, "skipped")
+    elif receipt["incomplete"]:
+        _recoverage(receipt, "partial")
+    return receipt
 
 
 def format_receipt(receipt: dict) -> str:
@@ -1217,6 +1246,7 @@ def format_receipt(receipt: dict) -> str:
     if receipt.get("skipped"):
         return ("Reconciled evidence: skipped - another reconciliation pass is already "
                 "running on this repo. The next checkpoint picks this up.")
+    coverage = receipt.get("coverage")
     head = "Reconciled evidence" + (" (dry run - nothing was written)" if receipt["dry_run"]
                                     else "")
     lines = [
@@ -1229,6 +1259,10 @@ def format_receipt(receipt: dict) -> str:
         f"  duplicates:               {receipt['duplicates']}",
         f"  insufficient evidence:    {receipt['insufficient']}",
     ]
+    if coverage:
+        # What could be seen at all, beside what was found: "0 proposed" on a host that
+        # cannot observe edits means something different from "0 proposed" on one that can.
+        lines.append(f"  capture coverage:         {evidence.format_coverage(coverage)}")
     if receipt["lifecycle_proposed"]:
         lines.append("  (proposals only - nothing was retired. `contexer review` shows each "
                      "one; retiring is an explicit `contexer retire <id>`.)")

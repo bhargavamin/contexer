@@ -9,6 +9,17 @@ from contexer.adapters import base
 
 NAME = "cursor"
 
+# Prompt directives ONLY. Cursor's hooks cannot observe an edit (`beforeSubmitPrompt` is the
+# one payload this adapter sees, #175), so `file_changes` says unavailable rather than
+# reporting the zero events that absence produces - those are different facts.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, beforeSubmitPrompt
+    "file_changes": "unavailable",              # no write hook
+    "assistant_conclusions": "model_reported",  # the MCP tool, agent-invoked
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
+
 
 def is_present(home: Path) -> bool:
     return (home / ".cursor").exists()

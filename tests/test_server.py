@@ -602,3 +602,60 @@ def test_evaluate_policy_docstring_is_self_approval_proofed():
     assert "ADVISORY" in doc
     assert "does not refuse" in doc
     assert "not permission" in doc
+
+
+# ── record_agent_conclusion ──────────────────────────────────────────────────
+
+def test_record_agent_conclusion_short_circuits_without_a_repo(monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda *a, **k: pytest.fail("reached the emitter with no repo"))
+    assert server.record_agent_conclusion("anything") == "Skipped - repo path not detected."
+
+
+def test_record_agent_conclusion_spools_evidence_and_writes_no_decision(tmp_repo, monkeypatch):
+    from contexer import spool
+
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: tmp_repo)
+
+    message = server.record_agent_conclusion(
+        "The codegen step overwrites src/generated/client.ts.",
+        rationale="It runs on every build.", files=["src/generated/client.ts"])
+
+    assert "EVIDENCE" in message and "not as a decision" in message
+    (event,) = spool.list_pending_evidence(tmp_repo, server.SESSION_ID)
+    assert event["kind"] == "agent_conclusion"
+    assert event["attributes"]["reported_by"] == "agent"
+    # The tool is an emitter, not a capture path: nothing reaches the store from here.
+    assert store.load(tmp_repo)["entries"] == []
+
+
+def test_record_agent_conclusion_delegates_rather_than_emitting_its_own_event(monkeypatch):
+    # A second hand-built event here would be a second schema to drift from evidence.py's.
+    seen = {}
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda repo, summary, **kw: (seen.update(
+                            {"repo": repo, "summary": summary, **kw}) or (True, "ok")))
+
+    assert server.record_agent_conclusion("a conclusion", rationale="why", files=["a.py"]) == "ok"
+    assert seen == {"repo": "/repo/x", "summary": "a conclusion", "rationale": "why",
+                    "files": ["a.py"], "session_id": server.SESSION_ID}
+
+
+def test_record_agent_conclusion_reports_a_failed_append(tmp_repo, monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: tmp_repo)
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda *a, **k: (False, "NOT recorded - the conclusion could not be "
+                                                "spooled (disk is on fire)."))
+    assert "NOT recorded" in server.record_agent_conclusion("x")
+
+
+def test_record_agent_conclusion_docstring_never_promises_storage():
+    """The tool's instructions are the only thing standing between "record a conclusion" and
+    a model treating it as `update_context`. They must say what it is NOT."""
+    doc = server.record_agent_conclusion.__doc__
+    assert "evidence" in doc.lower()
+    assert "nothing is stored as a decision" in doc
+    assert "Do NOT call it for progress narration" in doc
+    assert "update_context instead" in doc

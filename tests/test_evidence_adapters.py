@@ -230,3 +230,59 @@ class TestEmitHookEvent:
         result = evidence.emit_hook_event(tmp_repo, "not_a_kind", source="post_tool_use")
         assert result["status"] == "rejected_invalid"
         assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
+
+
+class TestCaptureCoverage:
+    """Each adapter's static capability map, pinned exactly.
+
+    These maps are the ONLY place a host says what it can observe, and every surface that
+    reports coverage renders them, so a quiet edit here would change what Contexer tells a
+    developer about its own blind spots. Written out per host rather than derived, because
+    deriving them from the code they describe would make the test agree with any drift.
+    """
+
+    EXPECTED = {
+        "claude": {"user_directives": "captured", "file_changes": "captured",
+                   "assistant_conclusions": "model_reported",
+                   "test_results": "unavailable", "diffs": "unavailable"},
+        "codex": {"user_directives": "captured", "file_changes": "captured",
+                  "assistant_conclusions": "model_reported",
+                  "test_results": "unavailable", "diffs": "unavailable"},
+        "gemini": {"user_directives": "captured", "file_changes": "captured",
+                   "assistant_conclusions": "model_reported",
+                   "test_results": "unavailable", "diffs": "unavailable"},
+        "cursor": {"user_directives": "captured", "file_changes": "unavailable",
+                   "assistant_conclusions": "model_reported",
+                   "test_results": "unavailable", "diffs": "unavailable"},
+    }
+
+    @pytest.mark.parametrize("module", [claude, codex, cursor, gemini])
+    def test_the_map_is_exactly_what_this_host_can_observe(self, module):
+        assert module.EVIDENCE_COVERAGE == self.EXPECTED[module.NAME]
+
+    def test_codex_matches_claude_because_it_runs_claudes_entrypoints(self):
+        # Restated rather than aliased (module-boundary rule 3), so this parity check is what
+        # actually holds the two together - the shape policy/guard_engine trust already has.
+        assert codex.EVIDENCE_COVERAGE == claude.EVIDENCE_COVERAGE
+
+    def test_cursor_claims_neither_file_nor_assistant_capture(self):
+        # Cursor's hooks see one payload, the prompt. An absent file event there means "could
+        # not observe", which is why the map says unavailable instead of reporting zero.
+        assert cursor.EVIDENCE_COVERAGE["file_changes"] == "unavailable"
+        assert cursor.EVIDENCE_COVERAGE["assistant_conclusions"] != "captured"
+        assert not hasattr(cursor, "post_write") and not hasattr(cursor, "after_write")
+
+    @pytest.mark.parametrize("module", [claude, codex, cursor, gemini])
+    def test_no_host_claims_a_reserved_kind_or_an_unknown_state(self, module):
+        # `test_result` and `diff_observed` are schema-valid with no emitter anywhere, so no
+        # host may advertise them until one exists.
+        assert module.EVIDENCE_COVERAGE["test_results"] == "unavailable"
+        assert module.EVIDENCE_COVERAGE["diffs"] == "unavailable"
+        assert set(module.EVIDENCE_COVERAGE) == set(evidence.COVERAGE_FIELDS)
+        assert set(module.EVIDENCE_COVERAGE.values()) <= evidence.CAPTURE_STATES
+
+    @pytest.mark.parametrize("module", [claude, codex, cursor, gemini])
+    def test_no_host_claims_to_capture_the_assistants_own_words(self, module):
+        # No host hands a hook the model's response, and this is the surface that would lie
+        # about it first. `record_agent_conclusion` is agent-reported, always.
+        assert module.EVIDENCE_COVERAGE["assistant_conclusions"] == "model_reported"

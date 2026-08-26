@@ -237,6 +237,18 @@ def validate_event(event: Mapping) -> tuple[dict | None, list[str]]:
 # hand-built dict.
 
 
+# The `source` an agent-reported conclusion carries: not a hook, and named so a reader of the
+# spool can tell it apart from anything an adapter observed.
+_CONCLUSION_SOURCE = "agent_tool"
+
+_CONCLUSION_RECEIPT = (
+    "Recorded as EVIDENCE, not as a decision. Nothing was stored, approved, trusted or "
+    "injected: reconciliation groups it with this session's other evidence, and only the "
+    "developer's review can turn it into a decision. Tell them what you concluded - do not "
+    "tell them it was saved."
+)
+
+
 def emit_hook_event(repo_path: str, kind: str, *, session_id: str = "", source: str = "",
                     summary: str = "", files=None, attributes=None) -> dict:
     """Build one event out of what a hook knows and spool it, returning
@@ -272,6 +284,133 @@ def emit_hook_event(repo_path: str, kind: str, *, session_id: str = "", source: 
         })
     except Exception as exc:           # broad on purpose: the never-raises contract
         return {"status": "dropped_error", "errors": [f"{type(exc).__name__}: {exc}"]}
+
+
+def record_agent_conclusion(repo_path: str, summary: str, *, rationale: str = "",
+                            files=None, session_id: str = "",
+                            source: str = _CONCLUSION_SOURCE) -> tuple[bool, str]:
+    """Spool ONE `agent_conclusion` event for a conclusion an agent reached. `(ok, receipt)`.
+
+    The only production emitter of the kind, and deliberately a thin one: it records what an
+    agent SAYS it worked out, and nothing downstream treats that as observed. It never writes
+    a decision, approves, anchors, retires, restores or arms anything - the event goes to the
+    spool, reconciliation groups it, and the developer's review is the only thing that can
+    turn it into stored knowledge.
+
+    Two gates in front of the spool, both reusing rules that already exist:
+
+    * a blank conclusion is refused rather than spooled - an event with no statement can never
+      seed a candidate, so it would be a file nothing can read;
+    * `store.capture_lint` runs on the same text `update_context` would lint. Without it this
+      door is a LINT BYPASS: a narrative-shaped or multi-claim capture the write tool bounced
+      could be re-submitted here, reach the store through reconciliation's ordinary capture
+      path (which is `store.update_decision`, not the linted server tool), and land pending
+      review in exactly the shape the lint exists to reshape.
+
+    An append failure REPORTS the loss and returns `False`; it never reads as capture.
+    """
+    text = " ".join(part.strip() for part in (summary, rationale)
+                    if isinstance(part, str) and part.strip())
+    if not text:
+        return False, "Nothing recorded - a conclusion needs a summary."
+    lint = store.capture_lint(text, created_by="ai")
+    if lint:
+        return False, lint.replace("update_context", "record_agent_conclusion")
+    explained = bool(isinstance(rationale, str) and rationale.strip())
+    result = emit_hook_event(repo_path, "agent_conclusion", session_id=session_id,
+                             source=source, summary=text, files=files,
+                             attributes={"reported_by": "agent", "has_rationale": explained})
+    if result.get("status") != "stored":
+        return False, (f"NOT recorded - the conclusion could not be spooled "
+                       f"({'; '.join(result.get('errors') or ['unknown error'])}). It was not "
+                       f"captured anywhere: state it to the developer in this turn instead.")
+    return True, _CONCLUSION_RECEIPT
+
+
+# ── host capture coverage ────────────────────────────────────────────────────────
+#
+# What a host can actually observe, reported honestly. Each adapter owns its own static map
+# (`EVIDENCE_COVERAGE`) because the hooks it installs are the only thing that decides the
+# answer; this module owns the vocabulary, the manual/unknown fallback, and the rendering.
+#
+# The invariant is one-directional: a runtime status may DOWNGRADE a field, never raise one.
+# An agent invoking `record_agent_conclusion` is `model_reported`, never `captured` - no host
+# hands a hook the assistant's own response, so claiming observation would be a lie told in
+# the one surface built to say what is actually seen.
+
+COVERAGE_FIELDS = ("user_directives", "file_changes", "assistant_conclusions",
+                   "test_results", "diffs")
+CAPTURE_STATES = frozenset({"captured", "model_reported", "unavailable", "error"})
+RECONCILIATION_STATES = frozenset({"complete", "partial", "skipped", "error"})
+
+# No host adapter in the loop: the MCP tool and the CLI reach this repo from an unknown
+# client, so only what the client itself reports is available.
+_MANUAL_COVERAGE = {
+    "user_directives": "unavailable",
+    "file_changes": "unavailable",
+    "assistant_conclusions": "model_reported",
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
+
+_COVERAGE_LABELS = (
+    ("user_directives", "directives"),
+    ("file_changes", "file changes"),
+    ("assistant_conclusions", "conclusions"),
+    ("test_results", "test results"),
+    ("diffs", "diffs"),
+)
+_STATE_WORDS = {"captured": "captured", "model_reported": "agent-reported",
+                "unavailable": "unavailable", "error": "error"}
+
+
+def host_coverage(host: str = "", *, reconciliation: str = "complete",
+                  dropped_events: int = 0) -> dict:
+    """The coverage block for one host: its static capabilities plus this run's status.
+
+    `host` is an adapter name; anything else (including "") resolves to `manual` rather than
+    guessing, since a coverage block naming a host that did not observe anything is worse
+    than one that says so. An adapter value outside `CAPTURE_STATES` becomes `error` - a
+    typo in a static map must degrade to "this was not checked", never to a capture claim.
+
+    Evidence that left the spool unreconciled makes the pass `partial`: it cannot claim to
+    have accounted for everything it was given. That is the only upgrade direction blocked
+    here too - a caller-supplied state is never improved.
+    """
+    static, name = _MANUAL_COVERAGE, "manual"
+    if host:
+        # Call-time import: the adapters import this module, and an unnamed host must not
+        # pay to load all four of them on reconciliation's own fast path.
+        from contexer import adapters
+        try:
+            static, name = adapters.get(host).EVIDENCE_COVERAGE, host
+        except (KeyError, AttributeError):
+            static, name = _MANUAL_COVERAGE, "manual"
+    dropped = dropped_events if isinstance(dropped_events, int) \
+        and not isinstance(dropped_events, bool) and dropped_events > 0 else 0
+    if reconciliation not in RECONCILIATION_STATES:
+        reconciliation = "error"
+    if dropped and reconciliation == "complete":
+        reconciliation = "partial"
+    block = {"host": name}
+    for field in COVERAGE_FIELDS:
+        value = static.get(field)
+        block[field] = value if value in CAPTURE_STATES else "error"
+    block["reconciliation"] = reconciliation
+    block["dropped_events"] = dropped
+    return block
+
+
+def format_coverage(block) -> str:
+    """One line of coverage. States a capability, never a count: "file changes unavailable"
+    and a spool holding zero file events are different facts, and collapsing them is what
+    makes a host with no write hook look like a quiet session."""
+    parts = [f"{label} {_STATE_WORDS.get(block.get(field), 'error')}"
+             for field, label in _COVERAGE_LABELS]
+    dropped = block.get("dropped_events", 0)
+    return (f"{block.get('host', 'manual')}: " + ", ".join(parts)
+            + f"; reconciliation {block.get('reconciliation', 'error')}"
+            + f", {dropped} event{'' if dropped == 1 else 's'} dropped")
 
 
 def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
