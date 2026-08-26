@@ -542,8 +542,16 @@ def test_review_metadata_seen_row_only_once_corroborated(repo):
 
 
 def test_review_metadata_captured_row_humanises_origin(repo):
+    """Origin moved to the shared impact block (Task 07) so all three review surfaces render
+    one wording; the metadata row keeps the capture TIME, and the humanised origin is asserted
+    where it now lives."""
+    from contexer import review_impact
+
     store.update_decision(repo, SUMMARY, "s1", "architecture")
-    assert "captured by the assistant" in _rows(repo, _entry(repo))["Captured"]
+    entry = _entry(repo)
+    assert _rows(repo, entry)["Captured"] == (entry["timestamp"] or "")[:16].replace("T", " ")
+    assert "Origin: captured by the assistant" in review_impact.impact_lines(
+        review_impact.review_impact(repo, entry))
 
 
 def test_print_wrapped_preserves_paragraph_breaks(capsys):

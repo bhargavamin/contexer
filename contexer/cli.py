@@ -286,7 +286,7 @@ def version() -> None:
 def _print_wrapped(text: str, indent: str = "  ", width: int = 64) -> None:
     """Print a decision body IN FULL, wrapped to the terminal. Deliberately not clipped:
     this is the interactive one-decision-at-a-time surface, so the whole point is that the
-    developer can judge without running a second command. (`_clip_body` still governs the
+    developer can judge without running a second command. (`clip_body` still governs the
     list-shaped surfaces, where a long body would flood the screen.)"""
     for para in (text or "").split("\n"):
         if not para.strip():
@@ -347,8 +347,9 @@ def _review_metadata(repo_path: str, entry: dict,
 
     rows: list[tuple[str, str]] = []
     when = (entry.get("timestamp") or "")[:16].replace("T", " ")
-    origin = _ORIGIN_LABELS.get(entry.get("created_by") or "", entry.get("created_by") or "?")
-    rows.append(("Captured", f"{when} · {origin}" if when else origin))
+    # Origin is NOT repeated here: `review_impact.impact_lines` owns that label for all three
+    # surfaces now, and this row would have been a second, differently-worded copy of it.
+    rows.append(("Captured", when or "(unrecorded)"))
 
     occ = entry.get("occurrence_count") or 1
     sessions = len(entry.get("session_ids") or [entry.get("session_id")])
@@ -370,10 +371,8 @@ def _review_metadata(repo_path: str, entry: dict,
             # " [may be stale: x changed since capture, +N more]" -> the bare fact.
             rows.append(("", "! " + note.strip().lstrip("[").rstrip("]")
                          .replace("may be stale: ", "")))
-    candidates = entry.get("anchor_candidates")
-    if candidates:
-        rows.append(("Would anchor", ", ".join(candidates)))
-
+    # `Would anchor` moved to the shared impact block (review_impact), which renders it beside
+    # the possible-but-uncertain files it will NOT anchor - the pair is the point.
     anchor = _budgeted(budget, ("anchor", anchor_sha),
                        lambda: store.review_anchor_note(repo_path, entry))
     if anchor:
@@ -389,15 +388,9 @@ def _review_metadata(repo_path: str, entry: dict,
     return rows
 
 
-# How a decision got captured, in the developer's terms rather than the schema's.
-_ORIGIN_LABELS = {
-    "human": "your prompt",
-    "ai": "captured by the assistant",
-    "plan": "from an approved plan",
-    "scan": "measured from this repo",
-    "bootstrap": "repo bootstrap",
-    "memory": "imported from memory",
-}
+# How a decision got captured, in the developer's terms rather than the schema's, now lives in
+# `review_impact.ORIGIN_LABELS` - the MCP list and the console render it too, and a second copy
+# here is exactly the drift Task 07's shared block exists to remove.
 
 
 def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
@@ -432,8 +425,9 @@ def _print_reconsideration(entry: dict, recon: dict) -> None:
     state = "retired" if entry.get("deleted_at") else "ignored"
     print(f"You restated this {state} decision:")
     _print_wrapped(recon.get("content") or "(no wording recorded)")
-    if recon.get("source_files"):
-        print(f"\nConfirmed files: {', '.join(recon['source_files'])}")
+    # Confirmed files are rendered by the shared impact block below this one, beside the
+    # uncertain paths it refuses to anchor. Naming them twice, in two vocabularies, is what
+    # made "confirmed" and "possible" blur together on one screen.
     prior = [row for row in entry.get("reconsideration_history") or []
              if isinstance(row, dict) and row.get("disposition") == "dismissed"]
     if prior:
@@ -467,7 +461,7 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
 
 def review() -> None:
     """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
-    from contexer import conflicts, lifecycle, revisions, store
+    from contexer import conflicts, lifecycle, review_impact, revisions, store
 
     repo_path = store.git_root(os.getcwd())
     if not repo_path:
@@ -484,6 +478,10 @@ def review() -> None:
 
     approved = ignored = dismissed = edited = skipped = retired = restored = 0
     git_budget = _review_git_budget()   # one budget + memo for the whole run
+    # One store read, one spool listing and one host detection for the WHOLE run, threaded into
+    # every decision's impact block - the queue is normally one session's captures, so a
+    # per-decision rebuild would re-read the same three things once per screen.
+    impact_context = review_impact.review_context(repo_path)
     for i, entry in enumerate(pending, 1):
         recon = entry.get("proposed_reconsideration")
         life = None if recon else entry.get("proposed_lifecycle")
@@ -533,6 +531,12 @@ def review() -> None:
         for label, value in _review_metadata(repo_path, entry, git_budget):
             print(f"{label:<14}{value}")
         print(f"{'Confidence':<14}{score}%" + (f"  ·  {'; '.join(factors)}" if factors else ""))
+        print()
+        # The shared impact block: identical lines to `review_pending`'s, same categories the
+        # console projects. Printed unindented here because the terminal has no list to nest in.
+        for line in review_impact.impact_lines(
+                review_impact.review_impact(repo_path, entry, impact_context)):
+            _print_wrapped(line, indent="", width=76)
         print()
         if recon:
             print("[Y] Restore  [E] Restore with edits  [D] Dismiss  [S] Skip  [Q] Quit")
@@ -605,6 +609,9 @@ def review() -> None:
                 skipped += 1
                 print("Skipped.")
         elif choice in ("Y", "YES"):
+            # Repeat the confirmed anchors at the gesture itself, never the possible ones:
+            # this line is the last thing the developer reads before the approval writes them.
+            print(review_impact.anchor_confirmation(entry))
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
@@ -639,6 +646,7 @@ def review() -> None:
                 skipped += 1
                 continue
             if new_content:
+                print(review_impact.anchor_confirmation(entry))
                 ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content)
                 if ok:
                     edited += 1

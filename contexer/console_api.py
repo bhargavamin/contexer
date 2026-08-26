@@ -45,6 +45,7 @@ import time
 from pathlib import Path
 
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
+from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
 
@@ -359,6 +360,11 @@ def dashboard_summary(repo_path: str) -> dict:
         by_status[status] = by_status.get(status, 0) + 1
     recent = sorted(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp") or "",
                     reverse=True)[:_CONSOLE_RECENT]
+    # The review-impact block, on the SAME categories `review_pending` and `contexer review`
+    # render (Task 07). Built once per call and threaded in - the console polls this every 10
+    # seconds, so a per-row rebuild would mean one spool listing per pending decision per tick.
+    # The store read it would otherwise do is handed the decisions this function already has.
+    impact_context = review_impact.review_context(repo_path, decisions)
 
     return {
         "repo_path": repo_path,
@@ -382,9 +388,12 @@ def dashboard_summary(repo_path: str) -> dict:
         "status_mix": [{"status": k, "count": v}
                        for k, v in sorted(by_status.items(), key=lambda kv: (-kv[1], kv[0]))],
         "recent": [_console_summary(e) for e in recent],
-        "pending": [{**_console_summary(e), "confidence_factors": _console_factors(e)}
+        "pending": [{**_console_summary(e), "confidence_factors": _console_factors(e),
+                     "impact": review_impact.review_impact(repo_path, e, impact_context)}
                     for e in pending],
-        "proposals": [_console_proposal(e) for e in proposals],
+        "proposals": [{**_console_proposal(e),
+                       "impact": review_impact.review_impact(repo_path, e, impact_context)}
+                      for e in proposals],
         "staleness": team["staleness"],
         "health": health,
     }
@@ -770,4 +779,3 @@ def team_snapshot(repo_path: str) -> dict:
                       "error": last_sync.get("error")},
         "decisions": rows,
     }
-
