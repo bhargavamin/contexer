@@ -166,6 +166,20 @@ _QUOTA_ERROR_RE = re.compile(r"rate limit|quota|at capacity", re.I)
 # is perfectly valid - so it must never be dropped the way those are.
 LIFECYCLE_SKIP_REASON = "invalid_lifecycle"
 
+# Its OPPOSITE, and the two must never be conflated. `invalid_lifecycle` says the payload SHAPE is
+# unsupported, so re-pushing the base without the optional fields is right. `lifecycle_conflict`
+# says the event IDENTITY is contested - the server refused the whole row, wrote no event, and
+# saved no base - so re-pushing the base alone is precisely the resurrection it just refused, i.e.
+# this issue's bug in a new form. It is PERMANENT for that row: an id collision does not clear by
+# waiting, so no legacy retry, no `lifecycle_pending` (there is no synced base to have history
+# outstanding for), and it reaches the caller through the ordinary permanent-skip contract.
+LIFECYCLE_CONFLICT_REASON = "lifecycle_conflict"
+
+# The singular tool's form of the same refusal: a whole-call error whose message the server
+# prefixes with this literal token, precisely so a client cannot mistake it for the invalid-params
+# rejection the optional-protocol fallback answers by re-pushing the base alone.
+_LIFECYCLE_CONFLICT_PREFIX = "lifecycle_conflict:"
+
 
 def lifecycle_fingerprint(caps: "DecisionLifecycleCapabilities | None") -> str:
     """A short, stable identity for what a server said it accepts.
@@ -196,6 +210,12 @@ def _lifecycle_fallback_eligible(exc: Exception, args: dict) -> bool:
     if not any(k in args for k in _WIRE_LIFECYCLE_FIELDS):
         return False
     if isinstance(exc, (RemoteAuthError, RemoteUnavailableError)):
+        return False
+    if str(exc).lstrip().startswith(_LIFECYCLE_CONFLICT_PREFIX):
+        # A contested event identity, not an unsupported shape. The server already rolled the base
+        # write back on purpose; stripping the lifecycle and pushing the base again is the exact
+        # resurrection it refused. This is the one refusal that names itself, so it is matched
+        # rather than discovered by the retry.
         return False
     return not _QUOTA_ERROR_RE.search(str(exc))
 
@@ -648,6 +668,29 @@ class RemoteStore:
         except RemoteStoreError:
             return "unknown"
 
+    def _note_blocked_for_saved(self, rows: list[dict], results: list, exc: Exception,
+                                caps: "DecisionLifecycleCapabilities | None") -> None:
+        """Record a refused lifecycle delta for the rows the legacy retry CONFIRMED it saved.
+
+        The whole partition in one line, and it is the fix for this issue: a `lifecycle_pending`
+        outbox row asserts "the base decision is already synced, only its history is outstanding",
+        so creating one for a row the retry did not save states something untrue about the server
+        and buries the base decision's real failure. Both fallbacks used to mark every
+        lifecycle-carrying row blocked immediately after the retry CALL, before looking at what
+        came back, so a row the retry rejected as `invalid_content` was filed as history-pending
+        for a decision that does not exist remotely.
+
+        Everything not in `results` is deliberately left exactly where the server put it, because
+        each arm already has a correct owner downstream: a `quota_exceeded` skip stays a transient
+        skip, so the caller re-queues an ordinary base-pending row that still carries the complete
+        lifecycle payload; a permanent skip stays permanent and is dropped by the existing
+        skip contract; and a row in neither list is caught by the accounting check at the end of
+        the batch, which fails so the caller's original queued row survives untouched."""
+        saved_ids = {str(r.get("decisionId")) for r in results if r.get("decisionId")}
+        for kw in rows:
+            if str(kw.get("decision_id")) in saved_ids:
+                self._note_lifecycle_rejection(kw.get("decision_id"), exc, caps)
+
     async def apush_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
         """Async core of :meth:`push_decisions`: batch-push many decisions in ONE call, awaiting
         the transport (cancellable). Each item is push_decision KWARGS (built by
@@ -681,8 +724,8 @@ class RemoteStore:
             if not carried or not _lifecycle_fallback_eligible(exc, {"lifecycle": True}):
                 raise
             result = await self._ainvoke("push_decisions", _batch(kwargs_list, None))
-            for kw in carried:
-                self._note_lifecycle_rejection(kw.get("decision_id"), exc, caps)
+            legacy = getattr(result, "structuredContent", None) or {}
+            self._note_blocked_for_saved(carried, legacy.get("results") or [], exc, caps)
         structured = getattr(result, "structuredContent", None) or {}
         results = structured.get("results") or []
         skipped_rows = structured.get("skipped") or []
@@ -690,15 +733,18 @@ class RemoteStore:
         # (`invalid_lifecycle`) instead of the call, so those rows are re-pushed once as legacy
         # and their deltas recorded as blocked. Left in `skipped` they would be read as a
         # PERMANENT rejection and dropped - discarding a base decision that was never invalid.
+        # A `lifecycle_conflict` row is deliberately NOT collected here: the server refused the
+        # whole row on purpose, so it falls through untouched to the permanent-skip contract below.
         rejected_ids = {str(r.get("decisionId")) for r in skipped_rows
                         if r.get("reason") == LIFECYCLE_SKIP_REASON and r.get("decisionId")}
         if rejected_ids:
             retry_rows = [kw for kw in kwargs_list if kw.get("decision_id") in rejected_ids]
-            for kw in retry_rows:
-                self._note_lifecycle_rejection(kw.get("decision_id"),
-                                               RemoteStoreError(LIFECYCLE_SKIP_REASON), caps)
             retried = await self._ainvoke("push_decisions", _batch(retry_rows, None))
             again = getattr(retried, "structuredContent", None) or {}
+            # Blocked only for what the retry CONFIRMED it saved - the same partition the
+            # whole-call arm applies, and for the same reason.
+            self._note_blocked_for_saved(retry_rows, again.get("results") or [],
+                                         RemoteStoreError(LIFECYCLE_SKIP_REASON), caps)
             results = [*results, *(again.get("results") or [])]
             skipped_rows = [r for r in skipped_rows if r.get("reason") != LIFECYCLE_SKIP_REASON]
             skipped_rows = [*skipped_rows, *(again.get("skipped") or [])]

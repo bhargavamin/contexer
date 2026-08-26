@@ -35,7 +35,7 @@ import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from contexer import store
+from contexer import remote, store
 from contexer.config import Profile, load_profile
 from contexer.remote import (
     DecisionReconciliationPreview,
@@ -325,6 +325,39 @@ def _discard_outbox_unlocked() -> tuple[int, int]:
     return queued - len(after), len(after)
 
 
+def _staged_merge(existing: list[dict], payload: dict) -> dict:
+    """Resolve the ONE stage transition the decision-id-keyed dedupe can get wrong.
+
+    The outbox dedupes by `decision_id` and last write wins, which is right for two rows that mean
+    the same thing. It is wrong across STAGES, because an ordinary row and a `lifecycle_pending`
+    row make opposite claims about the server: "nothing of this reached it" against "the base is
+    synced, only its history is outstanding".
+
+    Two transitions are legitimate and are what this allows:
+      * ordinary -> `lifecycle_pending`: the base just synced and the server refused the history.
+        A plain replace, because the new row is strictly more informed.
+      * `lifecycle_pending` -> `lifecycle_pending`: a fresher refusal, with a newer reason and
+        capability fingerprint. Also a plain replace.
+
+    The third is a DOWNGRADE and is refused: an ordinary row must not overwrite a pending one. It
+    happens for real - a later failed `share()` of the same decision enqueues an ordinary payload -
+    and it would silently discard the `capability` fingerprint that stops the delta being re-offered
+    against an unchanged server, turning a durably pending delta back into a retry storm. The body
+    is still taken from the fresher payload; only the stage and its two bookkeeping fields survive,
+    so nothing about the decision goes stale."""
+    if payload.get("stage"):
+        return payload
+    prior = next((e for e in existing
+                  if e.get("decision_id") == payload.get("decision_id")
+                  and e.get("stage") == _LIFECYCLE_PENDING), None)
+    if prior is None:
+        return payload
+    return {**payload, "stage": _LIFECYCLE_PENDING,
+            "blocked_reason": prior.get("blocked_reason", ""),
+            "capability": prior.get("capability", ""),
+            "attempts": prior.get("attempts", 0)}
+
+
 def _enqueue(payload: dict) -> None:
     """Locked wrapper for queueing one failed push."""
     with outbox_lock():
@@ -353,6 +386,7 @@ def _enqueue_unlocked(payload: dict) -> None:
     if error is not None:
         raise RuntimeError(f"cannot read the share retry queue: {error}")
     entries = [e for e in loaded if e.get("decision_id") != payload.get("decision_id")]
+    payload = _staged_merge(loaded, payload)
     entries.append(payload)
     if len(entries) > _OUTBOX_CAP:
         entries = entries[-_OUTBOX_CAP:]
@@ -763,24 +797,42 @@ def _retry_lifecycle_pending(remote, pending: list[dict], endpoint) -> tuple[set
     return settled, kept
 
 
-def _split_skips(skipped: list) -> tuple[set, int]:
-    """Partition server skips into (retryable_decision_ids, permanent_invalid_count). TRANSIENT
-    'quota_exceeded' rows are kept queued to drain once space frees; PERMANENT ones (invalid type /
-    content - the server per-row-rejected them) can never sync, so they are dropped, not retried."""
+def _split_skips(skipped: list) -> tuple[set, int, int]:
+    """Partition server skips into (retryable_decision_ids, permanent_invalid, contested).
+
+    TRANSIENT 'quota_exceeded' rows are kept queued to drain once space frees; PERMANENT ones can
+    never sync as they stand, so they are dropped rather than retried.
+
+    `lifecycle_conflict` is counted apart from the other permanent rows only so the status line can
+    say what actually happened. It is dropped the same way, because the server refused the row over
+    a contested lifecycle event id: nothing was saved, and neither waiting nor stripping the
+    history helps - re-pushing the base alone is the resurrection the server refused."""
     retry = {s["decision_id"] for s in skipped if s.get("reason") == "quota_exceeded"}
-    invalid = len(skipped) - len(retry)
-    return retry, invalid
+    contested = sum(1 for s in skipped
+                    if s.get("reason") == remote.LIFECYCLE_CONFLICT_REASON)
+    invalid = len(skipped) - len(retry) - contested
+    return retry, invalid, contested
 
 
-def _batch_success_status(sent: int, at_capacity: int, invalid: int, lost: int) -> str:
+def _batch_success_status(sent: int, at_capacity: int, invalid: int, lost: int,
+                         contested: int = 0) -> str:
     """Status when no chunk hit a transport failure: what synced, what was queued at capacity, what
-    the server rejected as invalid (dropped), and what was genuinely lost (queued but un-writeable)."""
+    the server rejected as invalid (dropped), what it refused over a contested lifecycle event id
+    (also dropped), and what was genuinely lost (queued but un-writeable).
+
+    `contested` gets its own clause rather than being folded into `invalid` because the remedy is
+    completely different and the developer is the only one who can apply it: the decision's TYPE
+    and CONTENT were fine, and telling them it was "unsupported type or content" would send them
+    to edit a decision that has nothing wrong with it."""
     msg = f"Synced {sent} decision(s) to your personal cloud context"
     if at_capacity:
         msg += (f"; {at_capacity} could not be stored (context at capacity) and were queued - "
                 "delete some decisions to sync them")
     if invalid:
         msg += f"; {invalid} were rejected by the server (unsupported type or content) and skipped"
+    if contested:
+        msg += (f"; {contested} were refused because a lifecycle event id is already recorded "
+                "against another decision, and were skipped - nothing of them was saved")
     if lost:
         msg += f"; {lost} at capacity could NOT be queued (outbox write failed) and are unsaved"
     return msg + " - teammates won't see these until team promotion ships."
@@ -794,7 +846,7 @@ def _drain_mark(chunk: list[dict], res: tuple[list[str], list[dict]], sent_ids: 
     only the entries genuinely saved by the server (neither transient-retry NOR permanently-invalid
     - `skipped` as a whole, not just `retry`). Returns the count genuinely saved."""
     _saved, skipped = res
-    retry, _invalid = _split_skips(skipped)
+    retry, _invalid, _contested = _split_skips(skipped)
     skipped_ids = {s.get("decision_id") for s in skipped}
     for e in chunk:
         if e.get("decision_id") not in retry:
@@ -815,7 +867,7 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None
     """Sync batch push of shareable projections (share_all / share_ids). Stops at the first failed
     chunk (queues it + the rest); re-queues TRANSIENT capacity skips; drops PERMANENT invalid ones."""
     total = len(decs)
-    sent = at_capacity = invalid = lost = 0
+    sent = at_capacity = invalid = lost = contested = 0
     for start in range(0, total, _BATCH_SIZE):
         chunk = decs[start:start + _BATCH_SIZE]
         res = with_local_fallback(
@@ -830,20 +882,21 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None
         _pending, dropped_lifecycle = _queue_blocked_lifecycle(
             remote, {d["id"]: _payload(d, key) for d in chunk})
         lost += dropped_lifecycle
-        retry, inv = _split_skips(skipped)
+        retry, inv, con = _split_skips(skipped)
         invalid += inv
+        contested += con
         if retry:
             requeued, dropped = _requeue_skipped(chunk, key, retry)
             at_capacity += requeued
             lost += dropped
-    return _batch_success_status(sent, at_capacity, invalid, lost)
+    return _batch_success_status(sent, at_capacity, invalid, lost, contested)
 
 
 async def _apush_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str | None = None) -> str:
     """Async twin of :func:`_push_batch` (awaits apush_decisions so a wedged chunk is cancellable).
     Mirrors it line-for-line except the awaited push; shares every outbox/status helper."""
     total = len(decs)
-    sent = at_capacity = invalid = lost = 0
+    sent = at_capacity = invalid = lost = contested = 0
     for start in range(0, total, _BATCH_SIZE):
         chunk = decs[start:start + _BATCH_SIZE]
         res = await awith_local_fallback(
@@ -858,13 +911,14 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key, endpoint: str
         _pending, dropped_lifecycle = _queue_blocked_lifecycle(
             remote, {d["id"]: _payload(d, key) for d in chunk})
         lost += dropped_lifecycle
-        retry, inv = _split_skips(skipped)
+        retry, inv, con = _split_skips(skipped)
         invalid += inv
+        contested += con
         if retry:
             requeued, dropped = _requeue_skipped(chunk, key, retry)
             at_capacity += requeued
             lost += dropped
-    return _batch_success_status(sent, at_capacity, invalid, lost)
+    return _batch_success_status(sent, at_capacity, invalid, lost, contested)
 
 
 def drain_outbox(profile: Profile | None = None) -> int:
