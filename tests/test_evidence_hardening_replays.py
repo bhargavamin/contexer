@@ -671,6 +671,47 @@ def test_a_hold_written_under_the_old_scoring_resumes_under_the_new_one(tmp_repo
     assert len(store.load(tmp_repo)["entries"]) == 1
 
 
+def test_a_hold_whose_events_now_classify_as_a_different_kind_resumes_down_the_new_lane(
+        tmp_repo):
+    """The THIRD resume direction, and the one the other two miss: not a different candidate
+    COUNT but a different candidate KIND.
+
+    `_resume_holds` gates on `len(resumed) == 1` and never compares the fresh classification's
+    kind against the manifest's, which is deliberate - Task 02's `_candidate_id` docstring says
+    kind and target can legitimately change between the crash and the replay. So a hold created
+    when the store held nothing, resumed after a decision the same evidence now revises has
+    appeared, must materialize as a proposed_revision on that decision, inside the directory it
+    already occupies, without minting a second candidate or stranding the first.
+    """
+    doc = _load("05-directive-repeated-in-a-second-session")
+    directive = doc["events"][0]
+    assert spool.append_evidence(tmp_repo, directive)["status"] == "stored"
+    candidate_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "kind-change-hold"))
+    spool.hold_candidate_evidence(tmp_repo, candidate_id, [directive["event_id"]],
+                                  meta={"event_ids": [directive["event_id"]],
+                                        "status": "pending"})
+    # Appears only AFTER the hold: overlap 0.57 puts it in the update band (above
+    # `_UPDATE_OVERLAP`, below `_DUPLICATE_OVERLAP`), and the seed states no prohibition, so
+    # the same events that classified `new` against an empty store now classify `update`.
+    ok, target_id = store.update_decision(
+        tmp_repo, "Regenerate src/generated/client.ts by hand once a week.",
+        "sess-0", "architecture", created_by="human")
+    assert ok and target_id
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert receipt["proposed"] == 1 and receipt["incomplete"] is False
+    ((entry,),) = (store.load(tmp_repo)["entries"],)
+    assert entry["id"] == target_id, "the resume created a second decision"
+    assert entry["proposed_revision"]["content"].startswith("Regenerate src/generated")
+    assert entry["proposed_revision"]["content"] != entry["content"]
+    ((held_id, meta),) = spool.held_candidates(tmp_repo).items()
+    assert held_id == candidate_id, "a re-classified hold keeps the directory it occupies"
+    assert (meta["kind"], meta["target_decision_id"]) == ("update", target_id)
+    assert meta["entry_id"] == target_id
+    assert len(_held_event_files(tmp_repo, candidate_id)) == 1
+
+
 def test_a_hold_that_now_splits_is_reported_rather_than_duplicated(tmp_repo):
     """The other direction of the same risk, and the reason it is safe: when re-aggregation
     does NOT come back as one candidate, the pass says `incomplete` and leaves the hold exactly
@@ -698,12 +739,23 @@ def test_an_uncertain_path_never_becomes_an_anchor_a_policy_or_a_guard_input(tmp
     `possible_source_files` entry and only that. What must NOT happen anywhere downstream: it
     becoming `source_files`, becoming an `anchor_candidates` guess a developer could bless,
     selecting a policy, or pairing at commit time.
+
+    The edited-files sidecar is SEEDED here, and that is the whole point of the test rather
+    than setup noise. Review caught this assertion passing vacuously: on Claude and Codex the
+    same `post_write` call that emits the `file_changed` event also writes that sidecar, and
+    `store._EDITED_FILES_WINDOW` is the same 1800 seconds as `candidates._PROXIMITY_SECONDS`,
+    so in production every backward-linked path IS a fresh sidecar entry when reconciliation
+    materializes the decision - and the store stamped it on as an anchor guess. A fixture-only
+    replay never wrote the sidecar, so the test asserted a property the system did not have.
+    Seeding it is what makes the route real.
     """
     doc = _load("03-unrelated-edit-before-directive")
     (directive,) = [c for c in candidates.aggregate_candidates(doc["events"], [])["candidates"]
                     if c["kind"] == "new"]
     assert directive["possible_source_files"] == ["README.md"]
 
+    assert store.record_edited_file(tmp_repo, os.path.join(tmp_repo, "README.md")) == "README.md"
+    assert store._read_edited_files(tmp_repo) == ["README.md"], "the route must be live"
     _spool_events(tmp_repo, doc)
     assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
     (entry,) = store.load(tmp_repo)["entries"]
@@ -713,6 +765,47 @@ def test_an_uncertain_path_never_becomes_an_anchor_a_policy_or_a_guard_input(tmp
     request = {"operation": "commit", "files": ["README.md"], "artifact": ""}
     assert policy.select_policies([entry], request) == []
     assert guard_engine.decisions_for_files(tmp_repo, ["README.md"]) == []
+
+
+def test_a_decisions_evidence_receipts_are_bounded_and_the_drop_is_recorded(tmp_repo):
+    """A repeated directive settles one candidate per repetition, each filing an
+    `evidence_summary` receipt on the SAME decision - so this task opened a growth path beside
+    a `recurrences` list it had just capped at 20 (review measured 31 rows for 31 repetitions).
+
+    Bounded now, and honestly: the count of what left is stamped on the entry, the way
+    `_anchor_sources` stamps `source_files_total` when it truncates an anchor. A receipt is the
+    only place a settled candidate's disposition lives once its raw events are deleted, so
+    dropping one silently would be the shape runbook invariant 3 exists to prevent.
+    """
+    cap = store.MAX_EVIDENCE_SUMMARIES
+    ok, entry_id = store.update_decision(tmp_repo, RULE, "sess-0", "constraint",
+                                         created_by="human")
+    assert ok and entry_id
+
+    for i in range(cap + 3):
+        assert store.record_evidence_summary(tmp_repo, entry_id, {
+            "candidate_id": str(uuid.uuid5(_GEN_NAMESPACE, f"receipt#{i}")),
+            "disposition": "approved", "event_ids": [], "occurred_at": _T0.isoformat()})
+
+    (entry,) = store.load(tmp_repo)["entries"]
+    rows = entry["evidence_summary"]
+    assert len(rows) == cap
+    assert entry["evidence_summary_dropped"] == 3
+    assert rows[-1]["candidate_id"] == str(uuid.uuid5(_GEN_NAMESPACE, f"receipt#{cap + 2}")), \
+        "the cap keeps the most recent receipts"
+
+
+def test_a_short_receipt_history_records_no_drop_at_all(tmp_repo):
+    """The other side of the bound: an ordinary decision must not grow a bookkeeping key it
+    never needed. `evidence_summary_dropped` appears only once something actually left."""
+    ok, entry_id = store.update_decision(tmp_repo, RULE, "sess-0", "constraint",
+                                         created_by="human")
+    assert ok and store.record_evidence_summary(tmp_repo, entry_id, {
+        "candidate_id": str(uuid.uuid5(_GEN_NAMESPACE, "one")), "disposition": "approved",
+        "event_ids": [], "occurred_at": _T0.isoformat()})
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert len(entry["evidence_summary"]) == 1
+    assert "evidence_summary_dropped" not in entry
 
 
 def test_no_module_outside_the_aggregator_and_its_ledger_reads_a_possible_source_file():
