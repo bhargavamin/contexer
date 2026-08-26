@@ -769,8 +769,10 @@ def test_retention_on_an_absent_spool_is_a_clean_no_op(tmp_repo):
 # ── session-start maintenance (mitigation 1) ─────────────────────────────────────
 
 def test_maintain_spool_runs_retention_once_per_ttl(tmp_repo):
-    """The emit-only host's only bound: `run_retention`'s other caller is reconciliation,
-    which Codex never reaches and Cursor never has file evidence for."""
+    """The bound that runs whether or not a reconciliation pass does: `run_retention`'s only
+    other caller is reconciliation, which skips on lock contention and returns early on an
+    empty spool. (It landed when Codex and Cursor reached no reconciliation entrypoint at all;
+    every host reaches one now, and this bound is still not redundant.)"""
     spool.append_evidence(tmp_repo, _event(summary="ancient"))
     _age(next(iter(_pending(tmp_repo).iterdir())), spool._MAX_PENDING_AGE_DAYS + 1)
 
@@ -873,9 +875,12 @@ def test_status_says_a_spool_is_unreadable_rather_than_empty(tmp_repo, monkeypat
 
 
 def test_status_tells_evidence_that_aged_out_from_evidence_that_was_lost(tmp_repo):
-    """The two are different news. Pending events age out unconsumed on a host that never
-    reconciles (Codex, Cursor) - that is the queue working as designed, and reporting it as
-    "lost" both accused a healthy spool of failing and buried the real failures beside it."""
+    """The two are different news. A failed write is the spool failing at its job; a pending
+    event ageing out unconsumed is not, so reporting it as "lost" both accused a healthy spool
+    of failing and buried the real failures beside it. Kept separate for that reason, and
+    rendered as "aged out unreconciled" rather than as a benign outcome: now that every host
+    reconciles at session start, such an event outlived its whole retention window of session
+    starts and is worth looking into."""
     spool.append_evidence(tmp_repo, _event())
     spool._bump_gap(tmp_repo, "retention_unconsumed", 4, field="expired")
     rendered = _status_line(tmp_repo)
