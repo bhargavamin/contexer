@@ -36,6 +36,32 @@ SUPPORT_KINDS = frozenset({"file_changed", "test_result", "diff_observed"})
 # Which kinds contribute PATHS. `test_result` files name the tests, not what was decided.
 _FILE_KINDS = frozenset({"file_changed", "diff_observed"})
 
+# The closed V1 relationship vocabulary: WHY an event is in a candidate, recorded on every
+# signal row so a reviewer reads the link rather than inferring it from a weight.
+#
+# `unrelated` is the one that never attaches - it is what a leftover event is, and it is
+# carried on the leftover candidate's own rows so that report says why it exists.
+RELATIONS = frozenset({"explicit", "structural", "causal_forward", "temporal_backward",
+                       "repetition", "contradiction", "validation", "unrelated"})
+CERTAINTIES = frozenset({"confirmed", "supporting", "uncertain"})
+
+_CERTAINTY = {
+    "explicit": "confirmed",
+    "structural": "confirmed",
+    "contradiction": "confirmed",
+    "repetition": "supporting",
+    "causal_forward": "supporting",
+    "validation": "supporting",
+    "temporal_backward": "uncertain",
+    "unrelated": "uncertain",
+}
+
+# Attachment preference when several groups qualify for one support event: the strongest
+# relation first, then the shortest absolute time distance, then the lowest seed event id.
+# All three are properties of the data, never of list order, so the pick is stable under any
+# input permutation.
+_RELATION_RANK = {"structural": 0, "validation": 1, "causal_forward": 2, "temporal_backward": 3}
+
 # Workstream B2's table, in one object. Ranking weights, not probabilities. Each entry has a
 # test in tests/test_candidates.py explaining what its number buys at the review bar.
 _SCORES = {
@@ -139,13 +165,22 @@ def _attributes(event) -> dict:
 
 
 def _merge_target(seed, groups):
-    """The group this later seed joins, or None to start its own.
+    """`(group, relation)` for the group this later seed joins, or `(None, "")`.
 
-    Two bars: a restatement merges above `_MERGE_OVERLAP`, and a seed carrying a negation
-    marker merges above the lower `_CONTRADICTION_OVERLAP` - a rebuttal shares fewer words
-    with what it rebuts, and burying it in its own group would hide the disagreement from the
-    developer instead of scoring it. Whichever bar it crossed, a merged negating seed is
-    counted as a contradiction by `_score_group`.
+    Two bars: a restatement merges above `_MERGE_OVERLAP`, and a seed whose negation POLARITY
+    differs from the group's merges above the lower `_CONTRADICTION_OVERLAP` - a rebuttal
+    shares fewer words with what it rebuts, and burying it in its own group would hide the
+    disagreement from the developer instead of scoring it.
+
+    Polarity, not the bare presence of a negation word, is what makes it a `contradiction`
+    (ledger ruling D1). `_negates` matches "not"/"never"/"don't" anywhere in the summary, so a
+    PROHIBITION restated verbatim in a second session used to contradict ITSELF: "Do not edit
+    the generated client" repeated scored 50 - 30 = 20 and fell under the review bar, where the
+    same rule phrased affirmatively scored 65. A restatement that negates exactly what the
+    group's seed negates is `repetition`; only a seed that flips the polarity is a rebuttal.
+    That keeps the ratified high-overlap case intact - a near-verbatim REVERSAL ("never run
+    migrations before deploying" against "migrations must run before deploying") still flips
+    polarity and is still charged as the contradiction it is.
 
     ponytail: this compares each seed against every group opened so far, so a pass is O(N^2)
     in DISTINCT statements. That is a CEILING, not the normal cost - a real session spools a
@@ -159,12 +194,13 @@ def _merge_target(seed, groups):
     fallback = None
     negating = _negates(seed.get("summary"))
     for group in groups:
+        flipped = negating != _negates(group["seed"].get("summary"))
         overlap = _overlap(seed.get("summary"), group["seed"].get("summary"))
         if overlap > _MERGE_OVERLAP:
-            return group
-        if negating and fallback is None and overlap > _CONTRADICTION_OVERLAP:
+            return group, "contradiction" if flipped else "repetition"
+        if flipped and fallback is None and overlap > _CONTRADICTION_OVERLAP:
             fallback = group
-    return fallback
+    return (fallback, "contradiction") if fallback is not None else (None, "")
 
 
 def _within_proximity(seed, event) -> bool:
@@ -180,75 +216,158 @@ def _within_proximity(seed, event) -> bool:
     return 0 <= elapsed <= _PROXIMITY_SECONDS
 
 
+def _distance(seed, event) -> float:
+    """Absolute seconds between two events, `inf` when either timestamp will not parse - so an
+    unparseable pair always loses a tie-break rather than winning one by accident."""
+    try:
+        return abs((datetime.fromisoformat(str(event.get("occurred_at") or ""))
+                    - datetime.fromisoformat(str(seed.get("occurred_at") or ""))).total_seconds())
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _relation_for(group, event, files):
+    """WHY this support event would attach to this group, or None for no link at all.
+
+    Structural first, forward proximity second, backward proximity last and only as an
+    uncertain display link (the brief's three-tier rule):
+
+    * `structural` - the event touches a file the group already carries, or one the group's
+      SEED names in its own text. The text half is what fixes outstanding issue 6: the
+      generated-client rule names `src/generated/client.ts`, so the regeneration recorded a
+      minute BEFORE the developer typed the rule is linked by the rule's own words rather than
+      by the order the two happened to land in. Time-direction-blind by design, because a
+      shared identifier is proof whichever way the clock ran.
+    * `validation` - a test result for a group that has no files to share yet.
+    * `causal_forward` - the seed names no files and the event followed it inside
+      `_PROXIMITY_SECONDS`. This is what makes a real session aggregate at all: a
+      `user_directive`, the strongest seed there is, never carries `files`, so a shared-file
+      rule alone could never let anything attach to one. The bound is the SEED's own files,
+      not the group's, so the window stays open once the first edit has given the group files;
+      and it is measured from the seed, so a chain of edits cannot slide the window forward
+      and swallow a whole long session.
+    * `temporal_backward` - the same window, the other way round, with nothing structural to
+      show for it. ALWAYS uncertain, worth zero, and never an anchor: an edit that merely
+      happened shortly before a statement is not evidence for it, and a wrong anchor is guard
+      and staleness input, so it is worse than none.
+    """
+    seed = group["seed"]
+    if any(f in group["files"] or f in group["artifacts"] for f in files):
+        return "structural"
+    if not group["files"] and event.get("kind") == "test_result":
+        return "validation"
+    if not _event_files(seed):
+        if _within_proximity(seed, event):
+            return "causal_forward"
+        if _within_proximity(event, seed):
+            return "temporal_backward"
+    return None
+
+
 def _attach_target(event, groups):
-    """The group this support event corroborates, or None if it corroborates nothing.
+    """`(group, relation)` for the group this support event links to, or `(None, "")`.
 
-    Always the same session, and then one of three signals, in priority order: a file in
-    common with the group's files so far; the group has no files yet and this is a test
-    result; or the group's SEED names no files at all and this event is inside
-    `_PROXIMITY_SECONDS` of it.
+    Always the same session first: cross-session temporal attachment is forbidden outright, so
+    an edit made in another session can never corroborate this one's statement. Among the
+    groups that do qualify, the pick is the deterministic tie-break `_RELATION_RANK` documents
+    - strongest relation, shortest absolute time distance, lowest seed event id.
 
-    That third rule is what makes a real session aggregate. A `user_directive` - the strongest
-    seed there is - never carries `files`, because a directive is about the work rather than a
-    path, so a shared-file rule could NEVER let anything attach to one: the directive and the
-    edits it prompted came back as a thin `new` candidate beside a useless `insufficient` one,
-    which is the opposite of the accumulation this pipeline exists for. The bound is the SEED's
-    own files, not the group's, so the window stays open once the first edit has given the
-    group files; and it is measured from the seed rather than from the last attachment, so a
-    chain of edits cannot slide the window forward and swallow a whole long session.
-
-    The first two signals return immediately, matching what they have always done. The
-    proximity rule is a FALLBACK that keeps scanning, so the LAST (most recent) qualifying
-    seed takes the event - an edit corroborates what was just said, not the oldest thing said
-    in the window. Group order is seed order, which `_ordered` fixes, so this stays
-    deterministic under any input order.
-
-    Consequence, stated rather than worked around: the seed is always the group's earliest
-    event, so a file change recorded BEFORE the statement it belongs to attaches to nothing
-    and lands in the leftover set - which is exactly the plan's "only a file changed, with no
-    semantic statement" row.
+    The distance term is what the old "last qualifying seed wins" fallback was really saying:
+    an edit corroborates what was JUST said, not the oldest thing said inside the window.
+    Spelling it as a distance makes it hold for backward links too, where "last" has no
+    meaning, and makes it independent of group order rather than merely consistent with it.
     """
     files = _event_files(event)
-    fallback = None
+    best = None
     for group in groups:
         seed = group["seed"]
         if seed.get("session_id") != event.get("session_id"):
             continue
-        if any(f in group["files"] for f in files) \
-                or (not group["files"] and event.get("kind") == "test_result"):
-            return group
-        if not _event_files(seed) and _within_proximity(seed, event):
-            fallback = group
-    return fallback
+        relation = _relation_for(group, event, files)
+        if relation is None:
+            continue
+        key = (_RELATION_RANK[relation], _distance(seed, event),
+               str(seed.get("event_id") or ""))
+        if best is None or key < best[0]:
+            best = (key, group, relation)
+    return (best[1], best[2]) if best else (None, "")
+
+
+def _new_group(seed) -> dict:
+    """One seed's group. `artifacts` are the path- and module-shaped spans of the seed's own
+    text, used ONLY to recognize a structural link - they never become `source_files` by
+    themselves, because a rule that NAMES a file is not the same fact as a session that
+    CHANGED it (which is why scenario 3's directive still anchors nothing)."""
+    return {
+        "seed": seed,
+        "events": [seed],
+        "files": list(dict.fromkeys(_event_files(seed))),
+        "artifacts": set(retrieval.raw_path_artifacts(seed.get("summary") or "")),
+        "links": {},
+        "possible": [],
+        "uncertain": [],
+    }
 
 
 def _group(events):
-    """(groups, leftover support by session, ignored kind counts, merged seed count)."""
+    """(groups, leftover support by session, ignored kind counts, merged seed count).
+
+    Two passes, deliberately: every seed group is created and merged first, and only then is
+    support attached. One pass could only ever link an event to a statement made BEFORE it,
+    which is the whole of outstanding issue 6 - the same directive and edit grouped one way or
+    two depending purely on which the developer did first.
+
+    A group's `events` therefore read statements-first, then support, rather than in strict
+    wall-clock order - both passes read `_ordered`, so it is fixed, and it is what a signal
+    list now shows. Nothing scores off that order (`_candidate_id` sorts the ids, the
+    files/tests counters are first-wins within support, and the repetition counter walks seeds
+    only), so the change is a display one.
+
+    An UNCERTAIN link does not consume its event. It is recorded on the group for display
+    (`possible`/`uncertain`) and the event ALSO stays in the leftover set, because nothing
+    about it has been explained: it still belongs in the "files changed with no stated
+    decision" report, and letting a group swallow it would delete that gap from the run while
+    anchoring nothing.
+    """
     groups: list = []
     leftovers: dict = {}
     ignored: dict = {}
+    support: list = []
     merged = 0
     for event in _ordered(events):
         kind = event.get("kind")
         if kind in SEED_KINDS:
-            target = _merge_target(event, groups)
+            target, relation = _merge_target(event, groups)
             if target is None:
-                groups.append({"seed": event, "events": [event],
-                               "files": list(dict.fromkeys(_event_files(event)))})
+                groups.append(_new_group(event))
             else:
                 target["events"].append(event)
+                target["links"][str(event.get("event_id") or "")] = relation
                 merged += 1
         elif kind in SUPPORT_KINDS:
-            target = _attach_target(event, groups)
-            if target is None:
-                leftovers.setdefault(str(event.get("session_id") or ""), []).append(event)
-                continue
-            target["events"].append(event)
-            for path in _event_files(event) if kind in _FILE_KINDS else []:
-                if path not in target["files"]:
-                    target["files"].append(path)
+            support.append(event)
         else:
             ignored[str(kind)] = ignored.get(str(kind), 0) + 1
+
+    for event in support:
+        target, relation = _attach_target(event, groups)
+        session = str(event.get("session_id") or "")
+        if target is None:
+            leftovers.setdefault(session, []).append(event)
+            continue
+        paths = _event_files(event) if event.get("kind") in _FILE_KINDS else []
+        if _CERTAINTY[relation] == "uncertain":
+            target["uncertain"].append((event, relation))
+            for path in paths:
+                if path not in target["possible"]:
+                    target["possible"].append(path)
+            leftovers.setdefault(session, []).append(event)
+            continue
+        target["events"].append(event)
+        target["links"][str(event.get("event_id") or "")] = relation
+        for path in paths:
+            if path not in target["files"]:
+                target["files"].append(path)
     return groups, leftovers, ignored, merged
 
 
@@ -272,10 +391,14 @@ def _score_group(group) -> tuple:
 
     Every event in the group gets a signal row, weight 0 included: the row is the audit trail
     for why the candidate exists, and dropping the zero-weight ones would make a corroborating
-    event that scored nothing indistinguishable from one that was never seen.
+    event that scored nothing indistinguishable from one that was never seen. Each row carries
+    the typed link `_group` recorded (`relation`) and how much that link is worth as proof
+    (`certainty`) beside the ranking weight, so the reason a candidate holds together is read
+    off the candidate rather than reconstructed from a number.
     """
     events = group["events"]
     seed = group.get("seed")
+    links = group.get("links") or {}
     signals: list = []
     uncertainties: list = []
     sessions = {str(seed.get("session_id") or "")} if seed else set()
@@ -283,10 +406,15 @@ def _score_group(group) -> tuple:
 
     for index, event in enumerate(events):
         kind = event.get("kind")
+        # A leftover set has no seed, so nothing in it was linked to anything: `unrelated` is
+        # the honest relation for those rows, and it is what makes the insufficient candidate
+        # a report of an unexplained change rather than a weak proposal.
+        relation = links.get(str(event.get("event_id") or ""), "unrelated")
         if seed is not None and index == 0:
             weight, reason = _seed_weight(event)
+            relation = "explicit"
         elif kind in SEED_KINDS:
-            if _negates(event.get("summary")):
+            if relation == "contradiction":
                 weight, reason = _SCORES["contradiction"], "contradicts the group's statement"
                 uncertainties.append(
                     f"contradicted by a later statement: {_first_sentence(event.get('summary'))}")
@@ -302,15 +430,30 @@ def _score_group(group) -> tuple:
             counted_files = True
         elif _attributes(event).get("status") != "passed":
             # test_result, the only remaining support kind. A red run is evidence the behavior
-            # is NOT settled, so it corroborates nothing and must not raise the rank.
+            # is NOT settled, so it corroborates nothing and must not raise the rank - and it
+            # is `uncertain` for the same reason, whatever link brought it into the group.
             weight, reason = 0, "test result did not pass"
+            relation = "validation"
         else:
             weight = 0 if counted_tests else _SCORES["tests_validate"]
             reason = "tests already counted" if counted_tests else "tests validate the behavior"
             counted_tests = True
-        signals.append({"event_id": str(event.get("event_id") or ""),
-                        "weight": weight, "reason": reason})
+        certainty = ("uncertain" if reason == "test result did not pass"
+                     else _CERTAINTY[relation])
+        signals.append({"event_id": str(event.get("event_id") or ""), "weight": weight,
+                        "relation": relation, "certainty": certainty, "reason": reason})
     return sum(s["weight"] for s in signals), signals, uncertainties
+
+
+def _uncertain_signals(group) -> list:
+    """Display-only rows for the links that were made but proved nothing: the event, why it
+    was linked, and a plain statement that it counts for nothing. They are NOT in `signals`
+    and NOT in the candidate's event set, so nothing downstream can hold them, score them, or
+    read their files as an anchor - `possible_source_files` is the whole of what they buy."""
+    return [{"event_id": str(event.get("event_id") or ""), "weight": 0,
+             "relation": relation, "certainty": _CERTAINTY[relation],
+             "reason": "changed close in time with no structural link - not evidence"}
+            for event, relation in group.get("uncertain") or []]
 
 
 # ── classification against the existing decisions ────────────────────────────────
@@ -406,8 +549,14 @@ def _seeded_candidate(group, decisions) -> dict:
         # materialization/lifecycle work to use.
         "replacement_decision_id": None,
         "source_files": group["files"][:_MAX_SOURCE_FILES],
+        # Paths reached only through an uncertain link. Kept SEPARATE from `source_files` for
+        # the whole length of the pipeline: nothing may promote one into an anchor, a policy
+        # rule's scope, `anchor_candidates`, or Teams. See `_relation_for`'s temporal_backward
+        # note for why an uncertain anchor is worse than no anchor at all.
+        "possible_source_files": group["possible"][:_MAX_SOURCE_FILES],
         "score": score,
         "signals": signals,
+        "uncertain_signals": _uncertain_signals(group),
         "uncertainties": uncertainties,
     }
 
@@ -430,8 +579,10 @@ def _leftover_candidate(session_id, events) -> dict:
         "target_decision_id": None,
         "replacement_decision_id": None,
         "source_files": files[:_MAX_SOURCE_FILES],
+        "possible_source_files": [],
         "score": score,
         "signals": signals,
+        "uncertain_signals": [],
         "uncertainties": uncertainties,
     }
 

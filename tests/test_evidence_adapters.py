@@ -133,10 +133,16 @@ class TestUserDirectiveEmission:
 
 class TestStoreFailureIsRecordedNotSwallowed:
     """The loss case the spool exists for: capture raised, so no entry proves the directive
-    - the event is still written, flagged `unverified`, and the hook behaves exactly as before."""
+    - the event is still written, flagged `unverified`, and the hook behaves exactly as before.
+
+    The seam these patch is `capture_user_constraint_with_meta`, which is what
+    `evidence.capture_directive` calls: the 3-tuple `capture_user_constraint` is now a thin
+    wrapper over it (the house `_with_meta` pattern), so patching the wrapper would leave the
+    real call path untouched and test nothing.
+    """
 
     def test_claude_hook_output_unchanged_and_event_flagged(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "capture_user_constraint", _boom)
+        monkeypatch.setattr(store, "capture_user_constraint_with_meta", _boom)
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"   # pre-existing: swallowed
         (event,) = spool.list_pending_evidence(tmp_repo, "s1")
@@ -145,7 +151,7 @@ class TestStoreFailureIsRecordedNotSwallowed:
         assert store.load(tmp_repo)["entries"] == []               # nothing was stored
 
     def test_cursor_hook_output_unchanged_and_event_flagged(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "capture_user_constraint", _boom)
+        monkeypatch.setattr(store, "capture_user_constraint_with_meta", _boom)
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1",
                            "workspace_roots": [tmp_repo]})
         assert _json.loads(cursor.capture_constraint("", raw)) == {"continue": True}
@@ -156,7 +162,7 @@ class TestStoreFailureIsRecordedNotSwallowed:
                                                                         monkeypatch):
         # Gated on the store's OWN detector: a failure while handling an ordinary prompt is
         # not evidence of a directive, and guessing would poison the spool on every crash.
-        monkeypatch.setattr(store, "capture_user_constraint", _boom)
+        monkeypatch.setattr(store, "capture_user_constraint_with_meta", _boom)
         raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"
         assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
@@ -164,7 +170,7 @@ class TestStoreFailureIsRecordedNotSwallowed:
     def test_a_failing_detector_does_not_mask_the_original_error(self, tmp_repo, monkeypatch):
         # capture_directive re-raises what the store raised; a second failure while RECORDING
         # the loss must not replace it, or the caller's error path sees the wrong exception.
-        monkeypatch.setattr(store, "capture_user_constraint", _boom)
+        monkeypatch.setattr(store, "capture_user_constraint_with_meta", _boom)
         monkeypatch.setattr(store, "is_prescriptive_directive",
                             lambda *_a, **_k: 1 / 0)
         with pytest.raises(RuntimeError, match="boom"):

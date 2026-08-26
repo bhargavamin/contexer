@@ -540,3 +540,118 @@ def test_proximity_attachment_survives_a_shuffled_input_order():
         random.Random(seed).shuffle(shuffled)
         assert json.dumps(candidates.aggregate_candidates(shuffled, [])) == \
             json.dumps(baseline)
+
+
+# ── typed relationships (hardening Task 03) ──────────────────────────────────────
+
+# The seed NAMES a path in its own text, which is what a real directive does ("do not edit
+# src/generated/client.ts directly"), so an edit to that path is structurally linked whichever
+# side of the statement it landed on.
+_NAMES_A_FILE = "always regenerate src/generated/client.ts from the schema"
+
+
+def _relations(candidate) -> list[tuple]:
+    return [(s["relation"], s["certainty"]) for s in candidate["signals"]]
+
+
+def test_every_signal_carries_a_relation_and_a_certainty_from_the_closed_vocabulary():
+    """The row says WHY the event is here, not just what it was worth. A weight of 0 is
+    ambiguous on its own - a corroborating event that scored nothing and one that only
+    happened to be nearby read identically before this."""
+    events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00",
+                  files=["db/migrate.py"]),
+              _ev("file_changed", "migration", at="2026-08-24T10:01:00+00:00",
+                  files=["db/migrate.py"]),
+              _ev("user_directive", _SEED, session="s2", at="2026-08-24T11:00:00+00:00")]
+    got = _only(candidates.aggregate_candidates(events, []))
+    # Statements first, then what supported them: the two-pass grouping fills the seeds before
+    # it attaches support, so a merged restatement precedes an earlier file change. Both passes
+    # read `_ordered`, so the order is fixed - it is just no longer strict wall-clock order.
+    assert _relations(got) == [("explicit", "confirmed"), ("repetition", "supporting"),
+                               ("structural", "confirmed")]
+    for signal in got["signals"]:
+        assert signal["relation"] in candidates.RELATIONS
+        assert signal["certainty"] in candidates.CERTAINTIES
+
+
+def test_an_edit_before_a_directive_that_names_its_file_is_structural():
+    """Time direction is not evidence; a shared identifier is. The edit precedes the statement
+    and still anchors it, because the statement names the file."""
+    events = [_ev("file_changed", "regenerated", at="2026-08-24T10:00:00+00:00",
+                  files=["src/generated/client.ts"]),
+              _ev("user_directive", _NAMES_A_FILE, at="2026-08-24T10:01:00+00:00")]
+    got = _only(candidates.aggregate_candidates(events, []))
+    assert got["source_files"] == ["src/generated/client.ts"]
+    assert got["possible_source_files"] == []
+    assert _relations(got)[1] == ("structural", "confirmed")
+
+
+def test_an_edit_before_a_directive_with_no_structural_link_is_only_possible():
+    """The uncertain link, and everything it is NOT. The path is displayed as possible, the
+    score does not move, and the edit is STILL reported as an unexplained change - a display
+    link must not consume the evidence of the gap it failed to explain."""
+    events = [_ev("file_changed", "readme typo", at="2026-08-24T10:00:00+00:00",
+                  files=["README.md"]),
+              _ev("user_directive", _SEED, at="2026-08-24T10:01:00+00:00")]
+    result = candidates.aggregate_candidates(events, [])
+    directive = next(c for c in result["candidates"] if c["kind"] == "new")
+    leftover = next(c for c in result["candidates"] if c["kind"] == "insufficient")
+
+    assert directive["score"] == 50, "an uncertain link is worth nothing"
+    assert directive["source_files"] == []
+    assert directive["possible_source_files"] == ["README.md"]
+    assert _relations(directive) == [("explicit", "confirmed")]
+    assert [(s["relation"], s["certainty"]) for s in directive["uncertain_signals"]] \
+        == [("temporal_backward", "uncertain")]
+    assert leftover["source_files"] == ["README.md"]
+
+
+def test_an_uncertain_link_never_crosses_a_session_boundary():
+    """Cross-session temporal attachment is forbidden outright: another session's edit is not
+    even a possible anchor for this session's rule."""
+    events = [_ev("file_changed", "readme typo", session="s2",
+                  at="2026-08-24T10:00:00+00:00", files=["README.md"]),
+              _ev("user_directive", _SEED, at="2026-08-24T10:01:00+00:00")]
+    directive = next(c for c in candidates.aggregate_candidates(events, [])["candidates"]
+                     if c["kind"] == "new")
+    assert directive["possible_source_files"] == [] and directive["uncertain_signals"] == []
+
+
+def test_a_shared_file_beats_proximity_when_both_groups_qualify():
+    """The tie-break in the one case where the two rules disagree: the nearer group would take
+    the edit on proximity, the further one owns the file. Structural wins - proximity is a
+    guess about what an edit was for, a shared path is a fact about it."""
+    owns_the_file = _ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00",
+                        files=["db/migrate.py"])
+    nearer = _ev("user_directive", _UNRELATED, at="2026-08-24T10:05:00+00:00")
+    edit = _ev("file_changed", "migration again", at="2026-08-24T10:06:00+00:00",
+               files=["db/migrate.py"])
+    by_content = {c["content"]: c for c in candidates.aggregate_candidates(
+        [owns_the_file, nearer, edit], [])["candidates"]}
+    assert by_content[_SEED]["source_files"] == ["db/migrate.py"]
+    assert by_content[_UNRELATED]["source_files"] == []
+
+
+def test_a_prohibition_restated_is_repetition_not_a_contradiction():
+    """Ledger ruling D1. `_negates` matches a bare negation word, so a prohibition repeated
+    verbatim used to be charged -30 for contradicting ITSELF and sank below the review bar,
+    where the same rule phrased affirmatively was corroborated. Polarity is what decides."""
+    prohibition = "never run migrations before deploying postgres schema updates"
+    events = [_ev("user_directive", prohibition, at="2026-08-24T10:00:00+00:00"),
+              _ev("user_directive", prohibition, session="s2", at="2026-08-24T11:00:00+00:00")]
+    got = _only(candidates.aggregate_candidates(events, []))
+    assert got["score"] == 65 and got["kind"] == "new"
+    assert _relations(got)[1] == ("repetition", "supporting")
+    assert got["uncertainties"] == []
+
+
+def test_a_reversal_of_a_prohibition_is_still_a_contradiction():
+    """The other side of the same rule, so polarity is measured in both directions rather than
+    asserted in one: dropping the prohibition IS a contradiction of it."""
+    events = [_ev("user_directive", "never run migrations before deploying postgres schema",
+                  at="2026-08-24T10:00:00+00:00"),
+              _ev("user_directive", "migrations must run before deploying postgres schema",
+                  session="s2", at="2026-08-24T11:00:00+00:00")]
+    got = _only(candidates.aggregate_candidates(events, []))
+    assert _relations(got)[1] == ("contradiction", "confirmed")
+    assert got["score"] == 20, "a contradiction is never hidden by a high positive score"

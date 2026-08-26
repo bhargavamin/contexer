@@ -279,18 +279,30 @@ def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
     """`store.capture_user_constraint` plus the `user_directive` event for it - the one
     definition every host's per-prompt constraint hook shares.
 
-    Returns and raises EXACTLY what the store call does, so no hook's existing behaviour
-    changes. Two gates, each honest about what is actually known: on the normal path the
-    event is emitted only when the store reports it stored or updated an entry (a detected
-    directive that deduped against an existing one is a no-op there and stays one here), and
-    when the store RAISES - the loss this ledger exists to record - the event is emitted only
-    if the store's own detector says the prompt was a directive, marked `unverified` because
-    no entry exists to prove it. The detector is reached through its public alias; a second
-    copy of "what counts as a directive" would drift from the first.
+    Returns and raises EXACTLY what the store's 3-tuple contract does, so no hook's existing
+    behaviour changes. Three gates, each honest about what is actually known:
+
+    * the store stored or updated an entry - the event is emitted for it;
+    * the store recorded a RECURRENCE (`meta["recurrence"]`, the developer restating a rule the
+      store already holds). This used to emit nothing at all, which was outstanding issue 3:
+      the second time a rule was stated there was no trace of it anywhere in the ledger. The
+      event is an ordinary `user_directive` carrying the sanitized content, so the aggregator
+      matches it onto the decision it duplicates and settles it there - which is what keeps a
+      repeated rule from becoming a second pending decision. `decision_repeated` stays a valid
+      kind with no emitter: it means "some OTHER thing observed a repetition", and inventing it
+      here would open a group nothing can settle, since a lone repetition scores below the
+      review bar;
+    * the store RAISES - the loss this ledger exists to record - and the event is emitted only
+      if the store's own detector says the prompt was a directive, marked `unverified` because
+      no entry exists to prove it. The detector is reached through its public alias; a second
+      copy of "what counts as a directive" would drift from the first.
+
+    `source` is passed into the store call as well as onto the event, so the recurrence history
+    row records which host prompt hook restated the rule.
     """
     try:
-        result = store.capture_user_constraint(
-            repo_path, prompt, session_id, near, repo_source=repo_source)
+        entry_id, content, status, meta = store.capture_user_constraint_with_meta(
+            repo_path, prompt, session_id, near, repo_source=repo_source, source=source)
     except Exception:
         # Suppressed, not merged into the outer handler: a failure while RECORDING the loss
         # must not replace the exception the caller's own error path is about to see.
@@ -300,7 +312,11 @@ def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
                                 source=source, summary=prompt,
                                 attributes={"unverified": True})
         raise
-    if result[0] is not None:
+    repeated = meta.get("recurrence") or {}
+    if entry_id is not None:
         emit_hook_event(repo_path, "user_directive", session_id=session_id,
-                        source=source, summary=result[1])
-    return result
+                        source=source, summary=content)
+    elif repeated.get("content"):
+        emit_hook_event(repo_path, "user_directive", session_id=session_id,
+                        source=source, summary=repeated["content"])
+    return entry_id, content, status
