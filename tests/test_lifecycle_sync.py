@@ -832,6 +832,83 @@ def test_a_blocked_delta_is_never_quarantined_or_dropped(tmp_repo, wire_open, mo
     assert seen["pushes"] == []
 
 
+def _queued_offline_row(tmp_repo, monkeypatch):
+    """One ordinary queued share whose decision carries completed lifecycle history, sitting in
+    the outbox exactly as an offline share leaves it - the state a drain starts from."""
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    proj = store.get_shareable(tmp_repo, did)
+    share._enqueue(share._payload(proj, "github.com/a/b"))
+    assert [r.get("stage") for r in share._load_outbox()] == [None]
+    return proj["id"]
+
+
+def _drain_refusing_seam(monkeypatch, shape):
+    """A batch seam that advertises the capability and then refuses any chunk carrying lifecycle,
+    in either of the two shapes the fallback is built for."""
+    seen = {"pushes": []}
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        if name == "get_capabilities":
+            return _result(structured={"capabilities": {"decisionLifecycle": _LIFECYCLE_CAPS}})
+        seen["pushes"].append(arguments)
+        rows = arguments["decisions"]
+        carries = any("lifecycle" in d or "revision_id" in d for d in rows)
+        if carries and shape == "per_row":
+            return _result(structured={
+                "results": [],
+                "skipped": [{"decisionId": d["decisionId"], "reason": "invalid_lifecycle"}
+                            for d in rows]})
+        if carries and shape == "whole_call":
+            return types.SimpleNamespace(
+                content=[_text("MCP error -32602: Input validation error")],
+                structuredContent=None, isError=True)
+        return _result(structured={
+            "results": [{"id": f"srv-{i}", "decisionId": d["decisionId"]}
+                        for i, d in enumerate(rows)], "skipped": []})
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    return seen
+
+
+@pytest.mark.parametrize("shape", ["per_row", "whole_call"])
+def test_a_delta_refused_DURING_a_drain_survives_the_drain(shape, tmp_repo, wire_open, monkeypatch):
+    # The drain both DELIVERS the base and CREATES the pending row for the same decision id, so a
+    # purge keyed on that id alone deleted the delta in the same breath as recording it - silently,
+    # with the drain reporting success. Both refusal shapes, because the two arrive by different
+    # routes (a per-row skip, and a whole-call reject that raises).
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    _drain_refusing_seam(monkeypatch, shape)
+
+    assert share.drain_outbox(profile=TEAM) == 1      # the base decision did sync
+    rows = share._load_outbox()
+    assert [r.get("stage") for r in rows] == ["lifecycle_pending"], (
+        "the refused delta must outlive the drain that refused it")
+    assert rows[0]["decision_id"] == did
+    assert rows[0]["lifecycle"][0]["kind"] == "retired"
+    assert rows[0]["capability"] == "v1:r1t1p1"       # what it was refused under
+    assert rows[0]["blocked_reason"]                  # why, in the server's words
+
+
+def test_a_delta_refused_during_a_drain_is_re_offered_once_the_capability_moves(
+        tmp_repo, wire_open, monkeypatch):
+    # The other half: a row created by the drain path must be reachable by the retry path, not
+    # merely present. Surviving into a file nothing re-offers would be quarantine by another name.
+    _queued_offline_row(tmp_repo, monkeypatch)
+    _drain_refusing_seam(monkeypatch, "per_row")
+    share.drain_outbox(profile=TEAM)
+
+    seen = _caps_seam(monkeypatch, {"decisionLifecycle": {**_LIFECYCLE_CAPS, "version": 2}})
+    assert share.drain_outbox(profile=TEAM) == 1
+    assert share._load_outbox() == []
+    assert seen["pushes"][0]["lifecycle"][0]["kind"] == "retired"
+
+
 def test_a_refused_lifecycle_reason_is_still_scrubbed_on_the_retry_path(
         wire_open, monkeypatch):
     # Redaction is last-mile, so it must hold on BOTH the augmented push and the legacy retry.

@@ -607,7 +607,8 @@ def shared_map(endpoint: str | None) -> dict[str, str]:
         return {}
 
 
-def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
+def _reconcile_with_disk(tail: list[dict], sent_ids: set,
+                         settled_pending: set | None = None) -> list[dict]:
     """Re-read the outbox immediately before the final save and fold in anything that
     only exists on disk. The normal POSIX path serializes outbox writers with `outbox_lock`,
     so this is mostly the non-POSIX fallback: when advisory locking is unavailable, a
@@ -615,11 +616,28 @@ def _reconcile_with_disk(tail: list[dict], sent_ids: set) -> list[dict]:
     and this point writes straight to disk, so that payload is invisible to our in-memory
     `entries` and would otherwise be silently overwritten by this drain's final save.
     Disk-only entries are appended after `tail` since they were enqueued after this drain
-    started, so FIFO order is preserved."""
+    started, so FIFO order is preserved.
+
+    `sent_ids` DOES NOT SETTLE A `lifecycle_pending` ROW, and keeping the two apart is the whole
+    point of the second parameter. `sent_ids` means "this decision's BASE synced"; a pending row
+    means "the base synced and the server refused its history", so the very drain that delivers
+    the base is the one that creates the pending row, and purging on a shared `decision_id` key
+    deleted the delta in the same breath as recording it - silently, with the drain reporting
+    success. A pending delta is settled only by `_retry_lifecycle_pending` actually delivering it,
+    which is what `settled_pending` carries."""
     disk_entries = _load_outbox()
+    settled = settled_pending or set()
     tail_ids = {e.get("decision_id") for e in tail}
-    extra = [d for d in disk_entries
-             if d.get("decision_id") not in sent_ids and d.get("decision_id") not in tail_ids]
+    extra = []
+    for d in disk_entries:
+        decision_id = d.get("decision_id")
+        if decision_id in tail_ids:
+            continue
+        if d.get("stage") == _LIFECYCLE_PENDING:
+            if decision_id not in settled:
+                extra.append(d)
+        elif decision_id not in sent_ids:
+            extra.append(d)
     return tail + extra
 
 
@@ -828,7 +846,7 @@ def _queue_blocked_lifecycle(remote, payloads: dict) -> tuple[int, int]:
     return queued, lost
 
 
-def _retry_lifecycle_pending(remote, pending: list[dict], endpoint, sent_ids: set) -> tuple[int, list[dict]]:
+def _retry_lifecycle_pending(remote, pending: list[dict], endpoint) -> tuple[set, list[dict]]:
     """Re-offer blocked lifecycle deltas, but ONLY when the server's answer has changed.
 
     The gate is the advertised capability fingerprint, compared against the one recorded when the
@@ -836,15 +854,17 @@ def _retry_lifecycle_pending(remote, pending: list[dict], endpoint, sent_ids: se
     way, so the row is left exactly as it is - no round trip, no attempt counter, no eventual
     quarantine. That is the whole difference between "durably pending" and "retry storm".
 
-    Returns (settled, rows_still_pending); settled decision ids are added to `sent_ids` so the
-    normal reconcile drops them. Callers persist the returned rows."""
+    Returns (settled_decision_ids, rows_still_pending). The settled ids are threaded to
+    `_reconcile_with_disk` as `settled_pending` rather than merged into `sent_ids`: a delivered
+    delta and a delivered base decision are different facts about the same id, and the one time
+    they were spelled the same way the base's success deleted the delta."""
     if not pending:
-        return 0, []
+        return set(), []
     current = with_local_fallback(remote.lifecycle_capability_fingerprint, default=None,
                                   action="check the team lifecycle protocol")
     if not current or current == "unknown":
-        return 0, pending
-    settled = 0
+        return set(), pending
+    settled: set = set()
     kept: list[dict] = []
     for row in pending:
         if row.get("capability") == current:
@@ -860,8 +880,7 @@ def _retry_lifecycle_pending(remote, pending: list[dict], endpoint, sent_ids: se
                          "attempts": row.get("attempts", 0) + 1})
             continue
         _mark_shared([row.get("decision_id")], endpoint)
-        sent_ids.add(row.get("decision_id"))
-        settled += 1
+        settled.add(row.get("decision_id"))
     return settled, kept
 
 
@@ -1000,11 +1019,12 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
             return sent
         sent += _drain_mark(chunk, res, sent_ids, profile.endpoint)
         # A drained row whose lifecycle the server refused is re-queued as a pending delta rather
-        # than counted as fully delivered.
+        # than counted as fully delivered. `_reconcile_with_disk` is what keeps it: the row this
+        # writes names the decision whose base just entered `sent_ids`.
         _queue_blocked_lifecycle(remote, {e.get("decision_id"): e for e in chunk})
-    settled, still_pending = _retry_lifecycle_pending(remote, pending, profile.endpoint, sent_ids)
-    sent += settled
-    _save_outbox(_reconcile_with_disk([], sent_ids))
+    settled, still_pending = _retry_lifecycle_pending(remote, pending, profile.endpoint)
+    sent += len(settled)
+    _save_outbox(_reconcile_with_disk([], sent_ids, settled))
     for row in still_pending:
         with contextlib.suppress(Exception):
             _enqueue_unlocked(row)

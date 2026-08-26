@@ -339,13 +339,18 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
             args["source_files"] = bounded
     if _WIRE_LIFECYCLE and lifecycle_caps is not None:
         if lifecycle_caps.revisions and revision_id:
-            # UNVERIFIED spelling, and the weakest of the three guesses: `asubmit_team_decision`
-            # below spells the same conceptual field `"revisionId"` (camelCase) at its own tool
-            # top level, so this could as easily be that. Item 2 of the `_WIRE_LIFECYCLE`
-            # pre-flip checklist - confirm this one first.
+            # `revision_id`, snake_case, CONFIRMED (2026-08-26) against contexer-teams c3fbccc:
+            # `pushDecisionFields` in `apps/mcp-server/src/tools.ts`, and proved live on both
+            # write tools. This was the weakest of the three guesses and the counter-evidence is
+            # still real - `asubmit_team_decision` below spells the same CONCEPT `"revisionId"`
+            # (camelCase) at its own tool's top level - so the two spellings are not a typo to
+            # tidy up: that is a different tool's field, and the push fields are snake_case
+            # deliberately, because they are THIS serializer's shape.
             args["revision_id"] = revision_id
         if lifecycle_caps.tombstones and lifecycle:
-            # UNVERIFIED spelling - item 1 of the `_WIRE_LIFECYCLE` pre-flip checklist.
+            # `lifecycle`, CONFIRMED the same way, same server commit. The record's own seven keys
+            # are pinned byte-for-byte by `tests/fixtures/lifecycle-contract.v1.json`, which is a
+            # copy of the server repo's fixture rather than a second reading of it.
             events = bound_lifecycle(lifecycle, reasons=lifecycle_caps.retirement_reasons,
                                      redact_on=scrub)
             if events:   # an all-unknown-kind list omits the key, never sends []
