@@ -968,9 +968,12 @@ def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str
       silent loss it replaces, and it is the same answer this module gives every other
       candidate it cannot judge.
     * an `entry_id` that no longer RESOLVES (`not in filable`). The decision was evicted after
-      this candidate was attributed to it, so there is nowhere to file the receipt and no write
-      that could ever succeed - withholding the delete would retry it on every pass forever,
-      and `spool._sweep_orphan_holds` would remove the hold anyway. The delete proceeds.
+      this candidate was attributed to it, so `store.record_evidence_summary` has no entry to
+      write to and no retry could ever succeed. The disposition is filed in the spool's own
+      orphan ledger instead (`spool.record_orphan_receipt`) and only THEN is the raw evidence
+      deleted - the identical summary-before-delete order, against the only durable record
+      still available. It used to delete with no receipt anywhere, which is what invariants 3
+      and 4 forbid; a ledger write that fails now leaves the hold exactly where it is.
 
     The manifest reaches `reviewed` BETWEEN the summary and the delete, which is what makes the
     cleanup replayable on its own: a crash at the delete leaves a hold whose disposition and
@@ -981,17 +984,21 @@ def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str
     """
     if not entry_id:
         return
-    if entry_id in filable and (entry_id, candidate_id) not in recorded:
-        summary = {"candidate_id": candidate_id, "disposition": disposition,
-                   "event_ids": list(event_ids),
-                   "occurred_at": datetime.now(timezone.utc).isoformat()}
-        try:
-            landed = store.record_evidence_summary(repo_path, entry_id, summary)
-        except Exception:
-            landed = False
-        if not landed:
-            receipt["incomplete"] = True
-            return
+    if entry_id in filable:
+        if (entry_id, candidate_id) not in recorded:
+            summary = {"candidate_id": candidate_id, "disposition": disposition,
+                       "event_ids": list(event_ids),
+                       "occurred_at": datetime.now(timezone.utc).isoformat()}
+            try:
+                landed = store.record_evidence_summary(repo_path, entry_id, summary)
+            except Exception:
+                landed = False
+            if not landed:
+                receipt["incomplete"] = True
+                return
+    elif not spool.record_orphan_receipt(repo_path, candidate_id, entry_id, disposition):
+        receipt["incomplete"] = True
+        return
     # `status` only: the manifest already records which decision this was about, and nothing
     # here has learned anything truer about it.
     if not spool.update_candidate_state(repo_path, candidate_id, "reviewed",
@@ -1209,6 +1216,11 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
         _finalize(repo_path, candidate_id, disposition, str(meta.get("entry_id") or ""),
                   snap["filable"], meta.get("event_ids") or [], snap["recorded"], receipt)
     retention = spool.run_retention(repo_path)
+    if retention.get("orphans_unreceipted"):
+        # An orphaned hold whose terminal receipt could not be written is still holding its raw
+        # evidence, so nothing was lost - but this pass did not account for it, and a receipt
+        # that reported `complete` over it would be the silence invariant 3 exists against.
+        receipt["incomplete"] = True
     # Evidence evicted THIS pass, counted where the eviction happens rather than off the
     # cumulative `.gap` ledger: a coverage block reports the run it belongs to.
     _recoverage(receipt, "partial" if receipt["incomplete"] else "complete",
