@@ -703,6 +703,10 @@ def _evidence_status_lines(repos) -> list[str]:
                 # Held with no recorded decision: nothing will ever settle it (see
                 # spool._sweep_orphan_holds), so it is named rather than folded into the count.
                 parts.append(f"{diag['held_unattributed']} unattributed")
+            if diag["held_invalid_state"]:
+                # A manifest carrying a phase this version does not recognize: nothing resumes,
+                # sweeps or deletes it, so the only honest thing is to say it is there.
+                parts.append(f"{diag['held_invalid_state']} in an unknown state")
             if diag["quarantine"]:
                 parts.append(f"{diag['quarantine']} quarantined")
         else:

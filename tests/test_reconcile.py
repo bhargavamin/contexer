@@ -19,6 +19,7 @@ disposition lives on in the DECISION's own `evidence_summary` history, which is 
 the disposition assertions below read.
 """
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -837,34 +838,38 @@ class TestIdempotency:
         assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
         assert not spool._held_dir(tmp_repo, candidate_id).exists()
 
-    def test_a_crash_before_the_hold_exists_never_dismisses_what_it_just_created(self,
-                                                                                 tmp_repo):
-        """The THIRD crash window, and the one the recorded `event_ids` cannot cover.
+    def test_a_crash_before_the_state_is_persisted_never_dismisses_what_it_created(self,
+                                                                                   tmp_repo):
+        """Transition 6 interrupted: the store write landed and the manifest never learned it.
 
-        Materialize-then-move means a crash before the hold exists AT ALL leaves the decision
-        stored, `pending/` untouched, and nothing on disk connecting the two. The next pass
-        re-aggregates the same events, the aggregator matches them against the decision they
-        just became, and the candidate comes back as a `duplicate` - which used to delete the
-        only evidence for a decision still awaiting review and file a `dismissed` receipt on
-        it (reproduced by an external reviewer as `duplicates=1`, no held evidence, a dismissed
-        summary, and the decision still pending). A duplicate of a decision that is itself
-        awaiting review is held against it instead, and settles on the review.
+        The hold-first order is what makes this recoverable. The decision is stored, its
+        evidence is held, and the manifest still says `materializing` with no `entry_id` - so
+        the next pass replays the hold's own events against the store, the aggregator matches
+        them onto the decision they just became, and the candidate comes back as a `duplicate`
+        of it. Settling THAT would delete the only evidence for a decision nobody has reviewed
+        and file a `dismissed` receipt on it (an external reviewer reproduced exactly that on
+        the old order: `duplicates=1`, no held evidence, a dismissed summary, decision still
+        pending). A duplicate of a decision itself awaiting review is held against it instead,
+        and settles on the review.
         """
         _emit(tmp_repo, "user_directive", UNRELATED)
-        with pytest.MonkeyPatch.context() as patch:      # the crash: the hold never happens
+        with pytest.MonkeyPatch.context() as patch:   # the crash: the state is never persisted
             patch.setattr(reconcile, "_commit_writes", _boom)
             assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
         (created,) = store.get_pending_decisions(tmp_repo)
-        assert _held(tmp_repo) == {}                     # nothing records the connection
-        assert len(_pending(tmp_repo)) == 1
+        interrupted, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["entry_id"]) == ("materializing", "")
+        assert len(_held_events(tmp_repo, interrupted)) == 1     # the evidence is held anyway
+        assert _pending(tmp_repo) == []
 
         receipt = reconcile.reconcile_session(tmp_repo)
 
         assert (receipt["duplicates"], receipt["proposed"]) == (0, 0)
         assert receipt["already_pending"] == 1
         assert _dispositions_of(tmp_repo) == []          # nothing settled over a live review
-        candidate_id, meta = _only_held(tmp_repo)        # the evidence is connected instead
-        assert (meta["status"], meta["entry_id"]) == ("pending", created["id"])
+        candidate_id, meta = _only_held(tmp_repo)        # the same hold, now attributed
+        assert candidate_id == interrupted
+        assert (meta["state"], meta["entry_id"]) == ("pending_review", created["id"])
         assert len(_held_events(tmp_repo, candidate_id)) == 1
         assert _pending(tmp_repo) == []
         assert [store.entry_status(e) for e in store.load(tmp_repo)["entries"]] \
@@ -948,6 +953,25 @@ class TestDryRun:
         receipt = reconcile.reconcile_session(tmp_repo, dry_run=True)
         assert (receipt["proposed"], receipt["events_observed"]) == (0, 0)
         assert _spool_state(tmp_repo) == before
+
+    def test_dry_run_neither_resumes_a_candidate_nor_updates_its_manifest(self, tmp_repo):
+        """A resume is a store write and a manifest rewrite, so a preview does neither - not
+        even the phase flip. Measured on the manifest BYTES, since a state update that changed
+        only `updated_at` would still be a write a dry run promised not to make."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(store, "update_decision_with_meta", _boom)
+            reconcile.reconcile_session(tmp_repo)         # leaves a `materializing` hold
+        candidate_id, meta = _only_held(tmp_repo)
+        assert meta["state"] == "materializing"
+        before = _spool_state(tmp_repo)
+
+        reconcile.reconcile_session(tmp_repo, dry_run=True)
+
+        assert _spool_state(tmp_repo) == before
+        assert store.load(tmp_repo)["entries"] == []
+        assert _only_held(tmp_repo)[1]["state"] == "materializing"
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
 
 
 class TestFastPath:
@@ -1093,25 +1117,39 @@ class TestDamagedEvidence:
         assert _dispositions_of(tmp_repo) == []
         assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
 
-    def test_a_refused_hold_is_reported_not_swallowed(self, tmp_repo, monkeypatch):
-        # The decision is stored but its evidence still reads as pending; the receipt must say
-        # so, because the next pass is the one that finishes the move.
+    def test_a_refused_hold_is_reported_and_stores_nothing(self, tmp_repo, monkeypatch):
+        """The hold is transitions 1-3 and it comes FIRST, so a refusal stops the candidate
+        before the store is touched at all: nothing is proposed, the evidence stays exactly
+        where it was, and the receipt says the pass did not finish. The next pass aggregates
+        the same events under the same deterministic id and tries again."""
         _emit(tmp_repo, "user_directive", UNRELATED)
+        real_hold = spool.hold_candidate_evidence
         monkeypatch.setattr(spool, "hold_candidate_evidence",
                             lambda *_a, **_k: {"status": "error", "moved": 0,
                                                "already_held": 0, "missing": [],
                                                "failed": [], "errors": ["nope"]})
         receipt = reconcile.reconcile_session(tmp_repo)
-        assert (receipt["proposed"], receipt["incomplete"]) == (1, True)
+        assert (receipt["proposed"], receipt["incomplete"]) == (0, True)
+        assert store.load(tmp_repo)["entries"] == []
+        assert len(_pending(tmp_repo)) == 1
+
+        monkeypatch.setattr(spool, "hold_candidate_evidence", real_hold)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+        assert len(store.get_pending_decisions(tmp_repo)) == 1
 
     def test_a_hold_reporting_missing_evidence_records_no_disposition(self, tmp_repo,
                                                                       monkeypatch):
         """`hold_candidate_evidence` REPORTS a source that is gone with no target instead of
         raising, and its docstring hands the decision to the caller - so the caller has to make
-        one. A duplicate settles in the same pass, and finalizing it writes an
-        `evidence_summary` onto the decision saying this event set was dismissed: a receipt for
-        events this pass never verified as moved. It stays held instead, and the recorded
-        status settles it on a later pass that can account for them."""
+        one (transition 3, the verify).
+
+        Settling over such a hold writes an `evidence_summary` saying this event set was
+        dismissed: a receipt for events the pass never verified as moved. Because the hold now
+        comes BEFORE the store write, the answer is stronger than it was - the candidate is
+        abandoned entirely, so there is no disposition, no summary and no decision built on
+        evidence nobody could account for. What remains is a manifest holding nothing, which is
+        discarded on the next pass rather than occupying its candidate id for good.
+        """
         _stored_decision(tmp_repo)
         _emit(tmp_repo, "user_directive", DUPLICATES)
         real_hold = spool.hold_candidate_evidence
@@ -1124,15 +1162,16 @@ class TestDamagedEvidence:
         monkeypatch.setattr(spool, "hold_candidate_evidence", _vanish)
         receipt = reconcile.reconcile_session(tmp_repo)
 
-        assert (receipt["duplicates"], receipt["incomplete"]) == (1, True)
+        assert (receipt["duplicates"], receipt["incomplete"]) == (0, True)
         assert _dispositions_of(tmp_repo) == []          # nothing claimed to have settled
-        candidate_id, meta = _only_held(tmp_repo)        # and the hold is still there
-        assert meta["status"] == "dismissed"
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["entry_id"]) == ("held", "")
+        assert _held_events(tmp_repo, candidate_id) == []
 
         monkeypatch.setattr(spool, "hold_candidate_evidence", real_hold)
         reconcile.reconcile_session(tmp_repo)
         assert _held(tmp_repo) == {}
-        assert [kind for _id, kind in _dispositions_of(tmp_repo)] == ["dismissed"]
+        assert _dispositions_of(tmp_repo) == []
 
     def test_a_failed_summary_write_keeps_the_evidence_for_the_next_pass(self, tmp_repo,
                                                                         monkeypatch):
@@ -1199,6 +1238,258 @@ class TestDamagedEvidence:
         receipt = reconcile.reconcile_session(tmp_repo)
         assert receipt["incomplete"] is True
         assert receipt["proposed"] == 0
+
+
+class TestTransitionFaults:
+    """One injected failure per numbered transition of the candidate state machine, each
+    asserting the FILESYSTEM and the STORE after the interrupted run and again after recovery.
+
+    The transitions, and what a crash at each one must leave behind:
+
+    1. write the manifest in `held`      - nothing held, nothing stored, evidence still pending
+    2. move the named events             - a manifest naming every event, the rest still pending
+    3. verify the move                   - no store write over evidence nobody could account for
+    4. flip to `materializing`           - still `held`, and `held` replays the same way
+    5. the store or lifecycle write      - `materializing`, evidence held, store untouched
+    6. persist the observed state        - `materializing` over a stored decision, held against
+                                           its own review on the replay
+    7. record the evidence summary       - `settled`, evidence held, no receipt anywhere
+    8. persist `reviewed`                - summary durable, evidence STILL held (the receipt is
+                                           what licenses the delete, and it is not durable yet)
+    9. remove the held directory         - `reviewed`, so the retry deletes without a second
+                                           receipt
+
+    Behavioural twins for 3, 6 and 7 live in `TestDamagedEvidence` and `TestIdempotency` above:
+    those assert the receipt and the disposition rules, these assert the phase on disk. Neither
+    set subsumes the other.
+    """
+
+    def _corroborated(self, repo):
+        """A directive plus the file change that corroborates it: two events in one candidate,
+        which is what a partial move needs to be observable at all."""
+        _emit(repo, "user_directive", "Always pin the auth middleware to one provider.",
+              files=["src/auth.py"])
+        _emit(repo, "file_changed", "auth middleware changed", files=["src/auth.py"])
+
+    def test_1_a_manifest_that_cannot_be_written_stores_nothing(self, tmp_repo, monkeypatch):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        real_write = spool._write_json
+
+        def _no_manifest(directory, name, payload):
+            if name == spool._META_NAME:
+                raise OSError("no manifest")
+            return real_write(directory, name, payload)
+
+        monkeypatch.setattr(spool, "_write_json", _no_manifest)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["proposed"], receipt["incomplete"]) == (0, True)
+        assert store.load(tmp_repo)["entries"] == []
+        assert len(_pending(tmp_repo)) == 1               # the evidence never moved
+
+        monkeypatch.setattr(spool, "_write_json", real_write)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+        # The empty directory the failed attempt left is discarded rather than occupying the
+        # candidate id it named - one hold, holding the real events.
+        candidate_id, meta = _only_held(tmp_repo)
+        assert meta["state"] == "pending_review"
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert len(store.get_pending_decisions(tmp_repo)) == 1
+
+    def test_2_a_partial_move_keeps_the_manifest_that_names_the_rest(self, tmp_repo,
+                                                                     monkeypatch):
+        self._corroborated(tmp_repo)
+        real_replace, moved = os.replace, []
+
+        def _interrupt(src, dst):
+            if "held" in str(dst) and not str(dst).endswith(spool._META_NAME):
+                moved.append(str(src))
+                if len(moved) == 2:
+                    raise OSError("interrupted mid-batch")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", _interrupt)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["proposed"], receipt["incomplete"]) == (0, True)
+        assert store.load(tmp_repo)["entries"] == []
+        candidate_id, meta = _only_held(tmp_repo)
+        assert meta["state"] == "held" and len(meta["event_ids"]) == 2
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert len(_pending(tmp_repo)) == 1                # nothing is in neither place
+
+        monkeypatch.setattr(os, "replace", real_replace)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+        assert list(_held(tmp_repo)) == [candidate_id]     # the same candidate, finished
+        assert len(_held_events(tmp_repo, candidate_id)) == 2
+        assert _pending(tmp_repo) == []
+        assert len(store.get_pending_decisions(tmp_repo)) == 1
+
+    def test_3_a_move_that_cannot_be_verified_never_reaches_the_store(self, tmp_repo,
+                                                                      monkeypatch):
+        self._corroborated(tmp_repo)
+        real_hold = spool.hold_candidate_evidence
+
+        def _lose_the_edit(repo, candidate_id, event_ids, meta=None):
+            for path in spool._event_files(spool._pending_dir(repo)):
+                if "file_changed" in path.read_text(encoding="utf-8"):
+                    path.unlink()           # gone between the listing and the move
+            return real_hold(repo, candidate_id, event_ids, meta=meta)
+
+        monkeypatch.setattr(spool, "hold_candidate_evidence", _lose_the_edit)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["proposed"], receipt["incomplete"]) == (0, True)
+        assert store.load(tmp_repo)["entries"] == []
+        candidate_id, meta = _only_held(tmp_repo)
+        assert meta["state"] == "held"
+        assert len(_held_events(tmp_repo, candidate_id)) == 1   # what survived is still held
+
+        monkeypatch.setattr(spool, "hold_candidate_evidence", real_hold)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+        # Replayed from what the hold can actually account for, under the same id.
+        assert list(_held(tmp_repo)) == [candidate_id]
+        assert _only_held(tmp_repo)[1]["state"] == "pending_review"
+        assert len(store.get_pending_decisions(tmp_repo)) == 1
+
+    def test_4_a_checkpoint_that_never_flips_replays_from_held(self, tmp_repo, monkeypatch):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        real_update = spool.update_candidate_state
+
+        def _crash_on_materializing(repo, candidate_id, state, **fields):
+            if state == "materializing":
+                raise RuntimeError("boom")
+            return real_update(repo, candidate_id, state, **fields)
+
+        monkeypatch.setattr(spool, "update_candidate_state", _crash_on_materializing)
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert meta["state"] == "held"
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert store.load(tmp_repo)["entries"] == []       # the store comes after the flip
+
+        monkeypatch.setattr(spool, "update_candidate_state", real_update)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+        assert _only_held(tmp_repo)[1]["state"] == "pending_review"
+        assert len(store.get_pending_decisions(tmp_repo)) == 1
+
+    def test_5_a_store_write_that_never_lands_replays_as_new(self, tmp_repo, monkeypatch):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        # Restored by re-patching, never `monkeypatch.undo()`: undo is per-INSTANCE and the
+        # `tmp_repo` fixture redirects `store.STORE_DIR` through this same instance, so undoing
+        # here would run the rest of the test against the developer's real store.
+        real_update = store.update_decision_with_meta
+        monkeypatch.setattr(store, "update_decision_with_meta", _boom)
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["entry_id"]) == ("materializing", "")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert store.load(tmp_repo)["entries"] == []
+        assert _pending(tmp_repo) == []                    # held, not lost
+
+        monkeypatch.setattr(store, "update_decision_with_meta", real_update)
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+        assert list(_held(tmp_repo)) == [candidate_id]
+        assert _only_held(tmp_repo)[1]["state"] == "pending_review"
+        assert len(store.get_pending_decisions(tmp_repo)) == 1
+
+    def test_6_a_state_that_cannot_be_persisted_is_held_against_its_own_review(self, tmp_repo,
+                                                                              monkeypatch):
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        real_update = spool.update_candidate_state
+        monkeypatch.setattr(spool, "update_candidate_state",
+                            lambda repo, cid, state, **f: (
+                                False if state == "pending_review"
+                                else real_update(repo, cid, state, **f)))
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["proposed"], receipt["incomplete"]) == (1, True)
+        (created,) = store.get_pending_decisions(tmp_repo)
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["entry_id"]) == ("materializing", "")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+
+        monkeypatch.setattr(spool, "update_candidate_state", real_update)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["already_pending"], receipt["proposed"]) == (1, 0)
+        assert _only_held(tmp_repo)[1]["entry_id"] == created["id"]
+        assert _dispositions_of(tmp_repo) == []            # nothing settled over a live review
+        assert len(store.load(tmp_repo)["entries"]) == 1   # and nothing proposed twice
+
+    def test_7_a_summary_that_never_lands_leaves_the_state_settled(self, tmp_repo, monkeypatch):
+        target_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        real_record = store.record_evidence_summary
+        monkeypatch.setattr(store, "record_evidence_summary", lambda *_a, **_k: False)
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["status"]) == ("settled", "dismissed")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _dispositions_of(tmp_repo) == []
+
+        monkeypatch.setattr(store, "record_evidence_summary", real_record)
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is False
+
+        assert _held(tmp_repo) == {}
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+
+    def test_8_a_reviewed_state_that_never_lands_keeps_the_raw_evidence(self, tmp_repo,
+                                                                        monkeypatch):
+        """The receipt is durable and the phase saying so is not, so the evidence STAYS. This
+        is the one ordering the invariant is written on: raw evidence is removed only after
+        its final disposition receipt is durable, and `reviewed` is that record."""
+        target_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        real_update = spool.update_candidate_state
+        monkeypatch.setattr(spool, "update_candidate_state",
+                            lambda repo, cid, state, **f: (
+                                False if state == "reviewed"
+                                else real_update(repo, cid, state, **f)))
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["status"]) == ("settled", "dismissed")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+
+        monkeypatch.setattr(spool, "update_candidate_state", real_update)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _held(tmp_repo) == {}
+        assert not spool._held_dir(tmp_repo, candidate_id).exists()
+        # ONE row: the summary was already durable, so the retry never files a second.
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+
+    def test_9_a_cleanup_that_fails_replays_without_a_second_receipt(self, tmp_repo,
+                                                                     monkeypatch):
+        target_id = _stored_decision(tmp_repo)
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        real_finalize = spool.finalize_candidate_evidence
+        monkeypatch.setattr(spool, "finalize_candidate_evidence", _boom)
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["status"]) == ("reviewed", "dismissed")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+
+        monkeypatch.setattr(spool, "finalize_candidate_evidence", real_finalize)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _held(tmp_repo) == {}
+        assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
 
 
 class TestSessionScope:
