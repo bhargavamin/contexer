@@ -360,11 +360,6 @@ def dashboard_summary(repo_path: str) -> dict:
         by_status[status] = by_status.get(status, 0) + 1
     recent = sorted(decisions, key=lambda e: e.get("updated_at") or e.get("timestamp") or "",
                     reverse=True)[:_CONSOLE_RECENT]
-    # The review-impact block, on the SAME categories `review_pending` and `contexer review`
-    # render (Task 07). Built once per call and threaded in - the console polls this every 10
-    # seconds, so a per-row rebuild would mean one spool listing per pending decision per tick.
-    # The store read it would otherwise do is handed the decisions this function already has.
-    impact_context = review_impact.review_context(repo_path, decisions)
 
     return {
         "repo_path": repo_path,
@@ -388,12 +383,9 @@ def dashboard_summary(repo_path: str) -> dict:
         "status_mix": [{"status": k, "count": v}
                        for k, v in sorted(by_status.items(), key=lambda kv: (-kv[1], kv[0]))],
         "recent": [_console_summary(e) for e in recent],
-        "pending": [{**_console_summary(e), "confidence_factors": _console_factors(e),
-                     "impact": review_impact.review_impact(repo_path, e, impact_context)}
+        "pending": [{**_console_summary(e), "confidence_factors": _console_factors(e)}
                     for e in pending],
-        "proposals": [{**_console_proposal(e),
-                       "impact": review_impact.review_impact(repo_path, e, impact_context)}
-                      for e in proposals],
+        "proposals": [_console_proposal(e) for e in proposals],
         "staleness": team["staleness"],
         "health": health,
     }
@@ -452,7 +444,15 @@ def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
     `entry_id` accepts a full UUID or the 8-char prefix, like every other id-taking store
     function. `confidence` widens from the summary's bare score to {score, factors} here.
     `rationale` is not a local store field today (the share wire hardcodes None); it is
-    projected as whatever the entry carries, so a row imported with one still shows it."""
+    projected as whatever the entry carries, so a row imported with one still shows it.
+
+    `impact_lines` is the shared review block (Task 07), the SAME list `review_pending` and
+    `contexer review` print - as rendered LINES rather than the structured dict, because the
+    console renders lines and nothing in it consumes the structure. It lives on this
+    one-decision read rather than on `dashboard_summary`, which the console polls every 10
+    seconds: the block costs a spool listing, and paying that per tick for a payload consumed
+    only when a developer opens one decision is cost with no reader.
+    """
     entries = [e for e in store.load(repo_path).get("entries", []) if e.get("type") == "decision"]
     entry = store.entry_by_id(entries, entry_id)
     if entry is None:
@@ -480,6 +480,9 @@ def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
             "is_current": r.get("revision_id") == current_revision_id,
         } for r in entry.get("revisions") or []],
         "proposed_revision": _console_proposed(proposal) if proposal else None,
+        "impact_lines": review_impact.impact_lines(
+            review_impact.review_impact(repo_path, entry,
+                                        review_impact.review_context(repo_path, entries))),
         "share": _console_share_state(entry.get("id", "")),
     }
 

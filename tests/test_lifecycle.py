@@ -509,7 +509,7 @@ class TestConflictRendering:
         eid = _approved(tmp_repo)
         _propose(tmp_repo, eid)
         entry = _entry(tmp_repo, eid)
-        assert not conflicts._has_open_conflict(entry)
+        assert not conflicts.has_open_conflict(entry)
         assert conflicts._conflict_view(entry)[2] == []
         assert conflicts.memo_steer_line(entry) is None
 

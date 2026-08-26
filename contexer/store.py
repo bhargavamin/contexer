@@ -727,7 +727,7 @@ def similar_decisions(entry: dict, decisions: list, limit: int = _NEAR_MISS_CAP)
     "close enough that a human should look, not close enough for the dedup to act" is one
     judgment, and two spellings of it would drift.
 
-    `conflict` is `conflicts._has_open_conflict`, the same gate the render sites use - a similar
+    `conflict` is `conflicts.has_open_conflict`, the same gate the render sites use - a similar
     decision that is itself carrying an unreviewed update is the case where approving this one
     silently creates a third version of the same rule.
     """
@@ -750,7 +750,7 @@ def similar_decisions(entry: dict, decisions: list, limit: int = _NEAR_MISS_CAP)
              "title": e.get("title") or revisions.derive_title(revisions.current_content(e)),
              "status": entry_status(e),
              "overlap": round(ratio, 2),
-             "conflict": conflicts._has_open_conflict(e)}
+             "conflict": conflicts.has_open_conflict(e)}
             for ratio, e in scored[:limit]]
 
 

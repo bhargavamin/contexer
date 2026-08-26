@@ -6818,7 +6818,7 @@ class TestCaptureLintSplit:
 
 
 class TestBodyClipping:
-    """clip_body — the human-review-surface clip (review_pending, contexer review, share
+    """clip_body - the human-review-surface clip (review_pending, contexer review, share
     lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
     and are untouched by this class."""
 
