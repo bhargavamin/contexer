@@ -1,0 +1,32 @@
+{
+  "name": "06-agent-conclusion-with-rationale",
+  "issue": null,
+  "summary": "An explained agent conclusion clears the review bar on its own.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "7d5f0a4c-bee9-54c4-83bd-62301605f702",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "agent_conclusion",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "The generated client is rebuilt from openapi/schema.yaml by the codegen step, so a hand edit is overwritten on the next build.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "The generated client is rebuilt from openapi/schema.yaml by the codegen step, so a hand edit is over",
+      "subtype": "architecture",
+      "score": 25,
+      "target_decision_id": null,
+      "source_files": [],
+      "uncertainties": []
+    }
+  ]
+}

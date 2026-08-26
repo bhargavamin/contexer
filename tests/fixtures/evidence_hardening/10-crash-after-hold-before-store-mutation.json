@@ -1,0 +1,49 @@
+{
+  "name": "10-crash-after-hold-before-store-mutation",
+  "issue": null,
+  "summary": "A hold whose decision never landed keeps its raw evidence.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "841b69f3-fd02-5f28-8e76-396a0ea3ed25",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "68218808-89e4-5a74-8da7-6fd7161b7c17",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "file_changed",
+      "occurred_at": "2026-08-01T10:01:00+00:00",
+      "source": "replay",
+      "summary": "regenerated the client",
+      "files": [
+        "src/generated/client.ts"
+      ],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 60,
+      "target_decision_id": null,
+      "source_files": [
+        "src/generated/client.ts"
+      ],
+      "uncertainties": []
+    }
+  ]
+}
