@@ -89,7 +89,7 @@ _WIRE_SOURCE_FILES_MAX_LEN = 300
 # OPENED on 2026-08-26. The pre-flip checklist was five items - three guessed field names and two
 # closed vocabularies, a strictly bigger set of unknowns than `source_files` had - and every one
 # of them was settled by READING the server's schema and then proving it live, not by inference.
-# What the server now defines (contexer-teams commit b712864, `packages/db/src/validation.ts` +
+# What the server now defines (contexer-teams commit c3fbccc, `packages/db/src/validation.ts` +
 # `decision-lifecycle.ts` + migration 0063, `apps/mcp-server/src/tools.ts`):
 #   1. Record-list field name: `lifecycle`. Confirmed - the guess was right.
 #   2. Revision-identity field name: `revision_id`, snake_case. This was the WEAKEST guess, with
