@@ -166,7 +166,11 @@ def session_start(repo_path: str, raw: str) -> str:
             # except below, which would inject the bare nudge instead of the real rules.
             store.anchor_repo(repo)
             _ensure_rule_file(repo)
-            payload = store.session_start_payload(repo)
+            # `host=NAME`: the shared payload reconciles this repo's unconsumed evidence, and
+            # Cursor is the host that CAN say least about what it saw (no write hook at all),
+            # so a receipt naming it is the difference between "no file changes" and "no way
+            # to observe one". This is Cursor's only reconciliation checkpoint of any kind.
+            payload = store.session_start_payload(repo, "", "", NAME)
         else:
             payload = {"status": "", "context": ""}
         return json.dumps(format_session_start(payload))

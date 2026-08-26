@@ -430,13 +430,29 @@ def sync_memory(repo_path: str) -> int:
 def _reconcile_evidence(repo_path: str) -> None:
     """Materialize recorded evidence into decisions pending review. Fail-soft to the point of
     swallowing an import error: this is a passenger on `sync_memory`, and a passenger must
-    never cost the session its memory import - let alone its SessionStart output."""
+    never cost the session its memory import - let alone its SessionStart output.
+
+    CLAUDE-ONLY, and it stays that way (task-05 review, minor M6, settled by Task 06). Codex
+    reuses a lot of this module verbatim - `capture_constraint`, `post_write`, `review_nudge` -
+    and an earlier version of this comment claimed it reused this entrypoint too. It never did,
+    and it must not: `host=NAME` is a literal, so every Codex receipt would have named
+    `claude` as the host that observed the session, in the one block whose whole job is saying
+    who observed what. Codex reconciles through the shared store-side session-start path
+    (`store.session_start_payload`), which its own installed hook calls with `'codex'`.
+
+    THE SESSION-START CALL IS NOW A DOUBLE, DELIBERATELY. Claude's SessionStart hook runs
+    `sync_memory` (this) and then `get_session_start_context`, which reconciles again on the
+    shared path. The second call is a no-op by construction rather than by a marker: this one
+    has already moved the spool's events into their holds, so `reconcile._has_work` finds
+    nothing, returns before the store is read or any lock is taken, and costs two directory
+    listings. Measured at 0.04ms. The brief's rule is to keep the duplicate HARMLESS first and
+    remove it only against a measured cost, using an explicit hook-event argument rather than
+    an external skip marker - and there is no measured cost to remove.
+    """
     try:
         from contexer import reconcile
         repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
         if repo:
-            # Codex reuses this entrypoint through its own hooks, but the coverage block
-            # names the host whose adapter OWNS the checkpoint, which is this one.
             reconcile.reconcile_session(repo, host=NAME)
     except Exception:
         pass
@@ -518,8 +534,12 @@ def install(home: Path) -> list[str]:
         "_c.pull_team(repo); "
         # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
         # rehydration; "" on hosts/events that omit it, preserving today's behavior.
+        # The trailing 'claude' (Task 06) names the host for the evidence-reconciliation
+        # coverage block the shared session-start path now produces. SINGLE-quoted, because
+        # `_py` wraps this whole string in double quotes - which is also why the migration
+        # gate below matches it with `_in_commands` rather than `_in_groups`.
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
-        "store.session_from_hook_stdin(raw))))"
+        "store.session_from_hook_stdin(raw), 'claude')))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
@@ -642,13 +662,18 @@ def install(home: Path) -> list[str]:
     ss = hooks.setdefault("SessionStart", [])
     # Migrate: old SessionStart hook didn't read the session source from stdin, predates
     # memory-tool sync, predates session-id threading (compact-source working-set
-    # rehydration), or predates the fail-soft repo anchor (#152 — an unwritable
-    # ~/.contexer aborted the hook, injecting nothing); replace it so the current
-    # ss_code is installed.
+    # rehydration), predates the fail-soft repo anchor (#152: an unwritable
+    # ~/.contexer aborted the hook, injecting nothing), or predates the host argument
+    # (Task 06, without which this host's reconciliation receipts report `manual`);
+    # replace it so the current ss_code is installed.
+    #
+    # `_in_commands` for the host marker and nowhere else: it carries a quote, and `_in_groups`
+    # matches a dict REPR, where the surrounding double-quoted command forces `'claude'` to be
+    # re-escaped and the marker never matches (the live bug `base.py` documents).
     if _in_groups(ss, "get_session_start_context") and not (
             _in_groups(ss, "source_from_hook_stdin") and _in_groups(ss, "sync_memory")
             and _in_groups(ss, "session_from_hook_stdin")
-            and _in_groups(ss, "anchor_repo")):
+            and _in_groups(ss, "anchor_repo") and _in_commands(ss, "'claude'")):
         ss = _filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):

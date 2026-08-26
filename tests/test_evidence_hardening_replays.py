@@ -523,19 +523,22 @@ def test_the_coverage_block_on_a_pass_says_what_the_host_could_see(tmp_repo):
 
 
 @pytest.mark.parametrize("host", ["codex", "cursor", "gemini"])
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 1: only Claude reconciles at session start, via sync_memory. Codex "
-    "and Cursor never reconcile at all and Gemini reconciles only at PreCompress/SessionEnd, "
-    "so the shared store-side session-start path leaves the spooled directive pending and "
-    "the store empty."))
 def test_every_host_reconciles_at_session_start(tmp_repo, host):
+    """Outstanding issue 1, closed. Every host's SessionStart traverses the shared store-side
+    payload, which reconciles before it reads the store - so a directive left in the spool by
+    a session that crashed becomes a decision awaiting review at the NEXT session start,
+    whichever host opens it. The xfail marker these three carried is gone.
+
+    Each arm calls what the installed hook calls and nothing else, so a host wired only in
+    prose would still fail here.
+    """
     evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a",
                              source="replay", summary=RULE)
     raw = json.dumps({"session_id": "sess-a", "source": "startup",
                       "workspace_roots": [tmp_repo]})
     if host == "codex":
         # Codex's installed SessionStart hook calls exactly this, and nothing else.
-        store.get_session_start_context(tmp_repo, "startup", "sess-a")
+        store.get_session_start_context(tmp_repo, "startup", "sess-a", "codex")
     elif host == "cursor":
         cursor.session_start(tmp_repo, raw)
     else:
@@ -545,13 +548,224 @@ def test_every_host_reconciles_at_session_start(tmp_repo, host):
 
 
 def test_claude_does_reconcile_at_session_start(tmp_repo):
-    """The other side of the parametrized xfail above, so "every host" is measured against a
-    host that already passes rather than against an assumption."""
+    """The other side of the parametrized test above, so "every host" is measured against a
+    host that already passed rather than against an assumption."""
     evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a",
                              source="replay", summary=RULE)
     claude.sync_memory(tmp_repo)
     assert [store.entry_status(e) for e in store.load(tmp_repo)["entries"]] \
         == ["pending_approval"]
+
+
+# ── shared session-start reconciliation (outstanding issue 1) ────────────────────
+
+def _spooled_rule(repo: str, session: str = "sess-crashed") -> None:
+    """One directive left in the spool by a session that ended without a checkpoint."""
+    evidence.emit_hook_event(repo, "user_directive", session_id=session,
+                             source="replay", summary=RULE)
+
+
+def _reconcile_lock_path(repo: str) -> Path:
+    return store.STORE_DIR / f".reconcile_{store.repo_slug(repo)}.lock"
+
+
+def test_evidence_left_by_a_crashed_session_reconciles_at_the_next_session_start(tmp_repo):
+    """The whole of outstanding issue 1, stated as the user-visible outcome: session A emits a
+    directive and never reaches a checkpoint, session B opens and the developer is asked about
+    it. Session B passes a DIFFERENT session id, which is exactly why the shared call scopes
+    itself to `""` - a pass scoped to session B would skip session A's evidence forever."""
+    _spooled_rule(tmp_repo, "sess-a")
+    payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "codex")
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert store.entry_status(entry) == "pending_approval"
+    assert spool.list_pending_evidence(tmp_repo) == []
+    # The COUNT reaches this session's own status line, which is only true because the store
+    # is read after the pass rather than before it.
+    assert "1 decision pending review" in payload["status"]
+    # A count, never the candidate's text: the startup payload must not carry raw evidence.
+    assert RULE not in payload["context"] and RULE not in payload["status"]
+
+
+def test_the_newly_proposed_count_comes_from_the_post_reconcile_store(tmp_repo):
+    """Sharper than the line above: with a decision already stored, the pending count has to
+    move by exactly the number of proposals this pass made. A store read taken BEFORE the pass
+    would report the old count and defer the whole queue by one session."""
+    store.update_decision(tmp_repo, "Use Postgres for the decision store, not SQLite.",
+                          "sess-0", "architecture", created_by="human")
+    before = store.session_start_payload(tmp_repo, "startup", "sess-a", "gemini")["status"]
+    assert "pending review" not in before
+
+    _spooled_rule(tmp_repo)
+    after = store.session_start_payload(tmp_repo, "startup", "sess-b", "gemini")["status"]
+    assert "1 decision pending review" in after
+
+
+@pytest.mark.parametrize("source", ["resume", "compact"])
+def test_resume_and_compact_do_not_miss_older_evidence(tmp_repo, source):
+    """Both replay paths return early or render differently, and the reconcile call sits AHEAD
+    of every one of those branches on purpose: a resumed session's spool holds exactly what a
+    fresh one's does, and skipping it would strand that evidence until the next cold start."""
+    store.update_decision(tmp_repo, "Use Postgres for the decision store, not SQLite.",
+                          "sess-0", "architecture", created_by="human")
+    _spooled_rule(tmp_repo)
+    store.session_start_payload(tmp_repo, source, "sess-b", "claude")
+    assert sorted(store.entry_status(e) for e in store.load(tmp_repo)["entries"]) \
+        == ["approved", "pending_approval"]
+
+
+def test_claude_reaching_reconciliation_twice_produces_one_proposal_and_one_summary(tmp_repo):
+    """Claude's SessionStart runs `sync_memory` and THEN the shared payload, so it reconciles
+    twice. The duplicate is kept harmless rather than suppressed by a marker: the first pass
+    moves the events into the hold, so the second finds no work at all.
+
+    Asserted on the outcome the brief names - one proposal, one held candidate, and one
+    evidence summary once the developer approves - rather than on a call count, because a
+    second pass that DID run and correctly did nothing is equally acceptable.
+    """
+    _spooled_rule(tmp_repo)
+    claude.sync_memory(tmp_repo)
+    payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "claude")
+
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert store.entry_status(entry) == "pending_approval"
+    assert "1 decision pending review" in payload["status"]
+    assert len(spool.held_candidates(tmp_repo)) == 1
+
+    assert store.approve_decision(tmp_repo, entry["id"], "approve")[0]
+    reconcile.reconcile_session(tmp_repo)
+    (settled,) = store.load(tmp_repo)["entries"]
+    summaries = settled.get("evidence_summary") or []
+    assert [row["disposition"] for row in summaries] == ["approved"]
+
+
+def test_gemini_keeps_its_precompress_and_sessionend_checkpoints_idempotent(tmp_repo):
+    """Gemini gains SessionStart and KEEPS the two it had. Running all three over one piece of
+    evidence must still leave exactly one proposal - the safety checkpoints are a net for a
+    session that never starts again, not a second producer."""
+    _spooled_rule(tmp_repo)
+    raw = json.dumps({"session_id": "sess-a", "source": "startup"})
+    gemini.session_start(tmp_repo, raw)
+    gemini.pre_compress(tmp_repo, raw)
+    gemini.session_end(tmp_repo, raw)
+    assert [store.entry_status(e) for e in store.load(tmp_repo)["entries"]] \
+        == ["pending_approval"]
+    assert len(spool.held_candidates(tmp_repo)) == 1
+
+
+def test_a_concurrent_session_start_skips_its_pass_without_waiting(tmp_repo):
+    """Two sessions opening on one repo at once: the second finds the reconcile flock held,
+    skips, and renders its context anyway. Pinned with the lock genuinely held by another file
+    descriptor, and with a wall-clock bound, because the failure this guards against is a
+    session start BLOCKING on another one rather than one proposing twice."""
+    import fcntl
+    _spooled_rule(tmp_repo)
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    with open(_reconcile_lock_path(tmp_repo), "ab") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        start = time.perf_counter()
+        payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "cursor")
+        elapsed = time.perf_counter() - start
+    assert elapsed < 5.0, "a session start must never wait on another pass's lock"
+    assert store.load(tmp_repo)["entries"] == []
+    assert spool.list_pending_evidence(tmp_repo) != []
+    # Skipped is not incomplete: another pass holding the lock is the design working, and the
+    # next checkpoint picks the work up, so the developer is told nothing.
+    assert "reconciliation was incomplete" not in payload["status"]
+
+
+def test_an_incomplete_pass_does_not_break_session_start_and_stays_visible(tmp_repo,
+                                                                          monkeypatch):
+    """Fail-soft, but never silent. A pass that could not account for its evidence leaves the
+    session start intact - rules, counts and all - and says so in the status line, because
+    acknowledged evidence that went unaccounted for is exactly what runbook invariant 3
+    requires to remain visible."""
+    store.update_decision(tmp_repo, "Always run migrations before deploying.", "sess-0",
+                          "constraint", created_by="human")
+    _spooled_rule(tmp_repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(spool, "hold_candidate_evidence",
+                      lambda *a, **k: {"status": "ok", "missing": ["gone"], "held": []})
+        payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "gemini")
+    assert "Evidence reconciliation was incomplete" in payload["status"]
+    assert "contexer reconcile-session" in payload["status"]
+    assert "Always run migrations before deploying." in payload["context"]
+
+
+def test_a_raising_reconciliation_still_renders_the_session_start(tmp_repo, monkeypatch):
+    """The call site is unguarded on `reconcile_session`'s never-raises contract, so this pins
+    that contract from the session-start side: even an exception raised inside the pass costs
+    the session nothing but the coverage note."""
+    store.update_decision(tmp_repo, "Always run migrations before deploying.", "sess-0",
+                          "constraint", created_by="human")
+    _spooled_rule(tmp_repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(spool, "held_candidates",
+                      lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "codex")
+    assert "Evidence reconciliation was incomplete" in payload["status"]
+    assert "Always run migrations before deploying." in payload["context"]
+
+
+def test_an_empty_spool_session_start_does_no_reconciliation_work_at_all(tmp_repo,
+                                                                        monkeypatch):
+    """The Task 06 latency gate for the case that runs on EVERY session start of EVERY repo.
+
+    Not a wall-clock number: the requirement is structural, so it is measured structurally.
+    No store read, no store lock, no reconcile lock FILE and no candidate scan happen while
+    the spool holds nothing - the pass returns on two directory listings. Counted against the
+    real session-start path, so a future call added above `reconcile_session` would be caught
+    here too.
+    """
+    store.update_decision(tmp_repo, "Always run migrations before deploying.", "sess-0",
+                          "constraint", created_by="human")
+    # `store.load` and `store.store_lock` are used by the REST of session start too, so the
+    # counters only count while the pass itself is on the stack.
+    counts = {"aggregate": 0, "load": 0, "lock": 0}
+    inside = {"pass": False}
+    real_pass, real_load, real_lock = (reconcile.reconcile_session, store.load,
+                                       store.store_lock)
+
+    def scoped(name, real):
+        def counted(*args, **kwargs):
+            if inside["pass"]:
+                counts[name] += 1
+            return real(*args, **kwargs)
+        return counted
+
+    def watched(*args, **kwargs):
+        inside["pass"] = True
+        try:
+            return real_pass(*args, **kwargs)
+        finally:
+            inside["pass"] = False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reconcile, "reconcile_session", watched)
+        patch.setattr(reconcile.candidates, "aggregate_candidates",
+                      scoped("aggregate", candidates.aggregate_candidates))
+        patch.setattr(store, "load", scoped("load", real_load))
+        patch.setattr(store, "store_lock", scoped("lock", real_lock))
+        payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "codex")
+
+        assert counts == {"aggregate": 0, "load": 0, "lock": 0}
+        assert not _reconcile_lock_path(tmp_repo).exists()
+        assert "Always run migrations before deploying." in payload["context"]
+
+        # The instrumentation is not vacuous: spool one directive and every counter fires,
+        # so a zero above means the fast path skipped the work rather than that this test
+        # patched the wrong names.
+        _spooled_rule(tmp_repo)
+        store.session_start_payload(tmp_repo, "startup", "sess-c", "codex")
+    assert counts["aggregate"] and counts["load"] and counts["lock"]
+    assert _reconcile_lock_path(tmp_repo).exists()
+
+
+def test_the_status_line_says_nothing_when_a_pass_completes(tmp_repo):
+    """Silent operation. A pass that reconciled everything it was handed adds no sentence at
+    all - what it produced is already visible as the pending-review count."""
+    _spooled_rule(tmp_repo)
+    status = store.session_start_payload(tmp_repo, "startup", "sess-b", "claude")["status"]
+    assert "reconciliation" not in status.lower()
 
 
 def test_a_directive_restating_an_ignored_decision_is_surfaced_for_review(tmp_repo):
@@ -1558,6 +1772,20 @@ def test_cursor_is_prompt_signal_only_rather_than_a_full_host(tmp_repo):
 
 _RUNS = 3
 
+# Task 06's gate, for both 1,000-event fixtures. Unlike the loose order-of-magnitude ceilings
+# beside it this one is a real pass/fail: the shared session-start wiring was not allowed to
+# land until aggregation cleared it at the spool's own `_MAX_PENDING_EVENTS` bound, since that
+# bound is what a session start now pays in the worst case. Measured here at 106.45ms and
+# 8.26ms, so the margin is real rather than nominal.
+_AGGREGATION_GATE_MS = 500.0
+
+# The realistic-session row Task 06 states its regression delta from (ledger ruling D6): the
+# same aggregation-only measurement, 30.57ms before the indexing, 5.68ms after. The ceiling
+# here stays loose on purpose - this row exists to catch an order-of-magnitude move on a
+# machine nobody fixed, and the 20 percent no-regression rule was judged against the recorded
+# medians rather than against a CI-flaky assertion.
+_REALISTIC_CEILING_MS = 2000.0
+
 
 def _median_ms(call) -> float:
     call()                                     # warm-up, discarded
@@ -1620,34 +1848,36 @@ def test_baseline_aggregation_of_realistic_evidence():
 
     median = _median_ms(lambda: candidates.aggregate_candidates(events, []))
     _report(f"aggregate_candidates over {len(events)} realistic events", median)
-    assert median < 2000.0
+    assert median < _REALISTIC_CEILING_MS
 
 
 @pytest.mark.perf
 def test_baseline_aggregation_of_a_thousand_distinct_statements():
-    """Outstanding issue 4's ceiling, measured rather than asserted away: grouping compares
-    each seed against every group opened so far, so a corpus of entirely distinct statements
-    is O(N^2) token-overlap comparisons."""
+    """Outstanding issue 4's ceiling, and Task 06's gate: at most 500ms at the spool's own
+    bound. These 1,000 statements are mutually distinct but share four ordinary words, so
+    every pair is still counted - what the token postings removed is the price of a pair
+    (two tokenizations and a set intersection), not the pair count. 2667.67ms before."""
     doc = _load("14-thousand-distinct-statements")
     result = candidates.aggregate_candidates(doc["events"], [])
     assert len(result["candidates"]) == doc["expected_candidates"]
     assert result["diagnostics"]["merged_duplicates"] == doc["expected_merged"]
     median = _median_ms(lambda: candidates.aggregate_candidates(doc["events"], []))
     _report("aggregate_candidates over 1,000 distinct statements", median)
-    assert median < 30000.0
+    assert median < _AGGREGATION_GATE_MS
 
 
 @pytest.mark.perf
 def test_baseline_aggregation_of_a_thousand_boilerplate_statements():
-    """The other end of the same axis: 1,000 statements that all restate one another merge
-    into a single group on the first comparison, so the pass is linear."""
+    """The other end of the same axis, under the same 500ms gate: 1,000 statements that all
+    restate one another merge into a single group on the first comparison, so the pass is
+    linear and the postings never hold more than one group. 8.65ms before."""
     doc = _load("15-thousand-boilerplate-statements")
     result = candidates.aggregate_candidates(doc["events"], [])
     assert len(result["candidates"]) == doc["expected_candidates"]
     assert result["diagnostics"]["merged_duplicates"] == doc["expected_merged"]
     median = _median_ms(lambda: candidates.aggregate_candidates(doc["events"], []))
     _report("aggregate_candidates over 1,000 boilerplate statements", median)
-    assert median < 30000.0
+    assert median < _AGGREGATION_GATE_MS
 
 
 @pytest.mark.perf

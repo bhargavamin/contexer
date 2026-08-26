@@ -159,8 +159,12 @@ def install(home: Path) -> list[str]:
         "_c.pull_team(repo); "
         # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
         # rehydration, mirroring claude.py's ss_code.
+        # The trailing 'codex' (Task 06) names the host for the evidence-reconciliation
+        # coverage block the shared session-start path now produces. SINGLE-quoted, because
+        # `_py` wraps this whole string in double quotes - which is also why the migration
+        # gate below matches it with `_in_commands` rather than `_in_groups`.
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
-        "store.session_from_hook_stdin(raw))))"
+        "store.session_from_hook_stdin(raw), 'codex')))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
@@ -255,13 +259,18 @@ def install(home: Path) -> list[str]:
 
     ss = hooks.setdefault("SessionStart", [])
     # Migrate: an older SessionStart group predates the team-context pull (T2), predates
-    # session-id threading (compact-source working-set rehydration), or predates the
+    # session-id threading (compact-source working-set rehydration), predates the
     # fail-soft repo anchor (#152 — the unguarded `.current_repo` write that aborted the
-    # whole hook under Codex's sandbox) — replace it so the current ss_code is installed.
-    # Mirrors claude.py's SessionStart migration gate.
+    # whole hook under Codex's sandbox), or predates the host argument (Task 06, without which
+    # this host's reconciliation receipts report `manual`): replace it so the current ss_code
+    # is installed. Mirrors claude.py's SessionStart migration gate.
+    #
+    # `_in_commands` for the host marker and nowhere else: it carries a quote, and `_in_groups`
+    # matches a dict REPR, where the surrounding double-quoted command forces `'codex'` to be
+    # re-escaped and the marker never matches (the live bug the base module documents).
     if base._in_groups(ss, "get_session_start_context") and not (
             base._in_groups(ss, "pull_team") and base._in_groups(ss, "session_from_hook_stdin")
-            and base._in_groups(ss, "anchor_repo")):
+            and base._in_groups(ss, "anchor_repo") and base._in_commands(ss, "'codex'")):
         ss = base._filter_groups(ss, ["get_session_start_context"])
         hooks["SessionStart"] = ss
     if not base._in_groups(ss, "get_session_start_context"):
