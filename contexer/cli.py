@@ -710,10 +710,18 @@ def _gap_phrase(gap: dict) -> str:
     so rather than reporting a number it cannot stand behind, and `prior_drops_unknown` (the
     count restarted over a damaged marker) is stated because it makes the figure a lower bound.
 
-    LOST and EXPIRED are rendered as the different facts they are. Evidence that aged out of
-    `pending/` unconsumed is what the queue does on a host that never reconciles (Codex,
-    Cursor) - calling that "lost" told a developer their spool was failing when it was working
-    exactly as designed, and buried the failures that ARE worth acting on in the same number.
+    LOST and EXPIRED are rendered as the different facts they are: a failed write is this
+    module's own bug, while an unconsumed queue is not, and collapsing them told a developer
+    their spool was failing while burying the failures that ARE worth acting on in the same
+    number.
+
+    EXPIRED IS NO LONGER A BENIGN OUTCOME, and the wording says so. The split was introduced
+    when Codex and Cursor reached no reconciliation entrypoint, so ageing out was the designed
+    end of their queue. Every host now reconciles at session start, so an event that aged out
+    of `pending/` outlived a month of session starts on ANY host - which means reconciliation
+    was skipping, failing or never reached, and this line is the only place a developer would
+    see it. Still not counted as "lost" (nothing failed to record it), but it now reads as
+    something to look into rather than as an explanation that settles the question.
     """
     if gap.get("unreadable"):
         return "loss ledger unreadable"

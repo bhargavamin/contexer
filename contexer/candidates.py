@@ -186,6 +186,17 @@ def _new_index() -> dict:
     * `sessions` - the session key to its groups, in group order. Cross-session attachment is
       forbidden outright (`_attach_target`), so this is that RULE expressed as a lookup rather
       than as a test repeated against every group in the run.
+
+    ponytail: the session bucket is keyed on `session_id` ALONE, deliberately short of the
+    `(session_id, file)` posting the task brief asked for, and the file half is unclaimed
+    headroom rather than an oversight. A file posting would resolve the `structural` branch of
+    `_relation_for` by lookup, but the other three branches (`validation`, `causal_forward`,
+    `temporal_backward`) are answered by a seed's OWN files and timestamps rather than by the
+    support event's paths, so a support event carrying no matching file must still visit every
+    group in its session - which is the term the bucket already cut and the file half would
+    not. Measured sufficient: the realistic fixture went 30.57ms to 5.68ms without it. Add it
+    when a session is observed holding enough same-session groups for the structural scan to
+    show up in a profile; see `_attach_target` for the other half of the same omission.
     """
     return {"postings": {}, "sizes": [], "negations": [], "sessions": {}}
 
@@ -379,6 +390,19 @@ def _attach_target(event, groups):
     an edit corroborates what was JUST said, not the oldest thing said inside the window.
     Spelling it as a distance makes it hold for backward links too, where "last" has no
     meaning, and makes it independent of group order rather than merely consistent with it.
+
+    ponytail: this is a FULL scan of the session's groups with a `datetime.fromisoformat` parse
+    per pair (`_distance`, and `_within_proximity` inside `_relation_for`), so it is
+    O(support x groups_in_session) - the one term the indexing work did not reduce, and short
+    of the bounded nearest-neighbour search the task brief asked for. The groups ARE time-
+    sorted (`_ordered` sorts by `(occurred_at, event_id)` and groups open in that order, so
+    ascending positions are ascending seed time), which is half of what such a search needs;
+    what is missing is the window itself, plus parsed timestamps cached on the group. Left
+    unbuilt because the perf gate passed with a 4.7x margin without it and neither 1,000-event
+    fixture stresses this path (the boilerplate one collapses to a single group, the distinct
+    one is seeds only) - so the shape would have been chosen against no measurement. Add it
+    when a real session profile shows this term, and pair it with the `(session_id, file)`
+    posting `_new_index` documents; the two are one piece of work.
     """
     files = _event_files(event)
     best = None
