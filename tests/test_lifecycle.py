@@ -778,6 +778,97 @@ class TestReconsiderationProposal:
         assert _entry(tmp_repo, eid)["proposed_revision"]
 
 
+class TestReconsiderationExpectations:
+    """A caller that formed its question against an earlier snapshot says so, and the attach -
+    which is the first moment the store lock is held - refuses if the record has moved since.
+
+    The refusal is not one fact. `stale_basis`/`stale_state` mean a caller can retry; `occupied`
+    means a review is already pending; `not_found`/`live` mean there is nothing to ask about at
+    all. Reading them as one is what let a proposal bind to a revision its own evidence was
+    never judged against.
+    """
+
+    def _current(self, repo, eid):
+        return _entry(repo, eid)["current_revision_id"]
+
+    def test_matching_expectations_attach_exactly_as_before(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        result = lifecycle.propose_reconsideration(
+            tmp_repo, eid, content=RESTATED, title="t", candidate_id="c1",
+            expected_basis_revision_id=self._current(tmp_repo, eid),
+            expected_target_state="ignored")
+        assert result["ok"] and result["reason"] == ""
+        assert result["proposal"]["basis_revision_id"] == self._current(tmp_repo, eid)
+
+    def test_a_basis_that_moved_is_refused_and_attaches_nothing(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        stale = self._current(tmp_repo, eid)
+        data = store.load(tmp_repo)
+        revisions.append_revision(next(e for e in data["entries"] if e["id"] == eid),
+                                  RESTATED + " Reworded.", "ai")
+        store.save(tmp_repo, data)
+
+        result = lifecycle.propose_reconsideration(
+            tmp_repo, eid, content=RESTATED, title="t", candidate_id="c1",
+            expected_basis_revision_id=stale, expected_target_state="ignored")
+
+        assert not result["ok"] and result["reason"] == "stale_basis"
+        assert not _entry(tmp_repo, eid).get("proposed_reconsideration")
+
+    @pytest.mark.parametrize("expected", ["retired", "live"])
+    def test_a_state_that_moved_is_refused_and_attaches_nothing(self, tmp_repo, expected):
+        eid = _ignored(tmp_repo)
+        result = lifecycle.propose_reconsideration(
+            tmp_repo, eid, content=RESTATED, title="t", candidate_id="c1",
+            expected_basis_revision_id=self._current(tmp_repo, eid),
+            expected_target_state=expected)
+
+        assert not result["ok"] and result["reason"] == "stale_state"
+        assert not _entry(tmp_repo, eid).get("proposed_reconsideration")
+
+    def test_a_live_decision_reports_a_stale_state_when_one_was_expected(self, tmp_repo):
+        """A caller that named a state hears that the record MOVED - which it can replay -
+        rather than the terminal "there is nothing to reconsider" a caller with no expectation
+        gets for the same decision."""
+        eid = _approved(tmp_repo)
+        expecting = lifecycle.propose_reconsideration(
+            tmp_repo, eid, content=RESTATED, title="t", candidate_id="c1",
+            expected_target_state="ignored")
+        blind = lifecycle.propose_reconsideration(tmp_repo, eid, content=RESTATED, title="t",
+                                                  candidate_id="c1")
+
+        assert expecting["reason"] == "stale_state"
+        assert blind["reason"] == "live"
+
+    def test_an_occupied_slot_stays_its_own_refusal(self, tmp_repo):
+        """The one refusal that means a review IS pending, so it must never be confused with a
+        record that moved: the evidence is held against the sitting question rather than
+        replayed."""
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        result = lifecycle.propose_reconsideration(
+            tmp_repo, eid, content=RESTATED, title="t", candidate_id="c2",
+            expected_basis_revision_id=self._current(tmp_repo, eid),
+            expected_target_state="ignored")
+
+        assert not result["ok"] and result["reason"] == "occupied"
+
+    def test_a_missing_decision_is_its_own_refusal_too(self, tmp_repo):
+        result = lifecycle.propose_reconsideration(
+            tmp_repo, "no-such-decision", content=RESTATED, title="t", candidate_id="c1",
+            expected_basis_revision_id="whatever", expected_target_state="ignored")
+        assert not result["ok"] and result["reason"] == "not_found"
+
+    def test_a_retired_decision_is_judged_in_the_retired_state(self, tmp_repo):
+        eid = _retired(tmp_repo)
+        basis = _tombstone(tmp_repo, eid)["current_revision_id"]
+        result = lifecycle.propose_reconsideration(
+            tmp_repo, eid, content=RESTATED, title="t", candidate_id="c1",
+            expected_basis_revision_id=basis, expected_target_state="retired")
+        assert result["ok"]
+        assert result["proposal"]["target_state"] == "retired"
+
+
 class TestReconsiderationAnswers:
 
     def test_restore_of_an_ignored_twin_comes_back_pending_not_trusted(self, tmp_repo):
