@@ -45,7 +45,9 @@ import pytest
 
 from contexer import (
     candidates,
+    cli,
     evidence,
+    guard_engine,
     lifecycle,
     policy,
     reconcile,
@@ -314,23 +316,18 @@ def test_repo_key_is_not_a_guard_and_the_corpus_says_so(tmp_repo):
 
 # ── the reproduced gaps ──────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 6: an edit recorded BEFORE the directive that explains it does not "
-    "corroborate it. Today the corpus aggregates to TWO candidates - a fileless `new` at 50 "
-    "and an `insufficient` at 10 carrying src/generated/client.ts - where the same pair in "
-    "the other order (scenario 1) is ONE candidate at 60 anchored on that file."))
 def test_an_edit_before_its_directive_corroborates_it():
+    """Outstanding issue 6, fixed by Task 03's two-pass grouping plus the STRUCTURAL link.
+
+    The directive names `src/generated/client.ts` in its own text, so the regeneration recorded
+    a minute earlier is linked by the rule's own words rather than by which of the two the
+    developer happened to do first. Scenario 3 is the guard rail on the other side: an edit
+    with no such link still anchors nothing.
+    """
     doc = _load("02-edit-then-directive")
     assert _aggregate(doc) == doc["expected"], doc["summary"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Task 03 carry-forward (ledger D1): a PROHIBITION repeated verbatim in a second session "
-    "contradicts itself. `candidates._negates` matches the bare word `not` anywhere in the "
-    "summary, and `_score_group` charges any merged seed that negates -30 without asking "
-    "whether it negates the GROUP or merely restates the same prohibition - so the pair "
-    "scores 50 - 30 = 20 and falls under the 25 review bar, where the identical rule phrased "
-    "affirmatively (scenario 5) scores 65."))
 def test_a_repeated_prohibition_corroborates_itself_rather_than_contradicting():
     """Scenario 5's real-world shape, which the fixture deliberately avoids.
 
@@ -351,18 +348,79 @@ def test_a_repeated_prohibition_corroborates_itself_rather_than_contradicting():
     assert candidate["score"] == 65, "the repetition subtracted instead of corroborating"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 3: a directive that dedups against an already-stored rule emits no "
-    "evidence at all. `store.capture_user_constraint` returns (None, None, None) on the "
-    "restatement and `evidence.capture_directive` gates emission on a stored/updated entry, "
-    "so the second call leaves the spool at exactly one event."))
 def test_a_repeated_directive_leaves_an_evidence_trail(tmp_repo):
+    """Outstanding issue 3, fixed by Task 03's recurrence meta.
+
+    The store still stores nothing the second time - a restated rule is not a second decision -
+    but it now RECORDS the repetition and says so, so the wrapper spools the event that used to
+    vanish. What the second event becomes downstream is asserted in
+    `test_a_repeated_directive_records_history_without_a_second_decision`.
+    """
     first = evidence.capture_directive(tmp_repo, "always use conventional commits",
                                        "sess-a", "replay")
     assert first[0] is not None
     evidence.capture_directive(tmp_repo, "always use conventional commits",
                                "sess-b", "replay")
     assert len(spool.list_pending_evidence(tmp_repo)) == 2
+
+
+def test_a_repeated_directive_records_history_without_a_second_decision(tmp_repo):
+    """The other half of the same fix, and the property that keeps it from becoming spam.
+
+    A repetition is recurrence HISTORY on the decision the developer already has: the count and
+    the distinct sessions move, the bounded history gains a row naming how the match was made,
+    and nothing else does - no second entry, no status change, no new pending review. The
+    spooled event settles against that same decision as a duplicate rather than opening one.
+    """
+    evidence.capture_directive(tmp_repo, "always use conventional commits", "sess-a", "replay")
+    reconcile.reconcile_session(tmp_repo)
+    (entry,) = store.load(tmp_repo)["entries"]
+    before = store.entry_status(entry)
+
+    entry_id, content, _status = evidence.capture_directive(
+        tmp_repo, "always use conventional commits", "sess-b", "claude_user_prompt")
+    assert (entry_id, content) == (None, None), "a restatement must not store a second rule"
+
+    (again,) = store.load(tmp_repo)["entries"]
+    assert again["id"] == entry["id"] and store.entry_status(again) == before
+    assert again["occurrence_count"] == 2 and again["session_ids"] == ["sess-a", "sess-b"]
+    ((row,),) = (again["recurrences"],)
+    assert (row["session_id"], row["match_kind"], row["source"], row["count"]) \
+        == ("sess-b", "overlap", "claude_user_prompt", 1)
+    assert row["overlap"] == 1.0
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert receipt["proposed"] == 0 and receipt["duplicates"] == 1
+    assert len(store.load(tmp_repo)["entries"]) == 1
+
+
+def test_repeating_a_rule_inside_one_session_bumps_a_count_not_a_row(tmp_repo):
+    """The bound that makes the history readable: a developer who restates a rule six times in
+    one session must not evict five other sessions from a 20-row window."""
+    for _ in range(6):
+        evidence.capture_directive(tmp_repo, "always use conventional commits",
+                                   "sess-a", "replay")
+    ((row,),) = (store.load(tmp_repo)["entries"][0]["recurrences"],)
+    assert (row["session_id"], row["count"]) == ("sess-a", 5)
+
+
+def test_a_recurrence_from_another_session_shows_in_review_without_approving_anything(
+        tmp_repo, monkeypatch):
+    """Corroboration is visible to the developer reviewing the decision, and is exactly that -
+    visible. Repetition never approves, and never arms a policy."""
+    with monkeypatch.context() as no_edits:
+        no_edits.setattr(store, "_read_edited_files", lambda *_a, **_k: [])
+        evidence.capture_directive(tmp_repo, "always tag this release before pushing",
+                                   "sess-a", "replay")
+        evidence.capture_directive(tmp_repo, "always tag this release before pushing",
+                                   "sess-b", "replay")
+
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert store.entry_status(entry) == "pending_approval", "deictic: still awaiting review"
+    assert not entry.get("approved_by")
+    rows = dict(cli._review_metadata(tmp_repo, entry, cli._review_git_budget()))
+    assert rows["Seen"] == "2 times across 2 sessions"
 
 
 @pytest.mark.xfail(strict=True, reason=(
@@ -415,6 +473,33 @@ def test_a_directive_restating_an_ignored_decision_is_surfaced_for_review(tmp_re
 
 def test_a_directive_restating_a_retired_decision_is_surfaced_for_review(tmp_repo):
     _replay_inactive_twin(tmp_repo, retire=True)
+
+
+def test_restating_an_ignored_decision_is_never_absorbed_as_a_recurrence(tmp_repo):
+    """The half of issue 7 Task 03 owns, and the only half it owns.
+
+    The store's dedup is status-blind, so a restatement of an IGNORED decision used to bump its
+    `occurrence_count` - ranking a decision the developer switched off as increasingly
+    corroborated, which is the opposite of what happened, and burying the restatement where no
+    lane could ever find it. Nothing is stored and nothing is bumped now; the match is REPORTED
+    so Task 04's reconsideration lane has something to act on. The lane itself is not built
+    here, and the aggregator's own classification (`new`, with the `restates <id>` note) is
+    unchanged - see `test_a_restated_inactive_decision_is_classified_as_new_not_matched_back`.
+    """
+    ok, entry_id = store.update_decision(tmp_repo, RULE, "sess-0", "constraint",
+                                         created_by="human")
+    assert ok and store.approve_decision(tmp_repo, entry_id, "ignore")[0]
+
+    stored, new_id, meta = store.update_decision_with_meta(tmp_repo, RULE, "sess-1",
+                                                           "constraint", created_by="ai")
+
+    assert (stored, new_id) == (False, None)
+    assert meta["inactive_match"]["entry_id"] == entry_id
+    assert meta["inactive_match"]["status"] == "ignored"
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert entry["occurrence_count"] == 1, "an ignored decision must not gain corroboration"
+    assert entry.get("recurrences") is None
+    assert store.entry_status(entry) == "ignored"
 
 
 def _replay_inactive_twin(repo: str, *, retire: bool) -> None:
@@ -553,6 +638,93 @@ def test_a_decision_stored_before_its_hold_is_held_against_its_own_review(tmp_re
     ((candidate_id, meta),) = spool.held_candidates(tmp_repo).items()
     assert meta["entry_id"] == entries[0]["id"]
     assert _held_event_files(tmp_repo, candidate_id), "the raw evidence was thrown away"
+
+
+def test_a_hold_written_under_the_old_scoring_resumes_under_the_new_one(tmp_repo):
+    """Task 03 changes what the aggregator makes of a given event set, and `_resume_holds`
+    re-scores every interrupted candidate with the CURRENT scorer - so a hold written before
+    this change is re-read by rules it was never scored under.
+
+    Scenario 2 is exactly that pair: two events that used to aggregate to TWO candidates and
+    now aggregate to one, held under a candidate id neither scorer would mint. The identity of
+    a hold is the DIRECTORY it occupies, so the re-classification is materialized there rather
+    than under the id it now computes - one decision, one hold, and a second pass changes
+    nothing.
+    """
+    doc = _load("02-edit-then-directive")
+    event_ids = _spool_events(tmp_repo, doc)
+    candidate_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "pre-task-03-hold"))
+    spool.hold_candidate_evidence(tmp_repo, candidate_id, event_ids,
+                                  meta={"event_ids": event_ids, "status": "pending"})
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert receipt["proposed"] == 1 and receipt["incomplete"] is False
+    ((entry,),) = (store.load(tmp_repo)["entries"],)
+    assert store.entry_status(entry) == "pending_approval"
+    ((held_id, meta),) = spool.held_candidates(tmp_repo).items()
+    assert held_id == candidate_id, "a re-scored hold must keep the directory it occupies"
+    assert (meta["state"], meta["entry_id"]) == ("pending_review", entry["id"])
+    assert len(_held_event_files(tmp_repo, candidate_id)) == len(event_ids)
+
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+    assert len(store.load(tmp_repo)["entries"]) == 1
+
+
+def test_a_hold_that_now_splits_is_reported_rather_than_duplicated(tmp_repo):
+    """The other direction of the same risk, and the reason it is safe: when re-aggregation
+    does NOT come back as one candidate, the pass says `incomplete` and leaves the hold exactly
+    as it was. Nothing is stored, nothing is split across two directories, and nothing is
+    deleted - the next pass tries again.
+    """
+    doc = _load("03-unrelated-edit-before-directive")
+    event_ids = _spool_events(tmp_repo, doc)
+    candidate_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "pre-task-03-split"))
+    spool.hold_candidate_evidence(tmp_repo, candidate_id, event_ids,
+                                  meta={"event_ids": event_ids, "status": "pending"})
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+
+    assert receipt["incomplete"] is True and receipt["proposed"] == 0
+    assert store.load(tmp_repo)["entries"] == []
+    assert list(spool.held_candidates(tmp_repo)) == [candidate_id]
+    assert len(_held_event_files(tmp_repo, candidate_id)) == len(event_ids)
+
+
+def test_an_uncertain_path_never_becomes_an_anchor_a_policy_or_a_guard_input(tmp_repo):
+    """Runbook invariant 6, measured end to end rather than asserted at the aggregator.
+
+    The README edit precedes the directive with nothing structural to connect them, so it is a
+    `possible_source_files` entry and only that. What must NOT happen anywhere downstream: it
+    becoming `source_files`, becoming an `anchor_candidates` guess a developer could bless,
+    selecting a policy, or pairing at commit time.
+    """
+    doc = _load("03-unrelated-edit-before-directive")
+    (directive,) = [c for c in candidates.aggregate_candidates(doc["events"], [])["candidates"]
+                    if c["kind"] == "new"]
+    assert directive["possible_source_files"] == ["README.md"]
+
+    _spool_events(tmp_repo, doc)
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+    (entry,) = store.load(tmp_repo)["entries"]
+
+    assert "README.md" not in (entry.get("source_files") or [])
+    assert "README.md" not in (entry.get("anchor_candidates") or [])
+    request = {"operation": "commit", "files": ["README.md"], "artifact": ""}
+    assert policy.select_policies([entry], request) == []
+    assert guard_engine.decisions_for_files(tmp_repo, ["README.md"]) == []
+
+
+def test_no_module_outside_the_aggregator_and_its_ledger_reads_a_possible_source_file():
+    """The structural half of the same invariant. `possible_source_files` is produced by
+    `candidates.py` and carried on the manifest by `reconcile.py`; a third reader is how an
+    uncertain path starts being treated as a certain one, so it is caught here rather than in
+    review."""
+    owners = {"candidates.py", "reconcile.py"}
+    readers = [path.name for path in sorted(Path(store.__file__).parent.rglob("*.py"))
+               if path.name not in owners
+               and "possible_source_files" in path.read_text(encoding="utf-8")]
+    assert readers == []
 
 
 def test_raw_held_evidence_survives_a_failed_summary_write(tmp_repo, monkeypatch):

@@ -1306,18 +1306,24 @@ class TestPatternPromotion:
         data = store.load(tmp_repo)
         assert any(e["id"] == eid for e in data["entries"]), "pinned new entry must not be evicted"
 
-    def test_constraint_hook_near_dup_does_not_write_or_promote(self, tmp_repo):
-        """capture_user_constraint is a silent no-op on a near-duplicate: no disk write,
-        and it must never promote an architecture entry from a constraint phrasing."""
+    def test_constraint_hook_near_dup_records_recurrence_without_promoting(self, tmp_repo):
+        """capture_user_constraint stays silent to its CALLER on a near-duplicate and must
+        never promote an architecture entry from a constraint phrasing.
+
+        What it no longer does is stay silent in the RECORD (hardening Task 03): the developer
+        restated a rule the store already holds, so that is recurrence history on the matched
+        decision. The category, the content and the status are untouched - repetition ranks a
+        decision, it never reclassifies or approves one.
+        """
         store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
-        before = (store._store_path(tmp_repo)).stat().st_mtime_ns
         eid, _, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
         assert eid is None
         data = store.load(tmp_repo)
         arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
         assert arch["subtype"] == "architecture", "constraint hook must not promote architecture"
-        assert arch.get("occurrence_count", 1) == 1, "constraint hook must not bump the count"
-        assert (store._store_path(tmp_repo)).stat().st_mtime_ns == before, "no write on near-dup"
+        assert len(data["entries"]) == 1, "a restatement never accumulates a second entry"
+        assert arch["occurrence_count"] == 2
+        assert [r["match_kind"] for r in arch["recurrences"]] == ["overlap"]
 
 
 # ── 7. Context retrieval ──────────────────────────────────────────────────────

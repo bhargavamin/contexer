@@ -644,13 +644,14 @@ class TestInsufficientCandidate:
         second = reconcile.reconcile_session(tmp_repo)
         assert second["events_observed"] == 2      # the old file event re-aggregated
         assert second["proposed"] == 1
-        # The file change is still leftover, and correctly so: a support event that PRECEDES
-        # the statement it belongs to corroborates nothing (candidates._attach_target's stated
-        # consequence). It stays pending rather than being folded in after the fact.
-        assert second["insufficient"] == 1
+        # The earlier file change is folded IN, because the two share `src/a.py` - a
+        # STRUCTURAL link, which `candidates._relation_for` reads whichever way the clock ran.
+        # Until Task 03 it stayed leftover purely because the developer edited before speaking,
+        # which is outstanding issue 6: the same pair in the other order became one candidate.
+        assert second["insufficient"] == 0
         _candidate_id, meta = _only_held(tmp_repo)
-        assert len(meta["event_ids"]) == 1
-        assert [e["kind"] for e in _pending(tmp_repo)] == ["file_changed"]
+        assert len(meta["event_ids"]) == 2
+        assert _pending(tmp_repo) == []
 
 
 # ── idempotency, crash recovery, dry run, fast path ──────────────────────────

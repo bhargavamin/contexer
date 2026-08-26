@@ -3536,22 +3536,30 @@ class TestDeicticCleanRestatementPromotion:
         payload = store.session_start_payload(tmp_repo)
         assert "the feature" in payload["context"].lower()
 
-    def test_deictic_restatement_of_pending_twin_stays_silent_noop(self, tmp_repo):
+    def test_deictic_restatement_of_pending_twin_records_recurrence_and_stays_pending(
+            self, tmp_repo):
+        """Silent to the CALLER and to the store's shape - no second entry, no promotion, no
+        status change. Not silent in the record any more (hardening Task 03): a restatement is
+        recurrence history, so the count, the sessions and one bounded history row move."""
         eid, _, _ = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
         eid2, content2, status2 = store.capture_user_constraint(tmp_repo, self._DEICTIC, "s2")
         assert (eid2, content2, status2) == (None, None, None)
         entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == eid)
         assert entry["status"] == "pending_approval"
-        assert entry["occurrence_count"] == 1
+        assert entry["occurrence_count"] == 2 and entry["session_ids"] == ["s1", "s2"]
+        assert [r["session_id"] for r in entry["recurrences"]] == ["s2"]
 
-    def test_clean_restatement_of_already_approved_entry_stays_silent_noop(self, tmp_repo):
+    def test_clean_restatement_of_already_approved_entry_records_a_recurrence(self, tmp_repo):
+        eid3, content3, status3 = (None, None, None)
         store.capture_user_constraint(tmp_repo, self._DEICTIC, "s1")
         store.capture_user_constraint(tmp_repo, self._CLEAN, "s2")  # promotes -> approved
         eid3, content3, status3 = store.capture_user_constraint(tmp_repo, self._CLEAN, "s3")
         assert (eid3, content3, status3) == (None, None, None)
         data = store.load(tmp_repo)
         entry = next(e for e in data["entries"] if e["type"] == "decision")
-        assert entry["occurrence_count"] == 2, "no further bump on an ordinary duplicate"
+        assert entry["occurrence_count"] == 3
+        assert entry["status"] == "approved", "repetition never changes approval"
+        assert [r["session_id"] for r in entry["recurrences"]] == ["s2", "s3"]
 
 
 class TestDeicticIgnoredTombstoneDoesNotBlock:

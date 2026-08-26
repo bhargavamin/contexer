@@ -904,21 +904,67 @@ def _session_set(match: dict) -> set[str]:
     return sessions
 
 
-def _record_recurrence(match: dict, session_id: str = "") -> None:
-    """Record another near-duplicate hit on a matched entry: bump occurrence_count and
-    track the distinct session that produced it.
+MAX_RECURRENCES = 20            # bounded history; the counts above it stay exact
+
+
+def _append_recurrence(match: dict, session_id: str, source: str, match_kind: str,
+                       overlap: float) -> None:
+    """Append (or bump) one row of a matched entry's bounded recurrence history.
+
+    ONE row per (decision, session, match kind), with an in-session `count` rather than a row
+    per prompt: the constraint hook fires on EVERY prompt, so a developer who restates a rule
+    six times in one session must not push five older sessions out of a 20-row window. The
+    rows a reviewer actually needs are the distinct sessions; how loudly one session said it is
+    the count.
+
+    Rebuilt from a filtered copy rather than appended to in place, and every field is coerced,
+    because this is bookkeeping: a hand-edited store must never be the thing that breaks a
+    write. The list is capped at `MAX_RECURRENCES`, oldest first out - `occurrence_count` and
+    `session_ids` stay exact, so nothing is LOST by the cap, only the per-hit detail.
+    """
+    history = [row for row in (match.get("recurrences") or []) if isinstance(row, dict)]
+    key = (str(session_id), str(match_kind))
+    now = datetime.now(timezone.utc).isoformat()
+    for row in history:
+        if (str(row.get("session_id") or ""), str(row.get("match_kind") or "")) == key:
+            row["count"] = int(row.get("count") or 1) + 1
+            row["occurred_at"] = now
+            if source:
+                row["source"] = source
+            match["recurrences"] = history[-MAX_RECURRENCES:]
+            return
+    history.append({"occurred_at": now, "session_id": str(session_id),
+                    "source": str(source), "match_kind": str(match_kind),
+                    "overlap": round(float(overlap or 0.0), 2), "count": 1})
+    match["recurrences"] = history[-MAX_RECURRENCES:]
+
+
+def _record_recurrence(match: dict, session_id: str = "", *, source: str = "",
+                       match_kind: str = "overlap", overlap: float = 0.0) -> None:
+    """Record another near-duplicate hit on a matched entry: bump occurrence_count, track the
+    distinct session that produced it, and append a bounded history row saying how the match
+    was made.
 
     The count drives display ranking, eviction protection, and the ×N confidence marker
     — it does NOT change the entry's subtype. A decision's category (architecture,
     pattern, constraint, convention) is a semantic judgment made when it is captured,
     never inferred from how often the same text recurs. Recurrence measures repetition,
     not reuse-across-different-problems, so it cannot tell a genuine pattern from a
-    one-off decision that simply got restated."""
+    one-off decision that simply got restated.
+
+    Neither does it touch confidence or approval status: a rule repeated a hundred times is
+    still a rule a human has or has not approved, and letting repetition promote it would make
+    a chatty session an approval mechanism.
+
+    Callers hold the store lock already - this only mutates the loaded entry, exactly as it
+    always did, so the history lands in the same save.
+    """
     match["occurrence_count"] = match.get("occurrence_count", 1) + 1
     sessions = _session_set(match)
     if session_id:
         sessions.add(session_id)
     match["session_ids"] = sorted(sessions)
+    _append_recurrence(match, session_id, source, match_kind, overlap)
 
 
 def _keep_top(items: list, limit: int, pin_last: bool = False) -> list:
@@ -1347,10 +1393,27 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
 is_prescriptive_directive = _is_prescriptive_constraint
 
 
+def _match_overlap(content: str, match: dict) -> float:
+    """The max-denominator overlap between a capture and the entry it matched. Recomputed
+    rather than threaded out of `_find_match`, which answers a yes/no question on a hot path;
+    this runs only once a match already exists."""
+    return _overlap_ratio(_tokenize(content), _tokenize(match.get("content", "")))
+
+
 def capture_user_constraint(
     repo_path: str, prompt: str, session_id: str,
-    near_misses: list | None = None, repo_source: str = "",
+    near_misses: list | None = None, repo_source: str = "", *, source: str = "",
 ) -> tuple[str, str, str] | tuple[None, None, None]:
+    """`capture_user_constraint_with_meta` without the meta - the 3-tuple every existing
+    caller wants, unchanged. See that function for the behaviour."""
+    return capture_user_constraint_with_meta(
+        repo_path, prompt, session_id, near_misses, repo_source, source=source)[:3]
+
+
+def capture_user_constraint_with_meta(
+    repo_path: str, prompt: str, session_id: str,
+    near_misses: list | None = None, repo_source: str = "", *, source: str = "",
+) -> tuple:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
     stored but NOT auto-trusted — it lands pending_approval so the developer can generalize,
@@ -1375,15 +1438,25 @@ def capture_user_constraint(
     matches (see _near_misses) for a brand-new entry — the caller forwards it to
     constraint_ack so the developer can confirm a consolidation.
 
-    Returns (entry_id, sanitized_content, status) if stored, (None, None, None) otherwise.
+    Returns (entry_id, sanitized_content, status, meta) - the first three exactly as
+    `capture_user_constraint` has always returned them, so no existing caller changes.
     `status` is one of "approved" | "pending_approval" | "promoted" | "revision_proposed" |
-    "revision_already_pending" — pass it to constraint_ack() for the matching notice."""
+    "revision_already_pending" - pass it to constraint_ack() for the matching notice.
+
+    `meta` is `{}` except on the SILENT paths, where the 3-tuple is (None, None, None) and a
+    caller has no way to tell "not a directive" from "the developer said this again". A
+    restatement of a live rule now carries `meta["recurrence"]` = the entry it matched, how it
+    matched, and the sanitized content - which is what lets the evidence wrapper spool the
+    repetition (outstanding issue 3) without this path having to know anything about evidence.
+    `source` is the caller's own source category, recorded on the history row for the same
+    reason: only the caller knows which host prompt hook it came from.
+    """
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
-        return None, None, None
+        return None, None, None, {}
     content = _sanitize_directive(prompt.strip())[:600]
     if not _is_storable(content):
-        return None, None, None
+        return None, None, None, {}
     deictic = _is_deictic(content)
     status = "pending_approval" if deictic else "approved"
     with store_lock(repo_slug(repo_path)):
@@ -1404,17 +1477,30 @@ def capture_user_constraint(
                 match["status"] = "approved"
                 match["approved_at"] = now
                 match["approved_by"] = "human"
-                _record_recurrence(match, session_id)
+                _record_recurrence(match, session_id, source=source,
+                                   overlap=_match_overlap(content, match))
                 save(repo_path, data)
-                return match["id"], revisions.current_content(match), "promoted"
-            return None, None, None
+                return match["id"], revisions.current_content(match), "promoted", {}
+            # The developer restated a rule the store already holds. This used to be a pure
+            # no-op - no write, no record, nothing for anyone downstream to see (outstanding
+            # issue 3). It is now recorded as recurrence HISTORY: the count and the distinct
+            # sessions are the corroboration a reviewer reads, and the meta lets the evidence
+            # wrapper spool the repetition. Still no new entry, no status change, no
+            # confidence change - repetition is not approval.
+            matched = _match_overlap(content, match)
+            _record_recurrence(match, session_id, source=source, overlap=matched)
+            save(repo_path, data)
+            return None, None, None, {"recurrence": {
+                "entry_id": match["id"], "match_kind": "overlap", "content": content,
+                "overlap": round(matched, 2),
+                "occurrence_count": match.get("occurrence_count", 1)}}
         # Containment routing: a superset/subset restatement of a stored rule evades the
         # max-denominator metric above — consolidate onto the first contained entry
         # instead of accumulating a new overlapping one.
         hit = _find_containment(content, decisions_only)
         if hit is not None:
             return _route_containment(repo_path, data, hit, content, subtype,
-                                      deictic, session_id)
+                                      deictic, session_id, source)
         if near_misses is not None:
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
@@ -1443,7 +1529,7 @@ def capture_user_constraint(
         # Deliberately does NOT arm the .pending_review flag: the in-band ack (constraint_ack)
         # already notifies the developer, and the SessionStart pending-count pointer covers
         # persistence — a second nudge from this path would double up.
-        return entry["id"], content, status
+        return entry["id"], content, status, {}
 
 
 # ── Proposal-slot policy (who may take a decision's ONE unreviewed Suggested Update slot)
@@ -1454,9 +1540,11 @@ def capture_user_constraint(
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
-                       deictic: bool, session_id: str) -> tuple:
+                       deictic: bool, session_id: str, source: str = "") -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
-    Called under the store lock; saves and returns the capture 3-tuple. Never creates a
+    Called under the store lock; saves and returns the capture 4-tuple (see
+    capture_user_constraint_with_meta - the recurrence branches carry the meta that lets a
+    repetition be spooled as evidence). Never creates a
     new entry, and never silently replaces a trusted rule's current revision.
 
     New content LONGER (the observed bug — superset restatement):
@@ -1481,10 +1569,18 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
     pending = entry_status(hit) == "pending_approval"
     pending_twin = pending and hit.get("created_by") == "human"
 
-    def _recur_silently():
-        _record_recurrence(hit, session_id)
+    contained = _containment_ratio(_tokenize(content), _tokenize(hit.get("content", "")))
+
+    def _recurred():
+        """Silent to the caller, but no longer silent in the record: the same bounded
+        history a plain overlap duplicate gets, tagged as the containment match it was."""
+        _record_recurrence(hit, session_id, source=source, match_kind="containment",
+                           overlap=contained)
         save(repo_path, data)
-        return None, None, None
+        return None, None, None, {"recurrence": {
+            "entry_id": hit["id"], "match_kind": "containment", "content": content,
+            "overlap": round(contained, 2),
+            "occurrence_count": hit.get("occurrence_count", 1)}}
 
     if longer:
         if pending_twin:
@@ -1495,18 +1591,20 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
                     rev["content"] = revisions.normalize_content(content)
                 revisions.sync_decision_cache(hit)
                 hit["updated_at"] = now
-                _record_recurrence(hit, session_id)
+                _record_recurrence(hit, session_id, source=source,
+                                   match_kind="containment", overlap=contained)
                 save(repo_path, data)
-                return hit["id"], revisions.current_content(hit), "pending_approval"
+                return hit["id"], revisions.current_content(hit), "pending_approval", {}
             revisions.append_revision(hit, content, source="human", approved_at=now)
             hit["status"] = "approved"
             hit["approved_at"] = now
             hit["approved_by"] = "human"
-            _record_recurrence(hit, session_id)
+            _record_recurrence(hit, session_id, source=source,
+                               match_kind="containment", overlap=contained)
             save(repo_path, data)
-            return hit["id"], revisions.current_content(hit), "promoted"
+            return hit["id"], revisions.current_content(hit), "promoted", {}
         if pending:
-            return _recur_silently()  # never propose on an unreviewed base
+            return _recurred()  # never propose on an unreviewed base
         norm = revisions.normalize_content(content)
         prop = hit.get("proposed_revision")
         displaced = False
@@ -1519,7 +1617,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             # Equal-or-higher trust keeps the refusal: never clobber it (it would vanish
             # unreviewed); surface the new phrasing to the developer instead.
             if not review.outranks_proposal("human", prop):
-                return hit["id"], norm, "revision_already_pending"
+                return hit["id"], norm, "revision_already_pending", {}
             # Displaced, not discarded — same archival shape as edit_decision's dropped
             # proposal, so the timeline can still show what was suggested.
             hit.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
@@ -1536,7 +1634,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             # one arms the deterministic nudge too.
             if displaced:
                 touch_pending_review(repo_path)
-        return hit["id"], norm, "revision_proposed"
+        return hit["id"], norm, "revision_proposed", {}
 
     if pending_twin and not deictic:
         # Terse clean restatement is the activation gesture: bless revision 1 in place,
@@ -1545,7 +1643,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
         hit["status"] = "approved"
         hit["approved_at"] = now
         hit["approved_by"] = "human"
-        _record_recurrence(hit, session_id)
+        _record_recurrence(hit, session_id, source=source,
+                           match_kind="containment", overlap=contained)
         if cur is not None:
             cur["approved_at"] = now
             score, factors = revisions.compute_confidence(hit)
@@ -1553,8 +1652,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             cur["evidence"] = factors
         revisions.sync_decision_cache(hit)
         save(repo_path, data)
-        return hit["id"], revisions.current_content(hit), "promoted"
-    return _recur_silently()
+        return hit["id"], revisions.current_content(hit), "promoted", {}
+    return _recurred()
 
 
 def constraint_ack(content: str, status: str, entry_id: str = "",
@@ -2392,7 +2491,18 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
         match = _find_match(content, decisions_only)
         if match is not None:
-            _record_recurrence(match, session_id)
+            if entry_status(match) == "ignored":
+                # An INACTIVE decision restated is not a recurrence of a live rule: bumping
+                # `occurrence_count` on something the developer switched off records the
+                # opposite of what happened, and would rank a discarded decision as
+                # increasingly corroborated. This path stores nothing and changes nothing;
+                # it REPORTS the match so the reconsideration lane can surface it for a human,
+                # which is the only thing allowed to bring an inactive decision back.
+                return False, None, {"inactive_match": {
+                    "entry_id": match["id"], "status": entry_status(match),
+                    "overlap": round(_match_overlap(content, match), 2)}}
+            _record_recurrence(match, session_id, source=created_by,
+                               overlap=_match_overlap(content, match))
             save(repo_path, data)
             return False, None, {}
         if _is_tombstoned(repo_path, content):
