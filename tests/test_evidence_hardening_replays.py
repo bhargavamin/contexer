@@ -52,6 +52,7 @@ from contexer import (
     policy,
     reconcile,
     remote,
+    revisions,
     spool,
     store,
 )
@@ -1411,6 +1412,149 @@ def test_a_skipped_reconsideration_keeps_its_evidence_held(tmp_repo):
 
     assert len(_held_event_files(tmp_repo, candidate_id)) == 1
     assert _summaries(tmp_repo, entry_id) == []
+
+
+def _during_the_attach_window(mutate):
+    """A `propose_reconsideration` that lets `mutate()` change the store first, ONCE.
+
+    The window is real and unlocked on purpose: a pass classifies its evidence against a
+    snapshot, then does the filesystem work of holding it, and only then does the attach take
+    the store lock. Anything the developer or another session does in between lands here. Once,
+    because the replay that follows must meet a STABLE store."""
+    real = lifecycle.propose_reconsideration
+    fired = []
+
+    def proposer(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            mutate()
+        return real(*args, **kwargs)
+
+    return proposer
+
+
+def _advance_revision(repo: str, entry_id: str):
+    def mutate():
+        data = store.load(repo)
+        entry = next(e for e in data["entries"] if e["id"] == entry_id)
+        revisions.append_revision(entry, RULE + " Regenerate with `make codegen`.", "ai")
+        store.save(repo, data)
+    return mutate
+
+
+def _un_ignore(repo: str, entry_id: str):
+    """Straight to the store, because no public route brings an IGNORED decision back except
+    answering a reconsideration - which is the thing this window is preventing. It stands in
+    for any route that might: a hand-edited store, the console, a later lane."""
+    def mutate():
+        data = store.load(repo)
+        next(e for e in data["entries"] if e["id"] == entry_id)["status"] = "approved"
+        store.save(repo, data)
+    return mutate
+
+
+def _pass_through_the_window(repo: str, monkeypatch, mutate) -> dict:
+    with monkeypatch.context() as window:
+        window.setattr(lifecycle, "propose_reconsideration",
+                       _during_the_attach_window(mutate))
+        return reconcile.reconcile_session(repo)
+
+
+def test_a_revision_advance_in_the_attach_window_proposes_nothing(tmp_repo, monkeypatch):
+    """The defect this closes: the manifest records the revision the evidence was CLASSIFIED
+    against, while the attach bound the proposal to whatever was current when it ran. A
+    developer's answer then landed at the newer revision, the held candidate went on waiting
+    for one at the older, and the two could never meet - the evidence was held forever with no
+    receipt anywhere.
+
+    Refusing costs one deferred pass. Attaching cost the evidence."""
+    entry_id = _inactive_twin(tmp_repo, retire=False)
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+
+    receipt = _pass_through_the_window(tmp_repo, monkeypatch,
+                                       _advance_revision(tmp_repo, entry_id))
+
+    assert receipt["reconsidered"] == 0
+    assert receipt["incomplete"] is True
+    assert not _inactive_entry(tmp_repo, entry_id).get("proposed_reconsideration")
+    candidate_id, meta = _one_hold(tmp_repo)
+    assert meta["state"] == "materializing"          # replayable, not settled
+    assert len(_held_event_files(tmp_repo, candidate_id)) == 1
+    assert _summaries(tmp_repo, entry_id) == []
+
+
+@pytest.mark.parametrize("retire,mutation", [
+    (False, "retire"),                               # ignored -> retired
+    (True, "restore"),                               # retired -> live
+    (False, "un_ignore"),                            # ignored -> live
+])
+def test_a_state_change_in_the_attach_window_proposes_nothing(tmp_repo, monkeypatch,
+                                                              retire, mutation):
+    """The other half of the binding. A reconsideration asks "should this come back?", so the
+    state it was judged in is as load-bearing as the revision: a question formed about an
+    ignored decision says nothing about a retired one, and nothing at all about one that is
+    live again. Each refusal leaves the raw evidence exactly where it is."""
+    entry_id = _inactive_twin(tmp_repo, retire=retire)
+    mutate = {
+        "retire": lambda: lifecycle.retire_decision(tmp_repo, entry_id, "superseded"),
+        "restore": lambda: lifecycle.restore_decision(tmp_repo, entry_id),
+        "un_ignore": _un_ignore(tmp_repo, entry_id),
+    }[mutation]
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+
+    receipt = _pass_through_the_window(tmp_repo, monkeypatch, mutate)
+
+    assert receipt["reconsidered"] == 0
+    assert not _inactive_entry(tmp_repo, entry_id).get("proposed_reconsideration")
+    candidate_id, _meta = _one_hold(tmp_repo)
+    assert len(spool.held_events(tmp_repo, candidate_id)) == 1
+    assert _summaries(tmp_repo, entry_id) == []
+
+
+def test_the_replay_after_a_stale_refusal_asks_one_question_at_the_new_basis(tmp_repo,
+                                                                            monkeypatch):
+    """Deferred, not dropped. The next pass re-classifies the HELD events against the store as
+    it is NOW, under the same candidate id, and the manifest and the proposal agree on the
+    basis - which is what lets the developer's answer settle this candidate."""
+    entry_id = _inactive_twin(tmp_repo, retire=False)
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+    _pass_through_the_window(tmp_repo, monkeypatch, _advance_revision(tmp_repo, entry_id))
+    first_id, _meta = _one_hold(tmp_repo)
+
+    assert reconcile.reconcile_session(tmp_repo)["reconsidered"] == 1
+
+    candidate_id, meta = _one_hold(tmp_repo)
+    assert candidate_id == first_id
+    entry = _inactive_entry(tmp_repo, entry_id)
+    proposal = entry["proposed_reconsideration"]
+    assert meta["basis_revision_id"] == proposal["basis_revision_id"] \
+        == entry["current_revision_id"]
+    assert proposal["candidate_id"] == candidate_id
+    assert proposal["target_state"] == "ignored"
+
+
+@pytest.mark.parametrize("action,disposition", [("restore", "approved"),
+                                                ("dismiss", "dismissed")])
+def test_the_answer_to_a_replayed_question_settles_it_with_exactly_one_summary(
+        tmp_repo, monkeypatch, action, disposition):
+    """End to end through the refusal: one question, one answer, one receipt, no raw evidence
+    left over. Before the binding this candidate could be settled by nothing at all."""
+    entry_id = _inactive_twin(tmp_repo, retire=False)
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+    _pass_through_the_window(tmp_repo, monkeypatch, _advance_revision(tmp_repo, entry_id))
+    assert reconcile.reconcile_session(tmp_repo)["reconsidered"] == 1
+    candidate_id, _meta = _one_hold(tmp_repo)
+
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, action)[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    assert _summaries(tmp_repo, entry_id) == [disposition]
+    assert spool.held_candidates(tmp_repo) == {}
+    assert not _held_event_files(tmp_repo, candidate_id)
 
 
 def test_a_crash_before_the_proposal_replays_into_exactly_one_question(tmp_repo,

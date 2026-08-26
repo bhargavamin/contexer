@@ -405,6 +405,21 @@ def review_lines(entry: dict, eid: str) -> list[str]:
 #   available, since dropping a question needs no basis.
 
 
+def inactive_state(entry: dict, retired: bool = False) -> str:
+    """`"retired"` | `"ignored"` | `"live"` - the state a reconsideration is judged against.
+
+    ONE spelling, because three places compare it and they must agree: `attach_reconsideration`
+    stamps it as the proposal's `target_state`, `reconsideration_stale` re-derives it to say
+    the decision left the state it was judged in, and `propose_reconsideration` checks a
+    caller's expectation against it before anything is attached. `retired` is for the one
+    caller that knows the entry came out of the tombstone sidecar; the `deleted_at` stamp
+    answers for everyone else.
+    """
+    if retired or entry.get("deleted_at"):
+        return "retired"
+    return "ignored" if store.entry_status(entry) == "ignored" else "live"
+
+
 def attach_reconsideration(entry: dict, *, content: str, title: str, candidate_id: str,
                            source_files=(), source: str = "ai",
                            now: str = "") -> dict | None:
@@ -432,7 +447,7 @@ def attach_reconsideration(entry: dict, *, content: str, title: str, candidate_i
         "title": title,
         "candidate_id": candidate_id,
         "source_files": [f for f in source_files if isinstance(f, str) and f],
-        "target_state": "retired" if entry.get("deleted_at") else "ignored",
+        "target_state": inactive_state(entry),
         "basis_revision_id": entry.get("current_revision_id") or "",
         "source": source,
         "created_at": now,
@@ -453,9 +468,7 @@ def reconsideration_stale(entry: dict) -> bool:
         return False
     if prop.get("basis_revision_id") != (entry.get("current_revision_id") or ""):
         return True
-    now_state = "retired" if entry.get("deleted_at") else \
-        ("ignored" if store.entry_status(entry) == "ignored" else "live")
-    return now_state != prop.get("target_state")
+    return inactive_state(entry) != prop.get("target_state")
 
 
 def _locate_inactive(repo_path: str, entry_id: str) -> tuple:
@@ -506,33 +519,66 @@ def _drop_stale_tombstone(repo_path: str, live: dict, data: dict) -> None:
 
 
 def propose_reconsideration(repo_path: str, entry_id: str, *, content: str, title: str,
-                            candidate_id: str, source_files=(), source: str = "ai") -> dict:
-    """Attach a reconsideration question to an INACTIVE decision. `{"ok", "message",
+                            candidate_id: str, source_files=(), source: str = "ai",
+                            expected_basis_revision_id: str = "",
+                            expected_target_state: str = "") -> dict:
+    """Attach a reconsideration question to an INACTIVE decision. `{"ok", "reason", "message",
     "proposal"}`.
 
     Proposing restores nothing: an ignored decision stays ignored and a retired one stays in
     the tombstone sidecar until a developer answers through `reconsider_decision`. A decision
     that is still LIVE is refused outright - there is nothing to reconsider, and a restatement
     of a live decision is an ordinary duplicate or update in the content lane.
+
+    **The two expectations bind the proposal to the record the CALLER judged**, and they are
+    checked here because here is where the store lock is held. A caller that classified
+    evidence against a snapshot and then arrived to attach - `reconcile._materialize` is the
+    one - had no way to say which revision and which state it meant, so the proposal bound to
+    whatever was current at attach time while the evidence stayed keyed to the earlier basis:
+    the developer's answer landed at revision B, the held candidate went on waiting for one at
+    revision A, and nothing could ever settle it. Both are OPTIONAL, so a human caller
+    answering about what is on screen is unaffected.
+
+    `reason` is the refusal's own vocabulary, and it exists because `ok: False` is not one
+    fact: `stale_basis`/`stale_state` mean the record moved under a caller that can retry,
+    `occupied` means a review is already pending, and `not_found`/`live` mean there is nothing
+    to ask about at all. A caller that read them as one filed a disposition for a review that
+    never happened - the same lesson `_lifecycle_awaiting_review` records for the retirement
+    lane.
     """
     if not (content or "").strip():
-        return {"ok": False, "proposal": None,
+        return {"ok": False, "proposal": None, "reason": "empty_content",
                 "message": "A reconsideration needs the restated wording it is asking about."}
     with store.store_lock(store.repo_slug(repo_path)):
         entry, data, graveyard = _locate_inactive(repo_path, entry_id)
         if entry is None:
-            return {"ok": False, "proposal": None,
+            return {"ok": False, "proposal": None, "reason": "not_found",
                     "message": f"Decision {entry_id!r} not found, live or retired."}
         retired = graveyard is not None
-        if not retired and store.entry_status(entry) != "ignored":
-            return {"ok": False, "proposal": None,
+        state = inactive_state(entry, retired)
+        # BEFORE the live check, so a caller that expected an inactive decision hears that the
+        # record moved rather than that its own classification was wrong: it can replay, where
+        # "there is nothing to reconsider" is terminal.
+        if expected_target_state and expected_target_state != state:
+            return {"ok": False, "proposal": None, "reason": "stale_state",
+                    "message": f"Decision {entry['id'][:8]} is {state} now, not "
+                               f"{expected_target_state} - the reconsideration was formed "
+                               "against a state it has since left."}
+        if state == "live":
+            return {"ok": False, "proposal": None, "reason": "live",
                     "message": f"Decision {entry['id'][:8]} is live - there is nothing to "
                                "reconsider."}
+        basis = entry.get("current_revision_id") or ""
+        if expected_basis_revision_id and expected_basis_revision_id != basis:
+            return {"ok": False, "proposal": None, "reason": "stale_basis",
+                    "message": f"Decision {entry['id'][:8]} has advanced past the revision "
+                               "this reconsideration was formed against - it must be "
+                               "re-formed before it can be attached."}
         proposal = attach_reconsideration(
             entry, content=content.strip(), title=title, candidate_id=candidate_id,
             source_files=source_files, source=source)
         if proposal is None:
-            return {"ok": False, "proposal": None,
+            return {"ok": False, "proposal": None, "reason": "occupied",
                     "message": f"Decision {entry['id'][:8]} already carries a developer's "
                                "reconsideration - it keeps the slot."}
         if retired:
@@ -541,7 +587,7 @@ def propose_reconsideration(repo_path: str, entry_id: str, *, content: str, titl
         else:
             store.save(repo_path, data)
         store.touch_pending_review(repo_path)
-        return {"ok": True, "proposal": proposal,
+        return {"ok": True, "proposal": proposal, "reason": "",
                 "message": f"Reconsideration proposed for {entry['id'][:8]} - the decision "
                            "stays inactive until the developer restores it."}
 

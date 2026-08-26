@@ -105,6 +105,14 @@ _RECEIPT_LOG_CAP = 200
 # eventual lifecycle record read "superseded" instead of "retired").
 _LIFECYCLE_KINDS = frozenset({"retire", "replace"})
 
+# Reconsideration refusals that mean THE RECORD MOVED, not that there is nothing to ask. A
+# candidate meeting one of these is replayable: it stays held, unsettled and unproposed, and a
+# later pass re-forms it against whatever the decision is then. Every other refusal is terminal
+# for this candidate or means a review is already pending, and each is answered separately -
+# reading one `ok: False` as one fact is what filed a disposition for a review that never
+# happened (see `_lifecycle_awaiting_review`).
+_STALE_REFUSALS = frozenset({"stale_basis", "stale_state"})
+
 # Lifecycle record kinds that mean "this decision was retired". DERIVED, never respelled:
 # `lifecycle.py` owns the vocabulary it writes, and a local copy here would keep passing its
 # own tests while a rename there silently emptied this set. `restored` is excluded at the
@@ -215,6 +223,15 @@ def _projected(entry: dict, tombstoned: bool) -> dict:
         "source_files": entry.get("source_files") or [],
         "current_revision_id": entry.get("current_revision_id") or "",
     }
+
+
+def _basis_row(entry: dict, retired: bool) -> dict:
+    """What one snapshot knows about the record a proposal is formed against: the revision, and
+    the state. Kept as one row rather than two parallel maps because both answer for the same
+    decision at the same instant, and a caller that read one from this snapshot and the other
+    from a later one is the mismatch the reconsideration lane's expectations exist to refuse."""
+    return {"revision_id": str(entry.get("current_revision_id") or ""),
+            "state": lifecycle.inactive_state(entry, retired=retired)}
 
 
 def _retired_ids(tombstones: list) -> set:
@@ -533,7 +550,7 @@ def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
         "status": "pending",
         "kind": candidate.get("kind") or "",
         "target_decision_id": target,
-        "basis_revision_id": basis.get(target or "") or None,
+        "basis_revision_id": (basis.get(target or "") or {}).get("revision_id") or None,
         "event_ids": list(event_ids),
         "entry_id": "",
         "candidate": {
@@ -654,17 +671,37 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # defect this lane exists to close (OUTSTANDING-ISSUES item 7). Nothing is restored
         # here; a question is attached to the inactive decision and only a human answers it.
         target = str(candidate.get("target_decision_id") or "")
+        judged = basis.get(target) or {}
         result = lifecycle.propose_reconsideration(
             repo_path, target,
             content=candidate.get("content") or "",
             title=candidate.get("title") or "",
             candidate_id=candidate_id,
+            # The record this candidate was CLASSIFIED against, checked again under the store
+            # lock before anything attaches. Aggregation and the filesystem work in front of it
+            # deliberately hold no store lock, so the decision can move in between - and the
+            # proposal used to bind to whatever was current at attach time while the manifest
+            # stayed keyed to the earlier basis. The developer's answer then landed at the new
+            # revision, the held evidence went on waiting for one at the old, and nothing could
+            # ever settle it.
+            expected_basis_revision_id=str(judged.get("revision_id") or ""),
+            expected_target_state=str(judged.get("state") or ""),
             # CONFIRMED files only. The candidate's `possible_source_files` stop here, as they
             # do on every other lane: an uncertain path must never become a restoration anchor
             # (runbook invariant 6), and the manifest already carries them for the report.
             source_files=candidate.get("source_files") or [],
             source="ai")
         if not result["ok"]:
+            if result.get("reason") in _STALE_REFUSALS:
+                # The record moved between this pass's snapshot and the attach, so this
+                # candidate was formed against something that is no longer there. Nothing is
+                # settled, nothing is deleted and no `writes` record is made: the manifest
+                # stays `materializing`, which is the phase `_resume_holds` re-classifies
+                # against the CURRENT store under this same candidate id. So the question is
+                # asked once, at the new basis, on a later pass - never bound to a revision or
+                # a state its own evidence was never judged against.
+                receipt["incomplete"] = True
+                return
             if _reconsideration_awaiting_review(repo_path, target):
                 # Refused because a reconsideration for this target already sits on it - most
                 # often the one this very candidate attached before an interrupted pass. The
@@ -1137,8 +1174,12 @@ def _snapshot(repo_path: str) -> dict:
     * `filable` - what `store.record_evidence_summary` can actually write to; an `entry_id`
       outside it names a decision that is simply gone, which is a receipt with nowhere to go
       rather than a store failure to retry (see `_finalize`);
-    * `basis` - the revision a proposal is formed against, stamped on the manifest at hold time
-      so a resumed pass can tell what the candidate was judged against after HEAD moves.
+    * `basis` - per decision, the `revision_id` a proposal is formed against (stamped on the
+      manifest at hold time, so a resumed pass can tell what the candidate was judged against
+      after HEAD moves) plus the `state` it was judged in. Both travel together because both
+      are one snapshot's answer about one decision, and the reconsideration lane hands both to
+      `lifecycle.propose_reconsideration` so the attach under the store lock refuses outright
+      if either moved in between.
     """
     entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
     tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
@@ -1154,8 +1195,11 @@ def _snapshot(repo_path: str) -> dict:
         # Tombstones included: a reconsideration is formed against a RETIRED decision's own
         # revision, and a basis map that only knew live decisions stamped None on exactly the
         # manifests whose disposition rule reads it.
-        "basis": {str(e.get("id") or ""): str(e.get("current_revision_id") or "")
-                  for e in decisions + tombstones},
+        # `retired` is decided by WHICH FILE the entry came out of rather than by its
+        # `deleted_at` stamp, so a legacy tombstone written before that stamp existed still
+        # reads as retired instead of as an ignored decision that is somehow not in the store.
+        "basis": {**{str(e.get("id") or ""): _basis_row(e, False) for e in decisions},
+                  **{str(e.get("id") or ""): _basis_row(e, True) for e in tombstones}},
     }
 
 
