@@ -1008,8 +1008,9 @@ class TestFastPath:
         monkeypatch.setattr(store, "store_lock", _no)
         receipt = reconcile.reconcile_session(tmp_repo)
         assert receipt == {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0,
-                           "already_pending": 0, "duplicates": 0, "insufficient": 0,
-                           "incomplete": False, "skipped": False, "dry_run": False}
+                           "reconsidered": 0, "already_pending": 0, "duplicates": 0,
+                           "insufficient": 0, "incomplete": False, "skipped": False,
+                           "dry_run": False}
 
     def test_a_still_held_candidate_reads_the_store_but_never_locks_it(self, tmp_repo,
                                                                       monkeypatch):
@@ -1710,29 +1711,37 @@ class TestResumeDispositions:
         assert _dispositions_of(tmp_repo) == []          # nothing settled over a live review
         assert len(store.load(tmp_repo)["entries"]) == 1
 
-    def test_a_settled_candidate_naming_no_decision_keeps_its_evidence(self, tmp_repo):
-        """The backstop under Critical 2, and the pre-existing sink it also closes.
+    def test_a_directive_restating_an_ignored_decision_awaits_review_on_it(self, tmp_repo):
+        """The pre-existing sink of outstanding issue 7, now closed by the reconsideration
+        lane rather than merely survived.
 
-        The store's dedup is status-blind, so a restatement of an IGNORED decision is absorbed
-        as a recurrence and returns no entry id at all - while the aggregator, which is not
-        status-blind, classified it `new` and expected a review. Nothing can file a receipt for
-        that, so finalizing it deleted acknowledged evidence with no record anywhere. It stays
-        held and unattributed instead, which `contexer status` reports."""
+        The store's dedup is status-blind, so a restatement of an IGNORED decision used to be
+        absorbed as a recurrence returning no entry id at all - nothing could file a receipt
+        for it, so the hold stayed unattributed for good (`held_unattributed`). The aggregator
+        now names the inactive decision itself, so the candidate is a `reconsideration`
+        awaiting review ON that decision, with its evidence held against it."""
         entry_id = _stored_decision(tmp_repo)
         assert store.approve_decision(tmp_repo, entry_id, "ignore")[0]
         _emit(tmp_repo, "user_directive", STORED)
 
-        reconcile.reconcile_session(tmp_repo)
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert receipt["reconsidered"] == 1
 
         candidate_id, meta = _only_held(tmp_repo)
-        assert (meta["state"], meta["status"], meta["entry_id"]) == ("settled", "dismissed", "")
+        assert (meta["state"], meta["lane"], meta["entry_id"]) \
+            == ("pending_review", "reconsideration", entry_id)
         assert len(_held_events(tmp_repo, candidate_id)) == 1
         assert _dispositions_of(tmp_repo) == []
-        assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+        assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 0
 
-        # And it stays that way rather than being retried into a delete on the next pass.
-        reconcile.reconcile_session(tmp_repo)
+        # The decision stays exactly as inactive as it was - a question was attached, nothing
+        # was restored - and a second pass proposes nothing new.
+        (entry,) = store.load(tmp_repo)["entries"]
+        assert store.entry_status(entry) == "ignored"
+        assert entry["proposed_reconsideration"]["content"] == STORED
+        assert reconcile.reconcile_session(tmp_repo)["reconsidered"] == 0
         assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _only_held(tmp_repo)[0] == candidate_id
 
 
 class TestSessionScope:
@@ -1976,8 +1985,8 @@ class TestReceiptRendering:
 
     def _receipt(self, **overrides):
         return {"events_observed": 3, "proposed": 0, "lifecycle_proposed": 0,
-                "already_pending": 0, "duplicates": 0, "insufficient": 0, "dry_run": False,
-                "incomplete": False, **overrides}
+                "reconsidered": 0, "already_pending": 0, "duplicates": 0, "insufficient": 0,
+                "dry_run": False, "incomplete": False, **overrides}
 
     def test_a_proposed_retirement_says_it_retired_nothing(self):
         text = reconcile.format_receipt(self._receipt(lifecycle_proposed=2))
@@ -1986,6 +1995,14 @@ class TestReceiptRendering:
 
     def test_no_retirement_says_nothing_about_retiring(self):
         assert "nothing was retired" not in reconcile.format_receipt(self._receipt())
+
+    def test_a_reconsideration_says_it_restored_nothing(self):
+        text = reconcile.format_receipt(self._receipt(reconsidered=2))
+        assert "reconsiderations:         2" in text
+        assert "nothing was restored" in text
+
+    def test_no_reconsideration_says_nothing_about_restoring(self):
+        assert "nothing was restored" not in reconcile.format_receipt(self._receipt())
 
     def test_incomplete_is_stated(self):
         assert "incomplete" in reconcile.format_receipt(self._receipt(incomplete=True))

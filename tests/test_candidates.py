@@ -14,6 +14,8 @@ import json
 import random
 import uuid
 
+import pytest
+
 from contexer import candidates, evidence
 
 # 8 tokens: migrations must run before deploying postgres schema updates.
@@ -421,19 +423,91 @@ def test_support_events_with_no_seed_yield_one_insufficient_candidate_per_sessio
         [("a.py", "b.py"), ("c.py",)]
 
 
-def test_tombstoned_and_ignored_decisions_never_match_but_are_noted():
-    for decision in (_decision("dec-1", _SEED, tombstoned=True),
-                     _decision("dec-1", _SEED, status="ignored")):
+def test_a_directive_restating_an_inactive_decision_opens_a_reconsideration():
+    """Both halves of "inactive": a tombstoned decision and an ignored one. The candidate names
+    the ORIGINAL decision and the revision it was judged against, so the proposal lands on one
+    continuous identity rather than beside it as a second decision saying the same thing."""
+    for decision, state in ((_decision("dec-1", _SEED, tombstoned=True), "retired"),
+                            (_decision("dec-1", _SEED, status="ignored"), "ignored")):
         got = _only(candidates.aggregate_candidates([_ev("user_directive", _SEED)], [decision]))
-        assert (got["kind"], got["target_decision_id"]) == ("new", None)
-        assert any("retired or ignored" in u for u in got["uncertainties"])
+        assert (got["kind"], got["target_decision_id"]) == ("reconsider", "dec-1")
+        assert (got["target_state"], got["basis_revision_id"]) == (state, "rev-dec-1")
+        assert any("reconsiders dec-1" in u for u in got["uncertainties"])
+
+
+@pytest.mark.parametrize("kind", ["agent_conclusion", "decision_repeated"])
+def test_only_a_developers_directive_opens_a_reconsideration(kind):
+    """The opening gate. An agent conclusion restating an ignored decision - even one that
+    scores over the review bar - must not raise the question, and must not NAME the decision
+    either: a note pointing a reviewer at it would be the reopening itself, written in prose by
+    nobody."""
+    got = _only(candidates.aggregate_candidates(
+        [_ev(kind, _SEED + ". It was agreed in the design review.")],
+        [_decision("dec-1", _SEED, status="ignored")]))
+    assert got["kind"] != "reconsider" and got["target_decision_id"] is None
+    assert not any("dec-1" in u for u in got["uncertainties"])
+
+
+def test_agent_evidence_says_it_saw_an_inactive_restatement_without_naming_it():
+    """The note that replaces the reconsideration for agent-only evidence: honest that the
+    restatement was recognized, and useless as a pointer, which is the point."""
+    got = _only(candidates.aggregate_candidates(
+        [_ev("agent_conclusion", _SEED + ". It was agreed in the design review.")],
+        [_decision("dec-1", _SEED, status="ignored")]))
+    assert any("no longer active" in u for u in got["uncertainties"])
+
+
+def test_an_agent_event_supports_a_reconsideration_a_directive_already_opened():
+    """The other side of the gate: support may not OPEN one, but it must not veto one either.
+    A conclusion that merges into a directive's group leaves the group opening exactly the
+    reconsideration the directive earned."""
+    got = _only(candidates.aggregate_candidates(
+        [_ev("agent_conclusion", _SEED, at="2026-08-24T10:00:00+00:00"),
+         _ev("user_directive", _SEED, session="s2", at="2026-08-24T10:05:00+00:00")],
+        [_decision("dec-1", _SEED, status="ignored")]))
+    assert (got["kind"], got["target_decision_id"]) == ("reconsider", "dec-1")
 
 
 def test_a_live_decision_wins_over_a_retired_one_with_the_same_content():
+    """A simultaneous live match at least as strong stays a live duplicate: answering it
+    resurrects nothing, so it is the conservative read of the same evidence."""
     got = _only(candidates.aggregate_candidates(
         [_ev("user_directive", _SEED)],
         [_decision("dec-dead", _SEED, tombstoned=True), _decision("dec-live", _SEED)]))
     assert (got["kind"], got["target_decision_id"]) == ("duplicate", "dec-live")
+
+
+def test_the_reconsideration_id_is_bound_to_the_basis_revision():
+    """Reconsidering revision 3 of a retired decision is a different question from
+    reconsidering revision 5, and `held/<candidate-id>/` is what tells a reviewer which one
+    they were shown - so the basis joins the identity."""
+    events = [_ev("user_directive", _SEED)]
+    old = _decision("dec-1", _SEED, status="ignored")
+    new = {**old, "current_revision_id": "rev-dec-1-v2"}
+    assert (_only(candidates.aggregate_candidates(events, [old]))["candidate_id"]
+            != _only(candidates.aggregate_candidates(events, [new]))["candidate_id"])
+
+
+def test_a_prohibition_restating_a_stored_prohibition_is_not_a_retirement():
+    """The candidate-vs-store half of ledger ruling D1. `_negates` matches "never" anywhere, so
+    a prohibition restating a stored prohibition in the 0.5-0.7 band read as a proposal to
+    RETIRE the very rule it repeats - the same self-negation defect that was fixed for in-group
+    scoring, one comparison over."""
+    got = _only(candidates.aggregate_candidates(
+        [_ev("user_directive", _PARTIAL_NEGATED)],
+        # 0.667 against `_PARTIAL_NEGATED`: the same 0.5-0.7 band the retire branch reads, and
+        # both sides are prohibitions.
+        [_decision("dec-1", "never deploy postgres upgrades before checking the staging "
+                            "replica")]))
+    assert got["kind"] == "update" and got["target_decision_id"] == "dec-1"
+
+
+def test_a_genuine_negation_of_a_stored_rule_still_proposes_retirement():
+    """The other end of the same fix, so polarity is measured on both: a seed that FLIPS the
+    stored decision's polarity in that band is the reversal `retire` exists for."""
+    got = _only(candidates.aggregate_candidates(
+        [_ev("user_directive", _PARTIAL_NEGATED)], [_decision("dec-1", _SEED)]))
+    assert got["kind"] == "retire" and got["target_decision_id"] == "dec-1"
 
 
 # ── subtype ──────────────────────────────────────────────────────────────────────

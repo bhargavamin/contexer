@@ -210,24 +210,28 @@ def test_an_unrelated_edit_before_the_directive_never_anchors_it():
     assert leftover["kind"] == "insufficient" and leftover["source_files"] == ["README.md"]
 
 
-def test_a_restated_inactive_decision_is_classified_as_new_not_matched_back():
-    """Scenarios 7 and 8 at the AGGREGATOR, which is already correct: a restatement of an
-    ignored or retired decision comes back as `new` carrying a note naming what it restates.
-    The defect outstanding issue 7 describes is downstream of here."""
-    for name, dead_id in (("07-ignored-decision-restated-by-a-directive", "dec-ignored"),
-                          ("08-tombstoned-decision-restated-by-a-directive", "dec-retired")):
-        (candidate,) = _aggregate(_load(name))
-        assert candidate["kind"] == "new" and candidate["target_decision_id"] is None
+def test_a_restated_inactive_decision_opens_a_reconsideration_on_that_decision():
+    """Scenarios 7 and 8 at the AGGREGATOR. A restatement of an ignored or retired decision is
+    neither a duplicate of it nor a fresh decision beside it: it names the ORIGINAL decision
+    and the revision the question is asked against, which is what lets one continuous identity
+    carry the revisions, the retirement record and the reconsideration receipts together.
+
+    This asserted `new` with a note until Task 04's lane existed - the aggregator's half of
+    outstanding issue 7 was correct as far as it went, and stopped one step short of a lane
+    anything downstream could route."""
+    for name, dead_id, state in (
+            ("07-ignored-decision-restated-by-a-directive", "dec-ignored", "ignored"),
+            ("08-tombstoned-decision-restated-by-a-directive", "dec-retired", "retired")):
+        doc = _load(name)
+        (candidate,) = candidates.aggregate_candidates(doc["events"],
+                                                       doc["decisions"])["candidates"]
+        assert candidate["kind"] == "reconsider", name
+        assert candidate["target_decision_id"] == dead_id
+        assert candidate["target_state"] == state
+        assert candidate["basis_revision_id"] == f"rev-{dead_id}"
         assert any(dead_id in note for note in candidate["uncertainties"]), name
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 7, agent-only half, owned by Task 04's reconsideration lane: the "
-    "aggregator opens kind=new at score 25 from agent-only evidence against an inactive "
-    "decision, carrying 'restates dec-ignored, which was retired or ignored - review it as "
-    "new'. A restatement inside an agent_conclusion has two sentences, so `_has_rationale` "
-    "scores it 25 - exactly the review bar - and it reopens the ignored decision with no "
-    "developer having said anything."))
 def test_agent_only_evidence_cannot_reopen_an_inactive_decision():
     """Scenario 9: the SAME inactive decision as scenarios 7 and 8, named only by an agent.
 
@@ -236,23 +240,25 @@ def test_agent_only_evidence_cannot_reopen_an_inactive_decision():
     decision leaves the `decisions` array inert and measures nothing.
 
     The property, and the one Task 04's lane is designed on: only a developer saying it out
-    loud reopens an inactive decision. Asserted as "does not reopen" rather than as a golden,
-    because whether agent-only evidence should come back `insufficient`, `new` without the
-    reconsideration note, or in a lane of its own is Task 04's call.
+    loud reopens an inactive decision. Task 04 answered the open question this test left with
+    `new` and NO note naming the decision - a pointer at the inactive decision would be the
+    reopening itself, written in prose by nobody - so the assertion below is unchanged and the
+    xfail marker it carried is gone.
     """
     doc = _load("09-inactive-decision-mentioned-by-a-conclusion")
     (candidate,) = _aggregate(doc)
-    reopens = (candidate["kind"] == "new"
+    reopens = ((candidate["kind"] in ("new", "reconsider"))
                and any("dec-ignored" in note for note in candidate["uncertainties"]))
     assert not reopens, (
         f"agent-only evidence reopened dec-ignored: {candidate['kind']} at "
         f"{candidate['score']} - {candidate['uncertainties']}")
+    assert candidate["target_decision_id"] is None
 
 
 def test_a_human_directive_is_what_reopens_an_inactive_decision():
     """The passing side of the distinction above, so it is measured on both ends rather than
-    asserted on one. The identical restatement carried by a `user_directive` scores 50 and is
-    flagged as a reconsideration of the ignored decision - which is correct and must stay."""
+    asserted on one. The identical restatement carried by a `user_directive` scores 50 and
+    opens a reconsideration of the ignored decision - which is correct and must stay."""
     (directive,) = _aggregate(_load("07-ignored-decision-restated-by-a-directive"))
     (conclusion,) = _aggregate(_load("09-inactive-decision-mentioned-by-a-conclusion"))
     assert directive["score"] == 50 and conclusion["score"] == 25
@@ -502,31 +508,10 @@ def test_restating_an_ignored_decision_is_never_absorbed_as_a_recurrence(tmp_rep
     assert store.entry_status(entry) == "ignored"
 
 
-def _replay_inactive_twin(repo: str, *, retire: bool) -> None:
-    """Store the rule, make it inactive, then restate it as session evidence.
-
-    The requirement either way: the restatement reaches the developer. Something must be
-    reviewable afterwards - a fresh pending decision, a lifecycle proposal on the dead one,
-    or at the very least a held candidate still carrying its raw evidence - and a receipt
-    must exist. Deliberately not pinned to ONE of those shapes: Task 04 owns the design, and
-    this asserts the property rather than pre-judging the lane.
-
-    These two carried `xfail(strict=True)` for outstanding issue 7 until the durable-state
-    work's fix round: the store's status-blind dedup absorbs the restatement as a recurrence
-    and returns no entry id, and `reconcile._finalize` then DELETED the raw events having
-    filed no receipt anywhere. It no longer deletes what it cannot file a receipt against, so
-    the weak limb of the property above ("at the very least a held candidate still carrying
-    its raw evidence") now holds and the markers are gone.
-
-    **Task 04 still owns the rest of issue 7.** The evidence survives, but the restatement is
-    still not SURFACED: no pending decision, no lifecycle proposal, and the hold names no
-    decision at all, so it counts as `held_unattributed` and nothing will ever settle it. That
-    is a strictly better failure than silent destruction, and it is still a failure. Asserting
-    the surfacing here would pre-judge the lane, which is the one thing this replay refuses to
-    do - so it stays a property test and Task 04 strengthens it.
-    """
+def _inactive_twin(repo: str, *, retire: bool) -> str:
+    """One stored rule, made inactive the way the two halves of issue 7 describe."""
     # RULE on both sides, deliberately: the defect is the STORE's own status-blind dedup
-    # (`_find_match` / `_is_tombstoned`), which runs on a different tokenizer from the
+    # (`_find_match` / `_tombstoned_match`), which runs on a different tokenizer from the
     # aggregator's, so a paraphrase would land as a fresh entry and quietly test nothing.
     ok, entry_id = store.update_decision(repo, RULE, "sess-0", "constraint",
                                          created_by="human")
@@ -535,17 +520,52 @@ def _replay_inactive_twin(repo: str, *, retire: bool) -> None:
         assert lifecycle.retire_decision(repo, entry_id, "superseded by the codegen step")[0]
     else:
         assert store.approve_decision(repo, entry_id, "ignore")[0]
+    return entry_id
 
+
+def _inactive_entry(repo: str, entry_id: str) -> dict:
+    """The decision, wherever it currently lives - live store or tombstone sidecar."""
+    for source in (store.load(repo), store.load_deleted(repo)):
+        found = next((e for e in source["entries"] if e.get("id") == entry_id), None)
+        if found is not None:
+            return found
+    raise AssertionError(f"{entry_id} is in neither the live store nor the sidecar")
+
+
+def _replay_inactive_twin(repo: str, *, retire: bool) -> None:
+    """Store the rule, make it inactive, then restate it as session evidence.
+
+    The requirement either way: the restatement REACHES the developer, on the original
+    decision's own identity, with its raw evidence still held against the question.
+
+    These two carried `xfail(strict=True)` for outstanding issue 7 until the durable-state
+    work's fix round, which stopped `reconcile._finalize` deleting evidence it could file no
+    receipt against - the evidence survived, but the restatement was still not surfaced: no
+    proposal anywhere and a hold naming no decision, counted as `held_unattributed` forever.
+    The reconsideration lane closes that half, so this asserts the surfacing rather than the
+    weaker "something survived" property it was written as.
+    """
+    entry_id = _inactive_twin(repo, retire=retire)
     evidence.emit_hook_event(repo, "user_directive", session_id="sess-a", source="replay",
                              summary=RULE)
-    reconcile.reconcile_session(repo)
+    receipt = reconcile.reconcile_session(repo)
 
-    live = [e for e in store.load(repo)["entries"] if store.entry_status(e) != "ignored"]
-    held = spool.held_candidates(repo)
-    summaries = [s for e in store.load(repo)["entries"]
-                 for s in e.get("evidence_summary") or []]
-    assert live or held or summaries, (
-        "the restatement of an inactive decision left nothing to review and no receipt")
+    assert receipt["reconsidered"] == 1
+    # ONE question, on the decision that was already there - never a second decision beside it.
+    entry = _inactive_entry(repo, entry_id)
+    assert entry["proposed_reconsideration"]["content"] == RULE
+    assert len(store.load(repo)["entries"]) + len(store.load_deleted(repo)["entries"]) == 1
+    assert store.entry_status(entry) == ("approved" if retire else "ignored")
+    assert bool(entry.get("deleted_at")) is retire      # a retired twin stays tombstoned
+
+    # It is reviewable, one id at a time, and its raw evidence is held against the question.
+    assert [e["id"] for e in store.get_pending_decisions(repo)] == [entry_id]
+    assert f'reconsider_decision(entry_id="{entry_id[:8]}"' in store.format_pending_review(repo)
+    ((candidate_id, meta),) = spool.held_candidates(repo).items()
+    assert (meta["lane"], meta["entry_id"], meta["state"]) \
+        == ("reconsideration", entry_id, "pending_review")
+    assert len(_held_event_files(repo, candidate_id)) == 1
+    assert spool.evidence_diagnostics(repo)["held_unattributed"] == 0
 
 
 # ── crash windows and concurrency (scenarios 10-13) ──────────────────────────────
@@ -867,6 +887,164 @@ def test_no_raw_evidence_is_removed_when_the_summary_itself_fails(tmp_repo, monk
 
     assert _held_event_files(tmp_repo, candidate_id)
     assert not (store.load(tmp_repo)["entries"][0].get("evidence_summary") or [])
+
+
+# ── the reconsideration lane, end to end (outstanding issue 7) ───────────────────
+
+def _one_hold(repo: str) -> tuple:
+    ((candidate_id, meta),) = spool.held_candidates(repo).items()
+    return candidate_id, meta
+
+
+def _summaries(repo: str, entry_id: str) -> list:
+    return [s["disposition"]
+            for s in _inactive_entry(repo, entry_id).get("evidence_summary") or []]
+
+
+def _restated(repo: str, *, retire: bool) -> str:
+    """An inactive twin with a reconsideration proposed and its evidence held."""
+    entry_id = _inactive_twin(repo, retire=retire)
+    evidence.emit_hook_event(repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+    assert reconcile.reconcile_session(repo)["reconsidered"] == 1
+    return entry_id
+
+
+@pytest.mark.parametrize("retire", [False, True])
+def test_restoring_settles_the_candidate_and_keeps_the_receipt(tmp_repo, retire):
+    """The way back out. Approval in this lane is recognized ONLY by a completed `restored`
+    record for the basis revision - never by the decision merely being live again - and the
+    compact summary lands on that same decision before its raw evidence is removed."""
+    entry_id = _restated(tmp_repo, retire=retire)
+    candidate_id, _meta = _one_hold(tmp_repo)
+    before = _inactive_entry(tmp_repo, entry_id)["revisions"]
+
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "restore")[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    entry = _inactive_entry(tmp_repo, entry_id)
+    assert entry["id"] == entry_id and entry["revisions"] == before
+    assert "restored" in [r["kind"] for r in entry["lifecycle"]]
+    assert _summaries(tmp_repo, entry_id) == ["approved"]
+    assert spool.held_candidates(tmp_repo) == {}
+    assert not _held_event_files(tmp_repo, candidate_id)
+
+
+def test_dismissing_settles_the_candidate_against_a_decision_that_stays_inactive(tmp_repo):
+    entry_id = _restated(tmp_repo, retire=False)
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "dismiss")[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    assert store.entry_status(_inactive_entry(tmp_repo, entry_id)) == "ignored"
+    assert _summaries(tmp_repo, entry_id) == ["dismissed"]
+    assert spool.held_candidates(tmp_repo) == {}
+
+
+def test_a_skipped_reconsideration_keeps_its_evidence_held(tmp_repo):
+    """`skip` is not a disposition. Nothing settles, so nothing is deleted - the same rule
+    that keeps a held candidate exempt from retention until somebody actually answers."""
+    entry_id = _restated(tmp_repo, retire=False)
+    candidate_id, _meta = _one_hold(tmp_repo)
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "skip")[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    assert len(_held_event_files(tmp_repo, candidate_id)) == 1
+    assert _summaries(tmp_repo, entry_id) == []
+
+
+def test_a_crash_before_the_proposal_replays_into_exactly_one_question(tmp_repo,
+                                                                       monkeypatch):
+    """Crash boundary 1 - the events are held and the proposal never landed. The replay
+    re-classifies the HELD events against the current store under the SAME candidate id, so
+    the question is asked once, not twice."""
+    entry_id = _inactive_twin(tmp_repo, retire=True)
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+    with monkeypatch.context() as crashed:
+        crashed.setattr(lifecycle, "propose_reconsideration", _crash)
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+    candidate_id, meta = _one_hold(tmp_repo)
+    assert meta["state"] == "materializing"
+    assert not _inactive_entry(tmp_repo, entry_id).get("proposed_reconsideration")
+
+    assert reconcile.reconcile_session(tmp_repo)["reconsidered"] == 1
+
+    assert list(spool.held_candidates(tmp_repo)) == [candidate_id]
+    assert _inactive_entry(tmp_repo, entry_id)["proposed_reconsideration"]["content"] == RULE
+    assert len(_held_event_files(tmp_repo, candidate_id)) == 1
+
+
+def test_a_crash_at_the_summary_keeps_the_raw_evidence_and_files_it_once(tmp_repo,
+                                                                        monkeypatch):
+    """Crash boundaries 3 and 4 together, in the order the finalize is written: a summary that
+    did not land leaves the held evidence exactly where it is, and a cleanup that crashed
+    after a durable summary must not file it a second time."""
+    entry_id = _restated(tmp_repo, retire=False)
+    candidate_id, _meta = _one_hold(tmp_repo)
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "restore")[0]
+
+    with monkeypatch.context() as failed:
+        failed.setattr(store, "record_evidence_summary", lambda *_a, **_k: False)
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+    assert _held_event_files(tmp_repo, candidate_id)
+    assert _summaries(tmp_repo, entry_id) == []
+
+    with monkeypatch.context() as crashed:
+        crashed.setattr(spool, "finalize_candidate_evidence", _crash)
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+    assert _held_event_files(tmp_repo, candidate_id), "evidence deleted before its receipt"
+    assert _summaries(tmp_repo, entry_id) == ["approved"]
+
+    reconcile.reconcile_session(tmp_repo)
+
+    assert spool.held_candidates(tmp_repo) == {}
+    assert _summaries(tmp_repo, entry_id) == ["approved"], "the receipt was filed twice"
+
+
+def test_a_stale_basis_refuses_restoration_and_the_evidence_stays_held(tmp_repo):
+    """A verdict passed on text nobody read in this form is refused, exactly as the retirement
+    lane refuses one - and refusing settles nothing, so the evidence is still there for the
+    fresh question that replaces it."""
+    entry_id = _restated(tmp_repo, retire=False)
+    candidate_id, _meta = _one_hold(tmp_repo)
+    data = store.load(tmp_repo)
+    entry = next(e for e in data["entries"] if e["id"] == entry_id)
+    store.revisions.append_revision(entry, RULE + " Also update the docs.", source="human")
+    store.save(tmp_repo, data)
+
+    ok, message = lifecycle.reconsider_decision(tmp_repo, entry_id, "restore")
+    assert not ok and "Cannot restore" in message
+    reconcile.reconcile_session(tmp_repo)
+
+    assert store.entry_status(_inactive_entry(tmp_repo, entry_id)) == "ignored"
+    assert len(_held_event_files(tmp_repo, candidate_id)) == 1
+    assert _summaries(tmp_repo, entry_id) == []
+
+
+def test_a_pending_reconsideration_never_injects_and_never_gates_a_commit(tmp_repo):
+    """Runbook invariant 5 for this lane. The proposal is unreviewed content on a decision the
+    developer switched off, so it must reach neither a session's context nor a blocking policy
+    verdict until they explicitly restore it - and restoring an ignored twin returns it
+    PENDING, which is still excluded from both."""
+    entry_id = _restated(tmp_repo, retire=False)
+    entry = _inactive_entry(tmp_repo, entry_id)
+    entry["guard_check"] = {"type": "regex", "pattern": "client", "flags": "", "paths": "",
+                            "message": "no", "armed_at": "t"}
+
+    request = {"intent": "commit", "operation": "commit", "repo_key": tmp_repo,
+               "files": [GENERATED],
+               "artifact": {"kind": "diff", "content": "+ import client\n"}}
+    assert policy.select_policies([entry], request) == []
+    assert RULE not in store.get_context(tmp_repo)
+    assert "generated" not in store.get_context(tmp_repo)
+    assert RULE not in store.get_context_for_prompt(tmp_repo, "why is the client generated?")
+    assert entry_id[:8] not in store.session_start_payload(tmp_repo)
+
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "restore")[0]
+    restored = _inactive_entry(tmp_repo, entry_id)
+    restored["guard_check"] = entry["guard_check"]
+    assert store.entry_status(restored) == "pending_approval"
+    assert policy.select_policies([restored], request) == []
 
 
 def test_the_second_simultaneous_reconciliation_does_nothing_and_says_so(tmp_repo):

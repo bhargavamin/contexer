@@ -691,6 +691,280 @@ class TestCli:
         assert "STALE" in capsys.readouterr().out
 
 
+# ── the reconsideration lane (hardening Task 04) ──────────────────────────────
+
+RESTATED = "Use Postgres for the decision store - SQLite cannot handle concurrent sessions"
+
+
+def _ignored(repo: str) -> str:
+    eid = _approved(repo)
+    assert store.approve_decision(repo, eid, "ignore")[0]
+    return eid
+
+
+def _retired(repo: str) -> str:
+    eid = _approved(repo)
+    assert lifecycle.retire_decision(repo, eid, "the new store supersedes it")[0]
+    return eid
+
+
+def _reconsider(repo: str, eid: str, *, content: str = RESTATED, source: str = "ai",
+                candidate_id: str = "cand-1") -> dict:
+    result = lifecycle.propose_reconsideration(repo, eid, content=content,
+                                               title="Use Postgres for the decision store",
+                                               candidate_id=candidate_id, source=source)
+    assert result["ok"], result["message"]
+    return result["proposal"]
+
+
+def _tombstone(repo: str, eid: str) -> dict:
+    return next(e for e in store.load_deleted(repo)["entries"] if e["id"] == eid)
+
+
+class TestReconsiderationProposal:
+    """A restated INACTIVE decision becomes a question ON that decision, never a second
+    decision beside it and never a restoration."""
+
+    def test_an_ignored_decision_keeps_its_status_and_gains_one_question(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        proposal = _reconsider(tmp_repo, eid)
+        entry = _entry(tmp_repo, eid)
+        assert store.entry_status(entry) == "ignored"
+        assert entry["proposed_reconsideration"] == proposal
+        assert proposal["target_state"] == "ignored"
+        assert proposal["basis_revision_id"] == entry["current_revision_id"]
+
+    def test_a_retired_decision_is_questioned_on_its_tombstone(self, tmp_repo):
+        eid = _retired(tmp_repo)
+        proposal = _reconsider(tmp_repo, eid)
+        # It must NOT come back into the live store just to carry the question.
+        assert store.load(tmp_repo)["entries"] == []
+        assert _tombstone(tmp_repo, eid)["proposed_reconsideration"] == proposal
+        assert proposal["target_state"] == "retired"
+
+    def test_a_live_decision_has_nothing_to_reconsider(self, tmp_repo):
+        eid = _approved(tmp_repo)
+        result = lifecycle.propose_reconsideration(tmp_repo, eid, content=RESTATED,
+                                                   title="t", candidate_id="c")
+        assert not result["ok"] and "is live" in result["message"]
+        assert not _entry(tmp_repo, eid).get("proposed_reconsideration")
+
+    def test_a_second_automated_question_never_displaces_the_first(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        first = _reconsider(tmp_repo, eid)
+        again = lifecycle.propose_reconsideration(tmp_repo, eid, content=RESTATED, title="t",
+                                                  candidate_id="c2")
+        assert not again["ok"]
+        assert _entry(tmp_repo, eid)["proposed_reconsideration"] == first
+
+    def test_a_developers_question_displaces_an_automated_one_and_archives_it(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        first = _reconsider(tmp_repo, eid)
+        second = _reconsider(tmp_repo, eid, source="human", candidate_id="c2")
+        entry = _entry(tmp_repo, eid)
+        assert entry["proposed_reconsideration"] == second
+        assert [p["proposal_id"] for p in entry["superseded_reconsiderations"]] \
+            == [first["proposal_id"]]
+
+    def test_the_two_lanes_do_not_touch_each_other(self, tmp_repo):
+        """A reconsideration answers a different question from a Suggested Update, so neither
+        slot may read or write the other - the rule the retirement lane already holds."""
+        eid = _ignored(tmp_repo)
+        _with_update(tmp_repo, eid)
+        _reconsider(tmp_repo, eid)
+        entry = _entry(tmp_repo, eid)
+        assert entry["proposed_revision"] and entry["proposed_reconsideration"]
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")[0]
+        assert _entry(tmp_repo, eid)["proposed_revision"]
+
+
+class TestReconsiderationAnswers:
+
+    def test_restore_of_an_ignored_twin_comes_back_pending_not_trusted(self, tmp_repo):
+        """Nothing records what an ignored decision was BEFORE it was switched off, so
+        restoring it approved would be a guess dressed as a ratification - and a guess that
+        arms the commit-time guard."""
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "restore")
+        assert ok and "PENDING" in message
+        entry = _entry(tmp_repo, eid)
+        assert store.entry_status(entry) == "pending_approval"
+        assert entry.get("approved_by") is None
+        assert not entry.get("proposed_reconsideration")
+
+    def test_restore_preserves_the_id_the_revisions_and_the_retirement_history(self, tmp_repo):
+        eid = _retired(tmp_repo)
+        before = _tombstone(tmp_repo, eid)["revisions"]
+        _reconsider(tmp_repo, eid)
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "restore")[0]
+        entry = _entry(tmp_repo, eid)
+        assert entry["id"] == eid and entry["revisions"] == before
+        assert [r["kind"] for r in entry["lifecycle"]] == ["retired", "restored"]
+        assert store.entry_status(entry) == "approved"      # its own prior status, kept
+        assert store.load_deleted(tmp_repo)["entries"] == []
+
+    def test_restore_edit_appends_one_revision_and_one_restored_record(self, tmp_repo):
+        eid = _retired(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "restore_edit",
+                                             "Use Postgres, with pgbouncer in front")[0]
+        entry = _entry(tmp_repo, eid)
+        assert [r["version_number"] for r in entry["revisions"]] == [1, 2]
+        assert entry["revisions"][-1]["source"] == "human"
+        assert revisions.current_content(entry) == "Use Postgres, with pgbouncer in front"
+        assert [r["kind"] for r in entry["lifecycle"]] == ["retired", "restored"]
+        assert (store.entry_status(entry), entry["approved_by"]) == ("approved", "human")
+
+    def test_restore_edit_without_wording_is_refused(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "restore_edit", "  ")
+        assert not ok and "needs the developer's wording" in message
+        assert store.entry_status(_entry(tmp_repo, eid)) == "ignored"
+
+    def test_skip_writes_nothing_and_keeps_the_question(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        proposal = _reconsider(tmp_repo, eid)
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "skip")[0]
+        entry = _entry(tmp_repo, eid)
+        assert entry["proposed_reconsideration"] == proposal
+        assert entry.get("reconsideration_history") is None
+
+    def test_dismiss_keeps_it_inactive_and_leaves_a_durable_receipt(self, tmp_repo):
+        eid = _retired(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")[0]
+        tombstone = _tombstone(tmp_repo, eid)
+        assert store.load(tmp_repo)["entries"] == []        # still inactive
+        assert not tombstone.get("proposed_reconsideration")
+        (row,) = tombstone["reconsideration_history"]
+        assert (row["disposition"], row["candidate_id"], row["content"]) \
+            == ("dismissed", "cand-1", RESTATED)
+
+    def test_a_later_directive_may_raise_the_question_again_after_a_dismissal(self, tmp_repo):
+        """Dismiss means "not now". A NEW restatement carries a new evidence candidate, so it
+        gets a new question - and the reviewer sees that it was asked before."""
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")[0]
+        _reconsider(tmp_repo, eid, candidate_id="cand-2")
+        entry = _entry(tmp_repo, eid)
+        assert entry["proposed_reconsideration"]["candidate_id"] == "cand-2"
+        assert len(entry["reconsideration_history"]) == 1
+        assert "asked before: dismissed 1 time(s)" in "\n".join(
+            lifecycle.reconsideration_review_lines(entry, eid[:8]))
+
+    def test_an_unknown_action_writes_nothing(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        proposal = _reconsider(tmp_repo, eid)
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "approve")
+        assert not ok and "Unsupported reconsideration action" in message
+        assert _entry(tmp_repo, eid)["proposed_reconsideration"] == proposal
+
+
+class TestReconsiderationStaleness:
+    """A verdict must be passed on the version the developer was shown."""
+
+    def test_a_moved_revision_refuses_restoration_but_not_dismissal(self, tmp_repo):
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        data = store.load(tmp_repo)
+        revisions.append_revision(next(e for e in data["entries"] if e["id"] == eid),
+                                  "Use Postgres, reworded", source="human")
+        store.save(tmp_repo, data)
+
+        assert lifecycle.reconsideration_stale(_entry(tmp_repo, eid))
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "restore")
+        assert not ok and "Cannot restore" in message
+        assert store.entry_status(_entry(tmp_repo, eid)) == "ignored"
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")[0]
+
+    def test_a_decision_restored_by_another_route_is_stale(self, tmp_repo):
+        """The other half: a retired decision brought back by `restore_decision` while the
+        question sat is no longer the retired decision the question was about."""
+        eid = _retired(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        assert lifecycle.restore_decision(tmp_repo, eid)[0]
+        entry = _entry(tmp_repo, eid)
+        assert lifecycle.reconsideration_stale(entry)
+        assert not lifecycle.reconsider_decision(tmp_repo, eid, "restore")[0]
+
+    def test_a_concurrent_restore_never_leaves_two_live_copies(self, tmp_repo):
+        """The crash window `_restore_unlocked` mirrors, reached from this lane: the live
+        store is written first, so an interrupted restore leaves the entry in BOTH files and
+        the reconsideration answer must drop the stale tombstone rather than append a second
+        copy of the same id."""
+        eid = _retired(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        graveyard = store.load_deleted(tmp_repo)
+        data = store.load(tmp_repo)
+        data["entries"].append(json.loads(json.dumps(graveyard["entries"][0])))
+        store.save(tmp_repo, data)
+
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")
+        assert ok, message
+        assert [e["id"] for e in store.load(tmp_repo)["entries"]] == [eid]
+        assert lifecycle.restore_decision(tmp_repo, eid)[0]
+        assert [e["id"] for e in store.load(tmp_repo)["entries"]] == [eid]
+
+
+class TestReconsiderationReviewSurfaces:
+
+    def test_both_halves_reach_review_pending_one_id_at_a_time(self, tmp_repo):
+        ignored_id = _ignored(tmp_repo)
+        retired_id = _approved(tmp_repo, OTHER, subtype="convention", session="s3")
+        assert lifecycle.retire_decision(tmp_repo, retired_id, "no longer relevant")[0]
+        _reconsider(tmp_repo, ignored_id)
+        _reconsider(tmp_repo, retired_id, content=OTHER, candidate_id="cand-2")
+
+        assert {e["id"] for e in store.get_pending_decisions(tmp_repo)} \
+            == {ignored_id, retired_id}
+        text = store.format_pending_review(tmp_repo)
+        for eid in (ignored_id, retired_id):
+            assert f'reconsider_decision(entry_id="{eid[:8]}"' in text
+        assert "this ignored decision was restated" in text
+        assert "this retired decision was restated" in text
+        # An inactive decision is not approvable: `approve_decision` must not be offered.
+        assert "approve_decision" not in text
+
+    def test_the_mcp_tool_answers_one_id(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(server.store, "resolve_repo", lambda _="": tmp_repo)
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        assert "one at a time" in server.reconsider_decision(f"{eid},{eid}", "restore")
+        assert store.entry_status(_entry(tmp_repo, eid)) == "ignored"
+        assert "Restored" in server.reconsider_decision(eid[:8], "restore")
+        assert store.entry_status(_entry(tmp_repo, eid)) == "pending_approval"
+
+    @pytest.mark.parametrize("keys,expected", [
+        (["Y", "Q"], "pending_approval"),
+        (["D", "Q"], "ignored"),
+        (["S", "Q"], "ignored"),
+    ])
+    def test_the_cli_review_loop_answers_a_reconsideration(self, keys, expected, tmp_repo,
+                                                           monkeypatch, capsys):
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        monkeypatch.setattr(store, "git_root", lambda _: tmp_repo)
+        _answer(monkeypatch, keys)
+        cli.review()
+        assert "You restated this ignored decision" in capsys.readouterr().out
+        assert store.entry_status(_entry(tmp_repo, eid)) == expected
+
+    def test_the_cli_restore_with_edits_appends_the_developers_wording(self, tmp_repo,
+                                                                       monkeypatch, capsys):
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        monkeypatch.setattr(store, "git_root", lambda _: tmp_repo)
+        _answer(monkeypatch, ["E", "Use Postgres with pgbouncer", "Q"])
+        cli.review()
+        assert "1 restored" in capsys.readouterr().out
+        entry = _entry(tmp_repo, eid)
+        assert revisions.current_content(entry) == "Use Postgres with pgbouncer"
+        assert (store.entry_status(entry), entry["approved_by"]) == ("approved", "human")
+
+
 # ── the extraction seam ───────────────────────────────────────────────────────
 
 # Every public name the lifecycle lane owns. A name reappearing as a top-level def in
@@ -700,6 +974,8 @@ OWNED = frozenset({
     "lifecycle_record", "attach_lifecycle_proposal", "lifecycle_proposal_stale",
     "propose_lifecycle", "dismiss_lifecycle", "tombstone_entry", "retire_decision",
     "restore_decision", "review_lines",
+    "attach_reconsideration", "reconsideration_stale", "propose_reconsideration",
+    "pending_reconsiderations", "reconsider_decision", "reconsideration_review_lines",
 })
 
 

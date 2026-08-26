@@ -2603,8 +2603,15 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                                overlap=_match_overlap(content, match))
             save(repo_path, data)
             return False, None, {}
-        if _is_tombstoned(repo_path, content):
-            return False, None, {}          # discarded silently, like any other filtered capture
+        tombstoned = _tombstoned_match(repo_path, content)
+        if tombstoned is not None:
+            # Discarded silently as far as STORAGE goes, like any other filtered capture - but
+            # REPORTED, exactly as the ignored branch above is, so the reconsideration lane and
+            # the evidence pipeline can name the decision this restatement is actually about
+            # instead of settling evidence against nothing.
+            return False, None, {"inactive_match": {
+                "entry_id": tombstoned.get("id") or "", "status": "retired",
+                "overlap": round(_match_overlap(content, tombstoned), 2)}}
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by,
                                     title=title,
                                     status="pending_approval" if force_pending else "")
@@ -2859,15 +2866,30 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
 
 def get_pending_decisions(repo_path: str) -> list[dict]:
     """Returns all decisions awaiting the developer: brand-new pending_approval entries, live
-    decisions carrying a Suggested Update (proposed_revision), and live decisions carrying a
-    retirement proposal (proposed_lifecycle). An entry carrying both proposals appears once."""
+    decisions carrying a Suggested Update (proposed_revision), live decisions carrying a
+    retirement proposal (proposed_lifecycle), and INACTIVE decisions carrying a
+    reconsideration proposal. An entry carrying several proposals appears once.
+
+    The reconsideration lane is the one that reaches outside the live store: an IGNORED
+    decision is here in the store with an inactive status, but a RETIRED one is in the
+    tombstone sidecar, and both are equally a question waiting on the developer. Counting them
+    here rather than in each surface is what makes the mid-session nudge, the MCP review list
+    and `contexer review` agree - a lane only one of the three could see would be a lane whose
+    proposal silently never surfaces (`lifecycle.pending_reconsiderations` is the reader).
+    """
+    from contexer import lifecycle       # function-level: same cycle rule as the call sites
+                                         # in format_pending_review below
     data = load(repo_path)
-    return [
+    live = [
         e for e in data.get("entries", [])
         if e.get("type") == "decision"
         and (entry_status(e) == "pending_approval" or e.get("proposed_revision")
-             or e.get("proposed_lifecycle"))
+             or e.get("proposed_lifecycle") or e.get("proposed_reconsideration"))
     ]
+    # Only the RETIRED half is added here: the ignored half is already in `live` above, and
+    # `deleted_at` is exactly what separates a tombstoned entry from one that never left.
+    return live + [e for e in lifecycle.pending_reconsiderations(repo_path)
+                   if e.get("deleted_at")]
 
 
 def format_pending_review(repo_path: str) -> str:
@@ -2891,8 +2913,12 @@ def format_pending_review(repo_path: str) -> str:
     for d in shown:
         eid = (d.get("id") or "")[:8]
         st = d.get("subtype") or "decision"
-        prop = d.get("proposed_revision")
-        life = d.get("proposed_lifecycle")
+        recon = d.get("proposed_reconsideration")
+        # A reconsideration outranks a content question on the same decision for the reason a
+        # retirement does: there is no point settling how a decision should READ while it is
+        # not live at all.
+        prop = None if recon else d.get("proposed_revision")
+        life = None if recon else d.get("proposed_lifecycle")
         if prop:
             raw_current = revisions.current_content(d)
             raw_detected = prop.get("content", "")
@@ -2917,13 +2943,17 @@ def format_pending_review(repo_path: str) -> str:
                 lines.append(f'    "{clipped_body}"')
             if d.get("anchor_candidates"):
                 lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
-            if not life:
+            if not life and not recon:
                 # A live decision whose only pending item is a retirement is already approved -
                 # offering to approve it again would be the one action approve_decision rejects.
+                # An INACTIVE one is not approvable at all: `reconsider_decision` is its only
+                # door back, and approve_decision would refuse or, worse, trust it silently.
                 lines.append(
                     f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
         if life:
             lines.extend(lifecycle.review_lines(d, eid))
+        if recon:
+            lines.extend(lifecycle.reconsideration_review_lines(d, eid))
     lines.append("\nReview each one with the developer before approving, and act on their "
                  "answer ONE id at a time - there is no bulk approve, and approving a "
                  "mis-captured decision makes it trusted standing context in every future "
@@ -3020,8 +3050,13 @@ def entry_by_id(entries: list, entry_id: str) -> dict | None:
     return next((e for e in entries if e.get("id", "").startswith(entry_id)), None)
 
 
-def _is_tombstoned(repo_path: str, content: str) -> bool:
-    """True when `content` restates a decision the developer deleted.
+def _tombstoned_match(repo_path: str, content: str) -> dict | None:
+    """The tombstoned decision `content` restates, or None.
+
+    The MATCH rather than a bare bool: capture is filtered either way, but the caller reports
+    which decision it matched so reconciliation can file its receipt on that decision instead
+    of holding evidence attributed to nothing. Exactly the shape the ignored branch already
+    returns.
 
     Without this guard a deleted decision comes straight back at the next session from
     `CLAUDE.md`, the memory tool, or a repo scan, and the delete looks broken. Judged with
@@ -3035,14 +3070,14 @@ def _is_tombstoned(repo_path: str, content: str) -> bool:
     handled: `deleted_diagnostics` reports it so the Deleted view says "unreadable", and
     `delete_decision` refuses to write over a sidecar it could not parse, so a corrupt file
     never costs more than the tombstones it had already lost."""
-    return _find_match(content, _load_deleted(repo_path).get("entries", [])) is not None
+    return _find_match(content, _load_deleted(repo_path).get("entries", []))
 
 
 def _keep_recent_tombstones(entries: list) -> list:
     """The MAX_TOMBSTONES most recently deleted tombstones, oldest first. Under the cap the
     list is returned untouched, so ordinary use keeps plain append order.
 
-    The sidecar was uncapped, and `_is_tombstoned` runs `_find_match` over ALL of it inside the
+    The sidecar was uncapped, and `_tombstoned_match` runs `_find_match` over ALL of it in the
     lock on every capture - so an unbounded graveyard turns into unbounded WRITE latency, which
     is the cost the sidecar deliberately moved off the per-prompt read path. Bounded at the same
     MAX_ENTRIES the live store already evicts at, so the guard beside the novelty check can

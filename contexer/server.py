@@ -266,13 +266,44 @@ def dismiss_lifecycle(entry_id: str, repo_path: str = "") -> str:
 
 
 @mcp.tool()
+def reconsider_decision(entry_id: str, action: str, repo_path: str = "",
+                        content: str = "") -> str:
+    """Answer ONE reconsideration: the developer restated a decision they had ignored or
+    retired, and review_pending is showing it as "reconsideration proposed".
+
+    Call this ONLY when the developer themselves answered, in a genuine user turn in this
+    conversation. NEVER restore a decision they switched off because the restatement looks
+    right to you - the proposal is a question FOR them, and answering it yourself is the one
+    thing this lane exists to prevent. If they have not said, show them the question and ask.
+
+    entry_id: the inactive decision's id exactly as rendered, e.g. 6fb28fd9. One id - no lists.
+    action:   restore      - bring the SAME decision back with its whole history. It returns
+                             PENDING unless it was approved before, so restoring never makes
+                             something trusted on its own.
+              restore_edit - the same, plus the developer's wording as a new approved
+                             revision. Requires `content`.
+              skip         - leave the question pending for later.
+              dismiss      - keep the decision inactive and record that this was asked.
+    content:  the developer's own wording, for restore_edit only.
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped - repo path not detected."
+    target, refusal = _single_id(entry_id)
+    if refusal:
+        return refusal
+    return lifecycle.reconsider_decision(resolved, target, action, content)[1]
+
+
+@mcp.tool()
 def review_pending(repo_path: str = "") -> str:
     """List decisions awaiting the developer's review - brand-new pending-approval decisions,
-    suggested updates, and proposed retirements - each with its id and full content, so you can
-    surface them conversationally and act on the developer's answer (approve_decision for
-    content, retire_decision / dismiss_lifecycle for a retirement). The in-session equivalent of
-    the `contexer review` terminal command. Call this when the developer asks to review, or when
-    SessionStart reported items pending."""
+    suggested updates, proposed retirements, and inactive decisions the developer has restated
+    (a reconsideration) - each with its id and full content, so you can surface them
+    conversationally and act on the developer's answer (approve_decision for content,
+    retire_decision / dismiss_lifecycle for a retirement, reconsider_decision for a
+    reconsideration). The in-session equivalent of the `contexer review` terminal command. Call
+    this when the developer asks to review, or when SessionStart reported items pending."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
