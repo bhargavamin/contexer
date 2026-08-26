@@ -428,6 +428,8 @@ def test_an_unknown_state_on_disk_is_diagnostic_never_destructive(tmp_repo):
     # Not even the orphan sweep touches it, though its `entry_id` names no decision at all.
     assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
     assert len(spool.held_events(tmp_repo, candidate)) == 2
+    # And no terminal receipt either: filing one would claim this candidate was settled.
+    assert _receipts(tmp_repo) == []
 
 
 @pytest.mark.parametrize("meta,expected", [
@@ -698,19 +700,129 @@ def test_retention_removes_gap_write_debris_too(tmp_repo):
     assert not debris.exists()
 
 
-def test_a_held_candidate_whose_decision_is_gone_is_finalized(tmp_repo):
+def _receipts(repo):
+    """The orphan ledger's rows - the terminal record of a disposition with no decision left
+    to carry it."""
+    return spool._read_orphan_receipts(repo).get("receipts") or []
+
+
+def _held_files(repo, candidate_id):
+    """The raw event files one hold still carries - `candidate.json` is bookkeeping, not
+    evidence."""
+    return [p for p in spool._event_files(spool._held_dir(repo, candidate_id))
+            if p.name != spool._META_NAME]
+
+
+def _refuse_write(*_args, **_kwargs):
+    raise OSError("no")
+
+
+def test_a_held_candidate_whose_decision_is_gone_is_finalized_with_a_receipt(tmp_repo):
+    """The raw events go, and the receipt that replaces them names everything a reader would
+    need to account for them: which candidate, which decision, what was decided, which events,
+    when, and why there was nowhere else to file it."""
     store.update_decision(tmp_repo, "use JWTs instead of server sessions - stateless", "s1")
     live_id = store.load(tmp_repo)["entries"][0]["id"]
     live, orphan = str(uuid.uuid4()), str(uuid.uuid4())
+    orphan_events = _spool_two(tmp_repo)
     spool.hold_candidate_evidence(tmp_repo, live, _spool_two(tmp_repo),
                                   meta={"entry_id": live_id})
-    spool.hold_candidate_evidence(tmp_repo, orphan, _spool_two(tmp_repo),
+    spool.hold_candidate_evidence(tmp_repo, orphan, orphan_events,
                                   meta={"entry_id": "no-such-entry"})
 
     report = spool.run_retention(tmp_repo)
 
     assert report["finalized_orphans"] == [orphan]
+    assert report["orphans_unreceipted"] == []
     assert list(spool.held_candidates(tmp_repo)) == [live]
+    (row,) = _receipts(tmp_repo)
+    assert row["candidate_id"] == orphan
+    assert row["entry_id"] == "no-such-entry"
+    assert row["disposition"] == "dismissed"
+    assert sorted(row["event_ids"]) == sorted(orphan_events)
+    assert datetime.fromisoformat(row["occurred_at"]).tzinfo is not None
+    assert row["reason"] == spool.ORPHAN_REASON
+    # Not a spool loss: this evidence was recorded, held and dispositioned. Saying otherwise
+    # would accuse the capture path of a failure the history contradicts.
+    assert spool.evidence_diagnostics(tmp_repo)["gap"] is None
+
+
+def test_a_receipt_that_cannot_be_written_leaves_the_raw_evidence_held(tmp_repo, monkeypatch):
+    """Invariant 4, at its one remaining edge: raw evidence goes only AFTER its disposition is
+    durable. A ledger write that fails leaves the manifest, every event file and the hold
+    itself exactly as they were, and the pass says so."""
+    orphan = str(uuid.uuid4())
+    events = _spool_two(tmp_repo)
+    spool.hold_candidate_evidence(tmp_repo, orphan, events, meta={"entry_id": "gone"})
+    before = sorted(p.name for p in _held_files(tmp_repo, orphan))
+
+    with monkeypatch.context() as failing:
+        failing.setattr(spool, "_write_json", _refuse_write)
+        report = spool.run_retention(tmp_repo)
+
+    assert report["finalized_orphans"] == []
+    assert report["orphans_unreceipted"] == [orphan]
+    assert list(spool.held_candidates(tmp_repo)) == [orphan]
+    assert sorted(p.name for p in _held_files(tmp_repo, orphan)) == before
+    assert spool._read_meta(spool._held_dir(tmp_repo, orphan))["entry_id"] == "gone"
+    assert _receipts(tmp_repo) == []
+
+
+def test_a_damaged_ledger_is_never_overwritten_with_a_fresh_one(tmp_repo):
+    """The unreadable-versus-empty split, one level up from `.gap`. Reading a corrupt ledger as
+    empty would trade every receipt it held for one new row - and then delete the evidence."""
+    orphan = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, orphan, _spool_two(tmp_repo),
+                                  meta={"entry_id": "gone"})
+    spool._orphan_receipts_path(tmp_repo).write_text("{ nope", encoding="utf-8")
+
+    report = spool.run_retention(tmp_repo)
+
+    assert report["orphans_unreceipted"] == [orphan]
+    assert spool._read_orphan_receipts(tmp_repo) == {"unreadable": True}
+    assert len(_held_files(tmp_repo, orphan)) == 2
+
+
+def test_a_crash_between_the_receipt_and_the_delete_files_no_second_receipt(tmp_repo):
+    """Crash boundary: the receipt is durable and the raw cleanup is not. The next sweep
+    finishes the removal off the receipt it finds rather than appending a second row for the
+    same candidate."""
+    orphan = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, orphan, _spool_two(tmp_repo),
+                                  meta={"entry_id": "gone"})
+    assert spool.record_orphan_receipt(tmp_repo, orphan, "gone", "dismissed")
+
+    report = spool.run_retention(tmp_repo)
+
+    assert report["finalized_orphans"] == [orphan]
+    assert len(_receipts(tmp_repo)) == 1
+    assert spool.held_candidates(tmp_repo) == {}
+
+
+def test_repeated_orphan_retention_is_idempotent(tmp_repo):
+    orphan = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, orphan, _spool_two(tmp_repo),
+                                  meta={"entry_id": "gone"})
+    assert spool.run_retention(tmp_repo)["finalized_orphans"] == [orphan]
+
+    for _ in range(3):
+        assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
+
+    assert len(_receipts(tmp_repo)) == 1
+    assert spool.held_candidates(tmp_repo) == {}
+
+
+def test_the_orphan_ledger_is_bounded_and_says_when_it_dropped_a_row(tmp_repo, monkeypatch):
+    """Bounded like every other ledger here, and truncation is RECORDED - a lower bound that
+    admits it is one, never a complete-looking account of what survived."""
+    with monkeypatch.context() as small:
+        small.setattr(spool, "MAX_ORPHAN_RECEIPTS", 2)
+        for _ in range(4):
+            assert spool.record_orphan_receipt(tmp_repo, str(uuid.uuid4()), "gone", "dismissed")
+
+    ledger = spool._read_orphan_receipts(tmp_repo)
+    assert len(ledger["receipts"]) == 2
+    assert ledger["dropped"] == 2
 
 
 def test_a_held_candidate_with_no_recorded_entry_is_left_alone_but_counted(tmp_repo):
@@ -722,6 +834,7 @@ def test_a_held_candidate_with_no_recorded_entry_is_left_alone_but_counted(tmp_r
     assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
     assert list(spool.held_candidates(tmp_repo)) == [candidate]
     assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+    assert _receipts(tmp_repo) == []
 
 
 def test_a_corrupt_candidate_meta_counts_as_unattributed_and_says_so(tmp_repo):
@@ -734,6 +847,7 @@ def test_a_corrupt_candidate_meta_counts_as_unattributed_and_says_so(tmp_repo):
     assert spool.held_candidates(tmp_repo) == {candidate: {"unreadable": True}}
     assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
     assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
+    assert _receipts(tmp_repo) == []
 
 
 def test_an_attributed_held_candidate_is_not_counted_as_unattributed(tmp_repo):
@@ -756,14 +870,14 @@ def test_an_unreadable_store_defers_the_orphan_sweep_rather_than_failing(tmp_rep
 
     assert spool.run_retention(tmp_repo) == {
         "dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
-        "finalized_orphans": [], "errors": []}
+        "finalized_orphans": [], "orphans_unreceipted": [], "errors": []}
     assert list(spool.held_candidates(tmp_repo)) == [candidate]
 
 
 def test_retention_on_an_absent_spool_is_a_clean_no_op(tmp_repo):
     assert spool.run_retention(tmp_repo) == {
         "dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
-        "finalized_orphans": [], "errors": []}
+        "finalized_orphans": [], "orphans_unreceipted": [], "errors": []}
 
 
 # ── session-start maintenance (mitigation 1) ─────────────────────────────────────

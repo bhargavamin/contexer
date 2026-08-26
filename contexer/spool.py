@@ -6,6 +6,8 @@ Storage for the evidence ledger, laid out as a spool rather than a sidecar docum
     ├── pending/<utc-stamp>-<event-id>.json          raw events awaiting reconciliation
     ├── held/<candidate-id>/<utc-stamp>-<event-id>.json   events behind an unsettled candidate
     ├── quarantine/                                  malformed events, isolated not fatal
+    ├── .orphan_receipts.json                        terminal receipts for evidence whose
+    │                                                decision no longer exists
     └── .gap                                         at least one event was lost
 
 Why per-event files: a host hook appends on every prompt and every tool use, and the one
@@ -29,6 +31,12 @@ consumed, and nothing here ever clears it - a successful run does not un-lose an
 only explicit maintenance may acknowledge one. It keeps TWO counts, because "we failed to
 record this" (`drops`) and "this aged out unconsumed" (`expired`) are different news for a
 developer and only the first is a bug (see `_bump_gap`).
+
+`.orphan_receipts.json` records a DIFFERENT fact from either of those, which is why it is its
+own file rather than a third `.gap` counter: an orphan's events were acknowledged, spooled,
+aggregated and held against a decision, and only then did that decision cease to exist. Calling
+that a spool loss would claim capture failed when it plainly did not (see
+`record_orphan_receipt`).
 """
 import json
 import os
@@ -67,6 +75,21 @@ _DIR_MODE = 0o700
 # `os.replace` preserves the mode - so 0600 is never re-asserted after the rename.
 _TEMP_PREFIX = "tmp-"
 _META_NAME = "candidate.json"
+
+# The terminal-receipt ledger for orphaned evidence, and its bound. 200 rows matches
+# `reconcile._RECEIPT_LOG_CAP` rather than `store.MAX_EVIDENCE_SUMMARIES`=50: those 50 rows
+# compete for one decision's own history, while these compete only with each other, and each
+# one is the ONLY surviving record of a candidate whose decision is gone. Truncation is
+# RECORDED (`dropped`), the rule `_anchor_sources` and `_bump_gap` already follow, so a ledger
+# that lost its oldest rows says so instead of reading as a complete account.
+_ORPHAN_RECEIPTS_NAME = ".orphan_receipts.json"
+MAX_ORPHAN_RECEIPTS = 200
+
+# The one reason this ledger is ever written, stated once. Both callers file the same fact -
+# the sweep and reconciliation's own finalize reach it from different directions - so it is a
+# constant here rather than a parameter two call sites would eventually word differently.
+ORPHAN_REASON = ("the owning decision exists in neither the live store nor the tombstone "
+                 "sidecar")
 
 # What `finalize_candidate_evidence` will settle a candidate as, and the whole vocabulary:
 # these are the only two dispositions anything writes. `edited` and `ignored` were declared
@@ -131,6 +154,10 @@ def _quarantine_dir(repo_path: str, slug: str = "") -> Path:
 
 def _gap_path(repo_path: str, slug: str = "") -> Path:
     return _repo_dir(repo_path, slug) / ".gap"
+
+
+def _orphan_receipts_path(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / _ORPHAN_RECEIPTS_NAME
 
 
 def spool_slugs() -> list[str]:
@@ -574,6 +601,90 @@ def held_candidates(repo_path: str) -> dict:
             if d.is_dir() and _ID_SHAPE.fullmatch(d.name)}
 
 
+def _held_event_ids(held: Path) -> list[str]:
+    """The event ids one held directory still holds, oldest first.
+
+    ONE definition, because two terminal writers read it and they must agree: the receipt filed
+    before a delete and the summary returned by the delete itself would otherwise be two
+    accounts of the same event set. An unreadable directory answers with what is known - the
+    empty list - rather than raising, since both callers are already settling."""
+    try:
+        held_files = _event_files(held)
+    except OSError:
+        return []
+    return [match.group(1) for match in
+            (_EVENT_ID_IN_NAME.search(path.name) for path in held_files) if match]
+
+
+def _read_orphan_receipts(repo_path: str, slug: str = "") -> dict:
+    """The orphan receipt ledger: `{}` when there has never been one, the mapping when it
+    reads, `{"unreadable": True}` when one exists and cannot be read.
+
+    The same three-way split `_read_gap` draws, and load-bearing for the same reason one level
+    up: this is the ONLY record of dispositions whose decision is gone, so a damaged file must
+    never read as an empty one - `record_orphan_receipt` refuses to write over it, which is
+    what keeps the raw evidence in place instead of trading it for a ledger that just lost
+    every row it held."""
+    try:
+        raw = _orphan_receipts_path(repo_path, slug).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return {"unreadable": True}
+    try:
+        ledger = json.loads(raw)
+    except ValueError:                  # covers JSON and UnicodeDecodeError both
+        return {"unreadable": True}
+    return ledger if isinstance(ledger, dict) else {"unreadable": True}
+
+
+def record_orphan_receipt(repo_path: str, candidate_id: str, entry_id: str,
+                          disposition: str) -> bool:
+    """File the terminal receipt for a candidate whose owning decision no longer exists. True
+    only when that receipt is DURABLE - which is the caller's licence to delete the raw events.
+
+    An orphan is the one settle with nowhere to file its summary: the decision it was reviewed
+    as is gone, so `store.record_evidence_summary` has no entry to write to. Deleting anyway
+    left an acknowledged event with no record of it anywhere, which runbook invariants 3 and 4
+    forbid, so the receipt moves to this ledger instead.
+
+    Deliberately NOT a `.gap` bump. That marker records evidence this module failed to record
+    or that aged out unconsumed; this event was recorded, aggregated, held and dispositioned,
+    and only its decision went missing. Filing it as a spool loss would claim capture failed
+    when the history says the opposite.
+
+    IDEMPOTENT on `candidate_id`: an already-filed candidate returns True without appending, so
+    a crash between the receipt and the delete resumes without a second row, and a repeated
+    sweep of a hold that resisted removal never grows the ledger.
+    """
+    _checked_id(candidate_id, "candidate_id")
+    if disposition not in DISPOSITIONS:
+        raise ValueError(f"disposition must be one of {sorted(DISPOSITIONS)}, "
+                         f"got {disposition!r}")
+    ledger = _read_orphan_receipts(repo_path)
+    if ledger.get("unreadable"):
+        return False
+    rows = [row for row in ledger.get("receipts") or [] if isinstance(row, dict)]
+    if any(str(row.get("candidate_id") or "") == candidate_id for row in rows):
+        return True
+    rows.append({
+        "candidate_id": candidate_id,
+        "entry_id": entry_id,
+        "disposition": disposition,
+        "event_ids": _held_event_ids(_held_dir(repo_path, candidate_id)),
+        "occurred_at": _now().isoformat(),
+        "reason": ORPHAN_REASON,
+    })
+    try:
+        _write_json(_ensure_dir(_repo_dir(repo_path)), _ORPHAN_RECEIPTS_NAME,
+                    {"receipts": rows[-MAX_ORPHAN_RECEIPTS:],
+                     "dropped": _count(ledger.get("dropped"))
+                     + max(0, len(rows) - MAX_ORPHAN_RECEIPTS)})
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
 def finalize_candidate_evidence(repo_path: str, candidate_id: str, disposition: str) -> dict:
     """Settle a candidate: return the compact summary and delete its raw held events.
 
@@ -590,15 +701,7 @@ def finalize_candidate_evidence(repo_path: str, candidate_id: str, disposition: 
         raise ValueError(f"disposition must be one of {sorted(DISPOSITIONS)}, "
                          f"got {disposition!r}")
     held = _held_dir(repo_path, candidate_id)
-    event_ids = []
-    try:
-        held_files = _event_files(held)
-    except OSError:                     # unreadable: settle anyway, with what is known
-        held_files = []
-    for path in held_files:
-        match = _EVENT_ID_IN_NAME.search(path.name)
-        if match:
-            event_ids.append(match.group(1))
+    event_ids = _held_event_ids(held)
     # Best-effort: a directory that resists removal shows up in the diagnostics rather than
     # failing a settle that has already produced its summary.
     shutil.rmtree(held, ignore_errors=True)
@@ -757,8 +860,9 @@ def _sweep_temp(root: Path) -> int:
     return removed
 
 
-def _sweep_orphan_holds(repo_path: str) -> list:
+def _sweep_orphan_holds(repo_path: str) -> tuple:
     """Settle every held candidate whose decision exists NOWHERE any more.
+    `(finalized_ids, unreceipted_ids)`.
 
     Its events would otherwise be held forever: nothing re-aggregates them (they are out of
     `pending/`) and nothing will ever finalize them (the decision they were reviewed as is
@@ -773,6 +877,12 @@ def _sweep_orphan_holds(repo_path: str) -> list:
     would race reconciliation for the one disposition the lifecycle lane exists to record and
     destroy it. Left held; the next reconciliation pass settles it properly. Once the tombstone
     itself is evicted, the decision really is gone and the hold is swept then.
+
+    The receipt comes FIRST and the delete only follows a durable one (`record_orphan_receipt`).
+    There is no decision left to carry an `evidence_summary`, so that ledger is the whole
+    terminal record: without it this sweep destroyed acknowledged evidence and left nothing
+    anywhere saying it had existed. A receipt that cannot be written leaves the hold exactly as
+    it is and is REPORTED, so the pass says it was incomplete rather than settling silently.
     """
     try:
         live = {str(e.get("id") or "") for e in store.load(repo_path).get("entries", [])
@@ -780,8 +890,8 @@ def _sweep_orphan_holds(repo_path: str) -> list:
         live |= {str(e.get("id") or "") for e in store.load_deleted(repo_path).get("entries", [])
                  if isinstance(e, dict)}
     except Exception:                   # broad on purpose: a sweep never breaks its caller
-        return []
-    finalized = []
+        return [], []
+    finalized, unreceipted = [], []
     for candidate_id, meta in held_candidates(repo_path).items():
         entry_id = str(meta.get("entry_id") or "")
         # An unknown state is as unjudgeable as a missing `entry_id`: this sweep can only ever
@@ -789,14 +899,21 @@ def _sweep_orphan_holds(repo_path: str) -> list:
         # candidate that may be mid-materialization.
         if meta.get("invalid_state") or not entry_id or entry_id in live:
             continue
+        if not record_orphan_receipt(repo_path, candidate_id, entry_id, "dismissed"):
+            unreceipted.append(candidate_id)
+            continue
         finalize_candidate_evidence(repo_path, candidate_id, "dismissed")
         finalized.append(candidate_id)
-    return finalized
+    return finalized, unreceipted
 
 
 def run_retention(repo_path: str) -> dict:
     """Bound the spool. `{"dropped_pending", "dropped_quarantine", "temp_removed",
-    "finalized_orphans", "errors"}`.
+    "finalized_orphans", "orphans_unreceipted", "errors"}`.
+
+    `orphans_unreceipted` names every orphaned hold left standing because its terminal receipt
+    could not be written. It is not an error - nothing was lost - but the pass did not finish
+    what it set out to do, so a caller reports itself incomplete on it.
 
     The ONLY caller-facing retention entry point, and it SCANS - so it runs from
     reconciliation or maintenance and never from an editor hook. Held events are exempt while
@@ -814,7 +931,7 @@ def run_retention(repo_path: str) -> dict:
     than the queue working as intended. See `_bump_gap` for the full note.
     """
     report = {"dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
-              "finalized_orphans": [], "errors": []}
+              "finalized_orphans": [], "orphans_unreceipted": [], "errors": []}
     try:
         root = _repo_dir(repo_path)
         if not root.is_dir():
@@ -822,7 +939,8 @@ def run_retention(repo_path: str) -> dict:
         report["temp_removed"] = _sweep_temp(root)
         report["dropped_pending"] = _sweep_events(_pending_dir(repo_path))
         report["dropped_quarantine"] = _sweep_events(_quarantine_dir(repo_path))
-        report["finalized_orphans"] = _sweep_orphan_holds(repo_path)
+        report["finalized_orphans"], report["orphans_unreceipted"] = \
+            _sweep_orphan_holds(repo_path)
     except Exception as exc:            # broad on purpose: a report, not a traceback
         report["errors"].append(f"{type(exc).__name__}: {exc}")
     if report["dropped_pending"]:

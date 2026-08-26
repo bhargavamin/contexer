@@ -71,6 +71,12 @@ def _pending(repo):
             if e["kind"] in (candidates.SEED_KINDS | candidates.SUPPORT_KINDS)]
 
 
+def _orphan_receipts(repo):
+    """The spool's terminal ledger for candidates whose decision is gone - the only place a
+    disposition can be recorded once there is no entry left to carry it."""
+    return spool._read_orphan_receipts(repo).get("receipts") or []
+
+
 def _receipts(repo):
     """The reconciliation log's lines - where a pass's receipt goes now that it is kept out of
     the evidence spool (ruling R34)."""
@@ -1888,18 +1894,71 @@ class TestRetentionWiring:
         (tombstone,) = store.load_deleted(tmp_repo)["entries"]
         assert [s["disposition"] for s in tombstone["evidence_summary"]] == ["approved"]
 
-    def test_a_hold_whose_decision_exists_nowhere_is_still_swept(self, tmp_repo):
+    def test_a_hold_whose_decision_exists_nowhere_is_swept_with_a_receipt(self, tmp_repo):
         # The other half: once nothing anywhere names the decision - not the live store, not
-        # the tombstones - the hold really is an orphan and nothing will ever settle it.
+        # the tombstones - the hold really is an orphan and nothing will ever settle it. The
+        # events were acknowledged, held and dispositioned, so the sweep leaves the terminal
+        # record the decision can no longer carry (invariants 3 and 4) instead of deleting into
+        # silence.
         _emit(tmp_repo, "user_directive", UNRELATED)
         reconcile.reconcile_session(tmp_repo)
-        candidate_id, _meta = _only_held(tmp_repo)
+        candidate_id, meta = _only_held(tmp_repo)
         data = store.load(tmp_repo)
         data["entries"] = []
         store.save(tmp_repo, data)
 
         assert spool.maintain_spool(tmp_repo, force=True)["finalized_orphans"] == [candidate_id]
         assert _held(tmp_repo) == {}
+        (row,) = _orphan_receipts(tmp_repo)
+        assert row["candidate_id"] == candidate_id
+        assert row["entry_id"] == meta["entry_id"]
+        assert row["disposition"] == "dismissed"
+        assert row["event_ids"] == meta["event_ids"]
+        assert row["reason"] == spool.ORPHAN_REASON
+
+    def test_reconciliation_files_an_orphan_receipt_before_it_deletes(self, tmp_repo):
+        """The other route to the same shape, and the one that used to delete silently: the
+        hold reached review, earned a disposition, and its decision was evicted before the
+        summary could be filed on it. There is no entry to write to and no retry that could
+        ever succeed, so the receipt goes to the spool's own ledger."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        candidate_id, meta = _only_held(tmp_repo)
+        data = store.load(tmp_repo)
+        data["entries"] = []
+        store.save(tmp_repo, data)
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["incomplete"] is False
+        assert _held(tmp_repo) == {}
+        (row,) = _orphan_receipts(tmp_repo)
+        assert row["candidate_id"] == candidate_id
+        assert row["entry_id"] == meta["entry_id"]
+        assert row["disposition"] == "dismissed"
+        assert row["event_ids"] == meta["event_ids"]
+
+    def test_an_unwritable_orphan_ledger_keeps_the_raw_evidence_and_says_so(self, tmp_repo,
+                                                                           monkeypatch):
+        """Both orphan routes fail the same way: no receipt, no delete. The hold keeps every
+        event file it has and the pass reports itself incomplete rather than settling in
+        silence."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        reconcile.reconcile_session(tmp_repo)
+        candidate_id, _meta = _only_held(tmp_repo)
+        before = [p.name for p in _held_events(tmp_repo, candidate_id)]
+        data = store.load(tmp_repo)
+        data["entries"] = []
+        store.save(tmp_repo, data)
+
+        with monkeypatch.context() as unwritable:
+            unwritable.setattr(spool, "record_orphan_receipt", lambda *a, **k: False)
+            receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["incomplete"] is True
+        assert list(_held(tmp_repo)) == [candidate_id]
+        assert [p.name for p in _held_events(tmp_repo, candidate_id)] == before
+        assert _orphan_receipts(tmp_repo) == []
 
     def test_session_start_retention_is_silent_and_fail_soft(self, tmp_repo, monkeypatch):
         _emit(tmp_repo, "user_directive", UNRELATED)
