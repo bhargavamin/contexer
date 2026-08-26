@@ -803,10 +803,15 @@ def run_retention(repo_path: str) -> dict:
     their candidate is unsettled.
 
     The two drops it makes are recorded as DIFFERENT facts (see `_bump_gap`), decided by which
-    directory was swept rather than by anything inside the events: an aged-out PENDING event
-    was never consumed, which on an emit-only host is the queue working as designed, while an
-    aged-out QUARANTINED one is evidence that could not be read at all. Reporting both as
-    "lost" is what made `contexer status` accuse a healthy repo of losing evidence.
+    directory was swept rather than by anything inside the events: an aged-out PENDING event was
+    never consumed, while an aged-out QUARANTINED one is evidence that could not be read at all.
+    Only the second is this module failing at its job, which is why reporting both as "lost" is
+    what made `contexer status` accuse a healthy repo of losing evidence.
+
+    An aged-out PENDING event is still not GOOD news. The queue's designed path is reconciliation
+    at the next session start, which every host now reaches, so an event that survived to its
+    retention age outlived every session start in that window - an anomaly to look into rather
+    than the queue working as intended. See `_bump_gap` for the full note.
     """
     report = {"dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
               "finalized_orphans": [], "errors": []}

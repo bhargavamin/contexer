@@ -1802,8 +1802,14 @@ class TestSessionScope:
 # ── retention wiring ─────────────────────────────────────────────────────────
 
 class TestRetentionWiring:
-    """The spool's two bounds. Reconciliation runs retention on every real pass; a host that
-    never reconciles gets it at session start instead (red-team mitigation 1)."""
+    """The spool's two bounds. Reconciliation runs retention on every real pass, and session
+    start runs it again through `spool.maintain_spool` (red-team mitigation 1).
+
+    The second bound landed when Codex and Cursor reached no reconciliation entrypoint at all.
+    Every host now reconciles at session start, and the bound is still not redundant: a pass
+    skips on lock contention and returns early on an empty spool, so `maintain_spool` is the
+    sweep that runs either way.
+    """
 
     def _age_pending(self, repo, days):
         import os
@@ -1826,19 +1832,21 @@ class TestRetentionWiring:
         gap = spool.evidence_diagnostics(tmp_repo)["gap"]
         assert gap["expired"] >= 1 and gap["drops"] == 0
 
-    def test_an_emit_only_host_still_gets_retention_at_session_start(self, tmp_repo):
-        """Codex reaches no reconciliation entrypoint and Cursor emits directives only, so
-        without this their `pending/` would grow for good. The call sits on the store-side
-        session-start payload every host traverses."""
+    def test_session_start_runs_retention_before_it_reconciles(self, tmp_repo):
+        """`spool.maintain_spool` sits on the store-side session-start payload every host
+        traverses, ahead of the reconcile call, so an event past its retention age is bounded
+        whether or not a pass runs."""
         _emit(tmp_repo, "user_directive", UNRELATED)
         self._age_pending(tmp_repo, spool._MAX_PENDING_AGE_DAYS + 1)
 
         store.session_start_payload(tmp_repo)
 
         assert spool.list_pending_evidence(tmp_repo) == []
-        # And it is recorded as what it is. This host NEVER reconciles, so its evidence ageing
-        # out is the queue working as designed - counting it in `drops` made `contexer status`
-        # report "1 event lost" on a repo that lost nothing.
+        # And it is recorded as what it is: `expired`, not `drops`. Nothing failed to record
+        # this event, so counting it as loss made `contexer status` report "1 event lost" on a
+        # repo that lost nothing. It is still not good news - an event this old outlived every
+        # session start in its retention window - but that is a symptom to look into rather
+        # than a failure of the spool itself.
         gap = spool.evidence_diagnostics(tmp_repo)["gap"]
         assert gap["expired"] == 1 and gap["drops"] == 0
 
