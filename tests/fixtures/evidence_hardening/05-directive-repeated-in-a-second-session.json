@@ -1,0 +1,45 @@
+{
+  "name": "05-directive-repeated-in-a-second-session",
+  "issue": null,
+  "summary": "A repetition in another session corroborates rather than opening a candidate.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "c4066b9b-42c8-5ca2-ade3-0bd7d16d1dc0",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Regenerate src/generated/client.ts from openapi/schema.yaml whenever the schema changes.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "6bdb3b91-6dfd-5871-b1e0-a6665b123e2f",
+      "session_id": "sess-b",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T11:00:00+00:00",
+      "source": "replay",
+      "summary": "Regenerate src/generated/client.ts from openapi/schema.yaml whenever the schema changes.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Regenerate src/generated/client.ts from openapi/schema.yaml whenever the schema changes.",
+      "subtype": "architecture",
+      "score": 65,
+      "target_decision_id": null,
+      "source_files": [],
+      "uncertainties": []
+    }
+  ]
+}

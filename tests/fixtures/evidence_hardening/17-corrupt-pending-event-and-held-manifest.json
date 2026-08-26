@@ -1,0 +1,34 @@
+{
+  "name": "17-corrupt-pending-event-and-held-manifest",
+  "issue": null,
+  "summary": "Damaged spool files are quarantined or reported, never interpreted.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "6de07f5e-9afc-5627-b6c2-774cdd2c89cb",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "corrupt_pending_bytes": "{\"schema_version\": 1, \"event_id\": \"not-a-uuid\"",
+  "corrupt_manifest_bytes": "{ this is not json",
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 50,
+      "target_decision_id": null,
+      "source_files": [],
+      "uncertainties": []
+    }
+  ]
+}
