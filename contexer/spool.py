@@ -264,11 +264,18 @@ def _bump_gap(repo_path: str, reason: str, drops: int = 1, field: str = "drops")
 
     * `drops` is genuine LOSS - a write that failed, a quarantined event that aged out. We
       tried to record this and could not.
-    * `expired` is evidence that aged out of `pending/` UNCONSUMED. On a host that never
-      reconciles (Codex reaches no reconciliation entrypoint; Cursor emits directives only)
-      that is the DESIGNED end of the queue, not a failure - and counting it as loss made
-      `contexer status` report "N events lost" on a repo that lost nothing, in the one surface
-      built to be honest about loss.
+    * `expired` is evidence that aged out of `pending/` UNCONSUMED. Kept separate because
+      counting it as loss made `contexer status` report "N events lost" on a repo that lost
+      nothing, in the one surface built to be honest about loss - a failed write and an
+      unconsumed queue are different news, and only the first is a bug in this module.
+
+    WHAT `expired` MEANS CHANGED, and the separation outlived the reason for it. It was
+    introduced when Codex and Cursor reached no reconciliation entrypoint at all, so ageing out
+    genuinely was the designed end of their queue. Every host now reconciles at session start
+    (`store._local_session_start_payload`), so an `expired` count on ANY host is an anomaly: a
+    30-day-old event outlived every session start in that month. It is still not a `drops`,
+    because nothing here failed to record anything - but it is a symptom to look at rather than
+    an explanation to be satisfied by, and `cli._gap_phrase` renders it that way.
 
     A DAMAGED marker is never overwritten with a fresh count of one. The counts it recorded are
     unrecoverable, so they restart - but `prior_drops_unknown` is stamped and carried forward
@@ -829,14 +836,18 @@ def _maintenance_stamp(repo_path: str) -> Path:
 
 
 def maintain_spool(repo_path: str, force: bool = False) -> dict:
-    """Retention for a host that never reconciles. The retention report, or `{}` when the run
-    was skipped. NEVER raises.
+    """Periodic retention and the orphan-hold sweep, on a TTL. The retention report, or `{}`
+    when the run was skipped. NEVER raises.
 
-    An emit-only host - Codex reaches no reconciliation entrypoint, Cursor emits directives
-    only - would otherwise grow `pending/` for good, since `run_retention`'s only other caller
-    is reconciliation. Session start is not an editor hook, so the never-scan-in-a-hook rule
-    holds; but it IS every session, so the scan is gated twice: nothing happens at all until a
-    spool directory exists, and after that at most once per `_MAINTENANCE_TTL`.
+    It was introduced as the retention path for an emit-only host, back when Codex reached no
+    reconciliation entrypoint and Cursor emitted directives only. Every host now reconciles at
+    session start, and reconciliation runs `run_retention` itself - so this is no longer the
+    ONLY thing keeping `pending/` bounded, and it is not redundant either. It is the sweep that
+    runs INDEPENDENTLY of whether a pass happened: reconciliation skips on lock contention,
+    returns early on an empty spool, and `_sweep_orphan_holds` has no other caller at all.
+    Session start is not an editor hook, so the never-scan-in-a-hook rule holds; but it IS every
+    session, so the scan is gated twice: nothing happens at all until a spool directory exists,
+    and after that at most once per `_MAINTENANCE_TTL`.
 
     The TTL is not only about cost. `_sweep_orphan_holds` judges a held candidate against the
     LIVE store, where a retired decision is absent - which reconciliation reads as its

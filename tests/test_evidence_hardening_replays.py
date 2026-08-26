@@ -691,6 +691,28 @@ def test_an_incomplete_pass_does_not_break_session_start_and_stays_visible(tmp_r
     assert "Always run migrations before deploying." in payload["context"]
 
 
+def test_the_incomplete_note_survives_the_deliberately_silent_compact_path(tmp_repo,
+                                                                          monkeypatch):
+    """The fifth return path of `_local_session_start_payload`, and the only one that returns
+    an empty status by design: a compaction continuing a session whose developer already
+    dismissed the setup offer.
+
+    It is reachable exactly when reconciliation stored no decision, which is what a failed pass
+    looks like from here, so it is the branch where dropping the diagnostic would hide it in
+    the very case it exists for. The context stays empty either way: the silence that path
+    protects is about not re-opening a dismissed picker, not about suppressing a loss report.
+    """
+    # An empty repo takes the no-decisions branch, which is what arms the offer.
+    store.session_start_payload(tmp_repo, "startup", "sess-a", "claude")
+    _spooled_rule(tmp_repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(spool, "hold_candidate_evidence",
+                      lambda *a, **k: {"status": "ok", "missing": ["gone"], "held": []})
+        payload = store._local_session_start_payload(tmp_repo, "compact", "sess-b", "claude")
+    assert payload["context"] == ""
+    assert payload["status"].startswith("Evidence reconciliation was incomplete")
+
+
 def test_a_raising_reconciliation_still_renders_the_session_start(tmp_repo, monkeypatch):
     """The call site is unguarded on `reconcile_session`'s never-raises contract, so this pins
     that contract from the session-start side: even an exception raised inside the pass costs

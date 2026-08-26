@@ -4434,11 +4434,13 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # fresh one. Fail-soft end to end (log write included), and a no-op read when the index
     # is healthy - no guard needed here.
     ensure_retrieval_index(repo_path)
-    # Bound the evidence spool on hosts that never reconcile (Codex reaches no reconciliation
-    # entrypoint, Cursor emits directives only): this is the one store-side path EVERY host
-    # traverses at session start, and session start is not an editor hook, so the spool's
-    # never-scan-in-a-hook rule holds. Positioned with `ensure_retrieval_index` and for the
-    # same reason - unconditional on `source`, ahead of the `resume` early-return, since a
+    # Periodic spool retention plus the orphan-hold sweep, on a 24h TTL. It landed here as the
+    # retention path for a host that never reconciled; the reconcile call below now covers
+    # every host, so this is the sweep that runs INDEPENDENTLY of whether a pass happens -
+    # reconciliation skips on lock contention and returns early on an empty spool, and
+    # `_sweep_orphan_holds` has no other caller. Session start is not an editor hook, so the
+    # spool's never-scan-in-a-hook rule holds. Positioned with `ensure_retrieval_index` and for
+    # the same reason - unconditional on `source`, ahead of the `resume` early-return, since a
     # resumed session's spool grows exactly like a fresh one's. `maintain_spool` is
     # self-gating (no spool dir / inside its TTL = no work) and never raises, so the call
     # site is deliberately unguarded on the strength of that promise.
@@ -4554,7 +4556,13 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
 
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
-            return {"status": "", "context": ""}
+            # The deliberately-silent path: a compaction continuing a session whose developer
+            # already dismissed the setup offer injects nothing. The reconcile note is the ONE
+            # thing that still speaks here, `.strip()`ped because it is written as a suffix.
+            # This branch is reachable exactly when reconciliation stored no decision, which is
+            # what a `partial`/`error` pass looks like from here - so it is the branch where
+            # dropping the diagnostic would hide it in the case it was written for.
+            return {"status": reconcile_note.strip(), "context": ""}
         _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
         sys_parts = []
