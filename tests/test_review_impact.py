@@ -30,6 +30,7 @@ from contexer import (
     spool,
     store,
 )
+from tests.conftest import _git, _write
 
 NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://contexer.dev/tests/review-impact")
 T0 = datetime(2026, 8, 1, 10, 0, 0, tzinfo=timezone.utc)
@@ -382,6 +383,95 @@ def test_an_armed_rule_with_no_pattern_and_no_paths_renders_no_empty_parenthesis
     assert blocking.startswith("Blocking after approval: this decision ALREADY has an armed "
                                "secret rule. The approved revision")
     assert "()" not in blocking
+
+
+DORMANT = ("Blocking after approval: this decision carries an armed secret rule, DORMANT "
+           "while the decision is not live. Approving or restoring it RE-ACTIVATES that rule "
+           "and commits can be blocked by it again; declining leaves it dormant.")
+
+
+def _armed_then_switched_off(repo_path: str, inactive: str) -> str:
+    """An approved decision armed with a `secret` rule, then made inactive and restated, so it
+    sits in the review queue holding a rule the guard is not currently firing. Nothing strips
+    `guard_check` on the way out, which is what makes the state reachable at all."""
+    ok, entry_id = store.update_decision(repo_path, RULE, "sess-0", "constraint",
+                                         created_by="human")
+    assert ok
+    data = store.load(repo_path)
+    data["entries"][0]["status"] = "approved"
+    store.save(repo_path, data)
+    guard_engine.arm_guard(repo_path, entry_id, "secret")
+    if inactive == "ignored":
+        data = store.load(repo_path)
+        data["entries"][0]["status"] = "ignored"
+        store.save(repo_path, data)
+    else:
+        assert lifecycle.retire_decision(repo_path, entry_id, "the generator was replaced")[0]
+    spool.append_evidence(repo_path, event(f"armed-{inactive}", "user_directive", RULE,
+                                           offset=600))
+    assert reconcile.reconcile_session(repo_path)["reconsidered"] == 1
+    return entry_id
+
+
+@pytest.mark.parametrize("inactive", ["ignored", "retired"])
+def test_a_dormant_armed_rule_says_approval_re_activates_it(repo, coverage, inactive):
+    """The armed rule that survives being switched off, and the sentence that used to be
+    false about it (final review I1).
+
+    `_armed_rules` requires `entry_status == "approved"`, so an inactive decision still
+    holding a `guard_check` reported nothing and the block printed "Approval does not arm a
+    guard rule" - about a decision whose approval re-arms it. Both inactive states are
+    covered because they are dormant for DIFFERENT reasons: an ignored entry fails the status
+    check, while a tombstoned one keeps `status: approved` and is simply absent from the live
+    store `guard_staged` reads.
+    """
+    repo_path = str(repo)
+    entry_id = _armed_then_switched_off(repo_path, inactive)
+    entry = next(e for e in store.get_pending_decisions(repo_path) if e["id"] == entry_id)
+    assert entry.get("guard_check"), "the rule must survive the switch-off, or this proves nothing"
+
+    lines = block(repo_path, entry)
+    assert DORMANT in lines
+    assert POLICY_TAIL[1] not in lines, "the false 'approval arms nothing' claim must be gone"
+
+
+def test_a_dormant_rule_fires_again_after_the_approval_the_block_described(repo, coverage):
+    """The reviewer's end-to-end reproduction: the block's claim is checked against
+    `guard_staged` itself rather than against a second reading of the store."""
+    repo_path = str(repo)
+    entry_id = _armed_then_switched_off(repo_path, "ignored")
+    assert lifecycle.reconsider_decision(repo_path, entry_id, "restore")[0]
+
+    entry = store.entry_by_id(store.load(repo_path)["entries"], entry_id)
+    assert store.entry_status(entry) == "pending_approval", \
+        "a restore with no recorded active status fails toward review, rule intact"
+    assert guard_engine._armed_rules([entry]) == []
+    assert DORMANT in block(repo_path, entry)
+
+    _write(repo, "cfg.py", "AKIAIOSFODNN7EXAMPLE\n")
+    _git(repo, "add", "cfg.py")
+    assert guard_engine.guard_staged(repo_path)["violations"] == [], \
+        "dormant means dormant: the commit is clean while the decision is pending"
+
+    assert store.approve_decision(repo_path, entry_id, "approve")[0]
+    assert [v["decision_id"] for v in guard_engine.guard_staged(repo_path)["violations"]] == \
+        [entry_id]
+
+
+def test_a_hand_edited_pending_entry_carrying_a_rule_renders_honestly(tmp_repo, coverage):
+    """The lane with no lifecycle history at all. The store is a JSON file a human or a botched
+    migration can edit, so a `pending_approval` entry can carry a rule without ever having been
+    ignored - and the block must read the same way there."""
+    ok, entry_id = store.update_decision(tmp_repo, RULE, "sess-0", "constraint")
+    assert ok
+    data = store.load(tmp_repo)
+    data["entries"][0]["status"] = "pending_approval"
+    data["entries"][0]["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
+                                         "paths": "", "message": ""}
+    store.save(tmp_repo, data)
+
+    entry = next(e for e in store.get_pending_decisions(tmp_repo) if e["id"] == entry_id)
+    assert DORMANT in block(tmp_repo, entry)
 
 
 # ── the five invariants ──────────────────────────────────────────────────────────
