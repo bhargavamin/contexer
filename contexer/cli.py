@@ -418,6 +418,35 @@ def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
     print()
 
 
+def _print_reconsideration(entry: dict, recon: dict) -> None:
+    """The reconsideration block under an INACTIVE decision's own text in `contexer review`:
+    what the developer restated, which files the evidence CONFIRMED, whether this was asked
+    before, and whether it has gone stale.
+
+    Confirmed files only. A candidate's uncertain paths never reach the proposal at all, so
+    there is nothing here that could become a restoration anchor (runbook invariant 6)."""
+    from contexer import lifecycle
+
+    state = "retired" if entry.get("deleted_at") else "ignored"
+    print(f"You restated this {state} decision:")
+    _print_wrapped(recon.get("content") or "(no wording recorded)")
+    if recon.get("source_files"):
+        print(f"\nConfirmed files: {', '.join(recon['source_files'])}")
+    prior = [row for row in entry.get("reconsideration_history") or []
+             if isinstance(row, dict) and row.get("disposition") == "dismissed"]
+    if prior:
+        print(f"\nAsked before: dismissed {len(prior)} time(s), most recently "
+              f"{(prior[-1].get('occurred_at') or '')[:10]}.")
+    if lifecycle.reconsideration_stale(entry):
+        print("\n! STALE - this decision has changed or moved since the question was raised.\n"
+              "  [Y] and [E] are refused until a fresh restatement raises it again; [D] still "
+              "works.")
+    else:
+        print("\n[Y] brings it back with its whole history - PENDING review unless it was "
+              "approved before.\n  [E] appends your own wording as a new approved revision.")
+    print()
+
+
 def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, str]:
     """The `[R]etire` sub-flow: confirm the reason, then retire. The proposal's own reason is
     the default rather than the value - a retirement's reason becomes permanent history, and
@@ -451,14 +480,17 @@ def review() -> None:
 
     print(f"\n{len(pending)} decision(s) pending approval for {Path(repo_path).name}\n")
 
-    approved = ignored = dismissed = edited = skipped = retired = 0
+    approved = ignored = dismissed = edited = skipped = retired = restored = 0
     git_budget = _review_git_budget()   # one budget + memo for the whole run
     for i, entry in enumerate(pending, 1):
-        life = entry.get("proposed_lifecycle")
+        recon = entry.get("proposed_reconsideration")
+        life = None if recon else entry.get("proposed_lifecycle")
         # A retirement outranks a content question on the same decision: there is no point
         # settling how a decision should read while its existence is in doubt. Dismissing the
         # retirement leaves any Suggested Update pending for the next run, which the render says.
-        prop = None if life else entry.get("proposed_revision")
+        # A reconsideration outranks both, for the same reason one step further out: the
+        # decision is not live at all.
+        prop = None if (life or recon) else entry.get("proposed_revision")
         print("─" * 66)
         eid = (entry.get("id") or "")[:8]
         heading = f"Decision {i} of {len(pending)}"
@@ -483,7 +515,8 @@ def review() -> None:
         else:
             score, factors = revisions.compute_confidence(entry)
             title, body = store.title_and_body(entry)
-            status = ("retirement proposed" if life
+            status = ("reconsideration proposed" if recon
+                      else "retirement proposed" if life
                       else store.entry_status(entry).replace("_", " "))
             print(f"[{subtype}]  {status}\n")
             print(title)
@@ -493,11 +526,15 @@ def review() -> None:
             print()
             if life:
                 _print_lifecycle_proposal(entry, life)
+            if recon:
+                _print_reconsideration(entry, recon)
         for label, value in _review_metadata(repo_path, entry, git_budget):
             print(f"{label:<14}{value}")
         print(f"{'Confidence':<14}{score}%" + (f"  ·  {'; '.join(factors)}" if factors else ""))
         print()
-        if life:
+        if recon:
+            print("[Y] Restore  [E] Restore with edits  [D] Dismiss  [S] Skip  [Q] Quit")
+        elif life:
             print("[R] Retire  [D] Dismiss  [S] Skip  [Q] Quit")
         elif prop:
             print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip  [Q] Quit")
@@ -514,7 +551,38 @@ def review() -> None:
             print("Stopped — the rest stay pending.")
             break
 
-        if life:
+        if recon:
+            # Its own branch for the same reason the retirement one is: the decision is not
+            # live, so approve/ignore have nothing to act on. `reconsider_decision` is the one
+            # door back, and it never returns a decision as trusted unless the developer typed
+            # the wording themselves.
+            action = {"Y": "restore", "YES": "restore", "E": "restore_edit",
+                      "EDIT": "restore_edit", "D": "dismiss",
+                      "DISMISS": "dismiss"}.get(choice, "skip")
+            wording = ""
+            if action == "restore_edit":
+                print(f'Current: "{revisions.current_content(entry)}"')
+                try:
+                    wording = input("Edit: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    wording = ""
+                if not wording:
+                    print("\nNo changes made, skipping.")
+                    skipped += 1
+                    continue
+            if action == "skip":
+                skipped += 1
+                print("Skipped - the reconsideration stays pending.")
+                continue
+            ok, msg = lifecycle.reconsider_decision(repo_path, entry["id"], action, wording)
+            if not ok:
+                skipped += 1
+            elif action == "dismiss":
+                dismissed += 1
+            else:
+                restored += 1
+            print(msg)
+        elif life:
             # Its own branch, not a key bolted onto the content flow: [D] here dismisses the
             # RETIREMENT, and approve/edit have no meaning for a decision that is already live.
             if choice in ("R", "RETIRE"):
@@ -593,6 +661,8 @@ def review() -> None:
         parts.append(f"{dismissed} dismissed")
     if retired:
         parts.append(f"{retired} retired")
+    if restored:
+        parts.append(f"{restored} restored")
     if ignored:
         parts.append(f"{ignored} ignored")
     if skipped:

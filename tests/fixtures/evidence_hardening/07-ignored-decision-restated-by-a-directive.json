@@ -1,7 +1,7 @@
 {
   "name": "07-ignored-decision-restated-by-a-directive",
   "issue": 7,
-  "summary": "A directive restating an ignored decision is a NEW candidate, flagged as such.",
+  "summary": "A directive restating an ignored decision opens a RECONSIDERATION on that same decision.",
   "events": [
     {
       "schema_version": 1,
@@ -31,14 +31,14 @@
   ],
   "expected": [
     {
-      "kind": "new",
+      "kind": "reconsider",
       "title": "Do not edit src/generated/client.ts directly.",
       "subtype": "constraint",
       "score": 50,
-      "target_decision_id": null,
+      "target_decision_id": "dec-ignored",
       "source_files": [],
       "uncertainties": [
-        "restates dec-ignored, which was retired or ignored - review it as new"
+        "reconsiders dec-ignored, which the developer made inactive - only their explicit review restores it"
       ]
     }
   ]

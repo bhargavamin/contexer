@@ -11,7 +11,12 @@ REVIEWABLE by construction:
 * an update lands as a `proposed_revision` on its target, HEAD unmoved until approval;
 * a retirement or replacement lands as a `proposed_lifecycle` on its target - a proposal in the
   separate lifecycle lane, which retires nothing: only an explicit `lifecycle.retire_decision` by a
-  human moves a decision out of active context.
+  human moves a decision out of active context;
+* a developer's restatement of an INACTIVE decision lands as a `proposed_reconsideration` on
+  that same decision - the reconsideration lane, which restores nothing: only an explicit
+  `lifecycle.reconsider_decision` by a human brings one back. Routed to the lifecycle owner and
+  never through the content path, because the store's dedup is status-blind and would absorb
+  the restatement onto the dead entry with no receipt anywhere (OUTSTANDING-ISSUES item 7).
 
 The same discipline governs the way back out: a candidate is only ever settled `approved`
 against real review evidence - a human ratification stamp, a content proposal whose revision
@@ -114,9 +119,9 @@ _FALLBACK_SESSION = "reconcile"
 
 
 def _receipt(dry_run: bool) -> dict:
-    return {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0, "already_pending": 0,
-            "duplicates": 0, "insufficient": 0, "incomplete": False, "skipped": False,
-            "dry_run": bool(dry_run)}
+    return {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0, "reconsidered": 0,
+            "already_pending": 0, "duplicates": 0, "insufficient": 0, "incomplete": False,
+            "skipped": False, "dry_run": bool(dry_run)}
 
 
 @contextmanager
@@ -227,7 +232,7 @@ def _human_ratified(entry: dict | None) -> bool:
                 and not entry.get("proposed_revision"))
 
 
-def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
+def _dispositions(held: dict, entries: list, retired_ids: set, tombstones: list = ()) -> dict:
     """The disposition each held candidate has earned since the last pass,
     `{candidate_id: "approved"|"dismissed"}`.
 
@@ -269,6 +274,10 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
     `spool.evidence_diagnostics`' `held_unattributed` counter exists to surface instead.
     """
     by_id = {str(e.get("id") or ""): e for e in entries}
+    # Kept SEPARATE from `by_id` rather than merged into it: every other lane's rules read a
+    # missing entry as "gone, dismissed", and a tombstone is not gone. Only the reconsideration
+    # branch looks here, because its target is inactive by definition.
+    tombstoned = {str(e.get("id") or ""): e for e in tombstones}
     flips = {}
     for candidate_id, meta in sorted(held.items()):
         state = meta.get("state")
@@ -306,6 +315,26 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
         # Named `lifecycle_lane`, never `lifecycle`: that name is the imported MODULE here.
         lifecycle_lane = meta.get("lane") == "lifecycle"
         entry = by_id.get(entry_id)
+        if meta.get("lane") == "reconsideration":
+            # FIRST, before the retirement test below: this lane's target is normally IN the
+            # tombstone sidecar carrying a retirement record, which every rule under here reads
+            # as "the decision left" - the opposite of what a reconsideration is asking.
+            target = entry if entry is not None else tombstoned.get(entry_id)
+            if target is None:
+                status = "dismissed"                    # evicted: nothing left to answer
+            elif target.get("proposed_reconsideration"):
+                continue                                # the question still sits, unanswered
+            elif _restored_on_basis(target, str(meta.get("basis_revision_id") or "")):
+                status = "approved"
+            elif _reconsideration_dismissed(target, candidate_id):
+                status = "dismissed"
+            else:
+                # Neither receipt is durable yet - the answer landed between the two writes, or
+                # the proposal was displaced. Held, which is what keeps its evidence exempt
+                # from retention until something can actually speak for it.
+                continue
+            flips[candidate_id] = status
+            continue
         if entry_id in retired_ids:
             status = "approved" if lifecycle_lane else "dismissed"
         elif entry is None or store.entry_status(entry) == "ignored":
@@ -343,6 +372,45 @@ def _lifecycle_awaiting_review(repo_path: str, target: str) -> bool:
     entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
     entry = store.entry_by_id([e for e in entries if e.get("type") == "decision"], target)
     return bool(entry and entry.get("proposed_lifecycle"))
+
+
+def _reconsideration_awaiting_review(repo_path: str, target: str) -> bool:
+    """True when `target` is an inactive decision that already carries a reconsideration.
+
+    The reconsideration lane's twin of `_lifecycle_awaiting_review`, and it exists for the
+    same reason: `propose_reconsideration` returns the same `ok: False` whether the decision
+    is gone, is live again, or is holding a question somebody has yet to answer, and only the
+    last of those means a review is pending. Asked of the STORE, so it stays true however that
+    message is worded. Reads both halves of the lane - an ignored decision is in the live
+    store, a retired one is in the tombstone sidecar.
+    """
+    if not target:
+        return False
+    return any(str(e.get("id") or "") == target
+               for e in lifecycle.pending_reconsiderations(repo_path))
+
+
+def _restored_on_basis(entry: dict | None, basis: str) -> bool:
+    """True when this decision carries a COMPLETED `restored` record for the revision the
+    reconsideration was judged against.
+
+    The only approval signal this lane accepts. Not "the decision is live again": a decision
+    can come back through `restore_decision`, a console edit, or a developer un-ignoring it,
+    and none of those is an answer to THIS question. The basis is what ties the record to the
+    proposal a human was actually shown.
+    """
+    return bool(entry) and any(
+        isinstance(record, dict) and record.get("kind") == "restored"
+        and str(record.get("revision_id") or "") == str(basis or "")
+        for record in (entry.get("lifecycle") or []))
+
+
+def _reconsideration_dismissed(entry: dict | None, candidate_id: str) -> bool:
+    """True when the decision carries a durable dismissal receipt for THIS candidate."""
+    return bool(entry) and any(
+        isinstance(row, dict) and row.get("disposition") == "dismissed"
+        and str(row.get("candidate_id") or "") == candidate_id
+        for row in (entry.get("reconsideration_history") or []))
 
 
 def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
@@ -422,6 +490,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # manifest, moves no event and takes no lock. This is the only guard the preview
         # needs on this path now that everything below it writes.
         receipt["lifecycle_proposed" if kind in _LIFECYCLE_KINDS
+                else "reconsidered" if kind == "reconsider"
                 else "duplicates" if kind == "duplicate" else "proposed"] += 1
         return
     if not _hold(repo_path, candidate_id, event_ids,
@@ -473,6 +542,47 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "pending",
                                 "entry_id": target, "lane": "lifecycle"}
         return
+    if kind == "reconsider":
+        # ROUTED ONLY to the lifecycle owner, never through the content capture path: the
+        # target is not live, so `update_decision_with_meta` would meet the store's
+        # status-blind dedup and absorb the restatement with no receipt anywhere - which is the
+        # defect this lane exists to close (OUTSTANDING-ISSUES item 7). Nothing is restored
+        # here; a question is attached to the inactive decision and only a human answers it.
+        target = str(candidate.get("target_decision_id") or "")
+        result = lifecycle.propose_reconsideration(
+            repo_path, target,
+            content=candidate.get("content") or "",
+            title=candidate.get("title") or "",
+            candidate_id=candidate_id,
+            # CONFIRMED files only. The candidate's `possible_source_files` stop here, as they
+            # do on every other lane: an uncertain path must never become a restoration anchor
+            # (runbook invariant 6), and the manifest already carries them for the report.
+            source_files=candidate.get("source_files") or [],
+            source="ai")
+        if not result["ok"]:
+            if _reconsideration_awaiting_review(repo_path, target):
+                # Refused because a reconsideration for this target already sits on it - most
+                # often the one this very candidate attached before an interrupted pass. The
+                # question awaits review, so the evidence is held against it exactly as the
+                # retirement lane holds its own.
+                receipt["already_pending"] += 1
+                writes[candidate_id] = {"event_ids": event_ids, "kind": kind,
+                                        "status": "pending", "entry_id": target,
+                                        "lane": "reconsideration"}
+                return
+            # The target is gone, or is live again and has nothing to reconsider. Settled
+            # rather than re-aggregated into the same refusal on every future pass; the
+            # receipt still lands on the decision, which is what keeps the outcome durable.
+            writes[candidate_id] = {"event_ids": event_ids, "kind": kind,
+                                    "status": "dismissed", "entry_id": target}
+            return
+        receipt["reconsidered"] += 1
+        # `lane` is what `_dispositions` reads to settle this hold on a completed `restored`
+        # record or a durable dismissal receipt. Deliberately NO `revision_id`: restoration is
+        # a MOVE, so a revision advance is not an approval signal here either (ruling R25).
+        writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "pending",
+                                "entry_id": target, "lane": "reconsideration"}
+        return
     if kind == "duplicate":
         # The store already holds this decision, so there is nothing to review - provided that
         # decision is itself settled. Then the events ARE settled too, so they are held and
@@ -493,7 +603,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
     # in the existing trust-ordered proposal slot without moving HEAD. `force_pending` applies
     # to a brand-new entry only: an INFERRED decision must never rest in the `suggested` tier,
     # which injects at session start but never appears in `review_pending`.
-    stored, entry_id, _meta = store.update_decision_with_meta(
+    stored, entry_id, meta = store.update_decision_with_meta(
         repo_path,
         candidate.get("content") or "",
         _write_session(event_ids, sessions),
@@ -526,9 +636,16 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         return
     # The store's own filter rejected it - an existing decision already says this. That is a
     # duplicate, not an error, and it settles the events exactly like a matched one.
+    #
+    # `inactive_match` is the store REPORTING that the decision it matched is ignored or
+    # tombstoned. Only agent-shaped evidence reaches here that way (a developer's restatement
+    # is classified `reconsider` and never touches this path at all), and the receipt is what
+    # keeps it from vanishing: without the id the summary has nowhere to go and the hold
+    # accumulates as `held_unattributed` for good.
+    inactive = (meta or {}).get("inactive_match") or {}
     receipt["duplicates"] += 1
     writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "dismissed",
-                            "entry_id": ""}
+                            "entry_id": str(inactive.get("entry_id") or "")}
 
 
 def _settle_write_statuses(repo_path: str, writes: dict, receipt: dict) -> None:
@@ -558,8 +675,11 @@ def _settle_write_statuses(repo_path: str, writes: dict, receipt: dict) -> None:
     review itself. The receipt is corrected here too: it was counted as a duplicate at
     materialize time, and it is not one.
     """
+    # Any `lane` at all means a non-content record: the content lane is the one spelled by the
+    # ABSENCE of the key, so testing for that covers every lane added since without a second
+    # name to keep in step.
     pending_ids = {cid for cid, record in writes.items()
-                   if record.get("status") == "pending" and record.get("lane") != "lifecycle"}
+                   if record.get("status") == "pending" and not record.get("lane")}
     if not pending_ids:
         return
     by_id = {str(e.get("id") or ""): e for e in store.load(repo_path).get("entries", [])
@@ -919,8 +1039,11 @@ def _snapshot(repo_path: str) -> dict:
                        + [_projected(e, True) for e in tombstones]),
         "recorded": _recorded_summaries(decisions + tombstones),
         "filable": {str(e.get("id") or "") for e in decisions + tombstones},
+        # Tombstones included: a reconsideration is formed against a RETIRED decision's own
+        # revision, and a basis map that only knew live decisions stamped None on exactly the
+        # manifests whose disposition rule reads it.
         "basis": {str(e.get("id") or ""): str(e.get("current_revision_id") or "")
-                  for e in decisions},
+                  for e in decisions + tombstones},
     }
 
 
@@ -961,7 +1084,8 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
             # file a receipt against. One re-read closes it; `_finalize` refusing to delete an
             # unattributed hold is the backstop for every other route to the same shape.
             snap = _snapshot(repo_path)
-        flips = _dispositions(held, snap["entries"], _retired_ids(snap["tombstones"]))
+        flips = _dispositions(held, snap["entries"], _retired_ids(snap["tombstones"]),
+                              snap["tombstones"])
     for candidate in candidates.aggregate_candidates(events, snap["projection"])["candidates"]:
         if candidate["candidate_id"] in held:
             # Already awaiting review under its deterministic id. Belt to the held-events
@@ -996,8 +1120,8 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
     `session_id` scopes which events participate (`""` = the whole spool, which is what a
     worktree-shared spool needs). Returns the receipt:
 
-        {"events_observed", "proposed", "lifecycle_proposed", "already_pending", "duplicates",
-         "insufficient", "incomplete", "skipped", "dry_run"}
+        {"events_observed", "proposed", "lifecycle_proposed", "reconsidered",
+         "already_pending", "duplicates", "insufficient", "incomplete", "skipped", "dry_run"}
 
     `already_pending` counts both shapes of "this is already waiting on the developer": a
     candidate whose own held directory exists, and a duplicate of a decision that is itself
@@ -1032,6 +1156,7 @@ def format_receipt(receipt: dict) -> str:
         f"  evidence events observed: {receipt['events_observed']}",
         f"  proposed for review:      {receipt['proposed']}",
         f"  retirements proposed:     {receipt['lifecycle_proposed']}",
+        f"  reconsiderations:         {receipt['reconsidered']}",
         f"  already pending:          {receipt['already_pending']}",
         f"  duplicates:               {receipt['duplicates']}",
         f"  insufficient evidence:    {receipt['insufficient']}",
@@ -1039,6 +1164,9 @@ def format_receipt(receipt: dict) -> str:
     if receipt["lifecycle_proposed"]:
         lines.append("  (proposals only - nothing was retired. `contexer review` shows each "
                      "one; retiring is an explicit `contexer retire <id>`.)")
+    if receipt["reconsidered"]:
+        lines.append("  (questions only - nothing was restored. `contexer review` shows each "
+                     "inactive decision that was restated; only you can bring one back.)")
     if receipt["incomplete"]:
         lines.append("  incomplete: the evidence spool could not be fully read or updated.")
     return "\n".join(lines)

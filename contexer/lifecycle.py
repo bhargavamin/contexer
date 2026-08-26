@@ -42,9 +42,17 @@ Two rules carry the lane and neither is negotiable:
 import uuid
 from datetime import datetime, timezone
 
+from contexer import revisions
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 LIFECYCLE_ACTIONS = ("retire",)
+# The four answers a developer may give a reconsideration proposal. `skip` writes nothing at
+# all - it is here so the surfaces have one vocabulary rather than two.
+RECONSIDER_ACTIONS = ("restore", "restore_edit", "skip", "dismiss")
+_RECONSIDER_SLOT = "proposed_reconsideration"
+# The dismissal receipts kept on one decision. Bounded like every other accumulating list in
+# this store; the count is what a reviewer needs ("asked before, three times"), not the tail.
+_MAX_RECONSIDER_HISTORY = 20
 # V1 has one action. A replacement is not a second action but a field on this one: retiring a
 # decision *because another supersedes it* is still a retirement, recorded as lifecycle kind
 # "superseded". "replacement_linked" stays reserved vocabulary with no writer.
@@ -292,34 +300,55 @@ def restore_decision(repo_path: str, entry_id: str, reason: str = "") -> tuple[b
     The entry comes back with its prior status and its whole `lifecycle` list, one "restored"
     record longer - history accumulates rather than being rewound."""
     with store.store_lock(store.repo_slug(repo_path)):
-        graveyard = store.load_deleted(repo_path)
-        entry = store.entry_by_id(graveyard["entries"], entry_id)
-        if entry is None:
-            return False, f"Deleted decision {entry_id!r} not found."
-        data = store.load(repo_path)
-        # Full id, never the caller's prefix: this asks "is THIS entry already live".
-        if store.entry_by_id(data["entries"], entry["id"]) is not None:
-            graveyard["repo_path"] = repo_path
-            graveyard["entries"] = [e for e in graveyard["entries"] if e is not entry]
-            store._save_deleted(repo_path, graveyard)
-            return True, (f"{entry['id'][:8]} was already in the live store - dropped the "
-                          "leftover tombstone instead of storing a second copy.")
-        if len(data["entries"]) >= store.MAX_ENTRIES:
-            return False, (f"Cannot restore {entry['id'][:8]}: the store already holds "
-                           f"{store.MAX_ENTRIES} entries, the maximum. Restoring would evict "
-                           "another decision with no tombstone - delete one yourself first.")
-        entry.pop("deleted_at", None)
-        entry.pop("deleted_by", None)
-        entry.setdefault("lifecycle", []).append(lifecycle_record(
-            "restored", reason=(reason or "").strip(),
-            at=datetime.now(timezone.utc).isoformat(),
-            revision_id=entry.get("current_revision_id") or ""))
-        data["entries"].append(entry)
-        store.save(repo_path, data)
+        return _restore_unlocked(repo_path, entry_id, reason)[:2]
+
+
+def _restore_unlocked(repo_path: str, entry_id: str, reason: str = "",
+                      *, amend=None) -> tuple[bool, str, dict | None]:
+    """`restore_decision`'s body with the lock ALREADY HELD, plus an `amend(entry)` hook the
+    reconsideration lane uses to settle its proposal in the same write.
+
+    Separated out rather than duplicated because `store.store_lock` is an `flock` with no
+    timeout: a second acquisition from the same process would wait on itself forever, so a
+    caller that already holds the lock cannot reach `restore_decision` at all. Returns the
+    restored entry so the caller can read what it just wrote.
+    """
+    graveyard = store.load_deleted(repo_path)
+    entry = store.entry_by_id(graveyard["entries"], entry_id)
+    if entry is None:
+        return False, f"Deleted decision {entry_id!r} not found.", None
+    data = store.load(repo_path)
+    # Full id, never the caller's prefix: this asks "is THIS entry already live".
+    live = store.entry_by_id(data["entries"], entry["id"])
+    if live is not None:
         graveyard["repo_path"] = repo_path
         graveyard["entries"] = [e for e in graveyard["entries"] if e is not entry]
         store._save_deleted(repo_path, graveyard)
-        return True, f"Restored {entry['id'][:8]}."
+        if amend is not None:
+            # The restore itself already landed (its `restored` record went in before the live
+            # save); only the caller's own bookkeeping is outstanding.
+            amend(live)
+            store.save(repo_path, data)
+        return True, (f"{entry['id'][:8]} was already in the live store - dropped the "
+                      "leftover tombstone instead of storing a second copy."), live
+    if len(data["entries"]) >= store.MAX_ENTRIES:
+        return False, (f"Cannot restore {entry['id'][:8]}: the store already holds "
+                       f"{store.MAX_ENTRIES} entries, the maximum. Restoring would evict "
+                       "another decision with no tombstone - delete one yourself first."), None
+    entry.pop("deleted_at", None)
+    entry.pop("deleted_by", None)
+    entry.setdefault("lifecycle", []).append(lifecycle_record(
+        "restored", reason=(reason or "").strip(),
+        at=datetime.now(timezone.utc).isoformat(),
+        revision_id=entry.get("current_revision_id") or ""))
+    if amend is not None:
+        amend(entry)
+    data["entries"].append(entry)
+    store.save(repo_path, data)
+    graveyard["repo_path"] = repo_path
+    graveyard["entries"] = [e for e in graveyard["entries"] if e is not entry]
+    store._save_deleted(repo_path, graveyard)
+    return True, f"Restored {entry['id'][:8]}.", entry
 
 
 def review_lines(entry: dict, eid: str) -> list[str]:
@@ -345,4 +374,313 @@ def review_lines(entry: dict, eid: str) -> list[str]:
         lines.append(f'    retire_decision(entry_id="{eid}", reason="<the developer\'s reason>")'
                      f' | dismiss_lifecycle(entry_id="{eid}")')
     lines.append("    Ask the developer - never retire a decision on your own judgment.")
+    return lines
+
+
+# ── the reconsideration lane (hardening Task 04) ─────────────────────────────────
+#
+# A THIRD question, and the reason it gets its own slot rather than borrowing one. The
+# `proposed_revision` lane answers "this live decision should READ differently" and the
+# `proposed_lifecycle` lane answers "this live decision should stop being live". Neither can
+# carry "this decision the developer already switched off should come BACK", because the
+# subject of that question is not live at all: an ignored decision sits in the store with an
+# inactive status, and a retired one is not in the store at all - it is in the tombstone
+# sidecar. Sharing a slot would also let either proposal silently displace the other, the
+# exact failure this module was extracted to stop.
+#
+# The lane exists because a restatement of an inactive decision used to be absorbed by the
+# store's status-blind dedup and its evidence destroyed with no receipt anywhere
+# (OUTSTANDING-ISSUES item 7). It is now surfaced against the ORIGINAL decision identity, so
+# the revisions, the retirement record and the reconsideration receipts stay one continuous
+# history rather than becoming a second decision that says the same thing.
+#
+# Two rules carry it, and they mirror the retirement lane's:
+#
+# * **Nothing here restores anything on its own.** `propose_reconsideration` attaches a
+#   question. The decision stays exactly as inactive as it was until a developer answers.
+# * **A proposal is bound to the revision it was judged against.** If the inactive record
+#   changes, or is restored by some other route, restoration is REFUSED - `dismiss` stays
+#   available, since dropping a question needs no basis.
+
+
+def attach_reconsideration(entry: dict, *, content: str, title: str, candidate_id: str,
+                           source_files=(), source: str = "ai",
+                           now: str = "") -> dict | None:
+    """Claim the entry's ONE reconsideration slot IN MEMORY, returning the proposal or None
+    when a sitting proposal keeps it. Persistence is the caller's, exactly as with
+    `attach_lifecycle_proposal`.
+
+    `source_files` are the CONFIRMED ones only. A candidate's merely-possible paths - the ones
+    it reached through an uncertain link - are deliberately not carried here at all: an anchor
+    is guard and staleness input, so a wrong one is worse than none (runbook invariant 6), and
+    the cheapest way to guarantee one never becomes a restoration anchor is for this lane never
+    to hold it. That also keeps the aggregator and its ledger the only two modules that name
+    that field at all, which is the structural half of the same invariant.
+    """
+    now = now or datetime.now(timezone.utc).isoformat()
+    sitting = entry.get(_RECONSIDER_SLOT)
+    if sitting and not (source == "human" and sitting.get("source") != "human"):
+        return None
+    if sitting:
+        entry.setdefault("superseded_reconsiderations", []).append({**sitting,
+                                                                   "superseded_at": now})
+    proposal = {
+        "proposal_id": str(uuid.uuid4()),
+        "content": content,
+        "title": title,
+        "candidate_id": candidate_id,
+        "source_files": [f for f in source_files if isinstance(f, str) and f],
+        "target_state": "retired" if entry.get("deleted_at") else "ignored",
+        "basis_revision_id": entry.get("current_revision_id") or "",
+        "source": source,
+        "created_at": now,
+    }
+    entry[_RECONSIDER_SLOT] = proposal
+    return proposal
+
+
+def reconsideration_stale(entry: dict) -> bool:
+    """True when the inactive record moved under its own reconsideration proposal.
+
+    Two ways it can, and both mean the developer would be answering about something they were
+    not shown: HEAD advanced (the wording changed), or the decision left the state it was
+    judged in - restored, retired or un-ignored by some other route while the question sat.
+    """
+    prop = entry.get(_RECONSIDER_SLOT) or {}
+    if not prop:
+        return False
+    if prop.get("basis_revision_id") != (entry.get("current_revision_id") or ""):
+        return True
+    now_state = "retired" if entry.get("deleted_at") else \
+        ("ignored" if store.entry_status(entry) == "ignored" else "live")
+    return now_state != prop.get("target_state")
+
+
+def _locate_inactive(repo_path: str, entry_id: str) -> tuple:
+    """`(entry, data, graveyard)` for an inactive decision, looking in the live store first
+    and the tombstone sidecar second. `data`/`graveyard` are the loaded files so the caller
+    saves whichever one actually holds the entry; the other stays None.
+
+    Live first because an IGNORED decision never left the store - only a RETIRED one did.
+    """
+    data = store.load(repo_path)
+    entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
+                              entry_id)
+    if entry is not None:
+        return entry, data, None
+    graveyard = store.load_deleted(repo_path)
+    entry = store.entry_by_id([e for e in graveyard["entries"]
+                               if e.get("type") == "decision"], entry_id)
+    return entry, None, graveyard
+
+
+def propose_reconsideration(repo_path: str, entry_id: str, *, content: str, title: str,
+                            candidate_id: str, source_files=(), source: str = "ai") -> dict:
+    """Attach a reconsideration question to an INACTIVE decision. `{"ok", "message",
+    "proposal"}`.
+
+    Proposing restores nothing: an ignored decision stays ignored and a retired one stays in
+    the tombstone sidecar until a developer answers through `reconsider_decision`. A decision
+    that is still LIVE is refused outright - there is nothing to reconsider, and a restatement
+    of a live decision is an ordinary duplicate or update in the content lane.
+    """
+    if not (content or "").strip():
+        return {"ok": False, "proposal": None,
+                "message": "A reconsideration needs the restated wording it is asking about."}
+    with store.store_lock(store.repo_slug(repo_path)):
+        entry, data, graveyard = _locate_inactive(repo_path, entry_id)
+        if entry is None:
+            return {"ok": False, "proposal": None,
+                    "message": f"Decision {entry_id!r} not found, live or retired."}
+        retired = graveyard is not None
+        if not retired and store.entry_status(entry) != "ignored":
+            return {"ok": False, "proposal": None,
+                    "message": f"Decision {entry['id'][:8]} is live - there is nothing to "
+                               "reconsider."}
+        proposal = attach_reconsideration(
+            entry, content=content.strip(), title=title, candidate_id=candidate_id,
+            source_files=source_files, source=source)
+        if proposal is None:
+            return {"ok": False, "proposal": None,
+                    "message": f"Decision {entry['id'][:8]} already carries a developer's "
+                               "reconsideration - it keeps the slot."}
+        if retired:
+            graveyard["repo_path"] = repo_path
+            store._save_deleted(repo_path, graveyard)
+        else:
+            store.save(repo_path, data)
+        store.touch_pending_review(repo_path)
+        return {"ok": True, "proposal": proposal,
+                "message": f"Reconsideration proposed for {entry['id'][:8]} - the decision "
+                           "stays inactive until the developer restores it."}
+
+
+def pending_reconsiderations(repo_path: str) -> list[dict]:
+    """Every inactive decision carrying an open reconsideration - ignored ones from the live
+    store, retired ones from the tombstone sidecar, in that order.
+
+    A tombstoned entry is handed back as-is, carrying its `deleted_at`, which is what every
+    render below reads to say "retired" rather than "ignored". Nothing here mutates.
+    """
+    ignored = [e for e in store.load(repo_path).get("entries", [])
+               if isinstance(e, dict) and e.get("type") == "decision"
+               and e.get(_RECONSIDER_SLOT)]
+    retired = [e for e in store.load_deleted(repo_path).get("entries", [])
+               if isinstance(e, dict) and e.get("type") == "decision"
+               and e.get(_RECONSIDER_SLOT)]
+    return ignored + retired
+
+
+def _reconsider_receipt(entry: dict, prop: dict, disposition: str, action: str,
+                        now: str) -> None:
+    """Record what was answered, on the decision itself. The durable half of every outcome:
+    once the raw evidence is finalized away, this list is the only place the question and its
+    answer survive - and a reviewer meeting the same restatement again needs to see that it
+    was asked before."""
+    history = entry.get("reconsideration_history")
+    history = (history if isinstance(history, list) else []) + [{
+        "candidate_id": prop.get("candidate_id") or "",
+        "proposal_id": prop.get("proposal_id") or "",
+        "disposition": disposition,
+        "action": action,
+        "basis_revision_id": prop.get("basis_revision_id") or "",
+        "content": prop.get("content") or "",
+        "occurred_at": now,
+    }]
+    entry["reconsideration_history"] = history[-_MAX_RECONSIDER_HISTORY:]
+
+
+def _fail_toward_review(entry: dict) -> None:
+    """A decision coming back with no historical ACTIVE status returns PENDING, never trusted.
+
+    An ignored entry records only that it was switched off - nothing anywhere says what it was
+    before - so approving it on the way back in would be a guess dressed as a ratification,
+    and a guess that arms the commit-time guard. A retired entry normally carries the status it
+    held when it was retired, and keeps it; one retired out of an inactive state hits the same
+    rule for the same reason.
+    """
+    if store.entry_status(entry) not in _ACTIVE_STATUSES:
+        entry["status"] = "pending_approval"
+        entry.pop("approved_by", None)
+
+
+def reconsider_decision(repo_path: str, entry_id: str, action: str,
+                        content: str = "") -> tuple[bool, str]:
+    """The developer's answer to a reconsideration. Returns (ok, message).
+
+    * `restore` - the same decision, the same id, the same revision history, back in the live
+      store. It returns PENDING when nothing records that it was ever approved (see
+      `_fail_toward_review`), so restoring can never fabricate a ratification.
+    * `restore_edit` - the same identity, plus the developer's own wording appended as a new
+      human-approved revision. This is the way back for a decision whose point still stands
+      but whose text does not.
+    * `skip` - keep the question pending. Writes nothing.
+    * `dismiss` - the decision stays inactive and the question is answered, durably. A LATER
+      human directive may raise it again; repeated agent evidence may not.
+
+    Only a human calls this, from `contexer review` or the `reconsider_decision` tool, which
+    is why the restored lifecycle record's actor is "human" either way - the same rule
+    `retire_decision` follows.
+    """
+    action = (action or "").strip()
+    if action not in RECONSIDER_ACTIONS:
+        return False, (f"Unsupported reconsideration action {action!r}. Use: "
+                       f"{', '.join(RECONSIDER_ACTIONS)}.")
+    if action == "restore_edit" and not (content or "").strip():
+        return False, "restore_edit needs the developer's wording for the new revision."
+    with store.store_lock(store.repo_slug(repo_path)):
+        entry, data, graveyard = _locate_inactive(repo_path, entry_id)
+        if entry is None:
+            return False, f"Decision {entry_id!r} not found, live or retired."
+        prop = entry.get(_RECONSIDER_SLOT)
+        if not prop:
+            return False, f"Decision {entry['id'][:8]} has no reconsideration to answer."
+        eid = entry["id"][:8]
+        now = datetime.now(timezone.utc).isoformat()
+        if action == "skip":
+            return True, f"Left the reconsideration of {eid} pending."
+        if action == "dismiss":
+            entry.pop(_RECONSIDER_SLOT, None)
+            _reconsider_receipt(entry, prop, "dismissed", action, now)
+            if graveyard is not None:
+                graveyard["repo_path"] = repo_path
+                store._save_deleted(repo_path, graveyard)
+            else:
+                store.save(repo_path, data)
+            return True, (f"Kept {eid} inactive. The question and its answer are recorded on "
+                          "the decision; a later directive from you can raise it again.")
+        if reconsideration_stale(entry):
+            return False, (
+                f"Cannot restore {eid}: this reconsideration was raised against an earlier "
+                "revision or a different state, and the decision has moved since. Dismiss it "
+                "and let a fresh restatement raise the question against what the decision "
+                "says now.")
+
+        def _settle(target: dict) -> None:
+            target.pop(_RECONSIDER_SLOT, None)
+            _fail_toward_review(target)
+            if action == "restore_edit":
+                revisions.append_revision(target, content.strip(), source="human",
+                                          approved_at=now)
+                target["status"] = "approved"
+                target["approved_by"] = "human"
+            _reconsider_receipt(target, prop, "approved", action, now)
+
+        if graveyard is not None:
+            ok, message, restored = _restore_unlocked(
+                repo_path, entry["id"], "reconsidered after a developer restatement",
+                amend=_settle)
+            if not ok:
+                return False, message
+            entry = restored or entry
+        else:
+            # An IGNORED decision never left the live store, so there is nothing to move: the
+            # `restored` record is appended here rather than by `_restore_unlocked`, and it
+            # carries the BASIS revision so the disposition rules read one shape for both
+            # halves of the lane.
+            entry.setdefault("lifecycle", []).append(lifecycle_record(
+                "restored", reason="reconsidered after a developer restatement", at=now,
+                revision_id=entry.get("current_revision_id") or ""))
+            _settle(entry)
+            store.save(repo_path, data)
+        store.touch_pending_review(repo_path)
+        status = store.entry_status(entry)
+        tail = (" It is live and approved." if status == "approved"
+                else " It is back as PENDING - approve it in review to make it trusted "
+                     "context, since nothing recorded that it was ever approved before.")
+        return True, f"Restored {eid} with its full history.{tail}"
+
+
+def reconsideration_review_lines(entry: dict, eid: str) -> list[str]:
+    """The reconsideration block `store.format_pending_review` renders under an inactive
+    decision: what was restated, where it came from, whether the question was asked before,
+    and what each answer does. Its own block for the same reason the retirement block is -
+    restoring a decision and rewording a live one are different answers to different
+    questions."""
+    prop = entry.get(_RECONSIDER_SLOT) or {}
+    state = "retired" if entry.get("deleted_at") else "ignored"
+    lines = [f"    reconsideration proposed (source={prop.get('source') or 'unknown'}): this "
+             f"{state} decision was restated by the developer",
+             f'    restated as: "{store._clip_body(prop.get("content") or "")}"']
+    if prop.get("source_files"):
+        lines.append(f"    confirmed files: {', '.join(prop['source_files'])}")
+    prior = [row for row in entry.get("reconsideration_history") or []
+             if isinstance(row, dict) and row.get("disposition") == "dismissed"]
+    if prior:
+        lines.append(f"    asked before: dismissed {len(prior)} time(s), most recently "
+                     f"{(prior[-1].get('occurred_at') or '')[:10]}")
+    if reconsideration_stale(entry):
+        lines.append("    STALE - the decision has changed or moved since this was raised; "
+                     "restoring is refused until a fresh restatement raises it again. "
+                     "Dismissing still works.")
+        lines.append(f'    reconsider_decision(entry_id="{eid}", action="dismiss")')
+    else:
+        lines.append("    restoring brings the SAME decision back with its whole history "
+                     "(pending review unless it was approved before); restore_edit appends "
+                     "the developer's own wording as a new approved revision; dismissing "
+                     "keeps it inactive and records that the question was asked.")
+        lines.append(f'    reconsider_decision(entry_id="{eid}", '
+                     'action="restore|restore_edit|skip|dismiss")')
+    lines.append("    Ask the developer - never restore a decision they switched off on your "
+                 "own judgment.")
     return lines

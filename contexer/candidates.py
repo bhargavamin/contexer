@@ -12,7 +12,8 @@ queue" - not "this is 50% likely to be correct". Nothing here approves, enforces
 materializes anything: the review flow is the only gate.
 
 Idempotency is the load-bearing property. `candidate_id` is a uuid5 over the candidate's kind,
-its target decision when it names one, and the sorted contributing event ids; events are
+its target decision when it names one, the sorted contributing event ids, and - for a
+`reconsider` candidate only - the basis revision the question is asked against; events are
 ordered by (occurred_at, event_id) before anything reads them, and candidates come back sorted
 by (-score, candidate_id). The same event set in ANY input order therefore produces
 byte-identical output. A `uuid4` in this module is a defect.
@@ -463,14 +464,36 @@ def _is_live(decision) -> bool:
 
 
 def _best_match(content, decisions) -> tuple:
-    """(decision_id, overlap) for the closest decision. Ties break on the lowest id, so the
-    same corpus always names the same decision."""
-    best_id, best = None, 0.0
+    """(decision, overlap) for the closest decision, `(None, 0.0)` for no match at all. Ties
+    break on the lowest id, so the same corpus always names the same decision.
+
+    The DECISION rather than its id: the retire branch needs the matched text's own negation
+    polarity, and re-looking it up by id would be a second scan for a value this loop already
+    held."""
+    best_decision, best = None, 0.0
     for decision in sorted(decisions, key=lambda d: str(d.get("id") or "")):
         overlap = _overlap(content, decision.get("content") or "")
         if overlap > best:
-            best_id, best = str(decision.get("id") or ""), overlap
-    return best_id, best
+            best_decision, best = decision, overlap
+    return best_decision, best
+
+
+def _has_directive(group) -> bool:
+    """Whether a developer said this out loud somewhere in the group.
+
+    The OPENING gate for reconsideration, and the whole of what separates it from every other
+    kind: an agent conclusion, a file edit, a test run or a repetition may corroborate a
+    reconsideration that is already open, but none of them may raise the question. Read across
+    the group's events rather than off its seed alone, so a directive that merged into an
+    earlier conclusion's group still counts as the developer having spoken."""
+    return any(e.get("kind") == "user_directive" for e in group.get("events") or [])
+
+
+def _by_id(decisions, decision_id):
+    """The projected decision with this id, or None."""
+    if not decision_id:
+        return None
+    return next((d for d in decisions if str(d.get("id") or "") == str(decision_id)), None)
 
 
 def _repeated_target(group, live_ids):
@@ -487,22 +510,43 @@ def _repeated_target(group, live_ids):
 def _classify(content, group, decisions) -> tuple:
     """(kind, target_decision_id, extra uncertainties) for a group that cleared the bar."""
     live = [d for d in decisions if _is_live(d)]
-    retired = [d for d in decisions if not _is_live(d)]
+    inactive = [d for d in decisions if not _is_live(d)]
     notes: list = []
 
-    # A re-stated retired decision is a NEW candidate: the developer retired it once, so it is
-    # surfaced fresh for review rather than silently matched back onto the tombstone.
-    dead_id, dead_overlap = _best_match(content, retired)
-    if dead_overlap > _DUPLICATE_OVERLAP:
-        notes.append(f"restates {dead_id}, which was retired or ignored - review it as new")
-
+    dead, dead_overlap = _best_match(content, inactive)
     target, overlap = _best_match(content, live)
+
+    # RECONSIDERATION. A restatement of an ignored or retired decision is neither a duplicate
+    # of it nor a fresh decision beside it: it is the question "should this come back?", asked
+    # against the ORIGINAL decision identity so its revisions and its retirement history stay
+    # one continuous record. Only an explicit `user_directive` may raise it (`_has_directive`),
+    # and only when the inactive match is STRICTLY closer than any live one - a live decision
+    # that matches at least as well is still a live duplicate or update, and answering it does
+    # not resurrect anything.
+    if dead is not None and dead_overlap > _DUPLICATE_OVERLAP and dead_overlap > overlap:
+        dead_id = str(dead.get("id") or "")
+        if _has_directive(group):
+            notes.append(f"reconsiders {dead_id}, which the developer made inactive - only "
+                         "their explicit review restores it")
+            return "reconsider", dead_id, notes
+        # Deliberately NAMES no decision. The candidate goes on to be classified as ordinary
+        # content, and a note pointing a reviewer at the inactive decision would be the
+        # reopening itself in prose - the developer never said anything.
+        notes.append("restates a decision that is no longer active - only an explicit "
+                     "developer directive reopens one")
+
     if overlap > _DUPLICATE_OVERLAP:
-        return "duplicate", target, notes
-    if overlap > _RETIRE_OVERLAP and _negates(group["seed"].get("summary")):
-        return "retire", target, notes
+        return "duplicate", str(target.get("id") or ""), notes
+    # POLARITY, not the bare presence of a negation word (the discipline `_merge_target`
+    # documents, applied to the candidate-vs-store comparison it was missing from). `_negates`
+    # matches "never"/"not"/"don't" anywhere, so a PROHIBITION restating a stored prohibition
+    # in slightly different words landed in this band and was classified as a proposal to
+    # RETIRE the very rule it repeats. A retirement is a reversal, so it takes a flip.
+    if (overlap > _RETIRE_OVERLAP
+            and _negates(group["seed"].get("summary")) != _negates(target.get("content"))):
+        return "retire", str(target.get("id") or ""), notes
     if overlap > _UPDATE_OVERLAP:
-        return "update", target, notes
+        return "update", str(target.get("id") or ""), notes
     repeated = _repeated_target(group, {str(d.get("id") or "") for d in live})
     if repeated:
         return "update", repeated, notes
@@ -511,21 +555,31 @@ def _classify(content, group, decisions) -> tuple:
 
 # ── assembly ─────────────────────────────────────────────────────────────────────
 
-def _candidate_id(kind, target_decision_id, events) -> str:
-    """The candidate's identity: its kind, the decision it acts on when it names one, and the
-    sorted ids of the events it is built from.
+def _candidate_id(kind, target_decision_id, events, basis_revision_id="") -> str:
+    """The candidate's identity: its kind, the decision it acts on when it names one, the
+    sorted ids of the events it is built from, and - for a reconsideration - the revision of
+    the inactive decision the proposal is formed against.
 
     Deterministic by construction, which is what the storage layer leans on: `held/<id>/` IS
     the "already pending" record, so two passes over the same evidence must name the same
     directory. The kind and target join the seed because they are what the candidate PROPOSES
     - the same events read as `update the auth decision` and as `retire it` are two different
-    proposals, and one directory could only ever hold one of them.
+    proposals, and one directory could only ever hold one of them. The basis joins them for
+    the same reason: reconsidering revision 3 of a retired decision is a different question
+    from reconsidering revision 5, and a reviewer must be answering the one they were shown.
+
+    APPENDED only when there is one, rather than always joined as an empty component: every
+    candidate id already in a ledger was minted from three parts, and adding a fourth
+    unconditionally would rename all of them.
     """
-    return str(uuid.uuid5(_CANDIDATE_NAMESPACE, "\n".join([
+    parts = [
         str(kind or ""),
         str(target_decision_id or ""),
         ",".join(sorted(str(e.get("event_id") or "") for e in events)),
-    ])))
+    ]
+    if basis_revision_id:
+        parts.append(str(basis_revision_id))
+    return str(uuid.uuid5(_CANDIDATE_NAMESPACE, "\n".join(parts)))
 
 
 def _seeded_candidate(group, decisions) -> dict:
@@ -538,9 +592,17 @@ def _seeded_candidate(group, decisions) -> dict:
     else:
         kind, target, notes = _classify(content, group, decisions)
         uncertainties.extend(notes)
+    # Only a reconsideration carries these, and only it binds its identity to the basis: for
+    # every other kind the target's revision is read at materialization time, where the
+    # proposal actually lands.
+    inactive = (_by_id(decisions, target) if kind == "reconsider" else None) or {}
+    basis = str(inactive.get("current_revision_id") or "") if inactive else ""
     return {
-        "candidate_id": _candidate_id(kind, target, group["events"]),
+        "candidate_id": _candidate_id(kind, target, group["events"], basis),
         "kind": kind,
+        "target_state": ("retired" if inactive.get("tombstoned") else "ignored")
+                        if inactive else None,
+        "basis_revision_id": basis or None,
         "title": _first_sentence(content),
         "content": content,
         "subtype": _subtype_for(seed),
@@ -573,6 +635,8 @@ def _leftover_candidate(session_id, events) -> dict:
     return {
         "candidate_id": _candidate_id("insufficient", None, events),
         "kind": "insufficient",
+        "target_state": None,
+        "basis_revision_id": None,
         "title": "Files changed with no stated decision",
         "content": "",
         "subtype": "architecture",
