@@ -322,7 +322,8 @@ def _dispositions(held: dict, entries: list, retired_ids: set, tombstones: list 
             target = entry if entry is not None else tombstoned.get(entry_id)
             basis = str(meta.get("basis_revision_id") or "")
             sitting = (target or {}).get("proposed_reconsideration") or {}
-            answer = _reconsideration_answer(target, candidate_id, basis)
+            answer = _reconsideration_answer(target, candidate_id, basis,
+                                             str(meta.get("created_at") or ""))
             if target is None:
                 status = "dismissed"                    # evicted: nothing left to answer
             elif str(sitting.get("candidate_id") or "") == candidate_id:
@@ -418,7 +419,31 @@ def _restored_on_basis(entry: dict | None, basis: str) -> bool:
         for record in (entry.get("lifecycle") or []))
 
 
-def _reconsideration_answer(entry: dict | None, candidate_id: str, basis: str) -> str:
+def _answered_after(occurred_at, held_since) -> bool:
+    """Whether a receipt was written at or after the moment a candidate was held.
+
+    The TIME half of the shared-receipt rule, and the whole of what keeps it honest. A
+    dismissal does not advance the decision's revision, so a receipt sits at its basis forever
+    - and a basis match alone therefore let one answer settle every FUTURE candidate at that
+    revision, including ones opened after it and answered the opposite way. A receipt can only
+    be an answer to a question that already existed when it was written.
+
+    Both stamps come from `datetime.now(timezone.utc).isoformat()` on one machine, so they are
+    aware and directly comparable; they are PARSED rather than string-compared because
+    `isoformat()` omits the microseconds when they are zero, and a correctness gate should not
+    rest on that shape being uniform. Unparseable or missing on either side returns False, so
+    the candidate stays held - the module's standing "cannot judge it, do not guess" rule, and
+    the safe direction for a clock that stepped backwards between the two writes.
+    """
+    try:
+        return (datetime.fromisoformat(str(occurred_at or ""))
+                >= datetime.fromisoformat(str(held_since or "")))
+    except (TypeError, ValueError):
+        return False
+
+
+def _reconsideration_answer(entry: dict | None, candidate_id: str, basis: str,
+                            held_since: str = "") -> str:
     """The developer's recorded answer to this candidate's question - `"approved"`,
     `"dismissed"`, or `""` for none yet.
 
@@ -431,9 +456,15 @@ def _reconsideration_answer(entry: dict | None, candidate_id: str, basis: str) -
     that it stays held for good with no receipt anywhere, and invisible to
     `evidence_diagnostics`' `held_unattributed` because it does name an entry.
 
-    A candidate's own receipt always wins over a same-basis one. A receipt at a DIFFERENT basis
-    answers a different question and never speaks here, which leaves such a candidate held -
-    the same "cannot judge it, so do not guess" rule every other branch follows.
+    That "same act" argument holds ONLY for a candidate the act could have been about, which is
+    why the shared branch is gated on `_answered_after`: `held_since` is the candidate's own
+    manifest `created_at`, stamped at hold time and carried across resumes, and a receipt older
+    than that answered a question this candidate had not asked yet.
+
+    A candidate's own receipt always wins over a same-basis one, and among shared ones the
+    latest that qualifies wins - so a question the developer eventually restored settles the
+    candidates displaced by it as approved, not off some earlier dismissal. A receipt at a
+    DIFFERENT basis answers a different question and never speaks here at all.
     """
     own = shared = ""
     for row in (entry or {}).get("reconsideration_history") or []:
@@ -444,7 +475,8 @@ def _reconsideration_answer(entry: dict | None, candidate_id: str, basis: str) -
             continue
         if str(row.get("candidate_id") or "") == candidate_id:
             own = disposition
-        elif basis and str(row.get("basis_revision_id") or "") == str(basis):
+        elif (basis and str(row.get("basis_revision_id") or "") == str(basis)
+                and _answered_after(row.get("occurred_at"), held_since)):
             shared = disposition
     return own or shared
 

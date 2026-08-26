@@ -986,6 +986,44 @@ def test_a_second_restatement_displaced_by_the_first_is_settled_not_stranded(tmp
     assert store.entry_status(_inactive_entry(tmp_repo, entry_id)) == "ignored"
 
 
+def test_a_receipt_never_settles_a_candidate_held_after_it_was_written(tmp_repo):
+    """The TIME half of the shared-receipt rule, in four ordinary passes.
+
+    A dismissal does not advance the decision's revision, so an old receipt sits at that basis
+    forever. Matching on the basis alone therefore settled every LATER displaced candidate off
+    it - filing `dismissed` for a restatement nobody had answered, and finalizing its evidence
+    away, while the sibling question at that same revision went on to be RESTORED. The durable
+    ledger then read dismissed / dismissed / approved with a fabricated middle row.
+
+    A receipt can only answer a question that existed when it was written.
+    """
+    entry_id = _restated(tmp_repo, retire=False)                    # pass 1: Q1
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "dismiss")[0]
+    reconcile.reconcile_session(tmp_repo)
+    assert _summaries(tmp_repo, entry_id) == ["dismissed"]
+
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-b", source="replay",
+                             summary=RULE + " I mean it.")
+    assert reconcile.reconcile_session(tmp_repo)["reconsidered"] == 1        # pass 2: Q2
+    sitting = _inactive_entry(tmp_repo, entry_id)["proposed_reconsideration"]
+
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-c", source="replay",
+                             summary=RULE + " Still true.")
+    assert reconcile.reconcile_session(tmp_repo)["already_pending"] == 1     # pass 3: displaced
+    reconcile.reconcile_session(tmp_repo)                                   # pass 4: the bug
+
+    assert _summaries(tmp_repo, entry_id) == ["dismissed"], "settled off a receipt that predates it"
+    assert len(spool.held_candidates(tmp_repo)) == 2
+    assert _inactive_entry(tmp_repo, entry_id)["proposed_reconsideration"] == sitting
+
+    # And the answer the developer DOES give settles both, with the truth on every row.
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "restore")[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    assert sorted(_summaries(tmp_repo, entry_id)) == ["approved", "approved", "dismissed"]
+    assert spool.held_candidates(tmp_repo) == {}
+
+
 def test_a_later_question_is_never_settled_by_an_earlier_answer(tmp_repo):
     """The guard on the fix above. A restatement arriving AFTER a dismissal opens a NEW
     question at the same basis, which the brief explicitly grants - and the earlier receipt
