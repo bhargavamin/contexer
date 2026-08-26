@@ -683,6 +683,23 @@ def _finish_share(dec: dict, key, server_id,
         share_status.SYNCED, sent=1, total=1, server_id=str(server_id))
 
 
+def _finish_share_lifecycle(remote, dec: dict, key) -> str:
+    """The clause `_finish_share`'s success message needs when the OPTIONAL half did not go.
+
+    Deliberately explicit rather than silent: the decision IS synced, so saying nothing would be
+    almost true, and "almost synced" is exactly the state a developer must be told about before
+    they assume the team can see this rule's retirement."""
+    blocked = getattr(remote, "lifecycle_blocked", None) or []
+    if not blocked:
+        return ""
+    queued, lost = _queue_blocked_lifecycle(remote, {dec["id"]: _payload(dec, key)})
+    if lost or not queued:
+        return (" Its retirement history was refused by the server and could NOT be queued - "
+                "re-share this decision once the server supports it.")
+    return (" Its retirement history was refused by the server and stays queued - it will be "
+            "offered again once the server's protocol changes.")
+
+
 # ── batch push (share_all / share_ids / drain, both twins) ───────────────────────────
 # One push_decisions call per _BATCH_SIZE decisions instead of one push_decision per row, so a
 # bulk share lands together instead of trickling into the web UI. The sync (_push_batch) and async
@@ -772,6 +789,82 @@ def _queue_rest_status(decs: list[dict], start: int, key, counts: _BatchCounts,
     return counts.status(share_status.BATCH_INTERRUPTED, total, queued=queued)
 
 
+# ── blocked lifecycle deltas (plan E1/E2 optional-protocol fallback) ─────────────────
+# A server that advertised `decisionLifecycle` and then refused the augmented push has its base
+# decision synced by `remote.apush_decision`'s one-shot legacy retry. The OPTIONAL half did not
+# go, and this is where it survives: an outbox row STAGED as lifecycle_pending, carrying why it
+# was refused and the capability fingerprint it was refused under.
+#
+# It is a distinct stage rather than an ordinary queued row because the two mean opposite things
+# to a drain. An ordinary row is "nothing of this decision reached the server, send it"; a
+# lifecycle_pending row is "the decision IS synced, only its history is outstanding". Draining it
+# as an ordinary row would re-ask an unchanged server the question it already refused - the
+# `source="plan"` retry storm - and reporting it as merely queued would understate what synced.
+_LIFECYCLE_PENDING = "lifecycle_pending"
+
+
+def _queue_blocked_lifecycle(remote, payloads: dict) -> tuple[int, int]:
+    """Durably queue every lifecycle delta this push could not deliver. Returns (queued, lost).
+
+    `payloads` maps decision_id -> the outbox payload for that decision, so the queued row carries
+    the FULL body: a later retry is one ordinary idempotent upsert, not a special partial-update
+    protocol the server would need to understand.
+
+    Never raises. A row that cannot be written is counted as lost so the caller can say so - the
+    module's standing rule that a status must not promise a retry that was never recorded."""
+    queued = lost = 0
+    for blocked in getattr(remote, "lifecycle_blocked", None) or []:
+        row = payloads.get(blocked.get("decision_id"))
+        if row is None:
+            continue
+        try:
+            _enqueue_unlocked({**row, "stage": _LIFECYCLE_PENDING,
+                               "blocked_reason": blocked.get("reason", ""),
+                               "capability": blocked.get("capability", ""),
+                               "queued_at": time.time(), "attempts": 0})
+            queued += 1
+        except Exception:
+            lost += 1
+    return queued, lost
+
+
+def _retry_lifecycle_pending(remote, pending: list[dict], endpoint, sent_ids: set) -> tuple[int, list[dict]]:
+    """Re-offer blocked lifecycle deltas, but ONLY when the server's answer has changed.
+
+    The gate is the advertised capability fingerprint, compared against the one recorded when the
+    delta was refused. An unchanged advertisement means the same server would refuse it the same
+    way, so the row is left exactly as it is - no round trip, no attempt counter, no eventual
+    quarantine. That is the whole difference between "durably pending" and "retry storm".
+
+    Returns (settled, rows_still_pending); settled decision ids are added to `sent_ids` so the
+    normal reconcile drops them. Callers persist the returned rows."""
+    if not pending:
+        return 0, []
+    current = with_local_fallback(remote.lifecycle_capability_fingerprint, default=None,
+                                  action="check the team lifecycle protocol")
+    if not current or current == "unknown":
+        return 0, pending
+    settled = 0
+    kept: list[dict] = []
+    for row in pending:
+        if row.get("capability") == current:
+            kept.append(row)
+            continue
+        ok = with_local_fallback(lambda row=row: remote.push_decision(**_entry_push_kwargs(row)),
+                                 default=None, action="retry a pending lifecycle update")
+        refused = {b.get("decision_id") for b in getattr(remote, "lifecycle_blocked", None) or []}
+        if ok is None or row.get("decision_id") in refused:
+            # Still refused, or the cloud went away mid-retry. Record the fingerprint it was
+            # refused under so the next drain asks again only once the server's answer moves.
+            kept.append({**row, "capability": current if ok is not None else row.get("capability", ""),
+                         "attempts": row.get("attempts", 0) + 1})
+            continue
+        _mark_shared([row.get("decision_id")], endpoint)
+        sent_ids.add(row.get("decision_id"))
+        settled += 1
+    return settled, kept
+
+
 def _split_skips(skipped: list) -> tuple[set, int]:
     """Partition server skips into (retryable_decision_ids, permanent_invalid_count). TRANSIENT
     'quota_exceeded' rows are kept queued to drain once space frees; PERMANENT ones (invalid type /
@@ -822,6 +915,10 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key,
         _saved, skipped = res
         _mark_batch_saved(chunk, skipped, endpoint)
         counts.sent += len(chunk) - len(skipped)
+        # The base rows above synced; any lifecycle delta the server refused stays pending here.
+        _pending, dropped_lifecycle = _queue_blocked_lifecycle(
+            remote, {d["id"]: _payload(d, key) for d in chunk})
+        counts.lost += dropped_lifecycle
         retry, inv = _split_skips(skipped)
         counts.invalid += inv
         if retry:
@@ -847,6 +944,10 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key,
         _saved, skipped = res
         _mark_batch_saved(chunk, skipped, endpoint)
         counts.sent += len(chunk) - len(skipped)
+        # The base rows above synced; any lifecycle delta the server refused stays pending here.
+        _pending, dropped_lifecycle = _queue_blocked_lifecycle(
+            remote, {d["id"]: _payload(d, key) for d in chunk})
+        counts.lost += dropped_lifecycle
         retry, inv = _split_skips(skipped)
         counts.invalid += inv
         if retry:
@@ -871,14 +972,20 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
     failure and leaves that entry plus everything after it queued: the cloud is likely
     still down, so hammering the rest would be pointless (with_local_fallback's warn-once
     already keeps stderr quiet). Entries are never dropped for age/attempts here - see
-    _OUTBOX_CAP."""
-    entries = _load_outbox()
-    if not entries:
+    _OUTBOX_CAP.
+
+    `lifecycle_pending` rows are held OUT of the batch loop and offered separately at the end
+    (`_retry_lifecycle_pending`): their base decision is already synced, so re-pushing them with
+    the ordinary rows would re-ask an unchanged server the optional question it already refused."""
+    all_entries = _load_outbox()
+    if not all_entries:
         return 0
     profile = profile or load_profile()
     remote = RemoteStore.from_profile(profile)
     if remote is None:
         return 0
+    entries = [e for e in all_entries if e.get("stage") != _LIFECYCLE_PENDING]
+    pending = [e for e in all_entries if e.get("stage") == _LIFECYCLE_PENDING]
     sent = 0
     sent_ids: set = set()
     for start in range(0, len(entries), _BATCH_SIZE):
@@ -892,7 +999,15 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
             _save_outbox(_reconcile_with_disk(entries[start:], sent_ids))
             return sent
         sent += _drain_mark(chunk, res, sent_ids, profile.endpoint)
+        # A drained row whose lifecycle the server refused is re-queued as a pending delta rather
+        # than counted as fully delivered.
+        _queue_blocked_lifecycle(remote, {e.get("decision_id"): e for e in chunk})
+    settled, still_pending = _retry_lifecycle_pending(remote, pending, profile.endpoint, sent_ids)
+    sent += settled
     _save_outbox(_reconcile_with_disk([], sent_ids))
+    for row in still_pending:
+        with contextlib.suppress(Exception):
+            _enqueue_unlocked(row)
     return sent
 
 
@@ -965,18 +1080,25 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
     cancellable). Identical FIFO / stop-at-first-failure / reconcile semantics - the only
     difference is the awaited push; every other line is the shared local outbox logic.
 
-    Drains the SHARE outbox only, exactly like its sync twin. The reconciliation retry queue is
+    Drains the SHARE outbox only. The reconciliation retry queue is
     drained by `drain_outbox`, the public locked wrapper, which `team_context.refresh` calls at
     session start. An async wrapper pairing this with an async-native reconciliation drain existed
-    and was deleted: nothing but its own tests ever called it, so the 68-line copy of that drain
-    only ever drifted from the sync original it duplicated."""
-    entries = _load_outbox()
-    if not entries:
+    and was deleted: nothing but its own tests ever called it, so the copy only drifted from the
+    sync original it duplicated.
+
+    `lifecycle_pending` rows are held out here too, but this twin does NOT re-offer them: it runs
+    on the in-loop share path, where the caller is on a latency budget, and a blocked lifecycle
+    delta is by definition not urgent (its decision is already synced). They stay queued for the
+    next session-start drain, which is the one that re-offers them. Skipping work is safe here in
+    a way that dropping it never would be."""
+    all_entries = _load_outbox()
+    if not all_entries:
         return 0
     profile = profile or load_profile()
     remote = RemoteStore.from_profile(profile)
     if remote is None:
         return 0
+    entries = [e for e in all_entries if e.get("stage") != _LIFECYCLE_PENDING]
     sent = 0
     sent_ids: set = set()
     for start in range(0, len(entries), _BATCH_SIZE):
@@ -990,6 +1112,7 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
             _save_outbox(_reconcile_with_disk(entries[start:], sent_ids))
             return sent
         sent += _drain_mark(chunk, res, sent_ids, profile.endpoint)
+        _queue_blocked_lifecycle(remote, {e.get("decision_id"): e for e in chunk})
     _save_outbox(_reconcile_with_disk([], sent_ids))
     return sent
 
@@ -1100,7 +1223,8 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
     server_id = with_local_fallback(
         lambda: remote.push_decision(**_dec_push_kwargs(dec, key)),
         default=None, action="share decision")
-    return _finish_share(dec, key, server_id, profile.endpoint)
+    return _finish_share(dec, key, server_id, profile.endpoint) + (
+        _finish_share_lifecycle(remote, dec, key) if server_id is not None else "")
 
 
 def share_ids(repo_path: str, decision_ids: list, *,
@@ -1451,7 +1575,8 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
         with contextlib.suppress(Exception):
             _enqueue_unlocked(_payload(dec, key))
         raise
-    return _finish_share(dec, key, server_id, profile.endpoint)
+    return _finish_share(dec, key, server_id, profile.endpoint) + (
+        _finish_share_lifecycle(remote, dec, key) if server_id is not None else "")
 
 
 async def share_ids_async(repo_path: str, decision_ids: list, *,
