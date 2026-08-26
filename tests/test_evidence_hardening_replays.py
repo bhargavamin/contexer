@@ -1147,10 +1147,21 @@ def test_a_short_receipt_history_records_no_drop_at_all(tmp_repo):
 
 def test_no_module_outside_the_aggregator_and_its_ledger_reads_a_possible_source_file():
     """The structural half of the same invariant. `possible_source_files` is produced by
-    `candidates.py` and carried on the manifest by `reconcile.py`; a third reader is how an
+    `candidates.py` and carried on the manifest by `reconcile.py`; a further reader is how an
     uncertain path starts being treated as a certain one, so it is caught here rather than in
-    review."""
-    owners = {"candidates.py", "reconcile.py"}
+    review.
+
+    `review_impact.py` is the ONE display exception, added by Task 07 because the brief
+    requires the uncertain paths to be SHOWN - the failure this invariant exists to stop is a
+    silent one, and a reviewer who is never told a path was considered cannot catch it either.
+    Its read is one function (`_possible_files`) whose whole output is rendered under "NOT
+    anchored on approval", and the behavioural half of the guard is
+    `tests/test_review_impact.py::TestInvariants` - a possible file never reaches
+    `files.confirmed`, never survives an approval as `source_files`, and is filtered out of the
+    possible list the moment it becomes confirmed. Widen this set again only with the same
+    pairing: a render-only reader plus a behavioural test that pins where the path CANNOT go.
+    """
+    owners = {"candidates.py", "reconcile.py", "review_impact.py"}
     readers = [path.name for path in sorted(Path(store.__file__).parent.rglob("*.py"))
                if path.name not in owners
                and "possible_source_files" in path.read_text(encoding="utf-8")]

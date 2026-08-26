@@ -20,7 +20,7 @@ the boundary visible.
 Store-owned helpers (`store_lock`, `load`, `save`, `repo_slug`, `entry_by_id`,
 `entry_status`, `load_deleted`, `read_deleted`, `touch_pending_review`, `MAX_ENTRIES`, and
 the tombstone sidecar's `_deleted_path` / `_save_deleted` / `_keep_recent_tombstones` plus
-the review-render `_clip_body`) are read through the `store` module OBJECT, not
+the review-render `clip_body`) are read through the `store` module OBJECT, not
 `from`-imported - the identical load-order discipline `guard_engine.py` documents at its own
 top: they are looked up at call time, so anything a test monkeypatches on `contexer.store` is
 still seen here, and store.py never needs this module at import time. The four private names
@@ -360,7 +360,7 @@ def review_lines(entry: dict, eid: str) -> list[str]:
     retiring the decision are different answers to different questions."""
     life = entry.get("proposed_lifecycle") or {}
     lines = [f'    retirement proposed (source={life.get("source") or "unknown"}): '
-             f'"{store._clip_body(life.get("reason") or "")}"']
+             f'"{store.clip_body(life.get("reason") or "")}"']
     replacement = (life.get("replacement_decision_id") or "")[:8]
     if replacement:
         lines.append(f"    replaced by: {replacement}")
@@ -704,9 +704,10 @@ def reconsideration_review_lines(entry: dict, eid: str) -> list[str]:
     state = "retired" if entry.get("deleted_at") else "ignored"
     lines = [f"    reconsideration proposed (source={prop.get('source') or 'unknown'}): this "
              f"{state} decision was restated by the developer",
-             f'    restated as: "{store._clip_body(prop.get("content") or "")}"']
-    if prop.get("source_files"):
-        lines.append(f"    confirmed files: {', '.join(prop['source_files'])}")
+             f'    restated as: "{store.clip_body(prop.get("content") or "")}"']
+    # The proposal's confirmed files are NOT listed here: `review_impact.impact_lines` renders
+    # them beside the uncertain ones it refuses to anchor, and two spellings of "confirmed
+    # files" on one screen is exactly the per-surface interpretation Task 07 removed.
     prior = [row for row in entry.get("reconsideration_history") or []
              if isinstance(row, dict) and row.get("disposition") == "dismissed"]
     if prior:

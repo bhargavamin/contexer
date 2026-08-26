@@ -701,6 +701,43 @@ def _near_misses(content: str, existing: list) -> list[str]:
     return out
 
 
+def similar_decisions(entry: dict, decisions: list, limit: int = _NEAR_MISS_CAP) -> list[dict]:
+    """The live decisions a reviewer should read BEFORE approving `entry`: same grey band as
+    `_near_misses` (0.25 <= overlap < 0.7), as structured rows rather than ack strings.
+
+    PURE - it takes the already-loaded decisions rather than reading the store, because its
+    caller (`review_impact`) renders a whole queue and a per-entry `load` would be one whole-file
+    parse per rendered decision. The band constant is shared with `_near_misses` on purpose:
+    "close enough that a human should look, not close enough for the dedup to act" is one
+    judgment, and two spellings of it would drift.
+
+    `conflict` is `conflicts._has_open_conflict`, the same gate the render sites use - a similar
+    decision that is itself carrying an unreviewed update is the case where approving this one
+    silently creates a third version of the same rule.
+    """
+    from contexer import conflicts        # function-level: same cycle rule as matches_query
+    tokens = _tokenize(revisions.current_content(entry))
+    if not tokens:
+        return []
+    mine = str(entry.get("id") or "")
+    scored = []
+    for other in decisions:
+        if str(other.get("id") or "") == mine or other.get("type") != "decision":
+            continue
+        if entry_status(other) == "ignored":
+            continue
+        ratio = _overlap_ratio(tokens, _tokenize(revisions.current_content(other)))
+        if _NEAR_MISS_FLOOR <= ratio < 0.7:
+            scored.append((ratio, other))
+    scored.sort(key=lambda t: (-t[0], str(t[1].get("id") or "")))
+    return [{"id": str(e.get("id") or ""),
+             "title": e.get("title") or revisions.derive_title(revisions.current_content(e)),
+             "status": entry_status(e),
+             "overlap": round(ratio, 2),
+             "conflict": conflicts._has_open_conflict(e)}
+            for ratio, e in scored[:limit]]
+
+
 def _is_storable(content: str) -> bool:
     """Content needs at least one real token to be a storable decision. Punctuation-
     or whitespace-only content is rejected — this preserves the pre-refactor behavior
@@ -748,11 +785,14 @@ def title_and_body(entry: dict, content: str | None = None) -> tuple[str, str | 
 _BODY_CLIP = 400  # human review surfaces only — model-facing retrieval keeps full content
 
 
-def _clip_body(body: str, limit: int = _BODY_CLIP) -> str:
+def clip_body(body: str, limit: int = _BODY_CLIP) -> str:
     """Clip a decision body for HUMAN surfaces (review lists, share previews) at a word
     boundary, marking how much was elided. The developer signs off on the title + first
     sentences; the full text stays one step away (contexer ui / get_context). Model-facing
-    renders never clip — the AI needs the full reasoning."""
+    renders never clip — the AI needs the full reasoning.
+
+    Public because it has TWO reader modules (`lifecycle`'s proposal blocks and
+    `review_impact`'s evidence rows), which Rule 2 makes an interface rather than coupling."""
     if len(body) <= limit:
         return body
     cut = body.rfind(" ", 0, limit)
@@ -2844,12 +2884,23 @@ def format_pending_review(repo_path: str) -> str:
     content + the action to take — for the in-session `review_pending` tool (the conversational
     twin of the `contexer review` terminal command). Content IS shown here: this is the
     on-demand surface, pulled only when the developer asks to review, so it is where the detail
-    belongs (unlike the deliberately terse SessionStart count)."""
-    from contexer import conflicts, lifecycle   # function-level: same cycle rule
-                                                # as anchors.verify_anchors' call site
+    belongs (unlike the deliberately terse SessionStart count).
+
+    The impact block under each decision (`review_impact.impact_lines`) is the SAME list
+    `contexer review` prints and the same categories the console projects: what the evidence
+    was, which files will and will not be anchored, and what approval does and does not enable.
+    Rendering it here rather than describing it here is the point - three surfaces phrasing
+    "uncertain file" three ways is how one of them ends up sounding confirmed.
+
+    Pending content is DATA, not instruction: every body is quoted and every proposal is
+    labelled, and nothing on this surface tells the model to act on the content it renders."""
+    from contexer import conflicts, lifecycle, review_impact   # function-level: same cycle
+                                                # rule as anchors.verify_anchors' call site
     pending = get_pending_decisions(repo_path)
     if not pending:
         return "Nothing pending review."
+    context = review_impact.review_context(repo_path)
+    seen_coverage: set = set()   # host capability is one fact per render, not one per decision
     total = len(pending)
     shown = pending[:_FILTERED_DISPLAY]  # cap like get_context, so a big backlog can't flood context
     header = f"{_pl(total, 'decision')} pending your review"
@@ -2869,8 +2920,8 @@ def format_pending_review(repo_path: str) -> str:
         if prop:
             raw_current = revisions.current_content(d)
             raw_detected = prop.get("content", "")
-            current = _clip_body(raw_current)
-            detected = _clip_body(raw_detected)
+            current = clip_body(raw_current)
+            detected = clip_body(raw_detected)
             clipped = clipped or current != raw_current or detected != raw_detected
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
@@ -2878,29 +2929,32 @@ def format_pending_review(repo_path: str) -> str:
             steer = conflicts.memo_steer_line(d)
             if steer:
                 lines.append(f"    {steer}")
-            if d.get("anchor_candidates"):
-                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
-            lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
+            action = f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")'
         else:
             title, body = title_and_body(d)
             lines.append(f'- {eid} [{st}] {title}')
             if body is not None:
-                clipped_body = _clip_body(body)
+                clipped_body = clip_body(body)
                 clipped = clipped or clipped_body != body
                 lines.append(f'    "{clipped_body}"')
-            if d.get("anchor_candidates"):
-                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
-            if not life and not recon:
-                # A live decision whose only pending item is a retirement is already approved -
-                # offering to approve it again would be the one action approve_decision rejects.
-                # An INACTIVE one is not approvable at all: `reconsider_decision` is its only
-                # door back, and approve_decision would refuse or, worse, trust it silently.
-                lines.append(
-                    f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
+            # A live decision whose only pending item is a retirement is already approved -
+            # offering to approve it again would be the one action approve_decision rejects.
+            # An INACTIVE one is not approvable at all: `reconsider_decision` is its only
+            # door back, and approve_decision would refuse or, worse, trust it silently.
+            action = ("" if (life or recon) else
+                      f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
         if life:
             lines.extend(lifecycle.review_lines(d, eid))
         if recon:
             lines.extend(lifecycle.reconsideration_review_lines(d, eid))
+        lines.extend(f"    {line}" for line in review_impact.impact_lines(
+            review_impact.review_impact(repo_path, d, context), seen_coverage))
+        if action:
+            # The action goes LAST, under the impact block, and repeats the confirmed anchors
+            # immediately beneath itself: the informed-signature rule is about the files being
+            # in front of the developer at the moment of the gesture, not somewhere above it.
+            lines.append(action)
+            lines.append(f"    {review_impact.anchor_confirmation(d)}")
     lines.append("\nReview each one with the developer before approving, and act on their "
                  "answer ONE id at a time — there is no bulk approve, and approving a "
                  "mis-captured decision makes it trusted standing context in every future "
@@ -3459,7 +3513,7 @@ def _share_item_line(proj: dict, maxlen: int = 0) -> str:
     stripped line while content may carry newlines/runs of spaces, so comparing raw strings
     would show a spurious body line even when the two are the same text), so the preview
     matches exactly what the wire will send. Content truncated to `maxlen` (0 = full); callers
-    doing human-surface clipping (e.g. format_shareable_list) do it themselves via `_clip_body`
+    doing human-surface clipping (e.g. format_shareable_list) do it themselves via `clip_body`
     on a shallow-copied dict before calling in — `maxlen` is a separate, lower-level knob and
     not where that clipping mechanism lives. Shared by the MCP and CLI push previews so both
     render identically."""
@@ -3563,7 +3617,7 @@ def format_shareable_list(repo_path: str) -> str:
         header += f" — showing {len(shown)} of {total}, run `contexer share` in a terminal for the rest"
     lines = [header + ". Tell me which to share, then I'll preview and confirm:\n"]
     for it in shown:
-        clipped_it = {**it, "content": _clip_body(it.get("content", ""))}
+        clipped_it = {**it, "content": clip_body(it.get("content", ""))}
         lines.append(_share_item_line(clipped_it))
     lines.append('\nShare the selected: share_decision(decision_id="<id>[,<id2>…]") '
                  "— previews first; add confirm=true to send.")

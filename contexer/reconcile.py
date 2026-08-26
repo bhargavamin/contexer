@@ -496,6 +496,20 @@ def _reconsideration_answer(entry: dict | None, candidate_id: str, basis: str,
     return own or shared
 
 
+def _link_rows(signals) -> list[dict]:
+    """A candidate's signal rows as the manifest keeps them: relation, certainty, reason.
+
+    The event id and the weight are deliberately dropped. The weight is a ranking input the
+    candidate's own `score` already summarizes, and the events themselves are held beside this
+    file until the candidate settles, so re-listing their ids here would be a second, divergent
+    account of `event_ids`.
+    """
+    return [{"relation": str(row.get("relation") or ""),
+             "certainty": str(row.get("certainty") or ""),
+             "reason": str(row.get("reason") or "")}
+            for row in (signals or []) if isinstance(row, dict)]
+
+
 def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
               created_at: str = "") -> dict:
     """The complete `candidate.json` for one candidate, in `held` state.
@@ -529,6 +543,14 @@ def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
             "source_files": list(candidate.get("source_files") or []),
             "possible_source_files": list(candidate.get("possible_source_files") or []),
             "score": candidate.get("score") or 0,
+            # The typed link rows, TRIMMED to what a review surface renders (Task 03's
+            # relation/certainty plus the reason). The relationship type exists only in the
+            # aggregator's output, so a manifest that dropped it left the human review unable
+            # to say what was OBSERVED and what was merely inferred - which is the whole point
+            # of the typing. Additive: a manifest written before this key reads back as no
+            # rows and renders nothing, never an empty claim.
+            "signals": _link_rows(candidate.get("signals")),
+            "uncertain_signals": _link_rows(candidate.get("uncertain_signals")),
         },
         "created_at": created_at or now,
         "updated_at": now,

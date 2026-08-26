@@ -3846,9 +3846,11 @@ class TestReviewPendingAndSharePreview:
         lines = out.splitlines()
         head = next(line for line in lines if line.startswith("- "))
         assert "Never deploy on Fridays" in head
-        # the very next line is the action line, not a quoted repeat of the content
+        # the very next line is part of the impact block, not a quoted repeat of the content
+        # (the action line now sits UNDER that block - see review_impact.impact_lines)
         idx = lines.index(head)
-        assert lines[idx + 1].strip().startswith("approve_decision(")
+        assert not lines[idx + 1].strip().startswith('"')
+        assert any(line.strip().startswith("approve_decision(") for line in lines)
 
 
 class TestPendingReviewFlag:
@@ -5126,12 +5128,12 @@ class TestAnchorCandidates:
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         out = store.format_pending_review(tmp_repo)
-        assert "would anchor: auth/jwt.py" in out
+        assert "Would anchor: auth/jwt.py" in out
 
     def test_review_omits_would_anchor_line_when_no_candidates(self, tmp_repo):
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
         out = store.format_pending_review(tmp_repo)
-        assert "would anchor" not in out
+        assert "Would anchor" not in out
 
     def test_three_way_precedence_caller_source_files_wins_over_stash_and_candidates(
             self, tmp_repo):
@@ -5209,7 +5211,7 @@ class TestConstraintCaptureCandidates:
     def test_candidates_render_in_the_review_surface(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
-        assert "would anchor: auth/jwt.py" in store.format_pending_review(tmp_repo)
+        assert "Would anchor: auth/jwt.py" in store.format_pending_review(tmp_repo)
 
     def test_approval_blesses_them_into_a_real_anchor(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
@@ -6793,16 +6795,16 @@ class TestCaptureLintSplit:
 
 
 class TestBodyClipping:
-    """_clip_body — the human-review-surface clip (review_pending, contexer review, share
+    """clip_body — the human-review-surface clip (review_pending, contexer review, share
     lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
     and are untouched by this class."""
 
     def test_short_body_unchanged(self):
-        assert store._clip_body("short decision", 400) == "short decision"
+        assert store.clip_body("short decision", 400) == "short decision"
 
     def test_long_body_clipped_at_word_boundary(self):
         body = "word " * 200  # 1000 chars
-        out = store._clip_body(body.strip(), 400)
+        out = store.clip_body(body.strip(), 400)
         assert len(out) < 450
         assert "… [+" in out and out.endswith("chars]")
         assert not out.split("…")[0].endswith("wor")  # no mid-word cut
@@ -6817,7 +6819,10 @@ class TestBodyClipping:
         store.save(tmp_repo, data)
         out = store.format_pending_review(tmp_repo)
         assert "… [+" in out
-        assert len(out) < len(long_content)
+        # The BODY line is what clips; the surface as a whole also carries the impact block,
+        # so the whole-output length stopped being a proxy for "the body was clipped".
+        body = next(line for line in out.splitlines() if line.strip().startswith('"'))
+        assert len(body) < len(long_content)
 
 
 class TestScanConventionVerify:

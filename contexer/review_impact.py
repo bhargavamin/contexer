@@ -1,0 +1,471 @@
+"""What approving THIS decision would actually do - the one interpretation the three review
+surfaces share (hardening Task 07).
+
+`review_pending` (MCP), `contexer review` (CLI) and the local console each used to decide for
+themselves what a pending decision's evidence, files, history and policy effect were, which is
+how the same decision could read as "would anchor: src/a.py" in the terminal and as nothing at
+all in the console. Every category below is therefore computed ONCE, here, and rendered from
+one `impact_lines` list; the console consumes the same dict structurally. Agreement is not a
+convention the three surfaces keep, it is the only code path they have.
+
+The module is a READ. It never approves, arms, anchors or restores anything, and it must stay
+that way: the entire point of the block is that a developer reads it BEFORE signing, so a
+surface that acted while describing would be describing its own side effects.
+
+Two rules it enforces rather than merely renders:
+
+* **Uncertain never reads as confirmed.** `possible_source_files` are labelled as files that
+  will NOT be anchored, in their own section, with the reason. They live only on the candidate
+  manifest in the spool (Task 04's ruling: they are never carried onto a proposal), so this is
+  the one place they surface at all.
+* **Approval is not arming.** The policy preview says what approval does (retrieval) and what
+  it does not (blocking), and names the separate explicit gesture that would. Nothing here can
+  create a rule; `guard_engine._armed_rules` is read to REPORT one that already exists.
+
+Store-owned helpers are read through the `store` module OBJECT at call time, the load-order
+discipline `guard_engine.py` documents, and the dependency runs one way only: store.py,
+cli.py and console_api.py call in, and nothing here calls back into any of them.
+"""
+
+from contexer import store          # module object, not `from`-imports: see docstring above
+
+
+# How a decision got captured, in the developer's terms rather than the schema's. Owned here
+# because all three surfaces render it now; `cli._ORIGIN_LABELS` used to be the only copy.
+ORIGIN_LABELS = {
+    "human": "your prompt",
+    "ai": "captured by the assistant",
+    "plan": "from an approved plan",
+    "scan": "measured from this repo",
+    "bootstrap": "repo bootstrap",
+    "memory": "imported from memory",
+    "agent": "reported by the assistant",
+}
+
+# What each relationship type MEANS to a human reading the queue. Task 03's vocabulary is the
+# aggregator's; this is its one translation, so MCP, CLI and console cannot describe the same
+# link differently. An unknown relation renders under its own raw name rather than being
+# dropped - a link nobody can name is still a link that was counted.
+RELATION_LABELS = {
+    "explicit": "the developer said it",
+    "structural": "the same files or identifiers",
+    "contradiction": "contradicts an earlier statement",
+    "repetition": "restated independently",
+    "causal_forward": "work that followed it",
+    "validation": "a test run",
+    "temporal_backward": "changed close in time, no shared file",
+    "unrelated": "unexplained, left over",
+}
+
+# Verbatim from the Task 07 brief. It is normative text, so it is a constant rather than
+# f-string fragments: an armed rule is reported BESIDE it, never by rewriting it.
+POLICY_KNOWLEDGE = "Knowledge after approval: eligible for normal retrieval."
+POLICY_BLOCKING = "Blocking after approval: none. Approval does not arm a guard rule."
+POLICY_HOW_TO_ARM = (
+    "To add a local deterministic block after approval, use `contexer guard arm` and review "
+    "its exact pattern, paths, and message separately.")
+
+_MAX_LISTED = 5          # rows per section before the honest "+N more" tail
+_TITLE_CLIP = 80         # a similar decision is identified, not reproduced
+
+
+def _listed(items: list, limit: int = _MAX_LISTED) -> str:
+    """`a, b, c (+2 more)` - the review surfaces' list clip, honest about what it dropped."""
+    head = ", ".join(str(i) for i in items[:limit])
+    extra = len(items) - limit
+    return f"{head} (+{extra} more)" if extra > 0 else head
+
+
+def evidence_index(repo_path: str) -> dict:
+    """`{entry_id: [manifest, ...]}` for every held candidate that names a decision.
+
+    ONE spool listing per render call, not one per decision: `format_pending_review` renders up
+    to 25 entries and the console polls, so a per-entry scan would multiply directory reads by
+    the size of the queue. Fail-soft to `{}` - a review that cannot read the spool renders
+    without evidence rows rather than not rendering at all.
+    """
+    try:
+        from contexer import spool
+        index: dict = {}
+        for candidate_id, meta in spool.held_candidates(repo_path).items():
+            if not isinstance(meta, dict) or meta.get("unreadable"):
+                continue
+            entry_id = str(meta.get("entry_id") or "")
+            if entry_id:
+                index.setdefault(entry_id, []).append({**meta, "candidate_id": candidate_id})
+        return index
+    except Exception:
+        return {}
+
+
+def coverage_lines() -> list[str]:
+    """One capture-coverage line per installed host, through `evidence.format_coverage`.
+
+    Capabilities only (`pass_status=False`): a review runs no reconciliation pass, so rendering
+    the block's runtime half would assert an outcome that never happened - the same reason
+    `contexer status` passes it. Fail-soft: an undetectable host set reports `manual`, which is
+    what an unknown host means everywhere else in the coverage vocabulary.
+    """
+    try:
+        from contexer import adapters, evidence
+        targets = adapters.detect() or []
+        blocks = [evidence.host_coverage(a.NAME) for a in targets] or \
+            [evidence.host_coverage("")]
+        return [evidence.format_coverage(b, pass_status=False) for b in blocks]
+    except Exception:
+        return []
+
+
+def review_context(repo_path: str, decisions: list | None = None) -> dict:
+    """The per-render-call reads every entry's impact block shares: the loaded decisions, the
+    held-evidence index and the host coverage. Built once by each surface and threaded in, so
+    rendering a queue of 25 costs one store read, one spool listing and one host detection.
+
+    `decisions` is for a caller that has already read the store this tick (the console's
+    dashboard poll): handing them in is what keeps this from being a second whole-file parse
+    inside a projection built to do exactly one.
+    """
+    if decisions is None:
+        try:
+            decisions = [e for e in store.load(repo_path).get("entries", [])
+                         if e.get("type") == "decision"]
+        except Exception:
+            decisions = []
+    return {"decisions": list(decisions), "evidence": evidence_index(repo_path),
+            "coverage": coverage_lines()}
+
+
+def _manifests_for(entry: dict, context: dict) -> list[dict]:
+    return list((context.get("evidence") or {}).get(str(entry.get("id") or "")) or [])
+
+
+def _pending_proposal(entry: dict) -> dict:
+    """The proposal this review is actually answering, whichever lane owns it. Order matches
+    the render sites': a reconsideration outranks a retirement outranks a content update,
+    because each question is moot while the one above it is open."""
+    for slot in ("proposed_reconsideration", "proposed_lifecycle", "proposed_revision"):
+        prop = entry.get(slot)
+        if prop:
+            return {"slot": slot, **prop}
+    return {}
+
+
+def _live_manifest(entry: dict, context: dict) -> dict:
+    """The held candidate this review answers: the one whose id the sitting proposal names,
+    else the most recently created. A settled hold is skipped - its question is already
+    answered and rendering its evidence would describe a decision nobody is being asked to
+    make."""
+    prop = _pending_proposal(entry)
+    live = [m for m in _manifests_for(entry, context) if m.get("status") == "pending"]
+    named = str(prop.get("candidate_id") or "")
+    for meta in live:
+        if named and meta.get("candidate_id") == named:
+            return meta
+    return max(live, key=lambda m: str(m.get("created_at") or ""), default={})
+
+
+def _grouped(rows: list) -> list[dict]:
+    """Signal rows collapsed to one row per relationship type, count first.
+
+    Grouping rather than listing is what makes the section readable at a glance AND is the
+    interpretation the brief forbids duplicating per surface: "3 x the same files or
+    identifiers" is one fact about the candidate, not three."""
+    counts: dict = {}
+    for row in rows:
+        relation = str(row.get("relation") or "unknown")
+        bucket = counts.setdefault(relation, {"relation": relation, "count": 0,
+                                              "certainty": str(row.get("certainty") or ""),
+                                              "reasons": []})
+        bucket["count"] += 1
+        reason = str(row.get("reason") or "")
+        if reason and reason not in bucket["reasons"]:
+            bucket["reasons"].append(reason)
+    # Strongest link first, by the vocabulary's own order, then by count, then by name. Not
+    # by count alone: with one of each (the ordinary case) that degrades to alphabetical, so
+    # "causal_forward" would lead a group whose whole meaning is the explicit directive at the
+    # front of it. The third term keeps an unknown relation deterministic.
+    order = list(RELATION_LABELS)
+    return [{**b, "label": RELATION_LABELS.get(b["relation"], b["relation"])}
+            for b in sorted(counts.values(),
+                            key=lambda b: (order.index(b["relation"])
+                                           if b["relation"] in order else len(order),
+                                           -b["count"], b["relation"]))]
+
+
+def _confirmed_anchors(entry: dict) -> list[str]:
+    """Exactly the files `_apply_approval` would write as `source_files`, in its own
+    precedence order: a proposal's own stashed anchor, else the capture-time candidates.
+
+    Never `possible_source_files` and never a similar decision's files - this list is what the
+    action confirmation repeats back, so anything speculative in it would be a wrong anchor
+    signed by a human who was told it was confirmed.
+    """
+    prop = _pending_proposal(entry)
+    if prop.get("source_files"):
+        return [str(f) for f in prop["source_files"]]
+    return [str(f) for f in entry.get("anchor_candidates") or []]
+
+
+def _possible_files(entry: dict, meta: dict) -> list[str]:
+    """The uncertain paths, from the candidate manifest ONLY.
+
+    They are deliberately absent from every proposal (Task 04 ruling): a backward temporal link
+    is not evidence, so nothing that could become an anchor is allowed to carry it. Anything
+    already confirmed is filtered out - a path that earned its way into the anchor list is not
+    also a maybe."""
+    confirmed = set(_confirmed_anchors(entry)) | set(entry.get("source_files") or [])
+    return [str(f) for f in (meta.get("candidate") or {}).get("possible_source_files") or []
+            if str(f) not in confirmed]
+
+
+def _inactive_history(entry: dict) -> dict:
+    """Why this decision is not live, and how often the question has been asked before.
+
+    The retirement reason comes off the decision's own lifecycle record rather than the
+    proposal, because that is what a restoration would be undoing."""
+    from contexer import lifecycle
+
+    if not entry.get("proposed_reconsideration"):
+        return {}
+    state = "retired" if entry.get("deleted_at") else "ignored"
+    record = next((r for r in reversed(entry.get("lifecycle") or [])
+                   if isinstance(r, dict) and r.get("kind") in lifecycle.RETIRED_KINDS), {})
+    dismissed = [r for r in entry.get("reconsideration_history") or []
+                 if isinstance(r, dict) and r.get("disposition") == "dismissed"]
+    return {
+        "state": state,
+        "since": str(record.get("occurred_at") or entry.get("deleted_at") or "")[:10],
+        "reason": store.clip_body(str(record.get("reason") or ""), 200),
+        "replacement": str(record.get("replacement_decision_id") or "")[:8],
+        "dismissed": len(dismissed),
+        "last_dismissed": str((dismissed[-1].get("occurred_at") if dismissed else "") or "")[:10],
+    }
+
+
+def _revisions(entry: dict, meta: dict) -> dict:
+    """Current revision id vs the revision the sitting proposal was formed against.
+
+    A content proposal carries no basis of its own (it is only ever attached with HEAD
+    unmoved), so the manifest's `basis_revision_id` is the fallback. `stale` is the lane's own
+    verdict where it has one, never a fresh comparison - two answers to "is this stale" is how
+    a surface ends up offering an action the owner refuses.
+    """
+    from contexer import lifecycle, revisions
+
+    current = str(entry.get("current_revision_id") or "")
+    prop = _pending_proposal(entry)
+    basis = str(prop.get("basis_revision_id") or meta.get("basis_revision_id") or "")
+    if prop.get("slot") == "proposed_reconsideration":
+        stale = lifecycle.reconsideration_stale(entry)
+    elif prop.get("slot") == "proposed_lifecycle":
+        stale = lifecycle.lifecycle_proposal_stale(entry)
+    else:
+        stale = bool(basis) and bool(current) and basis != current
+    rev = revisions.current_revision(entry) or {}
+    return {"current": current, "version": rev.get("version_number", entry.get("revision", 1)),
+            "basis": basis, "stale": stale}
+
+
+def _armed_rule(entry: dict) -> dict:
+    """The armed Tier-2 rule already on this decision, or `{}`.
+
+    Read through `guard_engine._armed_rules`, the same selector the commit-time guard runs, so
+    the preview cannot claim a rule is inert that the guard would fire (or the reverse). It is
+    a REPORT: nothing in this module can arm, and an approval never will."""
+    try:
+        from contexer import guard_engine
+        if not guard_engine._armed_rules([entry]):
+            return {}
+        check = entry.get("guard_check") or {}
+        return {"type": str(check.get("type") or ""), "pattern": str(check.get("pattern") or ""),
+                "paths": str(check.get("paths") or ""),
+                "message": store.clip_body(str(check.get("message") or ""), 200)}
+    except Exception:
+        return {}
+
+
+def _displaced(entry: dict, context: dict) -> list[str]:
+    """Held reconsideration candidates for this decision that ask about a DIFFERENT revision
+    than the sitting question (Task 04's residual, ledgered to this task).
+
+    Such a hold can never be settled by the answer on screen - its question genuinely was not
+    the one asked - so nothing judges it and it is invisible to `held_unattributed`, which
+    counts holds naming no entry at all. Naming it here is the whole fix: the developer learns
+    which decision and which basis is stuck, and a fresh restatement is what clears it.
+    """
+    live = _live_manifest(entry, context)
+    if not live:
+        return []
+    basis = str(live.get("basis_revision_id") or "")
+    out = []
+    for meta in _manifests_for(entry, context):
+        if meta.get("status") != "pending" or meta is live:
+            continue
+        other = str(meta.get("basis_revision_id") or "")
+        if other and other != basis:
+            out.append(f"another restatement of {str(entry.get('id') or '')[:8]} is held "
+                       f"against revision {other[:8]}, which is not the one under review "
+                       f"({basis[:8] or 'unknown'}); it stays held until a fresh restatement "
+                       f"raises it")
+    return out
+
+
+def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> dict:
+    """Everything the three review surfaces render about ONE pending decision.
+
+    `context` is `review_context(repo_path)`, built once per queue by the caller; omitting it
+    is supported for a single-decision caller and costs that caller the shared reads.
+    """
+    context = review_context(repo_path) if context is None else context
+    meta = _live_manifest(entry, context)
+    candidate = meta.get("candidate") or {}
+    prop = _pending_proposal(entry)
+    possible = _possible_files(entry, meta)
+    return {
+        "identity": {
+            "id": str(entry.get("id") or ""),
+            "title": prop.get("title") or entry.get("title") or "",
+            "subtype": entry.get("subtype") or "decision",
+            "status": store.entry_status(entry),
+            "origin": ORIGIN_LABELS.get(str(entry.get("created_by") or ""),
+                                        str(entry.get("created_by") or "")),
+            "lane": prop.get("slot", ""),
+        },
+        # Labelled at the point of rendering, never as a bare number: it ranks a review queue
+        # and says nothing about whether the statement is true (candidates.py's own rule).
+        "priority": {"score": candidate.get("score"),
+                     "label": "review priority (ranking only, not a probability)"},
+        "evidence": {
+            "confirmed": _grouped([r for r in candidate.get("signals") or []
+                                   if r.get("certainty") != "uncertain"]),
+            "uncertain": _grouped([r for r in candidate.get("signals") or []
+                                   if r.get("certainty") == "uncertain"]
+                                  + list(candidate.get("uncertain_signals") or [])),
+            "receipts": len(entry.get("evidence_summary") or []),
+            "dropped": int(entry.get("evidence_summary_dropped") or 0),
+        },
+        "files": {"confirmed": _confirmed_anchors(entry), "possible": possible},
+        "coverage": list(context.get("coverage") or []),
+        "related": {
+            "similar": store.similar_decisions(entry, context.get("decisions") or []),
+            "conflict": _has_conflict(entry),
+        },
+        "history": _inactive_history(entry),
+        "revisions": _revisions(entry, meta),
+        "policy": {"knowledge": POLICY_KNOWLEDGE, "blocking": POLICY_BLOCKING,
+                   "how_to_arm": POLICY_HOW_TO_ARM, "armed": _armed_rule(entry)},
+        "diagnostics": _displaced(entry, context),
+    }
+
+
+def _has_conflict(entry: dict) -> bool:
+    from contexer import conflicts
+    return conflicts._has_open_conflict(entry)
+
+
+def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
+    """The block, as text, for BOTH text surfaces. One list, one label vocabulary: the MCP
+    tool indents it and the CLI prints it, and neither gets to phrase a category its own way.
+
+    A section with nothing to say is OMITTED rather than rendered empty - "Would anchor: none"
+    reads as a checked-and-empty anchor list, and a reviewer who sees no line asks, which is
+    the safer of the two silences. The policy preview is the one section that always renders:
+    what approval does NOT do is exactly the thing a reviewer cannot infer from absence.
+
+    `seen_coverage` is for a LIST surface rendering a whole queue in one payload: capture
+    coverage is a property of the installed hosts, identical for every decision in the render,
+    so `review_pending` threads a set through and prints each host's line once instead of 25
+    times. The interactive surfaces pass nothing - a terminal screen and a console card are
+    each read on their own, where the line is a fact the reader has not just seen.
+    """
+    lines = []
+    identity = impact.get("identity") or {}
+    if identity.get("origin"):
+        lines.append(f"Origin: {identity['origin']}")
+    score = (impact.get("priority") or {}).get("score")
+    if score is not None:
+        lines.append(f"Review priority: {score} - "
+                     "ranking only, not a probability that this is correct")
+
+    evidence = impact.get("evidence") or {}
+    for key, label in (("confirmed", "Confirmed evidence"), ("uncertain", "Possibly related")):
+        rows = evidence.get(key) or []
+        if rows:
+            lines.append(f"{label}: " + _listed(
+                [f"{r['count']}x {r['relation']} ({r['label']})" for r in rows]))
+    if evidence.get("receipts") or evidence.get("dropped"):
+        tail = (f", {evidence['dropped']} older receipt(s) dropped"
+                if evidence.get("dropped") else "")
+        lines.append(f"Evidence receipts: {evidence.get('receipts', 0)} recorded{tail}")
+
+    files = impact.get("files") or {}
+    if files.get("confirmed"):
+        lines.append(f"Would anchor: {_listed(files['confirmed'])}")
+    if files.get("possible"):
+        lines.append(f"Possible files: {_listed(files['possible'])} - NOT anchored on "
+                     "approval; the link is uncertain")
+    for line in impact.get("coverage") or []:
+        if seen_coverage is not None:
+            if line in seen_coverage:
+                continue
+            seen_coverage.add(line)
+        lines.append(f"Capture coverage: {line}")
+
+    related = impact.get("related") or {}
+    if related.get("similar"):
+        lines.append("Similar decisions: " + _listed(
+            [f"{s['id'][:8]} \"{store.clip_body(s['title'], _TITLE_CLIP)}\""
+             + (" [open conflict]" if s.get("conflict") else "") for s in related["similar"]]))
+    if related.get("conflict"):
+        lines.append("Open conflict: this decision already carries an unreviewed update; "
+                     "the standing version stays operative until you rule on it")
+
+    history = impact.get("history") or {}
+    if history:
+        parts = [f"{history['state']}" + (f" on {history['since']}" if history.get("since") else "")]
+        if history.get("reason"):
+            parts.append(f'reason: "{history["reason"]}"')
+        if history.get("replacement"):
+            parts.append(f"replaced by {history['replacement']}")
+        if history.get("dismissed"):
+            parts.append(f"asked before: dismissed {history['dismissed']} time(s)"
+                         + (f", most recently {history['last_dismissed']}"
+                            if history.get("last_dismissed") else ""))
+        lines.append("Inactive history: " + "; ".join(parts))
+
+    rev = impact.get("revisions") or {}
+    if rev.get("current") or rev.get("basis"):
+        detail = f"current {rev.get('current', '')[:8]} (v{rev.get('version', 1)})"
+        if rev.get("basis"):
+            detail += f", proposed against {rev['basis'][:8]}"
+        if rev.get("stale"):
+            detail += " - STALE, the decision moved since"
+        lines.append(f"Revisions: {detail}")
+
+    policy = impact.get("policy") or {}
+    lines.append(policy.get("knowledge", POLICY_KNOWLEDGE))
+    armed = policy.get("armed") or {}
+    if armed:
+        lines.append(f"Blocking after approval: this decision ALREADY has an armed "
+                     f"{armed.get('type') or 'guard'} rule"
+                     + (f" (pattern {armed['pattern']}" if armed.get("pattern") else " (")
+                     + (f", paths {armed['paths']}" if armed.get("paths") else "") + ")"
+                     + ". The approved revision on record stays operative until you review "
+                       "this update; approving does not change the rule.")
+    else:
+        lines.append(policy.get("blocking", POLICY_BLOCKING))
+    lines.append(policy.get("how_to_arm", POLICY_HOW_TO_ARM))
+    for note in impact.get("diagnostics") or []:
+        lines.append(f"Held evidence: {note}")
+    return lines
+
+
+def anchor_confirmation(entry: dict) -> str:
+    """The one sentence an action confirmation repeats back before it writes an anchor.
+
+    Confirmed files only, spelled out in full rather than counted: the informed-signature rule
+    is about the developer having SEEN the paths at the moment they signed."""
+    files = _confirmed_anchors(entry)
+    if not files:
+        return "No files will be anchored by this approval."
+    return f"Will anchor on approval: {', '.join(files)}"
