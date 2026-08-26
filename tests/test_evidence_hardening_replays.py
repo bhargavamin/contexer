@@ -409,20 +409,10 @@ def test_claude_does_reconcile_at_session_start(tmp_repo):
         == ["pending_approval"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 7 (ignored twin): the restatement is absorbed as a RECURRENCE of the "
-    "ignored entry. The receipt says duplicates=1, occurrence_count goes to 2, the held "
-    "directory ends up empty, and no evidence_summary is filed anywhere - the restated "
-    "decision is never surfaced for review and its evidence is destroyed with no receipt."))
 def test_a_directive_restating_an_ignored_decision_is_surfaced_for_review(tmp_repo):
     _replay_inactive_twin(tmp_repo, retire=False)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "outstanding issue 7 (tombstoned twin): identical outcome via the other status-blind "
-    "path. `store._is_tombstoned` matches the retired entry, update_decision_with_meta "
-    "refuses the write, and reconcile settles the candidate as `dismissed` with entry_id "
-    "'' - so the events are deleted and there is no decision to file the receipt against."))
 def test_a_directive_restating_a_retired_decision_is_surfaced_for_review(tmp_repo):
     _replay_inactive_twin(tmp_repo, retire=True)
 
@@ -435,6 +425,20 @@ def _replay_inactive_twin(repo: str, *, retire: bool) -> None:
     or at the very least a held candidate still carrying its raw evidence - and a receipt
     must exist. Deliberately not pinned to ONE of those shapes: Task 04 owns the design, and
     this asserts the property rather than pre-judging the lane.
+
+    These two carried `xfail(strict=True)` for outstanding issue 7 until the durable-state
+    work's fix round: the store's status-blind dedup absorbs the restatement as a recurrence
+    and returns no entry id, and `reconcile._finalize` then DELETED the raw events having
+    filed no receipt anywhere. It no longer deletes what it cannot file a receipt against, so
+    the weak limb of the property above ("at the very least a held candidate still carrying
+    its raw evidence") now holds and the markers are gone.
+
+    **Task 04 still owns the rest of issue 7.** The evidence survives, but the restatement is
+    still not SURFACED: no pending decision, no lifecycle proposal, and the hold names no
+    decision at all, so it counts as `held_unattributed` and nothing will ever settle it. That
+    is a strictly better failure than silent destruction, and it is still a failure. Asserting
+    the surfacing here would pre-judge the lane, which is the one thing this replay refuses to
+    do - so it stays a property test and Task 04 strengthens it.
     """
     # RULE on both sides, deliberately: the defect is the STORE's own status-blind dedup
     # (`_find_match` / `_is_tombstoned`), which runs on a different tokenizer from the
