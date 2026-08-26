@@ -30,10 +30,17 @@ Contexer is wired in through two mechanisms: **MCP tools** the agent can call (t
 
 Constraints and conventions load every session because they apply to every task. Architecture and pattern decisions are fetched on demand when you ask about rationale, design, or past decisions.
 
-Capture is two-track, and you stay in control of both:
+Capture is three-track, and you stay in control of all three:
 
 - Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook — no model guesswork, no decision stored behind your back.
 - Everything else relies on the agent noticing a decision and calling the store tool. That is best-effort by design; when the agent misses one, say *"store that decision"* and it's captured immediately.
+- Behind both, Contexer keeps a small local record of what a session produced: rules stated outright, files edited, and conclusions the agent reported about how something works.
+  At the start of your next session it groups those signals and, where they add up to something, puts one item in your review queue.
+  Nothing in that record is a decision on its own, and nothing it proposes is trusted, replayed, linked to a file or able to block a commit until you approve it.
+
+That third track is a recovery net, not complete capture.
+Contexer cannot see the agent's answers, so a reported conclusion is what the agent chose to report rather than something Contexer observed; it sees no test results and no diffs at all; and on Cursor it sees your prompts but not your file edits.
+`contexer status` prints a `coverage:` line per connected tool saying exactly this, stating a capability rather than a count so a missing hook can never look like a quiet session.
 
 ## Bootstrap: establishing trusted knowledge
 
@@ -80,6 +87,17 @@ AI-proposed architecture and constraint decisions — and any change to a decisi
 Approved decisions are versioned: a change never overwrites the previous value — it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
 
 Approving a decision can also link it to the files it describes: pass `source_files` when you approve it, or accept the file suggestion Contexer shows you on the review screen. That link is what makes the commit-time guard's warnings precise, and lets Contexer tell you later if a decision might be outdated because its files changed without it.
+
+Under every decision awaiting review, Contexer prints what approving it would actually do: where it came from, which evidence supports it and how strongly, which files it would link and which it saw but will deliberately not link, what this host could observe at all, and the decision's revision history.
+The same block is printed by `contexer review`, by the `review_pending` tool, and by the console, so the three surfaces cannot describe one decision differently.
+
+**Approving is not arming.**
+Approval makes a decision trusted context and lets it raise an advisory warning at commit time; it never creates a rule that stops a commit.
+That is a separate, explicit `contexer guard arm`, and no review action reaches it.
+
+A decision you retired or ignored, restated out loud in a later session, is neither resurrected silently nor stored again beside the original.
+Contexer asks you about the original instead, in the same review queue, with its own choices: restore, restore with your edits, skip, or dismiss.
+Dismiss means "not this time", and the queue remembers being asked, so a later restatement tells you how often it has come up.
 
 ## Commit-time guard
 

@@ -141,8 +141,22 @@ Initial `kind` vocabulary:
 | `test_result` | A relevant validation passed or failed | Command class and status |
 | `decision_repeated` | Existing decision was restated | Decision and revision IDs |
 | `policy_evaluation` | An operation was checked | IDs, verdict, coverage |
-| `candidate_disposition` | Candidate approved, edited, ignored, or dismissed | IDs and action |
 | `session_reconcile` | Session reconciliation ran | Counts and completion state |
+
+As shipped, `evidence.EVENT_KINDS` holds exactly those eight and three of them are RESERVED, meaning
+schema-valid with no emitter anywhere. `diff_observed` and `test_result` are reserved because their
+consumer shipped first: `candidates.SUPPORT_KINDS` scores both, so the day an adapter emits one the
+validator must already accept it. `decision_repeated` is reserved because a restated rule is emitted
+as an ordinary `user_directive` instead, which the aggregator can match onto the decision it
+duplicates and settle as a `duplicate`, whereas a lone `decision_repeated` would score 15, land
+`insufficient` and sit in `pending/` forever. `session_reconcile` is reserved because the pass
+receipt was moved out of the spool entirely and into `.reconcile_<slug>.jsonl`: a receipt spooled
+into `pending/` was never held, so it aged out through retention and made `contexer status` report
+lost events on a repository that lost none.
+
+`candidate_disposition` was REMOVED on the opposite test. A settled candidate's disposition lives in
+the decision's own `evidence_summary` history, so that kind has neither a producer nor a reader, and
+a spooled file claiming it is schema drift the validator should catch.
 
 Do not store full source contents or full model transcripts in the ledger. The first release should
 store bounded summaries, repo-relative paths, hashes, counts, decision IDs, and small redacted
@@ -234,14 +248,34 @@ Capability matrix for the first release:
 | --- | --- | --- | --- | --- |
 | User prompt and explicit directive | Yes | Yes | Yes | Yes |
 | Edited-file event | Yes (`PostToolUse`) | Yes (`PostToolUse`) | Yes (`AfterTool`) | No |
+| Assistant conclusion | Model-reported | Model-reported | Model-reported | Model-reported |
 | Pre-compaction checkpoint | `PreCompact` | `PreCompact` | `PreCompress` | No |
 | Clean session-end checkpoint | `SessionEnd` | No | `SessionEnd` | No |
+| Session-start recovery | Yes | Yes | Yes | Yes |
 | Next-prompt fallback | Yes | Yes | `BeforeAgent` equivalent | Prompt-side capture only |
 | Next-session fallback | Yes | Yes | Yes | Yes |
 
 Cursor is prompt-signal-only until Contexer owns a reliable post-edit hook there. Its
 `beforeSubmitPrompt` hook can perform capture side effects but cannot inject per-prompt context.
 Do not claim edited-file or lifecycle-hook parity for Cursor.
+
+Session-start recovery is the one row that is true on every host without exception, and it is the
+only reconciliation checkpoint Codex and Cursor have. `store._local_session_start_payload` calls
+`reconcile.reconcile_session` from the shared store-side path every host traverses, so the guarantee
+does not depend on any adapter having wired its own checkpoint. Gemini keeps its `PreCompress` and
+`SessionEnd` calls beside it because they answer a different failure, and idempotency is what makes
+keeping both free.
+
+Assistant conclusions are `model_reported` on every host, including Cursor, and that is a distinct
+state from `captured`. No host hands a hook the assistant's own response, so nothing observes a
+conclusion. `evidence.record_agent_conclusion` and its MCP tool of the same name are agent-invoked
+by design, and no Stop hook or transcript scan was added to pretend otherwise.
+
+Coverage is reported per host by `evidence.host_coverage`, whose vocabulary is `captured`,
+`model_reported`, `unavailable`, `manual` and `error`. Reporting is DOWNGRADE-ONLY: an
+out-of-vocabulary static value becomes `error`, a missing field makes the pass `partial`, an unknown
+host becomes `manual`, and no caller state is ever improved. Capability is never rendered as a
+count, so an unavailable signal cannot read as captured-zero.
 
 `diff_observed` and `test_result` are reserved schema kinds in Phase 1, not promised signals. They
 remain absent until a commit-time diff emitter and a bounded PostToolUse/AfterTool command-result
@@ -260,20 +294,48 @@ Suggested candidate shape:
 ```python
 {
     "candidate_id": "uuid",
-    "kind": "new|update|replace|retire|duplicate|insufficient",
+    "kind": "new|update|replace|retire|reconsider|duplicate|insufficient",
     "title": "Retain retired decisions as history",
     "content": "...",
     "subtype": "architecture",
     "target_decision_id": None,
+    "target_state": None,
+    "basis_revision_id": None,
     "replacement_decision_id": None,
     "source_files": ["contexer/store.py"],
+    "possible_source_files": [],
     "score": 78,
     "signals": [
-        {"event_id": "...", "weight": 30, "reason": "explicit user directive"}
+        {"event_id": "...", "weight": 30, "relation": "explicit",
+         "certainty": "confirmed", "reason": "explicit user directive"}
     ],
+    "uncertain_signals": [],
     "uncertainties": [],
 }
 ```
+
+Three additions to the sketch above are load-bearing rather than cosmetic.
+
+`reconsider` is a seventh kind, added because a restatement of a retired or ignored decision is a
+question about that decision's identity rather than a new one. It carries `target_state`
+(`retired` or `ignored`) and `basis_revision_id`, the target's `current_revision_id` at proposal
+time, and only that kind binds its identity to the basis: for every other kind the target's revision
+is read at materialization time, where the proposal actually lands. Only an explicit `user_directive`
+may open one, so agent-only evidence produces no reconsideration and no note naming any decision.
+
+Every signal row carries a typed `relation` and a `certainty` beside its weight, from two closed
+vocabularies. `RELATIONS` is `explicit`, `structural`, `causal_forward`, `temporal_backward`,
+`repetition`, `contradiction`, `validation` and `unrelated`; `CERTAINTIES` is `confirmed`,
+`supporting` and `uncertain`. Weight alone could never say WHY an event is in a candidate, and a
+reviewer reading a queue needs the link rather than a number. Rows of weight 0 are kept for the same
+reason: dropping them would make a corroborating event that scored nothing indistinguishable from
+one that was never seen.
+
+`possible_source_files` holds paths reached only through an UNCERTAIN link, and it is kept separate
+from `source_files` for the whole length of the pipeline. Nothing may promote one into an anchor, a
+policy rule's scope, `anchor_candidates` or Teams. Its one reader outside the aggregator and its own
+manifest is the review render, which labels such paths as files that will NOT be anchored, with the
+reason. That separation is enforced by a structural test rather than by convention.
 
 ### B2. Deterministic scoring first
 
@@ -306,10 +368,11 @@ Add a coordinator in `store.py` or a focused facade module that:
 4. maps `new` candidates into the current pending decision model;
 5. maps `update` candidates into `proposed_revision` without moving HEAD;
 6. maps `retire` and `replace` candidates into the separate `proposed_lifecycle` lane defined in
-   C2, never into or through `proposed_revision`;
+   C2, never into or through `proposed_revision`, and maps `reconsider` candidates into a third
+   `proposed_reconsideration` lane that coexists with both of the others;
 7. records candidate-to-event references;
-8. materializes the candidate before moving its supporting files from `pending/` to
-   `held/<candidate-id>/`;
+8. moves its supporting files from `pending/` to `held/<candidate-id>/` and only then
+   materializes the candidate, which is the REVERSE of the order this plan first specified;
 9. emits a reconciliation receipt.
 
 Never call a low-level store mutation that bypasses current similarity filtering, revision
@@ -320,6 +383,39 @@ and sorted supporting event IDs. Store the supporting event IDs on the pending c
 crash occurs after candidate materialization but before every file moves to `held/`, the next run
 recognizes those event IDs as already referenced, finishes the moves, and does not create a second
 candidate.
+
+As shipped, a `reconsider` candidate APPENDS its `basis_revision_id` to that hash, so a question
+asked against one revision of a decision is a different question from the same words asked against
+the next one. Every pre-existing id keeps its spelling because the component is appended only when
+present.
+
+The hold directory is what makes repeated reconciliation a no-op, not the store's novelty filter:
+a held candidate's events never reach the aggregator again, and the directory itself is the record
+that the candidate awaits review. The novelty filter is only the backstop for a hold that failed to
+complete.
+
+**HOLD FIRST, materialize second**, which reverses step 8 as this plan originally wrote it, and the
+reversal was earned rather than preferred. Materializing first left a window nothing on disk covered:
+a crash after the store write and before the hold left a decision whose evidence was still in
+`pending/`, connected to it by nothing. Holding first means a crash anywhere leaves the evidence
+either wholly pending, so the next pass aggregates it again under the same deterministic id, or
+wholly held behind a manifest that names both what it claims and how far it got.
+
+The order is therefore a state machine rather than a sequence of hopeful writes, with each phase
+durable in the candidate's own manifest before the next one starts: write the manifest in `held`,
+move every named event, VERIFY the manifest's event set against what is now on disk, flip to
+`materializing`, write through the ordinary store or lifecycle path, re-read the store and persist
+`pending_review` or `settled` from what it OBSERVES rather than from the write's own return value,
+record the evidence summary after a review, persist `reviewed` with the disposition, and only then
+remove the held directory.
+
+On the way out the same rule reads backwards: the summary is durable before the manifest says
+`reviewed`, and the manifest says `reviewed` before a single raw event is deleted. Any other order
+loses the evidence and the receipt for it together, permanently.
+
+A hold that reports a source gone with no target is never finalized: finalizing writes an
+`evidence_summary` saying this event set settled, and a hold that cannot account for its events has
+not earned that receipt.
 
 ### B4. Session reconciliation surface
 
@@ -348,6 +444,28 @@ final recovery net. Repeated calls must be idempotent on the same event set. Hoo
 or invoke only bounded deterministic reconciliation; any expensive summarization remains outside
 the hook path.
 
+As shipped, the session-start net is a single store-side call rather than four adapter-side ones,
+and its cost is gated structurally rather than by wall clock. An empty spool does no store load, no
+store lock, no lock-file creation and no candidate scan, so a repository that will never hold an
+evidence event pays two directory listings at every session start. The lock is taken only once the
+fast path has already found work, which is the unlocked-then-locked shape `ensure_retrieval_index`
+uses; a pass that finds it held skips entirely and says so in its receipt, and the next checkpoint
+picks the work up.
+
+`reconcile_session` also takes a `host` argument, threaded from the adapter, because the store
+genuinely does not know which host it is running under. An un-reinstalled install reports `manual`,
+which claims nothing: the rule is under-report, never over-claim.
+
+The receipt is LOGGED to `.reconcile_<slug>.jsonl`, tail-capped and fail-soft, and never spooled. A
+pass that did nothing logs nothing, so a repository with one stuck held candidate does not write a
+line per session start forever.
+
+`dry_run` writes NOTHING anywhere: no store write, no hold, no manifest, no state update, no
+finalize, no retention, no receipt line, no disposition. Because the hold moved in front of the
+store write, the gate is ONE early return in `_materialize`, taken after the candidate is counted
+and before the first write of any kind, so every lane is covered by the same check. A future lane
+must sit BELOW that return rather than beside it.
+
 ## Workstream C: Decision lifecycle
 
 ### C1. Keep active state separate from history
@@ -366,6 +484,27 @@ Retrieval and policy evaluation deliberately have different trust filters:
 This plan does not change current pending retrieval behavior. Pending and suggested knowledge can
 help explain what is under consideration, but neither may produce a policy warning or block unless
 the developer explicitly approves it and it passes the Guard trust predicate.
+
+As shipped, everything reconciliation creates is REVIEWABLE by construction. A new candidate lands
+`pending_approval` via an explicit `force_pending`, never the `suggested` tier an `ai` capture would
+otherwise get, because `suggested` injects at session start yet never appears in `review_pending`,
+which is trusted without ever having been offered for review.
+
+**Approval is not arming, and the review surface says so.** Approving a decision makes it retrievable
+and lets it pair as a Tier-1 advisory; it never creates a blocking rule. Arming is a separate
+explicit `guard arm` gesture, and no path from any review surface reaches it.
+`review_impact._armed_rule` REPORTS through `guard_engine._armed_rules`, the same selector the guard
+itself runs, so the block can describe an armed rule that already exists and can create none.
+
+What a review surface shows is computed once, in `contexer/review_impact.py`, and rendered from one
+list by all three surfaces (`review_pending`, `contexer review`, the local console), so the same
+decision cannot read one way in the terminal and another in the console. The block names origin,
+the score LABELLED as a review priority rather than a confidence, confirmed evidence grouped by
+relationship type, uncertain links in their own section, what would be anchored and what explicitly
+would not, host coverage, similar decisions and open conflicts, inactive history and retirement
+reason, revision identity with the lane's own staleness verdict, and the policy effect of approving.
+The module is a READ: it never approves, arms, anchors or restores anything, which is the whole
+point of a block a developer reads before signing.
 
 The tombstone entry should gain a versioned lifecycle record:
 
@@ -391,6 +530,18 @@ Supported lifecycle events in V1:
 - `restored`
 - `superseded`
 - `replacement_linked`
+
+As shipped, that vocabulary has ONE owner, `lifecycle.RECORD_KINDS` and `lifecycle.RETIRED_KINDS`,
+enforced by `lifecycle_record` itself, and `reconcile` DERIVES its retired set rather than
+respelling it, so a rename cannot leave a reader matching on a spelling nothing writes while its own
+tests still pass. `replacement_linked` remains reserved vocabulary with no writer.
+`remote._WIRE_LIFECYCLE_KINDS` deliberately stays a SEPARATE list even though the three written
+spellings agree today: it is a guess at the server's enum, and coupling it to the local vocabulary
+would let a local rename silently change what goes over the wire.
+
+`revision_id` on a record is captured AT the transition and never re-derived, because
+`revisions.append_revision` pops the entry-level `approved_by` stamp whenever a non-human revision
+lands, so history that trusted entry-level state would misreport which version was retired.
 
 Deletion in the UI should become a clearly named retirement action for normal knowledge hygiene.
 Reserve irreversible erasure for an explicit privacy workflow.
@@ -440,6 +591,22 @@ restore_decision(entry_id, reason?)
 
 Do not overload `approve_decision(action="ignore")` forever. Maintain it as a compatibility alias
 while the UI and CLI migrate to lifecycle language.
+
+As shipped there are THREE lanes on an entry, not two. `proposed_revision` answers "this should read
+differently", `proposed_lifecycle` answers "this should stop being live", and
+`proposed_reconsideration` answers "this stopped being live and somebody just restated it". All
+three coexist, none displaces another, and resolving one leaves the others exactly where they were.
+A reconsideration lives on the live entry for an ignored twin and on the tombstone for a retired one,
+and its review actions are `restore`, `restore_edit`, `skip` and `dismiss`, one decision id at a
+time, on both the MCP and CLI surfaces plus a `reconsider_decision` tool.
+
+`restore` returns a decision with no historical active status as `pending_approval` rather than
+guessing that it was approved, so restoring an ignored twin deliberately costs two answers.
+
+For the lifecycle and reconsideration lanes a revision advance is NEVER an approval signal.
+Retirement is a move, so an unrelated content edit that happened to advance HEAD would otherwise
+record a retirement that never occurred. A hold in those lanes is settled only on observed review
+state: a completed record at the basis, or a durable receipt written at or after the hold itself.
 
 ## Workstream D: Policy-evaluation API
 
@@ -561,6 +728,34 @@ The remote client must discover support before sending new fields:
 ```
 
 Older servers continue receiving the existing active decision shape.
+
+As shipped, the contract is live and the client gate `remote._WIRE_LIFECYCLE` is OPEN. The exact
+spellings, which were guesses when this plan was written, were confirmed against the server
+implementation and then driven against a locally running migrated server before the gate moved. They
+are snake_case on the wire (`revision_id`, `lifecycle`, and the record's own keys) precisely because
+those ARE the local serializer's shape, and renaming one would be a rejection on every retry of a
+client outbox row. That the same schema spells `decisionId` in camelCase elsewhere is not a typo on
+either side; it is why the field names were never guessable and had to be read.
+
+The capability is advertised as `decisionLifecycle` with `version`, `revisions`, `tombstones` and
+`retirementReasons`, and `retirementReasons: false` genuinely strips the prose from the wire rather
+than merely hiding it.
+
+An OPTIONAL-PROTOCOL FALLBACK sits on both push paths, and it is what makes opening the gate safe
+rather than merely justified. An advertising server that refuses the augmented payload gets ONE
+retry with the base decision alone, re-serialized through the same wire path with the capability
+cleared so it is byte-identical to what an old server receives. THE RETRY IS THE DISCRIMINATOR:
+only authentication, authorization, unreachability and capacity are excluded up front, and
+everything else is a candidate until the base push actually succeeds, which is what makes it work
+against a server whose rejection names no field. If the legacy retry fails too, the ORIGINAL error is
+raised, nothing is marked blocked and the capability is untouched.
+
+A confirmed refusal disables the capability for the life of that store, so no later push re-offers
+the refused field, and queues the delta as a durable outbox row carrying the reason and the
+capability fingerprint it was refused under. It is re-offered only when the advertised fingerprint
+moves, which is the difference between durably pending and a retry storm, and it is never dropped,
+never quarantined and never counted as synced. A refusal now costs the history rather than the
+decision.
 
 ### E2. Outbound privacy boundary
 
