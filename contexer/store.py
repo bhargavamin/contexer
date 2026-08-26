@@ -4462,6 +4462,11 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # on the same repo skips its pass rather than waiting behind this one, and the fast path
     # takes no store lock, no store read and no lock file at all when the spool is empty -
     # which is every session start on a repo with no evidence waiting.
+    #
+    # What it costs when the spool is NOT empty is measured, and stated once in
+    # `reconcile_session`'s own docstring (a full spool is the worst case, it is a one-time
+    # drain, and by ruling P4 it is disclosed rather than gated). Read it before assuming this
+    # line is free.
     from contexer import reconcile     # function-level: reconcile imports store at ITS top
     reconcile_note = _reconcile_note(reconcile.reconcile_session(repo_path, session_id="",
                                                                  host=host))

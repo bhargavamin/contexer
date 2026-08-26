@@ -117,6 +117,12 @@ _WIRE_SOURCE_FILES_MAX_LEN = 300
 # while the delta stays pending, and a lead-approved team copy left untouched by a personal
 # retirement. No -32602 on either write tool for a valid payload.
 #
+# That validation is COMMITTED, at `scripts/roundtrip_lifecycle.py` - the twenty-five checks
+# above, in the order they are listed, runnable against a local server (its docstring carries the
+# four prerequisites). "Repeat the identical live validation" is an instruction nobody can follow
+# from prose alone, so re-run that script before changing anything this gate covers, and extend it
+# when the contract grows a scenario.
+#
 # Rolling back is still the one-line change it was, and deliberately still NOT a config toggle -
 # a toggle can be flipped on against a server that rejects the field, which is the failure mode
 # itself. What has changed is that a rejection is no longer catastrophic: `apush_decision` and
