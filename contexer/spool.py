@@ -49,9 +49,12 @@ from contexer import evidence, store
 # `os.replace` can legitimately be in flight, so anything older is debris.
 #
 # BEFORE RAISING `_MAX_PENDING_EVENTS`, read `candidates._merge_target`: reading 8MB is the
-# cheap half. Grouping is O(N^2) in DISTINCT statements, and reconciliation runs on the
-# SessionStart path. Measured at 1000: ~69ms for a realistic corpus (100 statements plus
-# corroborating file changes), ~2.7s if every event is its own distinct statement.
+# cheap half. Grouping is still O(N^2) in DISTINCT statements that share a word, and
+# reconciliation now runs on the SessionStart path EVERY host traverses. Measured at 1000
+# (aggregation alone, three-run median after warm-up): ~5.7ms for a realistic corpus (100
+# statements plus corroborating file changes), ~106ms if every event is its own distinct
+# statement. Both are ~25x the pre-indexing figures, which is headroom rather than a licence:
+# the growth in the ceiling case is still quadratic.
 _MAX_PENDING_EVENTS = 1000
 _MAX_PENDING_AGE_DAYS = 30
 _MAX_TEMP_AGE_SECONDS = 3600

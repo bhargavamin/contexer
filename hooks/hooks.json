@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; from contexer.adapters import claude as _c; import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); store.anchor_repo(repo); _c.sync_memory(repo); _c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw))))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; from contexer.adapters import claude as _c; import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); store.anchor_repo(repo); _c.sync_memory(repo); _c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw), 'claude')))\" \"$REPO\"",
             "statusMessage": "Loading session context..."
           }
         ]

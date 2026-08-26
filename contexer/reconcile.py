@@ -147,8 +147,10 @@ def _reconcile_lock(repo_path: str):
     snapshot and B's classification changes the `kind`/`target_decision_id` B computes for the
     SAME events, hence their `candidate_id` - and B then holds events A already moved, sees
     them `missing`, and files an `evidence_summary` under its own entry describing a
-    disposition nobody made. Claude and Gemini both reconcile at SessionStart, PreCompact and
-    SessionEnd, so two sessions on one repo is ordinary, not exotic.
+    disposition nobody made. EVERY host now reconciles at session start (the shared
+    `store._local_session_start_payload` path), and Claude and Gemini add their own compaction
+    and session-end checkpoints on top, so two passes on one repo is ordinary, not exotic - and
+    the non-blocking skip is what keeps a second session start from waiting on the first.
 
     THIS DOES NOT VIOLATE THE SPOOL'S "no locks anywhere" RULE. That rule governs EVIDENCE
     WRITES FROM EDITOR HOOKS (`spool.append_evidence`), which must never wait behind another

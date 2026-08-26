@@ -4290,7 +4290,7 @@ def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> d
 
 
 def session_start_payload(repo_path: str, source: str = "", session_id: str = "",
-                          *, console_url: bool = False) -> dict:
+                          host: str = "", *, console_url: bool = False) -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
 
@@ -4322,7 +4322,13 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     counts from what `team` actually rendered (nor drive `shown` negative).
 
     session_id (Retrieval V1 Part B): optional, "" preserves every existing caller. Threaded
-    through to `_local_session_start_payload` for compact-source working-set rehydration."""
+    through to `_local_session_start_payload` for compact-source working-set rehydration.
+
+    `host` names the adapter whose SessionStart is calling, for the evidence-reconciliation
+    coverage block this path now produces. It is the ADAPTER's to supply, because the store
+    genuinely does not know which host started the session; an omitted one resolves to
+    `manual`, whose static map claims nothing (`evidence._MANUAL_COVERAGE`), so a caller that
+    predates this argument under-reports rather than over-claiming what it could observe."""
     resolved = hook_cwd_repo(repo_path)
     if resolved != repo_path and is_sane_repo(resolved):
         # The cwd fallback engaged (non-git project dir): anchor the shared pointer
@@ -4330,7 +4336,7 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         # bare MCP calls (no repo_path) in this session resolve to the same store.
         anchor_repo(resolved)
     repo_path = resolved
-    payload = _local_session_start_payload(repo_path, source, session_id)
+    payload = _local_session_start_payload(repo_path, source, session_id, host)
     # text/count/deferred come from ONE team_context snapshot (see _team_section_with_counts)
     # so the status-suffix arithmetic below can never describe a different moment than `team`.
     team, count, deferred = _team_section_with_counts(repo_path)
@@ -4381,7 +4387,26 @@ def _pending_review_notice(total: int) -> str:
     return notice
 
 
-def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
+def _reconcile_note(receipt: dict) -> str:
+    """The one sentence a reconciliation pass may add to the session-start status line, and
+    only when the pass could not account for everything it was handed.
+
+    COVERAGE, never content. What a candidate says reaches the developer through the ordinary
+    pending-review queue, which the count pointer below already renders from the post-reconcile
+    store; a startup line must never carry raw candidate text. A `complete` pass therefore says
+    nothing at all (silent operation), and a `skipped` one says nothing either, because another
+    pass holding the lock is the design working rather than news. `partial` and `error` are the
+    two states where evidence was acknowledged and has NOT been accounted for, which is exactly
+    the loss runbook invariant 3 requires to stay visible.
+    """
+    if (receipt.get("coverage") or {}).get("reconciliation") not in ("partial", "error"):
+        return ""
+    return (" Evidence reconciliation was incomplete: some recorded evidence is still "
+            "unconsumed, run `contexer reconcile-session` to retry.")
+
+
+def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "",
+                                 host: str = "") -> dict:
     """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
@@ -4419,6 +4444,29 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # site is deliberately unguarded on the strength of that promise.
     from contexer import spool         # function-level: spool imports store at ITS top
     spool.maintain_spool(repo_path)
+    # Materialize unconsumed evidence BEFORE the store is read below, so anything this pass
+    # proposes reaches THIS session's pending-review count instead of the next one's. This is
+    # the store-side path every host traverses at session start, which is what closes
+    # OUTSTANDING-ISSUES item 1 for all four of them at once: Codex and Cursor had no
+    # reconciliation entrypoint at all and Gemini had none at session start, so a session that
+    # crashed left its evidence in the spool until somebody ran the tool by hand.
+    #
+    # `session_id=""` is DELIBERATE and is not the session id this call was handed: the whole
+    # point is that evidence from a session that ended without a checkpoint participates, and
+    # scoping the pass to this session would skip exactly that evidence forever.
+    #
+    # Unguarded on the same promise as `maintain_spool` above - `reconcile_session` NEVER
+    # raises, and a pass that could not finish returns a receipt marked incomplete. That
+    # receipt is what `_reconcile_note` renders; the alternative, a try/except here, would
+    # swallow the very diagnostic the brief requires to stay visible.
+    #
+    # It is also non-blocking: the reconcile flock is `LOCK_NB`, so a second session starting
+    # on the same repo skips its pass rather than waiting behind this one, and the fast path
+    # takes no store lock, no store read and no lock file at all when the spool is empty -
+    # which is every session start on a repo with no evidence waiting.
+    from contexer import reconcile     # function-level: reconcile imports store at ITS top
+    reconcile_note = _reconcile_note(reconcile.reconcile_session(repo_path, session_id="",
+                                                                 host=host))
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
@@ -4427,7 +4475,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     if source == "resume":
         if decisions:
             return {
-                "status": f"Contexer: session resumed - {_pl(len(decisions), 'decision')} already loaded in conversation",
+                "status": f"Contexer: session resumed - {_pl(len(decisions), 'decision')} already loaded in conversation{reconcile_note}",
                 "context": "",
             }
         # Best-effort: the flag only silences a duplicate bootstrap offer on the first
@@ -4453,7 +4501,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         return {
-            "status": "Contexer: resumed with no stored context - mining this conversation for decisions",
+            "status": f"Contexer: resumed with no stored context - mining this conversation for decisions{reconcile_note}",
             "context": "\n".join(sys_parts),
         }
 
@@ -4523,7 +4571,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append(_pending_review_notice(len(reconsidering)))
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "status": f"Contexer: no context stored{global_note} - setup offer on next prompt",
+            "status": f"Contexer: no context stored{global_note} - setup offer on next prompt{reconcile_note}",
             "context": "\n".join(sys_parts),
         }
 
@@ -4643,22 +4691,28 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                              "'review pending' or run `contexer review`")
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
-    return {"status": status, "context": "\n".join(sys_parts)}
+    return {"status": status + reconcile_note, "context": "\n".join(sys_parts)}
 
 
-def get_session_start_context(repo_path: str, source: str = "", session_id: str = "") -> dict:
+def get_session_start_context(repo_path: str, source: str = "", session_id: str = "",
+                              host: str = "") -> dict:
     """Claude Code SessionStart hook output. Thin envelope over session_start_payload -
     kept for back-compat with installed hooks and the existing test suite.
 
     session_id (Retrieval V1 Part B): "" preserves every existing caller (Codex/Cursor
     still call this without it).
 
+    `host` (Task 06): the calling adapter's name, for the evidence-reconciliation coverage
+    block. Both installed hook commands that reach this function pass it as a literal, and an
+    install that predates the argument keeps working and reports `manual`, which claims
+    nothing rather than claiming another host's capabilities.
+
     `console_url=True` here and nowhere else: this envelope is the ONE path that renders
     `status` into a `systemMessage` (Claude and Codex), the only developer-facing channel any
     adapter has. See `_with_console_url`."""
     from contexer.adapters import claude
     return claude.format_session_start(
-        session_start_payload(repo_path, source, session_id, console_url=True))
+        session_start_payload(repo_path, source, session_id, host, console_url=True))
 
 
 # The article is OPTIONAL - "what is repo doing?" (no this/the) is just as much a newcomer

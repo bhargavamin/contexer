@@ -21,6 +21,7 @@ byte-identical output. A `uuid4` in this module is a defect.
 
 import re
 import uuid
+from collections import Counter
 from datetime import datetime
 
 from contexer import retrieval
@@ -106,12 +107,19 @@ def _tokens(text: str) -> set:
     return set(retrieval.index_tokens(text or ""))
 
 
-def _overlap(left: str, right: str) -> float:
-    """|A∩B| / |smaller| over the shared index tokenizer. Empty on either side scores 0."""
-    a, b = _tokens(left), _tokens(right)
+def _overlap_tokens(a: set, b: set) -> float:
+    """|A∩B| / |smaller| over two ALREADY-tokenized statements. Empty on either side scores 0.
+
+    Split out of `_overlap` so every hot path can tokenize each statement exactly once and
+    compare the sets, rather than re-tokenizing both sides of every pair."""
     if not a or not b:
         return 0.0
     return len(a & b) / min(len(a), len(b))
+
+
+def _overlap(left: str, right: str) -> float:
+    """|A∩B| / |smaller| over the shared index tokenizer. Empty on either side scores 0."""
+    return _overlap_tokens(_tokens(left), _tokens(right))
 
 
 def _first_sentence(text: str) -> str:
@@ -165,7 +173,65 @@ def _attributes(event) -> dict:
     return attributes if isinstance(attributes, dict) else {}
 
 
-def _merge_target(seed, groups):
+def _new_index() -> dict:
+    """The lookup structures `_group` maintains beside its group list.
+
+    Dicts and lists, in one object, because they are written at exactly one place (a group
+    being opened) and every one of them is keyed by that group's own position in `groups`:
+
+    * `postings` - index token to the ASCENDING group positions whose seed carries it. What
+      lets `_merge_target` look at only the groups that could possibly overlap this seed.
+    * `sizes` / `negations` - each group's seed token count and negation polarity, so neither
+      is recomputed once per comparison.
+    * `sessions` - the session key to its groups, in group order. Cross-session attachment is
+      forbidden outright (`_attach_target`), so this is that RULE expressed as a lookup rather
+      than as a test repeated against every group in the run.
+    """
+    return {"postings": {}, "sizes": [], "negations": [], "sessions": {}}
+
+
+def _index_group(index: dict, position: int, tokens: set, negating: bool, session) -> None:
+    for token in tokens:
+        index["postings"].setdefault(token, []).append(position)
+    index["sizes"].append(len(tokens))
+    index["negations"].append(negating)
+    index["sessions"].setdefault(session, []).append(position)
+
+
+def _shared_counts(index: dict, tokens: set) -> dict:
+    """`{group position: |A∩B|}` for every group sharing at least one token with `tokens`.
+
+    `Counter.update` over each posting list, so the counting itself runs in C: the Python-level
+    work is one pass per token, not one pass per (seed, group) pair. A group absent from the
+    result shares no token, which scores 0.0 and can clear no bar.
+    """
+    counts: Counter = Counter()
+    postings = index["postings"]
+    for token in tokens:
+        hits = postings.get(token)
+        if hits:
+            counts.update(hits)
+    return counts
+
+
+def _session_key(event):
+    """A hashable identity for an event's session, so groups can be bucketed by it.
+
+    The RAW value, because that is what the equality test this bucketing replaces compared -
+    `""` and `None` are different sessions to it, and quietly normalizing them here would merge
+    two things the old scan kept apart. The fallback covers only a malformed, unvalidated event
+    carrying an unhashable session, where raising out of a pure function would be the worse
+    answer.
+    """
+    session = event.get("session_id")
+    try:
+        hash(session)
+    except TypeError:
+        return repr(session)
+    return session
+
+
+def _merge_target(tokens, negating, groups, index):
     """`(group, relation)` for the group this later seed joins, or `(None, "")`.
 
     Two bars: a restatement merges above `_MERGE_OVERLAP`, and a seed whose negation POLARITY
@@ -183,25 +249,59 @@ def _merge_target(seed, groups):
     migrations before deploying" against "migrations must run before deploying") still flips
     polarity and is still charged as the contradiction it is.
 
-    ponytail: this compares each seed against every group opened so far, so a pass is O(N^2)
-    in DISTINCT statements. That is a CEILING, not the normal cost - a real session spools a
-    few statements and many corroborating file changes, which merge into a handful of groups.
-    Measured at `spool._MAX_PENDING_EVENTS` = 1000: ~69ms for 100 statements plus support,
-    ~2.7s if every event is its own distinct statement, and reconciliation runs on the
-    SessionStart path. Upgrade path when that ceiling starts to matter: block on a cheap key
-    (shared index token, or session) so a seed is only compared within its block, rather than
-    a cleverer overlap function.
+    SEMANTICS ARE FIRST-MATCH IN GROUP ORDER, and they are preserved EXACTLY while the scan
+    itself is order-free. The loop this replaces returned the first group above
+    `_MERGE_OVERLAP` and only fell back to the first POLARITY-FLIPPED group above
+    `_CONTRADICTION_OVERLAP` when no group anywhere cleared the higher bar - so the answer was
+    never "the earliest of the two kinds of hit", it was "the earliest merge hit if one exists
+    at all, else the earliest contradiction hit". Both are the MINIMUM qualifying group index,
+    which is computable from any traversal order, so this tracks the two minima instead of
+    depending on where it happens to be when it finds one.
+
+    The scan itself is the group index's token postings: only groups sharing at least one
+    index token with this seed are even looked at, since a disjoint pair scores 0.0 and can
+    clear neither bar. Each surviving pair is then judged by the same exact expression as
+    before - `|A∩B| / |smaller|` against the same two constants - so no approximate matcher is
+    anywhere in this path.
+
+    ponytail: this remains O(N^2) in the WORST case - 1,000 statements that all share one
+    common word are still 1,000 x 1,000 counted pairs - but the pair is now an integer count
+    and a division rather than two tokenizations and a set intersection, and a pair sharing no
+    token costs nothing at all. Measured at `spool._MAX_PENDING_EVENTS` = 1000 (three-run
+    median after warm-up, aggregation alone): 2667.67ms -> 106.45ms for 1,000 mutually distinct
+    statements, 8.65ms -> 8.26ms for 1,000 boilerplate ones, and 30.57ms -> 5.68ms for a
+    realistically shaped session. The distinct case is the one this changes, and it is still
+    quadratic: its 1,000 statements share four ordinary words, so every pair IS counted. What
+    fell by 25x is the price of a pair. Upgrade path if that ceiling ever matters again: a
+    length-banded prefix filter over the rarest tokens, which needs a frequency-ordered token
+    vocabulary this module does not keep.
     """
-    fallback = None
-    negating = _negates(seed.get("summary"))
-    for group in groups:
-        flipped = negating != _negates(group["seed"].get("summary"))
-        overlap = _overlap(seed.get("summary"), group["seed"].get("summary"))
+    if not tokens:
+        return None, ""
+    size = len(tokens)
+    sizes, negations = index["sizes"], index["negations"]
+    merge_at = contra_at = None
+    for group_index, shared in _shared_counts(index, tokens).items():
+        # The token-length impossibility filter, before the division: |A∩B| / |smaller| can
+        # only exceed the LOWER of the two bars when twice the shared count exceeds the
+        # smaller token set. Exact, not a heuristic - it is the same inequality, rearranged.
+        smaller = size if size < sizes[group_index] else sizes[group_index]
+        if shared + shared <= smaller:
+            continue
+        overlap = shared / smaller
         if overlap > _MERGE_OVERLAP:
-            return group, "contradiction" if flipped else "repetition"
-        if flipped and fallback is None and overlap > _CONTRADICTION_OVERLAP:
-            fallback = group
-    return (fallback, "contradiction") if fallback is not None else (None, "")
+            if merge_at is None or group_index < merge_at:
+                merge_at = group_index
+        elif (overlap > _CONTRADICTION_OVERLAP
+                and negating != negations[group_index]
+                and (contra_at is None or group_index < contra_at)):
+            contra_at = group_index
+    if merge_at is not None:
+        flipped = negating != negations[merge_at]
+        return groups[merge_at], "contradiction" if flipped else "repetition"
+    if contra_at is not None:
+        return groups[contra_at], "contradiction"
+    return None, ""
 
 
 def _within_proximity(seed, event) -> bool:
@@ -269,9 +369,11 @@ def _attach_target(event, groups):
     """`(group, relation)` for the group this support event links to, or `(None, "")`.
 
     Always the same session first: cross-session temporal attachment is forbidden outright, so
-    an edit made in another session can never corroborate this one's statement. Among the
-    groups that do qualify, the pick is the deterministic tie-break `_RELATION_RANK` documents
-    - strongest relation, shortest absolute time distance, lowest seed event id.
+    an edit made in another session can never corroborate this one's statement. That rule is
+    now the CALLER's lookup - `groups` is this event's own session bucket, never the whole run
+    - which is the same filter applied once per group instead of once per (event, group) pair.
+    Among the groups that do qualify, the pick is the deterministic tie-break `_RELATION_RANK`
+    documents - strongest relation, shortest absolute time distance, lowest seed event id.
 
     The distance term is what the old "last qualifying seed wins" fallback was really saying:
     an edit corroborates what was JUST said, not the oldest thing said inside the window.
@@ -282,8 +384,6 @@ def _attach_target(event, groups):
     best = None
     for group in groups:
         seed = group["seed"]
-        if seed.get("session_id") != event.get("session_id"):
-            continue
         relation = _relation_for(group, event, files)
         if relation is None:
             continue
@@ -294,13 +394,18 @@ def _attach_target(event, groups):
     return (best[1], best[2]) if best else (None, "")
 
 
-def _new_group(seed) -> dict:
+def _new_group(seed, tokens: set) -> dict:
     """One seed's group. `artifacts` are the path- and module-shaped spans of the seed's own
     text, used ONLY to recognize a structural link - they never become `source_files` by
     themselves, because a rule that NAMES a file is not the same fact as a session that
-    CHANGED it (which is why scenario 3's directive still anchors nothing)."""
+    CHANGED it (which is why scenario 3's directive still anchors nothing).
+
+    `tokens` rides along because the seed's summary is ALSO the candidate's content, so
+    `_classify` compares the very same token set against the stored decisions - tokenizing it
+    a second time there would be the same string, twice, for every candidate over the bar."""
     return {
         "seed": seed,
+        "tokens": tokens,
         "events": [seed],
         "files": list(dict.fromkeys(_event_files(seed))),
         "artifacts": set(retrieval.raw_path_artifacts(seed.get("summary") or "")),
@@ -331,6 +436,7 @@ def _group(events):
     anchoring nothing.
     """
     groups: list = []
+    index = _new_index()
     leftovers: dict = {}
     ignored: dict = {}
     support: list = []
@@ -338,9 +444,12 @@ def _group(events):
     for event in _ordered(events):
         kind = event.get("kind")
         if kind in SEED_KINDS:
-            target, relation = _merge_target(event, groups)
+            tokens = _tokens(event.get("summary"))
+            negating = _negates(event.get("summary"))
+            target, relation = _merge_target(tokens, negating, groups, index)
             if target is None:
-                groups.append(_new_group(event))
+                _index_group(index, len(groups), tokens, negating, _session_key(event))
+                groups.append(_new_group(event, tokens))
             else:
                 target["events"].append(event)
                 target["links"][str(event.get("event_id") or "")] = relation
@@ -351,7 +460,8 @@ def _group(events):
             ignored[str(kind)] = ignored.get(str(kind), 0) + 1
 
     for event in support:
-        target, relation = _attach_target(event, groups)
+        target, relation = _attach_target(
+            event, [groups[i] for i in index["sessions"].get(_session_key(event), ())])
         session = str(event.get("session_id") or "")
         if target is None:
             leftovers.setdefault(session, []).append(event)
@@ -463,19 +573,37 @@ def _is_live(decision) -> bool:
     return not decision.get("tombstoned") and decision.get("status") != "ignored"
 
 
-def _best_match(content, decisions) -> tuple:
-    """(decision, overlap) for the closest decision, `(None, 0.0)` for no match at all. Ties
-    break on the lowest id, so the same corpus always names the same decision.
+def _decision_index(decisions) -> dict:
+    """The stored decisions tokenized ONCE per run, split into the two sets `_classify` asks
+    about, each sorted by id so a tie always names the same decision.
 
-    The DECISION rather than its id: the retire branch needs the matched text's own negation
+    A row is `(decision, content tokens, negation polarity)`. Every candidate over the review
+    bar compares itself against every decision twice - live and inactive - so re-tokenizing
+    each decision's content per candidate was the whole store, once per proposal.
+    """
+    rows = [(d, _tokens(d.get("content") or ""), _negates(d.get("content")))
+            for d in sorted(decisions, key=lambda d: str(d.get("id") or ""))]
+    return {
+        "all": rows,
+        "live": [row for row in rows if _is_live(row[0])],
+        "inactive": [row for row in rows if not _is_live(row[0])],
+    }
+
+
+def _best_match(tokens, rows) -> tuple:
+    """(row, overlap) for the closest decision, `(None, 0.0)` for no match at all. Ties break
+    on the lowest id (the order `_decision_index` already put the rows in), so the same corpus
+    always names the same decision.
+
+    The ROW rather than the id: the retire branch needs the matched text's own negation
     polarity, and re-looking it up by id would be a second scan for a value this loop already
     held."""
-    best_decision, best = None, 0.0
-    for decision in sorted(decisions, key=lambda d: str(d.get("id") or "")):
-        overlap = _overlap(content, decision.get("content") or "")
+    best_row, best = None, 0.0
+    for row in rows:
+        overlap = _overlap_tokens(tokens, row[1])
         if overlap > best:
-            best_decision, best = decision, overlap
-    return best_decision, best
+            best_row, best = row, overlap
+    return best_row, best
 
 
 def _has_directive(group) -> bool:
@@ -489,11 +617,12 @@ def _has_directive(group) -> bool:
     return any(e.get("kind") == "user_directive" for e in group.get("events") or [])
 
 
-def _by_id(decisions, decision_id):
+def _by_id(rows, decision_id):
     """The projected decision with this id, or None."""
     if not decision_id:
         return None
-    return next((d for d in decisions if str(d.get("id") or "") == str(decision_id)), None)
+    return next((d for d, _tok, _neg in rows if str(d.get("id") or "") == str(decision_id)),
+                None)
 
 
 def _repeated_target(group, live_ids):
@@ -507,14 +636,15 @@ def _repeated_target(group, live_ids):
     return None
 
 
-def _classify(content, group, decisions) -> tuple:
+def _classify(group, index) -> tuple:
     """(kind, target_decision_id, extra uncertainties) for a group that cleared the bar."""
-    live = [d for d in decisions if _is_live(d)]
-    inactive = [d for d in decisions if not _is_live(d)]
     notes: list = []
+    tokens = group["tokens"]
 
-    dead, dead_overlap = _best_match(content, inactive)
-    target, overlap = _best_match(content, live)
+    dead_row, dead_overlap = _best_match(tokens, index["inactive"])
+    target_row, overlap = _best_match(tokens, index["live"])
+    dead = dead_row[0] if dead_row else None
+    target = target_row[0] if target_row else None
 
     # RECONSIDERATION. A restatement of an ignored or retired decision is neither a duplicate
     # of it nor a fresh decision beside it: it is the question "should this come back?", asked
@@ -543,11 +673,12 @@ def _classify(content, group, decisions) -> tuple:
     # in slightly different words landed in this band and was classified as a proposal to
     # RETIRE the very rule it repeats. A retirement is a reversal, so it takes a flip.
     if (overlap > _RETIRE_OVERLAP
-            and _negates(group["seed"].get("summary")) != _negates(target.get("content"))):
+            and _negates(group["seed"].get("summary")) != target_row[2]):
         return "retire", str(target.get("id") or ""), notes
     if overlap > _UPDATE_OVERLAP:
         return "update", str(target.get("id") or ""), notes
-    repeated = _repeated_target(group, {str(d.get("id") or "") for d in live})
+    repeated = _repeated_target(group, {str(d.get("id") or "") for d, _tok, _neg
+                                        in index["live"]})
     if repeated:
         return "update", repeated, notes
     return "new", None, notes
@@ -582,7 +713,7 @@ def _candidate_id(kind, target_decision_id, events, basis_revision_id="") -> str
     return str(uuid.uuid5(_CANDIDATE_NAMESPACE, "\n".join(parts)))
 
 
-def _seeded_candidate(group, decisions) -> dict:
+def _seeded_candidate(group, index) -> dict:
     seed = group["seed"]
     content = seed.get("summary") or ""
     score, signals, uncertainties = _score_group(group)
@@ -590,12 +721,12 @@ def _seeded_candidate(group, decisions) -> dict:
         kind, target = "insufficient", None
         uncertainties.append(f"score {score} is below the {_MIN_CANDIDATE_SCORE} review bar")
     else:
-        kind, target, notes = _classify(content, group, decisions)
+        kind, target, notes = _classify(group, index)
         uncertainties.extend(notes)
     # Only a reconsideration carries these, and only it binds its identity to the basis: for
     # every other kind the target's revision is read at materialization time, where the
     # proposal actually lands.
-    inactive = (_by_id(decisions, target) if kind == "reconsider" else None) or {}
+    inactive = (_by_id(index["all"], target) if kind == "reconsider" else None) or {}
     basis = str(inactive.get("current_revision_id") or "") if inactive else ""
     return {
         "candidate_id": _candidate_id(kind, target, group["events"], basis),
@@ -659,9 +790,9 @@ def aggregate_candidates(events: list, decisions: list) -> dict:
     (`id`/`status`/`tombstoned`/`content`/... - never mutated, never written back).
     """
     groups, leftovers, ignored, merged = _group(events or [])
-    decisions = [d for d in (decisions or []) if isinstance(d, dict)]
+    index = _decision_index([d for d in (decisions or []) if isinstance(d, dict)])
 
-    candidates = [_seeded_candidate(g, decisions) for g in groups]
+    candidates = [_seeded_candidate(g, index) for g in groups]
     candidates += [_leftover_candidate(sid, evs) for sid, evs in sorted(leftovers.items())]
     candidates.sort(key=lambda c: (-c["score"], c["candidate_id"]))
 

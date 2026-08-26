@@ -117,7 +117,12 @@ def session_start(repo_path: str, raw: str) -> str:
             marker = _session_marker(raw)
             if marker is not None:
                 _flag_drop(marker)
-        payload = store.session_start_payload(repo, source)
+        # `host=NAME`: the shared payload now reconciles this repo's unconsumed evidence, so
+        # Gemini gains a SessionStart checkpoint beside the PreCompress and SessionEnd ones
+        # `_reconcile_evidence` already gives it. Those two stay: they are the safety net for
+        # a session that compresses or ends without ever starting again, and this one is the
+        # recovery net for a session that ended without either.
+        payload = store.session_start_payload(repo, source, "", NAME)
         return _output("SessionStart", [payload.get("context", "")])
     except Exception:
         return _output("SessionStart", [])

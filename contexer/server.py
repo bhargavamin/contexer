@@ -343,13 +343,13 @@ def review_pending(repo_path: str = "") -> str:
 @mcp.tool()
 def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool = False) -> str:
     """Turn this session's recorded evidence - the directives, file changes and conclusions the
-    hooks observed - into decisions awaiting the developer's review. Automatic checkpoints are
-    host-dependent today: Claude reconciles at session start, before compaction, and at session
-    end; Gemini reconciles before compression and at session end (not at session start); Codex
-    and Cursor have no automatic checkpoint yet, so their evidence only reconciles when this tool
-    (or `contexer reconcile-session`) is called explicitly. Call it explicitly when the developer
-    asks what was learned this session, before wrapping up a long piece of work, or on any host
-    without an automatic checkpoint.
+    hooks observed - into decisions awaiting the developer's review. EVERY host reconciles at
+    session start: that pass lives on the store-side path all four of them traverse, so evidence
+    a previous session left behind is picked up whenever the next one opens. Claude adds a
+    before-compaction and a session-end checkpoint, and Gemini adds a before-compression and a
+    session-end one; Codex and Cursor have session start only. Call this tool explicitly when
+    the developer asks what was learned this session, or before wrapping up a long piece of work
+    on a host whose only checkpoint is the next session start.
 
     session_id: scope to ONE host session id; omit to reconcile everything the repo's spool
                 holds (the default, and what a session shared across git worktrees needs).

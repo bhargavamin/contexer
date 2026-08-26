@@ -159,8 +159,12 @@ def install(home: Path) -> list[str]:
         "_c.pull_team(repo); "
         # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
         # rehydration, mirroring claude.py's ss_code.
+        # The trailing 'codex' (Task 06) names the host for the evidence-reconciliation
+        # coverage block the shared session-start path now produces. SINGLE-quoted, because
+        # `_py` wraps this whole string in double quotes - which is also why the migration
+        # gate below matches it with `_in_commands` rather than `_in_groups`.
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
-        "store.session_from_hook_stdin(raw))))"
+        "store.session_from_hook_stdin(raw), 'codex')))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "

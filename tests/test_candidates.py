@@ -729,3 +729,185 @@ def test_a_reversal_of_a_prohibition_is_still_a_contradiction():
     got = _only(candidates.aggregate_candidates(events, []))
     assert _relations(got)[1] == ("contradiction", "confirmed")
     assert got["score"] == 20, "a contradiction is never hidden by a high positive score"
+
+
+# ── exact-output parity against the pre-index linear scan ────────────────────────
+#
+# Task 06 replaced three linear scans with lookups: token postings for seed merging, a
+# per-session bucket for support attachment, and a tokenize-once decision index for
+# classification. Each is a PERFORMANCE change with no intended output change at all, so the
+# proof is not "the goldens still pass" (they do, in tests/test_evidence_hardening_replays.py)
+# but a running copy of what was replaced, compared on the COMPLETE returned dict over
+# randomized input permutations.
+#
+# The three helpers below are that copy. They are deliberately test-local: a reference
+# implementation kept in `contexer/` would be a second definition of the matching rules, which
+# is the drift this comparison exists to detect.
+
+
+def _naive_merge_target(tokens, negating, groups, index):
+    """`_merge_target` before the postings: one pass over EVERY group opened so far,
+    re-tokenizing and re-testing the polarity of each, returning the first hit in group order
+    and falling back to the first polarity-flipped near-miss seen before it."""
+    fallback = None
+    for group in groups:
+        summary = group["seed"].get("summary")
+        flipped = negating != candidates._negates(summary)
+        overlap = candidates._overlap_tokens(tokens, candidates._tokens(summary))
+        if overlap > candidates._MERGE_OVERLAP:
+            return group, "contradiction" if flipped else "repetition"
+        if flipped and fallback is None and overlap > candidates._CONTRADICTION_OVERLAP:
+            fallback = group
+    return (fallback, "contradiction") if fallback is not None else (None, "")
+
+
+def _naive_attach_target(event, groups):
+    """`_attach_target` before the session buckets: handed every group in the run, and
+    filtering by session itself."""
+    files = candidates._event_files(event)
+    best = None
+    for group in groups:
+        seed = group["seed"]
+        if seed.get("session_id") != event.get("session_id"):
+            continue
+        relation = candidates._relation_for(group, event, files)
+        if relation is None:
+            continue
+        key = (candidates._RELATION_RANK[relation], candidates._distance(seed, event),
+               str(seed.get("event_id") or ""))
+        if best is None or key < best[0]:
+            best = (key, group, relation)
+    return (best[1], best[2]) if best else (None, "")
+
+
+def _naive_best_match(tokens, rows):
+    """`_best_match` before the decision index: sort by id and re-tokenize every decision's
+    content for every candidate that asks."""
+    best_row, best = None, 0.0
+    for row in sorted(rows, key=lambda r: str(r[0].get("id") or "")):
+        overlap = candidates._overlap_tokens(
+            tokens, candidates._tokens(row[0].get("content") or ""))
+        if overlap > best:
+            best_row, best = row, overlap
+    return best_row, best
+
+
+def _reference(monkeypatch, events, decisions):
+    """`aggregate_candidates` with every indexed decision point swapped back for the scan it
+    replaced. Collapsing `_session_key` to one constant collapses the session buckets, so
+    `_naive_attach_target` is handed the whole run exactly as the old caller handed it."""
+    with monkeypatch.context() as patch:
+        patch.setattr(candidates, "_merge_target", _naive_merge_target)
+        patch.setattr(candidates, "_attach_target", _naive_attach_target)
+        patch.setattr(candidates, "_best_match", _naive_best_match)
+        patch.setattr(candidates, "_session_key", lambda event: "*")
+        return candidates.aggregate_candidates(events, decisions)
+
+
+def _parity_corpus():
+    """One corpus touching every decision point the indexing changed: a merge, a
+    polarity-flipped merge, a lower-bar contradiction fallback, structural / validation /
+    causal / backward support links, three more sessions, an ignored kind, a
+    `decision_repeated` naming a live decision, and a leftover set."""
+    return [
+        _ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00", files=["db/migrate.py"]),
+        _ev("agent_conclusion", _SEED + " because rollbacks break. Twice.",
+            at="2026-08-24T10:01:00+00:00"),
+        _ev("user_directive", _PARTIAL_NEGATED, at="2026-08-24T10:02:00+00:00"),
+        _ev("agent_conclusion", _NEGATED_ABOVE_MERGE, session="s2",
+            at="2026-08-24T10:03:00+00:00"),
+        _ev("file_changed", "migration touched", at="2026-08-24T10:04:00+00:00",
+            files=["db/migrate.py"]),
+        _ev("test_result", "suite green", at="2026-08-24T10:05:00+00:00",
+            attributes={"status": "passed"}),
+        _ev("test_result", "suite red", session="s2", at="2026-08-24T10:06:00+00:00",
+            attributes={"status": "failed"}),
+        _ev("user_directive", _UNRELATED, session="s2", at="2026-08-24T10:07:00+00:00"),
+        _ev("file_changed", "resolver edit", session="s2", at="2026-08-24T10:08:00+00:00",
+            files=["web/gql.ts"]),
+        _ev("file_changed", "orphan edit", session="s3", at="2026-08-24T10:09:00+00:00",
+            files=["web/app.ts"]),
+        _ev("policy_evaluation", "bookkeeping, never a seed", at="2026-08-24T10:10:00+00:00"),
+        _ev("decision_repeated", _PARTIAL, session="s4", at="2026-08-24T10:11:00+00:00",
+            attributes={"decision_id": "dec-live"}),
+        _ev("diff_observed", "diff of the migration", session="s4",
+            at="2026-08-24T10:12:00+00:00", files=["db/migrate.py"]),
+        # Two TIES, each between groups that do not merge into one another (2/3 = 0.667),
+        # where a later seed qualifies against BOTH and the answer is the lower group index.
+        # They are what makes the parity comparison sensitive to the traversal order the
+        # postings scan gave up: the kafka triad pins the lower-bar contradiction fallback
+        # (2/3, which is also the exact boundary of the impossibility filter, 2+2 <= 3+1),
+        # and the redis triad pins the merge bar (2/2 = 1.0 against both).
+        _ev("user_directive", "kafka broker retention", session="s5",
+            at="2026-08-24T10:13:00+00:00"),
+        _ev("user_directive", "kafka broker partitions", session="s5",
+            at="2026-08-24T10:14:00+00:00"),
+        _ev("user_directive", "never kafka broker", session="s5",
+            at="2026-08-24T10:15:00+00:00"),
+        _ev("user_directive", "redis cluster failover", session="s5",
+            at="2026-08-24T10:16:00+00:00"),
+        _ev("user_directive", "redis cluster sentinel", session="s5",
+            at="2026-08-24T10:17:00+00:00"),
+        _ev("user_directive", "redis cluster", session="s5",
+            at="2026-08-24T10:18:00+00:00"),
+    ]
+
+
+def _parity_decisions():
+    """A live decision the repeated event names, a live near-match for the update / retire
+    bands, and an ignored twin close enough to open the reconsideration branch."""
+    return [_decision("dec-live", _PARTIAL),
+            _decision("dec-other", _UNRELATED),
+            _decision("dec-dead", _SEED, status="ignored")]
+
+
+def test_the_parity_corpus_is_not_degenerate():
+    """A parity comparison over a corpus that groups nothing would pass for the wrong reason.
+    This states what the corpus must actually exercise before the comparison below leans on
+    it: several groups, real merges, a contradiction, and more than one classification."""
+    result = candidates.aggregate_candidates(_parity_corpus(), _parity_decisions())
+    kinds = {c["kind"] for c in result["candidates"]}
+    relations = {s["relation"] for c in result["candidates"] for s in c["signals"]}
+    assert result["diagnostics"]["merged_duplicates"] >= 2
+    assert result["diagnostics"]["ignored_kinds"] == {"policy_evaluation": 1}
+    assert len(result["candidates"]) >= 3 and len(kinds) >= 2
+    assert {"repetition", "contradiction", "structural"} <= relations
+
+
+def test_the_answer_does_not_depend_on_the_order_the_postings_scan_yields(monkeypatch):
+    """`_merge_target` no longer walks the groups in order, so it tracks the LOWEST qualifying
+    group index rather than the first one it happens to meet.
+
+    Reversing what the postings scan hands it must change nothing. This is not a hypothetical
+    ordering: the scan counts over token posting lists in set iteration order, and `str`
+    hashing is randomized per process, so a version that took the first hit would answer
+    differently on different runs of the same corpus. Pinned separately from the parity
+    comparison because that comparison shuffles the INPUT, which this ordering does not
+    follow.
+    """
+    events, decisions = _parity_corpus(), _parity_decisions()
+    expected = json.dumps(candidates.aggregate_candidates(events, decisions))
+    real = candidates._shared_counts
+    with monkeypatch.context() as patch:
+        patch.setattr(candidates, "_shared_counts",
+                      lambda index, tokens: dict(reversed(list(real(index, tokens).items()))))
+        assert json.dumps(candidates.aggregate_candidates(events, decisions)) == expected
+
+
+def test_indexed_aggregation_matches_the_linear_scan_on_every_permutation(monkeypatch):
+    """The Task 06 acceptance gate: candidate output is exactly unchanged.
+
+    Compared on the whole returned dict - every candidate's signals, relations, certainties,
+    files, score and uncertainties, plus the diagnostics block - never on a candidate count,
+    and over randomized permutations rather than one input order, because the property the
+    indexing had to preserve is precisely that the answer does not depend on traversal order.
+    """
+    events, decisions = _parity_corpus(), _parity_decisions()
+    expected = json.dumps(_reference(monkeypatch, events, decisions))
+    assert json.dumps(candidates.aggregate_candidates(events, decisions)) == expected
+
+    shuffled = list(events)
+    for seed in range(25):
+        random.Random(seed).shuffle(shuffled)
+        assert json.dumps(candidates.aggregate_candidates(shuffled, decisions)) == expected
+        assert json.dumps(_reference(monkeypatch, shuffled, decisions)) == expected
