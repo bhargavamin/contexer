@@ -2060,12 +2060,38 @@ def touch_pending_review(repo_path: str) -> None:
         pass
 
 
+MAX_EVIDENCE_SUMMARIES = 50     # see record_evidence_summary on why not MAX_RECURRENCES
+
+
 def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> bool:
     """Append one settled-candidate summary to a decision's own history. Returns whether it
     landed.
 
-    ADDITIVE and nothing else: the entry grows an `evidence_summary` list and no other key is
-    touched, so a store written before this key existed loads and renders unchanged.
+    ADDITIVE and nothing else: the entry grows an `evidence_summary` list (and, only once it
+    has actually overflowed, an `evidence_summary_dropped` count) and no other key is touched,
+    so a store written before this key existed loads and renders unchanged.
+
+    BOUNDED AT `MAX_EVIDENCE_SUMMARIES`, and the drop is RECORDED rather than silent. This list
+    is the one place a settled candidate's disposition lives once the raw events are deleted,
+    so an unbounded one grows for as long as a rule keeps being restated (measured in review:
+    31 rows for 31 repetitions, beside a `recurrences` list correctly capped at 20 on the same
+    entry). Evicting a row does cost the detail runbook invariant 3 leans on, which is why the
+    count of what left is stamped on the entry - the same "truncation is recorded, not silent"
+    rule `_anchor_sources` follows with `source_files_total`.
+
+    The cap is deliberately NOT `MAX_RECURRENCES`. A recurrence row COLLAPSES - one per
+    (session, match kind), with a count - so 20 rows cover 20 sessions however loudly each one
+    spoke. A summary row does not collapse: it is one settled candidate, carrying the ids of
+    the events it accounts for, so each eviction loses a distinct receipt. The bound therefore
+    sits where storage is still trivial (a few KB) and the record stays long.
+
+    KNOWN INTERACTION, stated rather than guarded: `reconcile._recorded_summaries` builds its
+    idempotency set from this list, so a receipt evicted before its held events were deleted
+    would be filed a second time on the next pass. Reaching it needs
+    `MAX_EVIDENCE_SUMMARIES` other candidates to settle on the SAME decision between one
+    candidate's summary write and its delete, which only a repeatedly failing delete produces.
+    The cost is one duplicated receipt row, never a wrong disposition and never a lost event -
+    `_finalize` still deletes - so it is not worth a second bookkeeping structure to prevent.
 
     This is where a disposition LIVES once reconciliation deletes the raw events it settled
     (`spool.finalize_candidate_evidence` returns the summary, this preserves it) - the decision
@@ -2091,8 +2117,12 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
         history = entry.get("evidence_summary")
         # Rebuilt rather than appended to: a hand-edited non-list would otherwise raise here,
         # and this is bookkeeping - it must never be the thing that breaks a store write.
-        entry["evidence_summary"] = (history if isinstance(history, list) else []) + \
-            [dict(summary)]
+        history = (history if isinstance(history, list) else []) + [dict(summary)]
+        dropped = len(history) - MAX_EVIDENCE_SUMMARIES
+        if dropped > 0:
+            entry["evidence_summary_dropped"] = \
+                int(entry.get("evidence_summary_dropped") or 0) + dropped
+        entry["evidence_summary"] = history[-MAX_EVIDENCE_SUMMARIES:]
 
     with store_lock(repo_slug(repo_path)):
         data = load(repo_path)
@@ -2368,7 +2398,9 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                               created_by: str = "ai", replace_id: str = "", title: str = "", *,
                               source_files: list | None = None,
                               repo_source: str = "",
-                              force_pending: bool = False) -> tuple[bool, str | None, dict]:
+                              force_pending: bool = False,
+                              anchor_candidates: list | None = None,
+                              ) -> tuple[bool, str | None, dict]:
     """Store (or route) one decision, plus a `meta` dict - `{}` except on a refused proposal
     slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
 
@@ -2398,7 +2430,16 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
     `repo_source` is the diagnostic half of the wrong-store problem: which signal in
     `resolve_repo_verbose` picked the store this write is landing in. Recorded on new
     entries only, and only when the caller actually resolved verbosely - every existing
-    caller omits it and is unaffected."""
+    caller omits it and is unaffected.
+
+    `anchor_candidates` OVERRIDES the recently-edited-files guess this function would
+    otherwise stash on a new pending entry, empty list included. It exists for a caller that
+    already knows which files its capture is about and can therefore say so more truthfully
+    than a time window can - reconciliation, which passes the candidate's own CONFIRMED
+    `source_files` and so never lets a merely-nearby edit become an anchor guess. `None` (every
+    other caller) keeps the sidecar accrual exactly as it was. Like the sidecar guess it
+    replaces, it is never guard input: `_guard_pairs` reads `source_files` only, and a human
+    approval is still what turns a candidate into an anchor."""
     content = revisions.normalize_content(content)
     with store_lock(repo_slug(repo_path)):
         data = load(repo_path)
@@ -2590,12 +2631,22 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         # architecture decision) can also land pending_approval, but it never touched a
         # specific file THIS session - the edited-files signal only correlates with a live
         # conversational capture - so scan/bootstrap/memory are excluded explicitly too.
+        # A caller that passed `anchor_candidates` KNOWS which files this capture is about, so
+        # its list replaces the sidecar read entirely - including when it is empty, which is
+        # the caller saying "none of the recent edits belong to this decision". That is what
+        # keeps reconciliation's uncertain paths out of the anchor pipeline: the edited-files
+        # sidecar and the aggregator's `temporal_backward` window are the SAME 1800 seconds,
+        # written by the same PostToolUse call, so every backward-linked path is guaranteed to
+        # be a fresh sidecar entry at the moment reconciliation materializes the decision - and
+        # a candidate the aggregator refused to anchor was landing here as an anchor guess a
+        # developer could bless (runbook invariant 6, caught in review).
         if (not entry.get("source_files")
                 and created_by not in ("scan", "bootstrap", "memory")
                 and entry_status(entry) == "pending_approval"):
-            candidates = _read_edited_files(repo_path)
-            if candidates:
-                entry["anchor_candidates"] = candidates[-MAX_SOURCE_FILES:]
+            guesses = (_read_edited_files(repo_path) if anchor_candidates is None
+                       else [f for f in anchor_candidates if isinstance(f, str) and f])
+            if guesses:
+                entry["anchor_candidates"] = guesses[-MAX_SOURCE_FILES:]
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         save(repo_path, data)

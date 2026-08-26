@@ -502,6 +502,16 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         replace_id=str(candidate.get("target_decision_id") or "") if kind == "update" else "",
         title=candidate.get("title") or "",
         force_pending=True,
+        # The candidate's CONFIRMED files, and never `possible_source_files`. Passed rather
+        # than left to the store's recently-edited-files accrual because that window
+        # (`_EDITED_FILES_WINDOW`) is the same 1800 seconds as the aggregator's
+        # `_PROXIMITY_SECONDS`, fed by the same PostToolUse call, so every path the aggregator
+        # judged `temporal_backward` was landing on the decision as an anchor guess anyway -
+        # the outcome runbook invariant 6 forbids, arrived at by a route the aggregator cannot
+        # see. Here the answer comes from the evidence itself: an empty list means this
+        # candidate's evidence named no file, which is a truer statement than "something was
+        # edited nearby". Still only a GUESS awaiting a human approval, exactly as before.
+        anchor_candidates=list(candidate.get("source_files") or []),
     )
     if stored and entry_id:
         # Counted as proposed even in the one case where the store accepted the call but kept
