@@ -787,6 +787,17 @@ def _evidence_status_lines(repos) -> list[str]:
     return lines
 
 
+def _coverage_status_lines(targets) -> list[str]:
+    """One `coverage:` line per host, saying what its hooks can OBSERVE - which is a different
+    question from what the spool happens to hold. A host with no write hook reports
+    `file changes unavailable`, never the zero events that absence produces, and an
+    agent-reported conclusion is never dressed up as an observed one."""
+    from contexer import evidence
+
+    return [f"  coverage:     {evidence.format_coverage(evidence.host_coverage(a.NAME))}"
+            for a in targets]
+
+
 def status(rest: list | None = None) -> None:
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
@@ -858,6 +869,8 @@ def status(rest: list | None = None) -> None:
     if current_repo:
         repos.add(current_repo)
     for line in _evidence_status_lines(repos):
+        print(line)
+    for line in _coverage_status_lines(targets):
         print(line)
 
     # Team sync block (Phase 2 observability). ZERO network calls - config.toml + the team

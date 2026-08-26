@@ -2,7 +2,7 @@ import json
 import os
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import conflicts, lifecycle, policy_api, reconcile, store
+from contexer import conflicts, evidence, lifecycle, policy_api, reconcile, store
 
 SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or str(uuid.uuid4())
 
@@ -293,6 +293,36 @@ def reconsider_decision(entry_id: str, action: str, repo_path: str = "",
     if refusal:
         return refusal
     return lifecycle.reconsider_decision(resolved, target, action, content)[1]
+
+
+@mcp.tool()
+def record_agent_conclusion(summary: str, rationale: str = "",
+                            files: list[str] | None = None, repo_path: str = "") -> str:
+    """Record a durable engineering conclusion YOU reached, as evidence for later review.
+
+    Call this when you have worked something out that a future session would need to know -
+    how a subsystem actually behaves, why an approach turns out not to work, a constraint the
+    code imposes - and the developer has not ratified it as settled knowledge. It is the
+    provisional twin of update_context: nothing is stored as a decision, nothing becomes
+    trusted, nothing is injected into any session. The conclusion is recorded as evidence,
+    reconciliation groups it with the session's other evidence, and only the developer's
+    review can promote it. Report it to them in your own words too - this is a ledger entry,
+    not a message.
+
+    Do NOT call it for progress narration ("refactored the parser"), file-by-file summaries,
+    status updates, or one-off work the developer asked you to do. If the developer has
+    already ratified the decision, call update_context instead.
+
+    summary:   the conclusion itself, in one or two sentences.
+    rationale: why it holds - what you based it on. A conclusion that explains itself carries
+               more weight at review time than a bare assertion.
+    files:     repo-relative paths the conclusion is about (optional).
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Skipped - repo path not detected."
+    return evidence.record_agent_conclusion(resolved, summary, rationale=rationale,
+                                            files=files, session_id=SESSION_ID)[1]
 
 
 @mcp.tool()

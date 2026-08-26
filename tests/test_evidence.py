@@ -7,15 +7,18 @@ tests below pick up any fixture added later with no new test code.
 
 STORAGE IS TESTED IN tests/test_spool.py, not here: evidence.py owns the schema and the
 host-hook emission surface, and every filesystem property (atomic per-event writes, holds,
-quarantine, retention, `.gap`) belongs to the module that does the writing. The emission
-surface's own tests live in tests/test_evidence_adapters.py, beside the hosts that call it.
+quarantine, retention, `.gap`) belongs to the module that does the writing. The HOOK emission
+surface's own tests live in tests/test_evidence_adapters.py, beside the hosts that call it;
+the agent-conclusion emitter and the host-coverage block are tested here, because neither
+belongs to any one adapter - the coverage vocabulary and the never-upgrade rule live in this
+module while each adapter owns only its own static map.
 """
 import json
 from pathlib import Path
 
 import pytest
 
-from contexer import evidence
+from contexer import evidence, spool
 
 FIXTURES = Path(__file__).parent / "fixtures" / "evidence"
 VALID = sorted((FIXTURES / "valid").glob("*.json"))
@@ -209,4 +212,138 @@ def test_large_but_under_cap_event_is_accepted():
         _event(attributes={f"k{i}": "v" * 500 for i in range(10)}))
     assert errors == []
     assert len(json.dumps(normalized).encode()) <= evidence._MAX_EVENT_BYTES
+
+
+# ── the agent-conclusion emitter ─────────────────────────────────────────────
+#
+# The one production emitter of `agent_conclusion`. Its END-TO-END behaviour (what the
+# aggregator does with what it spools, and that a lint-bounced capture cannot re-enter the
+# store through it) is pinned in tests/test_evidence_hardening_replays.py; what is here is
+# the emitter's own contract: shape, bounds, and an honest report of a failed append.
+
+CONCLUSION = "The codegen step overwrites the client."
+
+
+def test_a_recorded_conclusion_is_one_agent_reported_event(tmp_repo):
+    ok, message = evidence.record_agent_conclusion(
+        tmp_repo, CONCLUSION, rationale="It runs on every build.",
+        files=["src/a.py"], session_id="sess-1")
+
+    assert ok and "EVIDENCE" in message
+    (event,) = spool.list_pending_evidence(tmp_repo, "sess-1")
+    assert event["kind"] == "agent_conclusion"
+    assert event["source"] == "agent_tool"
+    assert event["summary"] == "The codegen step overwrites the client. It runs on every build."
+    assert event["files"] == ["src/a.py"]
+    assert event["attributes"] == {"reported_by": "agent", "has_rationale": True}
+
+
+def test_a_conclusion_without_a_rationale_says_so(tmp_repo):
+    assert evidence.record_agent_conclusion(tmp_repo, CONCLUSION, session_id="s")[0]
+    (event,) = spool.list_pending_evidence(tmp_repo, "s")
+    assert event["attributes"]["has_rationale"] is False
+    assert event["summary"] == CONCLUSION
+
+
+@pytest.mark.parametrize("summary,rationale", [("", ""), ("   ", "  "), (None, None)])
+def test_a_blank_conclusion_is_refused_rather_than_spooled(tmp_repo, summary, rationale):
+    # An event with no statement can never seed a candidate, so spooling one would write a
+    # file nothing can ever read.
+    ok, message = evidence.record_agent_conclusion(tmp_repo, summary, rationale=rationale)
+    assert (ok, message) == (False, "Nothing recorded - a conclusion needs a summary.")
+    assert spool.list_pending_evidence(tmp_repo) == []
+
+
+def test_an_escaping_path_is_reported_as_loss_not_silently_dropped(tmp_repo):
+    # The schema's own path rule, reused rather than restated here: nothing is spooled, and
+    # the caller is told the conclusion was NOT captured.
+    ok, message = evidence.record_agent_conclusion(tmp_repo, CONCLUSION, files=["/etc/passwd"])
+    assert not ok
+    assert "NOT recorded" in message and "repo-relative" in message
+    assert spool.list_pending_evidence(tmp_repo) == []
+
+
+def test_a_failed_append_reports_the_loss_and_never_claims_capture(tmp_repo, monkeypatch):
+    with monkeypatch.context() as broken:
+        broken.setattr(spool, "append_evidence",
+                       lambda *_a, **_k: {"status": "dropped_error", "errors": ["disk is on fire"]})
+        ok, message = evidence.record_agent_conclusion(tmp_repo, CONCLUSION)
+    assert not ok
+    assert "NOT recorded" in message and "disk is on fire" in message
+    assert "state it to the developer" in message
+
+
+# ── host capture coverage ────────────────────────────────────────────────────
+
+def test_no_host_reports_manual_and_claims_nothing_it_cannot_see():
+    block = evidence.host_coverage()
+    assert block == {"host": "manual", "user_directives": "unavailable",
+                     "file_changes": "unavailable",
+                     "assistant_conclusions": "model_reported",
+                     "test_results": "unavailable", "diffs": "unavailable",
+                     "reconciliation": "complete", "dropped_events": 0}
+
+
+def test_a_named_host_reports_its_own_adapter_map():
+    from contexer.adapters import claude
+
+    block = evidence.host_coverage("claude")
+    assert block["host"] == "claude"
+    assert {f: block[f] for f in evidence.COVERAGE_FIELDS} == claude.EVIDENCE_COVERAGE
+
+
+@pytest.mark.parametrize("host", ["nonesuch", "Claude", " "])
+def test_an_unknown_host_falls_back_to_manual_rather_than_guessing(host):
+    assert evidence.host_coverage(host)["host"] == "manual"
+
+
+def test_a_static_value_outside_the_vocabulary_degrades_to_error(monkeypatch):
+    # A typo in an adapter's map must read as "this was not checked", never as a capture
+    # claim - the only direction this block is allowed to move at runtime.
+    from contexer.adapters import cursor
+
+    with monkeypatch.context() as typo:
+        typo.setattr(cursor, "EVIDENCE_COVERAGE",
+                     dict(cursor.EVIDENCE_COVERAGE, user_directives="capturd"))
+        assert evidence.host_coverage("cursor")["user_directives"] == "error"
+
+
+def test_dropped_events_downgrade_the_pass_and_are_counted():
+    block = evidence.host_coverage("claude", dropped_events=3)
+    assert (block["reconciliation"], block["dropped_events"]) == ("partial", 3)
+    # A capability is never downgraded by a drop nobody attributed to it.
+    assert block["file_changes"] == "captured"
+
+
+@pytest.mark.parametrize("state", ["skipped", "error", "partial"])
+def test_a_reported_state_is_never_improved_by_the_drop_rule(state):
+    assert evidence.host_coverage("claude", reconciliation=state,
+                                  dropped_events=2)["reconciliation"] == state
+
+
+def test_an_unknown_reconciliation_state_reads_as_error():
+    assert evidence.host_coverage(reconciliation="finished")["reconciliation"] == "error"
+
+
+@pytest.mark.parametrize("dropped", [-1, True, "many", None])
+def test_a_nonsense_drop_count_reads_as_zero(dropped):
+    assert evidence.host_coverage(dropped_events=dropped)["dropped_events"] == 0
+
+
+def test_rendering_distinguishes_unavailable_from_a_zero_count():
+    # The honesty the block exists for: cursor sees no edits at all, which is a different
+    # fact from claude having observed none this session. Neither line states a count.
+    cursor_line = evidence.format_coverage(evidence.host_coverage("cursor"))
+    claude_line = evidence.format_coverage(evidence.host_coverage("claude"))
+    assert "file changes unavailable" in cursor_line
+    assert "file changes captured" in claude_line
+    assert "0 file changes" not in cursor_line
+    assert "conclusions agent-reported" in cursor_line and "captured" not in \
+        cursor_line.split("conclusions")[1]
+
+
+def test_rendering_names_the_pass_status_and_its_drops():
+    line = evidence.format_coverage(evidence.host_coverage("gemini", dropped_events=1))
+    assert line.startswith("gemini: ")
+    assert line.endswith("; reconciliation partial, 1 event dropped")
 

@@ -284,6 +284,45 @@ class TestInferredDecisionsAreAlwaysReviewable:
         assert _dispositions_of(tmp_repo) == []
 
 
+class TestReceiptCoverage:
+    """The coverage block a pass reports: what the host could observe, plus this run's own
+    status and the evidence it lost. Never an upgrade - a pass that could not finish, or one
+    that evicted evidence, says so."""
+
+    def test_a_named_host_is_reported_rather_than_guessed(self, tmp_repo):
+        _emit(tmp_repo, "user_directive", "always use conventional commits")
+        receipt = reconcile.reconcile_session(tmp_repo, host="gemini")
+        assert receipt["coverage"]["host"] == "gemini"
+        assert receipt["coverage"]["reconciliation"] == "complete"
+
+    def test_evidence_evicted_this_pass_downgrades_it_and_is_counted(self, tmp_repo,
+                                                                     monkeypatch):
+        _emit(tmp_repo, "user_directive", "always use conventional commits")
+        with monkeypatch.context() as lossy:
+            lossy.setattr(spool, "run_retention", lambda repo: {
+                "dropped_pending": 2, "dropped_quarantine": 1, "temp_removed": 0,
+                "finalized_orphans": [], "errors": []})
+            receipt = reconcile.reconcile_session(tmp_repo, host="claude")
+
+        assert receipt["coverage"]["dropped_events"] == 3
+        assert receipt["coverage"]["reconciliation"] == "partial"
+        # The loss is not attributed to a capability nobody tied it to.
+        assert receipt["coverage"]["file_changes"] == "captured"
+
+    def test_a_pass_that_could_not_finish_never_reports_complete(self, tmp_repo, monkeypatch):
+        with monkeypatch.context() as broken:
+            broken.setattr(reconcile, "_reconcile", _boom)
+            receipt = reconcile.reconcile_session(tmp_repo, host="claude")
+        assert receipt["incomplete"] is True
+        assert receipt["coverage"]["reconciliation"] == "error"
+
+    def test_a_skipped_pass_says_skipped(self, tmp_repo):
+        _emit(tmp_repo, "user_directive", "always use conventional commits")
+        with reconcile._reconcile_lock(tmp_repo):       # stands in for the running pass
+            receipt = reconcile.reconcile_session(tmp_repo, host="claude")
+        assert receipt["coverage"]["reconciliation"] == "skipped"
+
+
 # ── the four candidate kinds ─────────────────────────────────────────────────
 
 class TestUpdateCandidate:
@@ -1010,7 +1049,11 @@ class TestFastPath:
         assert receipt == {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0,
                            "reconsidered": 0, "already_pending": 0, "duplicates": 0,
                            "insufficient": 0, "incomplete": False, "skipped": False,
-                           "dry_run": False}
+                           "dry_run": False,
+                           # No host named, so the block reports `manual` rather than
+                           # guessing which client called - and reading it costs no adapter
+                           # import on this path.
+                           "coverage": evidence.host_coverage()}
 
     def test_a_still_held_candidate_reads_the_store_but_never_locks_it(self, tmp_repo,
                                                                       monkeypatch):

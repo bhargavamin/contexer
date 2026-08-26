@@ -10,6 +10,16 @@ from contexer.adapters import base
 
 NAME = "gemini"
 
+# What this host's installed hooks observe. `before_agent` captures directives and
+# `AfterTool(write_file|replace)` captures edits; nothing hands over the model's response.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, BeforeAgent
+    "file_changes": "captured",                 # after_write, AfterTool(write_file|replace)
+    "assistant_conclusions": "model_reported",  # the MCP tool, agent-invoked
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
+
 # Fix 1: namespaced so it doesn't collide with Claude's ~/.contexer/.pending_capture flag.
 _PENDING_CAPTURE = sidecars.filename("gemini_capture")
 _PENDING_RELOAD = sidecars.filename("gemini_reload")
@@ -254,7 +264,7 @@ def _reconcile_evidence(repo_path: str) -> None:
         from contexer import reconcile
         repo = store.hook_cwd_repo(repo_path)
         if repo:
-            reconcile.reconcile_session(repo)
+            reconcile.reconcile_session(repo, host=NAME)
     except Exception:
         pass
 
