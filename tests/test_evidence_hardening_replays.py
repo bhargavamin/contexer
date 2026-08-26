@@ -159,12 +159,33 @@ def test_every_fixture_event_is_schema_valid_and_deterministic():
     "06-agent-conclusion-with-rationale",
     "07-ignored-decision-restated-by-a-directive",
     "08-tombstoned-decision-restated-by-a-directive",
-    "09-inactive-decision-mentioned-by-a-conclusion",
+    # 10-13 and 17 drive the spool procedurally further down, but their goldens are asserted
+    # here too: an unasserted golden in the corpus that is supposed to BE the source of truth
+    # rots silently, and these are the corpora those replays are built on.
+    "10-crash-after-hold-before-store-mutation",
+    "11-crash-after-store-mutation-before-hold",
+    "12-crash-after-summary-before-evidence-deletion",
+    "13-two-simultaneous-reconciliations",
+    "17-corrupt-pending-event-and-held-manifest",
     "18-wrong-session-and-wrong-repo-evidence",
 ])
 def test_pure_aggregation_replay_matches_its_golden(name):
     doc = _load(name)
     assert _aggregate(doc) == doc["expected"], doc["summary"]
+
+
+def test_every_fixture_golden_is_either_asserted_or_absent():
+    """The other half of the rule above. A fixture carries a golden only if some test reads
+    it, so the corpus can never accumulate a stale expectation nobody checks. The two gap
+    fixtures are the exception in both directions: 02 carries the DESIRED output (its xfail
+    reads it), and 09 carries none at all, because the shape Task 04 lands on is that task's
+    design call and pre-judging it here would be a golden written by the wrong author."""
+    asserted = set(
+        test_pure_aggregation_replay_matches_its_golden.pytestmark[0].args[1])
+    for name in _scenarios():
+        doc = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        if doc.get("expected") is not None:
+            assert name in asserted or name == "02-edit-then-directive", name
 
 
 def test_the_directive_and_its_edit_become_one_candidate():
@@ -197,14 +218,42 @@ def test_a_restated_inactive_decision_is_classified_as_new_not_matched_back():
         assert any(dead_id in note for note in candidate["uncertainties"]), name
 
 
-def test_a_bare_agent_conclusion_cannot_reopen_an_inactive_decision():
-    """Scenario 9. An unexplained agent conclusion scores 15, under the 25 review bar, so it
-    never reaches classification at all - which is the distinction Task 04's reconsideration
-    lane rests on: a developer saying it out loud reopens a retired decision, an agent
-    noticing it does not."""
-    (candidate,) = _aggregate(_load("09-inactive-decision-mentioned-by-a-conclusion"))
-    assert candidate["kind"] == "insufficient"
-    assert "below the 25 review bar" in " ".join(candidate["uncertainties"])
+@pytest.mark.xfail(strict=True, reason=(
+    "outstanding issue 7, agent-only half, owned by Task 04's reconsideration lane: the "
+    "aggregator opens kind=new at score 25 from agent-only evidence against an inactive "
+    "decision, carrying 'restates dec-ignored, which was retired or ignored - review it as "
+    "new'. A restatement inside an agent_conclusion has two sentences, so `_has_rationale` "
+    "scores it 25 - exactly the review bar - and it reopens the ignored decision with no "
+    "developer having said anything."))
+def test_agent_only_evidence_cannot_reopen_an_inactive_decision():
+    """Scenario 9: the SAME inactive decision as scenarios 7 and 8, named only by an agent.
+
+    This is scenario 7's event with `kind` flipped to `agent_conclusion`, which is the only
+    way the scenario means anything - a conclusion whose wording does not restate the ignored
+    decision leaves the `decisions` array inert and measures nothing.
+
+    The property, and the one Task 04's lane is designed on: only a developer saying it out
+    loud reopens an inactive decision. Asserted as "does not reopen" rather than as a golden,
+    because whether agent-only evidence should come back `insufficient`, `new` without the
+    reconsideration note, or in a lane of its own is Task 04's call.
+    """
+    doc = _load("09-inactive-decision-mentioned-by-a-conclusion")
+    (candidate,) = _aggregate(doc)
+    reopens = (candidate["kind"] == "new"
+               and any("dec-ignored" in note for note in candidate["uncertainties"]))
+    assert not reopens, (
+        f"agent-only evidence reopened dec-ignored: {candidate['kind']} at "
+        f"{candidate['score']} - {candidate['uncertainties']}")
+
+
+def test_a_human_directive_is_what_reopens_an_inactive_decision():
+    """The passing side of the distinction above, so it is measured on both ends rather than
+    asserted on one. The identical restatement carried by a `user_directive` scores 50 and is
+    flagged as a reconsideration of the ignored decision - which is correct and must stay."""
+    (directive,) = _aggregate(_load("07-ignored-decision-restated-by-a-directive"))
+    (conclusion,) = _aggregate(_load("09-inactive-decision-mentioned-by-a-conclusion"))
+    assert directive["score"] == 50 and conclusion["score"] == 25
+    assert any("dec-ignored" in note for note in directive["uncertainties"])
 
 
 def test_evidence_from_another_session_never_corroborates_the_directive():
@@ -216,15 +265,50 @@ def test_evidence_from_another_session_never_corroborates_the_directive():
     assert "session sess-b" in " ".join(leftover["uncertainties"])
 
 
-def test_evidence_for_another_repository_never_reaches_this_repos_spool(tmp_repo, tmp_path):
-    """Scenario 18, second half - a spool boundary rather than an aggregation one, so it is
-    asserted where the boundary actually is. The spool is keyed by repo, and an event whose
-    `repo_key` names another repo is written to that repo's directory, never this one's."""
+def test_another_repositorys_evidence_never_enters_this_repos_candidates(tmp_repo, tmp_path):
+    """Scenario 18, second half. Both repos hold real evidence, and reconciling repo A must
+    produce a decision built ONLY from repo A's events.
+
+    The isolation comes from the per-repo spool DIRECTORY, and from nothing else - see the
+    documented limitation below. So the test seeds both spools and follows the events through
+    to the decision, rather than asserting that a file written to one directory is in it.
+    """
     doc = _load("18-wrong-session-and-wrong-repo-evidence")
     other_repo = str(tmp_path / "other-repo")
-    assert spool.append_evidence(other_repo, doc["foreign_repo_event"])["status"] == "stored"
-    assert spool.list_pending_evidence(tmp_repo) == []
-    assert len(spool.list_pending_evidence(other_repo)) == 1
+    ours = doc["events"][0]
+    theirs = doc["foreign_repo_event"]
+    assert spool.append_evidence(tmp_repo, ours)["status"] == "stored"
+    assert spool.append_evidence(other_repo, theirs)["status"] == "stored"
+
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+
+    ((_candidate_id, meta),) = spool.held_candidates(tmp_repo).items()
+    assert meta["event_ids"] == [ours["event_id"]]
+    assert theirs["event_id"] not in meta["event_ids"]
+    assert [e["event_id"] for e in spool.list_pending_evidence(other_repo)] \
+        == [theirs["event_id"]], "reconciling repo A consumed repo B's evidence"
+
+
+def test_repo_key_is_not_a_guard_and_the_corpus_says_so(tmp_repo):
+    """The limitation behind the isolation above, stated out loud rather than left implied.
+
+    `spool.append_evidence` keys the spool by its `repo_path` ARGUMENT and never reads the
+    event's own `repo_key`; the field appears nowhere in `candidates.py` or `reconcile.py`
+    either. So an event carrying another repo's `repo_key` that lands in this repo's
+    `pending/` - through a worktree or slug resolution change, say - is aggregated and
+    proposed into this repo's store like any other.
+
+    Asserted as the current TRUTH, not as an xfail: nobody has ruled that `repo_key` should
+    become a guard, and inventing an xfail nobody owns would be a requirement written by a
+    test. If a later task does add the check, this test is what tells them the corpus assumed
+    the old behaviour.
+    """
+    foreign = _load("18-wrong-session-and-wrong-repo-evidence")["foreign_repo_event"]
+    assert foreign["repo_key"] != tmp_repo
+    spool.append_evidence(tmp_repo, foreign)
+
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+    assert len(store.load(tmp_repo)["entries"]) == 1
 
 
 # ── the reproduced gaps ──────────────────────────────────────────────────────────
@@ -237,6 +321,33 @@ def test_evidence_for_another_repository_never_reaches_this_repos_spool(tmp_repo
 def test_an_edit_before_its_directive_corroborates_it():
     doc = _load("02-edit-then-directive")
     assert _aggregate(doc) == doc["expected"], doc["summary"]
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Task 03 carry-forward (ledger D1): a PROHIBITION repeated verbatim in a second session "
+    "contradicts itself. `candidates._negates` matches the bare word `not` anywhere in the "
+    "summary, and `_score_group` charges any merged seed that negates -30 without asking "
+    "whether it negates the GROUP or merely restates the same prohibition - so the pair "
+    "scores 50 - 30 = 20 and falls under the 25 review bar, where the identical rule phrased "
+    "affirmatively (scenario 5) scores 65."))
+def test_a_repeated_prohibition_corroborates_itself_rather_than_contradicting():
+    """Scenario 5's real-world shape, which the fixture deliberately avoids.
+
+    Scenario 5 uses an affirmative sentence so it can measure the repetition signal at all;
+    this is the same replay with the corpus's own prohibition, which is how a developer
+    actually repeats a rule ("never commit directly to main"). It matters beyond scenario 5:
+    outstanding issue 3's fix re-emits a deduped restatement as corroboration, and for every
+    prohibition-shaped rule that corroboration would subtract 30 instead of adding.
+    """
+    doc = _load("05-directive-repeated-in-a-second-session")
+    first, second = doc["events"]
+    prohibition = [first | {"summary": RULE}, second | {"summary": RULE}]
+
+    (candidate,) = [_project(c) for c in
+                    candidates.aggregate_candidates(prohibition, [])["candidates"]]
+
+    assert candidate["kind"] == "new", candidate["uncertainties"]
+    assert candidate["score"] == 65, "the repetition subtracted instead of corroborating"
 
 
 @pytest.mark.xfail(strict=True, reason=(
@@ -383,7 +494,9 @@ def test_a_hold_whose_store_write_never_landed_keeps_its_evidence(tmp_repo):
     assert receipt["proposed"] == 0 and receipt["duplicates"] == 0
     assert len(_held_event_files(tmp_repo, candidate_id)) == len(event_ids)
     assert store.load(tmp_repo)["entries"] == []
-    assert spool.evidence_diagnostics(tmp_repo)["held"] == 1
+    # `held_unattributed`, not `held`: the weaker counter is satisfied by an ordinary hold
+    # that names an entry, which is exactly the state this scenario is NOT in.
+    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
 
 
 def test_a_decision_stored_before_its_hold_is_held_against_its_own_review(tmp_repo,
@@ -795,16 +908,51 @@ def _report(label: str, median: float) -> None:
     print(f"\n  {label}: {median:.2f}ms (median of {_RUNS} after warm-up)")
 
 
+def _realistic_corpus(seeds: int = 100, total: int = 1000) -> list[dict]:
+    """The shape a real session leaves, at the spool's own bound.
+
+    Deliberately the SAME workload `test_benchmark_evidence._fill_to_the_bound` builds, since
+    that is the corpus OUTSTANDING-ISSUES item 4 quotes its "~69ms for a realistic session"
+    against: 100 distinct statements in 100 distinct sessions, plus 900 file changes each
+    carrying a REAL path so they actually attach. Ids are uuid5 like the rest of the corpus.
+
+    Getting this wrong is not a small measurement error. A corpus whose statements all merge
+    and whose file events carry no path measures the boilerplate case instead, two orders of
+    magnitude off - and Task 06 states its regression delta against this row.
+    """
+    events = [{"schema_version": evidence.SCHEMA_VERSION,
+               "event_id": str(uuid.uuid5(_GEN_NAMESPACE, f"realistic-seed#{i}")),
+               "session_id": f"sess-{i}", "repo_key": "/repo", "kind": "user_directive",
+               "occurred_at": (_T0 + timedelta(seconds=i)).isoformat(), "source": "replay",
+               "summary": f"Decision number {i} concerns subsystem alpha{i} and its "
+                          f"owner team{i}.",
+               "files": [], "content_hash": None, "attributes": {}}
+              for i in range(seeds)]
+    events += [{"schema_version": evidence.SCHEMA_VERSION,
+                "event_id": str(uuid.uuid5(_GEN_NAMESPACE, f"realistic-edit#{i}")),
+                "session_id": f"sess-{i % seeds}", "repo_key": "/repo",
+                "kind": "file_changed",
+                "occurred_at": (_T0 + timedelta(seconds=seeds + i)).isoformat(),
+                "source": "replay", "summary": f"module {i} changed",
+                "files": [f"src/module_{i % seeds}.py"], "content_hash": None,
+                "attributes": {}}
+               for i in range(total - seeds)]
+    return [_validated(e) for e in events]
+
+
 @pytest.mark.perf
-def test_baseline_aggregation_of_realistic_evidence(tmp_repo):
-    """A realistically shaped session: a few statements and the edits that corroborate them.
-    This is the figure the 1,000-distinct ceiling below should be read against."""
-    events = []
-    for i in range(10):
-        events.extend(_generated({"count": 1, "kind": "user_directive",
-                                  "template": f"Statement {i} about subsystem {i}."}))
-        events.extend(_generated({"count": 9, "kind": "file_changed",
-                                  "template": f"module {i} changed {{i}}"}))
+def test_baseline_aggregation_of_realistic_evidence():
+    """A realistically shaped session at the spool's bound: 100 statements, each in its own
+    session, with 900 file changes corroborating them. This is the figure the 1,000-distinct
+    ceiling below should be read against, and the row Task 06 states its delta from."""
+    events = _realistic_corpus()
+    result = candidates.aggregate_candidates(events, [])
+    # The corpus is only realistic if the support events actually attached. Asserted, because
+    # a silently degenerate corpus is precisely how this row was wrong the first time.
+    assert len(result["candidates"]) == 100
+    assert result["diagnostics"]["merged_duplicates"] == 0
+    assert sum(len(c["source_files"]) for c in result["candidates"]) == 100
+
     median = _median_ms(lambda: candidates.aggregate_candidates(events, []))
     _report(f"aggregate_candidates over {len(events)} realistic events", median)
     assert median < 2000.0
