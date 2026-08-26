@@ -144,7 +144,7 @@ def install(home: Path) -> list[str]:
     def _py(code: str) -> str:
         return (
             f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-            f'"{python}" -c "{code}" "$REPO"'
+            f'"{python}" -P -c "{code}" "$REPO"'
         )
 
     ss_code = (
@@ -201,13 +201,13 @@ def install(home: Path) -> list[str]:
     # Nudge to review decisions pending the developer. Reuses claude.review_nudge (codex-parity):
     # a Python entrypoint so it is per-repo and verifies the store — no false / cross-repo nudge.
     review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                  f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                   'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO"')
     cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-               f'"{python}" -c "from contexer.adapters import claude; import sys; '
+               f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO"')
     cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-               f'"{python}" -c "from contexer.adapters import claude; import sys; '
+               f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
     # Team delta poll (T2): Codex shares Claude's UserPromptSubmit output schema, so
     # claude.team_poll is reused — non-blocking, fail-soft, injects newly-approved team
@@ -215,7 +215,7 @@ def install(home: Path) -> list[str]:
     # Claude session on the same repo each get every synced batch once (independent high-water
     # markers) instead of racing for a single per-repo delivery.
     cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
-                f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                 'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
     # PostToolUse (issue #175 Task 2): reuse claude.post_write VERBATIM — Codex shares
     # Claude's PostToolUse hookSpecificOutput schema, so the same Python entrypoint records
@@ -225,7 +225,7 @@ def install(home: Path) -> list[str]:
     # feat/doc-drift branch. See claude.post_write's docstring for the hazard this guards
     # against: a cwd-vs-toplevel mismatch would silently key a different sidecar.
     post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+                      f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                       'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       '# .pending_capture')
 
@@ -284,6 +284,9 @@ def install(home: Path) -> list[str]:
     if base._in_groups(put, "claude.post_write") and not base._in_groups(put, "show-toplevel"):
         put = base._filter_groups(put, ["claude.post_write"])
         hooks["PostToolUse"] = put
+    # Converge on the exact current command (see the SessionStart note above).
+    put = base._strip_stale(put, ["claude.post_write"], post_write_cmd)
+    hooks["PostToolUse"] = put
     if not base._in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": post_write_cmd}]})
@@ -327,6 +330,19 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, ".pending_capture"):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...", "command": anchor_cmd}]})
+    # Converge each python-carrying UserPromptSubmit hook on its exact current command
+    # (see the SessionStart note above). Per-group via _strip_stale, never a list-wide
+    # marker check: `ups` holds several distinct hooks, and any() across the list would
+    # read one hook's fix as satisfying the others.
+    for marker, current in (
+        ("get_bootstrap_context_prompt", _py(boot_code)),
+        ("claude.capture_constraint", cap_con),
+        ("claude.rationale", cap_rat),
+        ("claude.team_poll", cap_poll),
+        ("claude.review_nudge", review_cmd),
+    ):
+        ups = base._strip_stale(ups, [marker], current)
+    hooks["UserPromptSubmit"] = ups
     # `once` mirrors Claude. If Codex ignores it the bootstrap offer degrades gracefully
     # to a silent {} once context exists.
     if not base._in_groups(ups, "get_bootstrap_context_prompt"):

@@ -102,7 +102,7 @@ _SENTINEL_RE = re.compile(r" # contexer-managed-hook.*$")
 
 def _normalize_adapter_command(cmd: str, python: str) -> str:
     """installer-generated command -> the form the plugin bundle should carry."""
-    cmd = cmd.replace(f'"{python}" -c', 'uv run --directory "${CLAUDE_PLUGIN_ROOT}" python -c')
+    cmd = cmd.replace(f'"{python}" -P -c', 'uv run --directory "${CLAUDE_PLUGIN_ROOT}" python -P -c')
     return _SENTINEL_RE.sub("", cmd)
 
 

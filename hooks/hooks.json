@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; from contexer.adapters import claude as _c; import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); store.anchor_repo(repo); _c.sync_memory(repo); _c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw), 'claude')))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer import store; from contexer.adapters import claude as _c; import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); store.anchor_repo(repo); _c.sync_memory(repo); _c.pull_team(repo); print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), store.session_from_hook_stdin(raw), 'claude')))\" \"$REPO\"",
             "statusMessage": "Loading session context..."
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; claude.sync_memory(sys.argv[1])\" \"$REPO\"; echo '{}'",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; claude.sync_memory(sys.argv[1])\" \"$REPO\"; echo '{}'",
             "statusMessage": "Syncing memory to Contexer..."
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.post_write(sys.argv[1], sys.stdin.read()))\" \"$REPO\""
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; print(claude.post_write(sys.argv[1], sys.stdin.read()))\" \"$REPO\""
           }
         ]
       },
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; claude.sync_memory(sys.argv[1])\" \"$REPO\"; echo '{\"systemMessage\": \"Contexer: context compaction starting \\u2014 call update_context for any decisions not yet stored. If update_context appears as a deferred tool, first call: ToolSearch(query='select:mcp__contexer__update_context')\"}'",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; claude.sync_memory(sys.argv[1])\" \"$REPO\"; echo '{\"systemMessage\": \"Contexer: context compaction starting \\u2014 call update_context for any decisions not yet stored. If update_context appears as a deferred tool, first call: ToolSearch(query='select:mcp__contexer__update_context')\"}'",
             "statusMessage": "Saving decisions before compact..."
           }
         ]
@@ -69,7 +69,7 @@
           {
             "type": "command",
             "once": true,
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer import store; import json,sys; result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); print(json.dumps(result))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer import store; import json,sys; result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); print(json.dumps(result))\" \"$REPO\"",
             "statusMessage": "Checking bootstrap context..."
           }
         ]
@@ -78,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
             "statusMessage": "Checking for constraint directives..."
           }
         ]
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.rationale(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; print(claude.rationale(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
             "statusMessage": "Checking for relevant decisions..."
           }
         ]
@@ -96,7 +96,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.team_poll(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; print(claude.team_poll(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
             "statusMessage": "Checking for new team decisions..."
           }
         ]
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -c \"from contexer.adapters import claude; import sys; print(claude.review_nudge(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
+            "command": "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && uv run --directory \"${CLAUDE_PLUGIN_ROOT}\" python -P -c \"from contexer.adapters import claude; import sys; print(claude.review_nudge(sys.argv[1], sys.stdin.read()))\" \"$REPO\"",
             "statusMessage": "Checking for decisions pending review..."
           }
         ]

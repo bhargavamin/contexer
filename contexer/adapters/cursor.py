@@ -251,7 +251,7 @@ def _cmd(entry: str) -> str:
     """A Cursor command hook: pass repo via "" (session_start reads workspace_roots from
     stdin); read stdin for prompt/session. Cursor runs hooks from the project root."""
     python = sys.executable
-    return (f'"{python}" -c "from contexer.adapters import cursor; import sys; '
+    return (f'"{python}" -P -c "from contexer.adapters import cursor; import sys; '
             f'print(cursor.{entry}(\'\', sys.stdin.read()))"')
 
 
@@ -275,13 +275,25 @@ def install(home: Path) -> list[str]:
     cfg["version"] = 1
     hk = cfg.setdefault("hooks", {})
 
+    # Converge each Contexer hook on its exact current command (the claude.py/codex.py
+    # `_strip_stale` rule, restated for Cursor's FLAT hook shape - these lists hold bare
+    # `{type, command}` dicts, not the grouped shape `_strip_stale` walks): a drift the
+    # marker checks below don't know about - the -P flag (without which `python -c`
+    # prepends cwd to sys.path and a checked-out contexer repo shadows the installed
+    # package) - would otherwise leave an installed hook running the old command forever.
+    def _converge(hook_list: list, marker: str, current: str) -> None:
+        hook_list[:] = [h for h in hook_list
+                        if marker not in h.get("command", "") or h.get("command") == current]
+
     ss = hk.setdefault("sessionStart", [])
+    _converge(ss, _HOOK_MARKER_SS, _cmd("session_start"))
     if not _has(ss, _HOOK_MARKER_SS):
         ss.append({"type": "command", "command": _cmd("session_start")})
 
     bsp = hk.setdefault("beforeSubmitPrompt", [])
     # Retire any previously-installed task-capture hook (the feature was removed).
     bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in h.get("command", "")]
+    _converge(bsp, _HOOK_MARKER_CON, _cmd("capture_constraint"))
     if not _has(bsp, _HOOK_MARKER_CON):
         bsp.append({"type": "command", "command": _cmd("capture_constraint")})
 
