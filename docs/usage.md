@@ -79,6 +79,8 @@ It names where the decision came from, which evidence supports it and how strong
 Approval makes a decision trusted context: it is replayed into sessions and it can raise an advisory warning at commit time.
 Turning one into a rule that actually stops a commit is a separate, explicit step you take yourself with `contexer guard arm`, and nothing in the review flow does it for you.
 The review block says so for each decision, and it will tell you when a rule is already armed.
+There is one case where answering the review does change what blocks a commit, and the block names it: a decision you armed earlier and then switched off still carries that rule, dormant, so approving or restoring it puts the rule back into service.
+Nothing in the review flow creates a rule that did not already exist, and `contexer guard disarm <id>` removes one.
 
 ### Decisions you switched off, restated later
 

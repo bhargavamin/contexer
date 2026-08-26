@@ -20,7 +20,8 @@ Two rules it enforces rather than merely renders:
   the one place they surface at all.
 * **Approval is not arming.** The policy preview says what approval does (retrieval) and what
   it does not (blocking), and names the separate explicit gesture that would. Nothing here can
-  create a rule; `guard_engine._armed_rules` is read to REPORT one that already exists.
+  create a rule; a rule the decision ALREADY carries is REPORTED, including the dormant case
+  where approving is what puts it back into service (see `_armed_rule`).
 
 Store-owned helpers are read through the `store` module OBJECT at call time, the load-order
 discipline `guard_engine.py` documents, and the dependency runs one way only: store.py,
@@ -331,19 +332,34 @@ def _revisions(entry: dict, meta: dict) -> dict:
 
 
 def _armed_rule(entry: dict) -> dict:
-    """The armed Tier-2 rule already on this decision, or `{}`.
+    """The armed Tier-2 rule this decision carries, or `{}`, with `active` saying whether the
+    guard fires it RIGHT NOW.
 
-    Read through `guard_engine._armed_rules`, the same selector the commit-time guard runs, so
-    the preview cannot claim a rule is inert that the guard would fire (or the reverse). It is
-    a REPORT: nothing in this module can arm, and an approval never will."""
+    Selection is the ENTRY'S OWN `guard_check`, not `guard_engine._armed_rules`, and that is
+    the whole point. `_armed_rules` is the guard's live selector: it requires
+    `entry_status == "approved"`, so a decision holding an armed rule while it is inactive
+    reported nothing at all and the block printed the default "Approval does not arm a guard
+    rule" - about a decision whose approval demonstrably re-arms the rule and blocks the next
+    commit. That state is reachable through the reconsideration lane (arm, ignore, restate,
+    restore: nothing strips `guard_check`, and `lifecycle._fail_toward_review` returns the
+    entry to `pending_approval` with the rule intact) and by a hand-edited store.
+
+    `active` still comes from the live selector, so the two phrasings cannot disagree with the
+    guard: a tombstoned entry keeps `status: approved` yet is absent from the live store
+    `guard_staged` reads, so it is dormant too, whatever the status field says. Still a REPORT:
+    nothing in this module can arm, and an approval never creates a rule that did not exist.
+    """
     try:
         from contexer import guard_engine
-        if not guard_engine._armed_rules([entry]):
-            return {}
         check = entry.get("guard_check") or {}
+        if not check:
+            return {}
+        active = (bool(guard_engine._armed_rules([entry]))
+                  and not entry.get("deleted_at"))
         return {"type": one_line(check.get("type")), "pattern": one_line(check.get("pattern")),
                 "paths": one_line(check.get("paths")),
-                "message": store.clip_body(one_line(check.get("message")), 200)}
+                "message": store.clip_body(one_line(check.get("message")), 200),
+                "active": active}
     except Exception:
         return {}
 
@@ -560,10 +576,20 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
         # `armed secret rule ()` and `(, paths src/*.py)`.
         detail = [f"{key} {armed[key]}" for key in ("pattern", "paths") if armed.get(key)]
         scope = f" ({', '.join(detail)})" if detail else ""
-        lines.append(f"Blocking after approval: this decision ALREADY has an armed "
-                     f"{armed.get('type') or 'guard'} rule{scope}. The approved revision on "
-                     "record stays operative until you review this update; approving does not "
-                     "change the rule.")
+        kind = armed.get("type") or "guard"
+        if armed.get("active"):
+            lines.append(f"Blocking after approval: this decision ALREADY has an armed "
+                         f"{kind} rule{scope}. The approved revision on record stays operative "
+                         "until you review this update; approving does not change the rule.")
+        else:
+            # The dormant half. The rule exists and is not firing only because the decision is
+            # not live, so answering YES here is what turns it back on - the one direction where
+            # the default "approval arms nothing" sentence would cost the developer a blocked
+            # commit they were told could not happen.
+            lines.append(f"Blocking after approval: this decision carries an armed {kind} "
+                         f"rule{scope}, DORMANT while the decision is not live. Approving or "
+                         "restoring it RE-ACTIVATES that rule and commits can be blocked by it "
+                         "again; declining leaves it dormant.")
     else:
         lines.append(policy.get("blocking", POLICY_BLOCKING))
     lines.append(policy.get("how_to_arm", POLICY_HOW_TO_ARM))
