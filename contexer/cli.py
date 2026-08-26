@@ -789,10 +789,16 @@ def _coverage_status_lines(targets) -> list[str]:
     """One `coverage:` line per host, saying what its hooks can OBSERVE - which is a different
     question from what the spool happens to hold. A host with no write hook reports
     `file changes unavailable`, never the zero events that absence produces, and an
-    agent-reported conclusion is never dressed up as an observed one."""
+    agent-reported conclusion is never dressed up as an observed one.
+
+    CAPABILITIES ONLY (`pass_status=False`): `status` runs no reconciliation, so rendering the
+    block's per-pass half would print its DEFAULTS as if they were an outcome - "reconciliation
+    complete, 0 events dropped" beside a count of unconsumed evidence, and on hosts that have no
+    reconciliation checkpoint at all. Only a receipt can report a pass."""
     from contexer import evidence
 
-    return [f"  coverage:     {evidence.format_coverage(evidence.host_coverage(a.NAME))}"
+    return [f"  coverage:     "
+            f"{evidence.format_coverage(evidence.host_coverage(a.NAME), pass_status=False)}"
             for a in targets]
 
 

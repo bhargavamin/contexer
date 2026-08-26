@@ -347,3 +347,15 @@ def test_rendering_names_the_pass_status_and_its_drops():
     assert line.startswith("gemini: ")
     assert line.endswith("; reconciliation partial, 1 event dropped")
 
+
+def test_a_caller_that_ran_no_pass_renders_capabilities_alone():
+    # The two runtime fields default to complete/0, so a caller with no pass to report on must
+    # not render them: printing a default as an outcome is the one lie this block exists to
+    # stop. `contexer status` is that caller.
+    block = evidence.host_coverage("claude")
+    line = evidence.format_coverage(block, pass_status=False)
+    assert line == "claude: directives captured, file changes captured, " \
+                   "conclusions agent-reported, test results unavailable, diffs unavailable"
+    assert "reconciliation" not in line and "dropped" not in line
+    assert evidence.format_coverage(block).startswith(line + ";")
+

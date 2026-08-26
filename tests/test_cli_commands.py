@@ -602,6 +602,19 @@ class TestStatusMultiTarget:
         assert "coverage:     cursor: directives captured, file changes unavailable" in out
         assert "conclusions agent-reported" in out
 
+    def test_status_never_claims_a_reconciliation_it_did_not_run(self, cursor_installed_home,
+                                                                 capsys):
+        # `status` runs no reconciliation pass, so it must report only what is statically true.
+        # It used to render the block's per-pass half from its defaults, printing "reconciliation
+        # complete, 0 events dropped" beside a pending-evidence count - and printing it for
+        # cursor and codex, which have no reconciliation checkpoint at all (issue 1). A pass
+        # outcome belongs to a receipt; here there is no pass to report on.
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "coverage:     cursor:" in out
+        assert "reconciliation" not in out
+        assert "dropped" not in out
+
     def test_cursor_only_install_not_reported_missing(self, cursor_installed_home, capsys):
         status(["--target", "cursor"])
         out = capsys.readouterr().out

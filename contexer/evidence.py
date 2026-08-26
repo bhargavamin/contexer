@@ -401,15 +401,25 @@ def host_coverage(host: str = "", *, reconciliation: str = "complete",
     return block
 
 
-def format_coverage(block) -> str:
+def format_coverage(block, *, pass_status: bool = True) -> str:
     """One line of coverage. States a capability, never a count: "file changes unavailable"
     and a spool holding zero file events are different facts, and collapsing them is what
-    makes a host with no write hook look like a quiet session."""
+    makes a host with no write hook look like a quiet session.
+
+    `pass_status=False` renders the CAPABILITY half alone, for a caller that ran no
+    reconciliation pass. The two runtime fields default to `complete`/`0`, so rendering them
+    outside a real pass asserts an outcome that never happened - `contexer status` printed
+    "reconciliation complete, 0 events dropped" beside a count of unconsumed evidence, and
+    printed it for hosts that have no reconciliation checkpoint at all. A pass outcome belongs
+    to the receipt of a pass.
+    """
     parts = [f"{label} {_STATE_WORDS.get(block.get(field), 'error')}"
              for field, label in _COVERAGE_LABELS]
+    line = f"{block.get('host', 'manual')}: " + ", ".join(parts)
+    if not pass_status:
+        return line
     dropped = block.get("dropped_events", 0)
-    return (f"{block.get('host', 'manual')}: " + ", ".join(parts)
-            + f"; reconciliation {block.get('reconciliation', 'error')}"
+    return (line + f"; reconciliation {block.get('reconciliation', 'error')}"
             + f", {dropped} event{'' if dropped == 1 else 's'} dropped")
 
 
