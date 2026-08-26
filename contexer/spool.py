@@ -73,6 +73,22 @@ _META_NAME = "candidate.json"
 # distinguishes "the developer rewrote it" from "the developer approved it" is one word.
 DISPOSITIONS = frozenset({"approved", "dismissed"})
 
+# The transition phases one candidate moves through, in order. `state` is WHERE a candidate
+# stands, `status` is the disposition it settles at (`pending` until one is known) - the field
+# that existed before this machine did, kept because every reader of a hold already speaks it.
+#
+# * `held`          - the manifest exists and its named events are being or have been moved;
+# * `materializing` - the store write may have started and must be replayed idempotently;
+# * `pending_review`- a concrete entry or lifecycle proposal is awaiting a developer;
+# * `settled`       - no review remains and a disposition is known;
+# * `reviewed`      - the disposition and its durable summary are both recorded, leaving only
+#                     the raw cleanup.
+#
+# An UNRECOGNIZED state is never guessed at: the candidate reads as incomplete, is counted in
+# `evidence_diagnostics`, and is neither swept nor resumed nor deleted.
+CANDIDATE_STATES = ("held", "materializing", "pending_review", "settled", "reviewed")
+MANIFEST_VERSION = 1
+
 # Mitigation 6: every id that becomes a path component is shape-checked BEFORE the join, so
 # no `..`, no separator and no absolute path can ever reach one. Deliberately a whitelist of
 # the two shapes this layer actually mints (a uuid, or bare hex) rather than a blocklist.
@@ -358,6 +374,29 @@ def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
 
 # ── hold / finalize (the candidate lifecycle) ────────────────────────────────────
 
+def _with_state(meta: dict) -> dict:
+    """`meta` with its transition phase resolved. A read-time migration, never a write.
+
+    A manifest written before this state machine existed carries no `state`, and such held
+    directories are on real machines from the installed branch - so an absent one is DERIVED
+    rather than read as damage: a recorded disposition means the candidate was `settled`, a
+    named `entry_id` means it reached review, and anything else is still `held`. The
+    disposition test comes first because a settled-on-arrival duplicate carries both.
+
+    An unrecognized EXPLICIT state is the opposite case and is flagged instead: something
+    wrote a phase this version does not know, so the candidate is incomplete and nothing may
+    resume, sweep or delete it.
+    """
+    if not meta or meta.get("unreadable"):
+        return meta                     # no manifest, or one nothing can read: not migratable
+    state = meta.get("state")
+    if state is None:
+        return {**meta, "state": (
+            "settled" if str(meta.get("status") or "") in DISPOSITIONS
+            else "pending_review" if str(meta.get("entry_id") or "") else "held")}
+    return meta if state in CANDIDATE_STATES else {**meta, "invalid_state": True}
+
+
 def _read_meta(held: Path) -> dict:
     """A held candidate's bookkeeping. `{}` when it was never written, `{"unreadable": True}`
     when it was written and cannot be read - the same three-way split `_read_gap` draws, and
@@ -373,7 +412,7 @@ def _read_meta(held: Path) -> dict:
         meta = json.loads(raw)
     except ValueError:
         return {"unreadable": True}
-    return meta if isinstance(meta, dict) else {"unreadable": True}
+    return _with_state(meta) if isinstance(meta, dict) else {"unreadable": True}
 
 
 def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
@@ -394,8 +433,13 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
     knows exactly which events still need moving.
 
     `meta` is written beside the events as `candidate.json`: the candidate's own bookkeeping
-    (its `entry_id`, lane, revision id). It is what makes a held dir self-describing, which is
-    what lets `run_retention` tell an unsettled candidate from an orphaned one.
+    (its `state`, `entry_id`, lane, revision id). It is what makes a held dir self-describing,
+    which is what lets `run_retention` tell an unsettled candidate from an orphaned one.
+
+    It is written BEFORE the first move, and that order is the state machine's first two
+    transitions: a crash between two `os.replace` calls then leaves a manifest naming every
+    event the candidate claims, which is what the next pass finishes the move from. The
+    reverse order would leave events in a directory nothing can attribute.
     """
     # Shape-checked BEFORE the try, so a bad id is a raised caller bug rather than one more
     # soft error line - everything inside the try is I/O, which is what degrades.
@@ -430,6 +474,76 @@ def hold_candidate_evidence(repo_path: str, candidate_id: str, event_ids,
             result["failed"].append(event_id)
             result["errors"].append(f"{event_id}: {type(exc).__name__}: {exc}")
     return result
+
+
+def update_candidate_state(repo_path: str, candidate_id: str, state: str, **fields) -> bool:
+    """Move one candidate's manifest to `state`, merging `fields`. True when it landed.
+
+    The atomic half of the state machine: a same-directory temp file plus `os.replace` (0600
+    from `mkstemp`, preserved by the rename), so a reader sees the old phase or the new one and
+    never a half-written manifest.
+
+    A manifest that was never written, cannot be read, or carries an unknown state is REFUSED
+    rather than replaced. The phase of a candidate nothing can read is unknown, and writing one
+    here would invent it - the caller reports the pass incomplete and the directory keeps every
+    file it holds.
+    """
+    _checked_id(candidate_id, "candidate_id")
+    if state not in CANDIDATE_STATES:
+        raise ValueError(f"state must be one of {list(CANDIDATE_STATES)}, got {state!r}")
+    held = _held_dir(repo_path, candidate_id)
+    meta = _read_meta(held)
+    if not meta or meta.get("unreadable") or meta.get("invalid_state"):
+        return False
+    try:
+        _write_json(held, _META_NAME,
+                    {**meta, **fields, "state": state, "updated_at": _now().isoformat()})
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def held_events(repo_path: str, candidate_id: str) -> list[dict]:
+    """The validated events one held candidate still holds, oldest first.
+
+    What a resumed materialization reads: the events are out of `pending/`, so the hold is the
+    only place they exist. `candidate.json` can never match `_EVENT_ID_IN_NAME`, so the name
+    needs no special case. An unreadable event is SKIPPED rather than quarantined - moving a
+    held file out would break the hold's own account of what it is holding.
+    """
+    _checked_id(candidate_id, "candidate_id")
+    events = []
+    for path in _event_files(_held_dir(repo_path, candidate_id)):
+        if not _EVENT_ID_IN_NAME.search(path.name):
+            continue
+        event = _read_event(path)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def discard_empty_hold(repo_path: str, candidate_id: str) -> bool:
+    """Remove a held directory that holds NO events. True when it went.
+
+    The one removal here that files no receipt, safe for exactly one reason: there is nothing
+    to file a receipt about. A hold whose events were claimed by another candidate (two passes
+    racing) or whose manifest landed before any event could move keeps its candidate id
+    occupied for good otherwise - the same evidence re-aggregates to the same id and reads as
+    already pending on every pass, forever.
+
+    Refused the moment one event file is present, and refused when the directory cannot be
+    listed: "raw evidence is removed only after its receipt is durable" is decided by what is
+    actually in there, never by what the manifest claims.
+    """
+    _checked_id(candidate_id, "candidate_id")
+    held = _held_dir(repo_path, candidate_id)
+    try:
+        if any(_EVENT_ID_IN_NAME.search(path.name) for path in _event_files(held)):
+            return False
+    except OSError:
+        return False
+    shutil.rmtree(held, ignore_errors=True)
+    return not held.exists()
 
 
 def held_candidates(repo_path: str) -> dict:
@@ -517,10 +631,16 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     whose `candidate.json` is missing or unreadable records no `entry_id`, so
     `_sweep_orphan_holds` can never judge it and it is held for good. A caller that forgets to
     pass `meta` therefore accrues held directories nothing will ever clean up - this counter is
-    what makes that show up in `contexer status` instead of accumulating silently.
+    what makes that show up in `contexer status` instead of accumulating silently. A candidate
+    still short of review counts here too, and correctly: until it materializes there is no
+    decision to attribute it to.
+
+    `held_invalid_state` is the other unjudgeable shape: a manifest carrying a state this
+    version does not recognize. Nothing resumes, sweeps or deletes it, so like the count above
+    it exists to make a stuck candidate visible rather than silent.
     """
     counts = {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
-              "quarantine": 0, "bytes": 0}
+              "held_invalid_state": 0, "quarantine": 0, "bytes": 0}
     readable = True
     try:
         for key, directory in (("pending", _pending_dir(repo_path, slug)),
@@ -541,8 +661,11 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
                 # excluded from the EVENT count and included in the byte total.
                 counts["held_events"] += sum(1 for p in files if p.name != _META_NAME)
                 counts["bytes"] += _total_bytes(files)
-                if not str(_read_meta(directory).get("entry_id") or ""):
+                meta = _read_meta(directory)
+                if not str(meta.get("entry_id") or ""):
                     counts["held_unattributed"] += 1
+                if meta.get("invalid_state"):
+                    counts["held_invalid_state"] += 1
     except OSError:
         counts = dict.fromkeys(counts, 0)
         readable = False
@@ -651,7 +774,10 @@ def _sweep_orphan_holds(repo_path: str) -> list:
     finalized = []
     for candidate_id, meta in held_candidates(repo_path).items():
         entry_id = str(meta.get("entry_id") or "")
-        if not entry_id or entry_id in live:
+        # An unknown state is as unjudgeable as a missing `entry_id`: this sweep can only ever
+        # say `dismissed`, and doing so over a phase nothing here understands would settle a
+        # candidate that may be mid-materialization.
+        if meta.get("invalid_state") or not entry_id or entry_id in live:
             continue
         finalize_candidate_evidence(repo_path, candidate_id, "dismissed")
         finalized.append(candidate_id)

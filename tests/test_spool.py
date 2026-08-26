@@ -292,7 +292,8 @@ def test_missing_spool_reads_as_empty_and_readable(tmp_repo):
     assert spool.list_pending_evidence(tmp_repo) == []
     diagnostics = spool.evidence_diagnostics(tmp_repo)
     assert diagnostics == {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
-                           "quarantine": 0, "bytes": 0, "gap": None, "readable": True}
+                           "held_invalid_state": 0, "quarantine": 0, "bytes": 0, "gap": None,
+                           "readable": True}
 
 
 # ── hold / finalize ──────────────────────────────────────────────────────────────
@@ -314,8 +315,11 @@ def test_hold_moves_events_out_of_pending(tmp_repo):
     assert result == {"status": "ok", "moved": 2, "already_held": 0, "missing": [],
                       "failed": [], "errors": []}
     assert spool.list_pending_evidence(tmp_repo) == []
+    # The meta comes back with its transition phase resolved: this one names an `entry_id` and
+    # no state, which is the pre-state-machine shape, so it reads as having reached review.
     assert spool.held_candidates(tmp_repo) == {candidate: {"entry_id": "abc123",
-                                                           "lane": "content"}}
+                                                           "lane": "content",
+                                                           "state": "pending_review"}}
     diagnostics = spool.evidence_diagnostics(tmp_repo)
     assert diagnostics["held"] == 1 and diagnostics["held_events"] == 2
 
@@ -365,6 +369,115 @@ def test_hold_reports_an_unserializable_meta_instead_of_raising(tmp_repo):
     result = spool.hold_candidate_evidence(tmp_repo, str(uuid.uuid4()), [],
                                            meta={"entry_id": object()})
     assert result["status"] == "error" and result["errors"]
+
+
+# ── the candidate state machine ──────────────────────────────────────────────────
+
+def _hold_one(repo, **meta):
+    candidate = str(uuid.uuid4())
+    spool.hold_candidate_evidence(repo, candidate, _spool_two(repo), meta=meta or None)
+    return candidate
+
+
+def test_a_state_update_rewrites_the_manifest_atomically(tmp_repo):
+    candidate = _hold_one(tmp_repo, state="held", event_ids=["x"])
+
+    assert spool.update_candidate_state(tmp_repo, candidate, "pending_review",
+                                        entry_id="dec-1") is True
+
+    meta = spool.held_candidates(tmp_repo)[candidate]
+    assert (meta["state"], meta["entry_id"], meta["event_ids"]) == ("pending_review", "dec-1",
+                                                                    ["x"])
+    assert datetime.fromisoformat(meta["updated_at"]).tzinfo is not None
+    # 0600 from `mkstemp`, preserved by the rename - the manifest quotes prompt text too.
+    assert oct((spool._held_dir(tmp_repo, candidate)
+                / spool._META_NAME).stat().st_mode)[-3:] == "600"
+
+
+def test_a_state_update_refuses_a_manifest_it_cannot_read(tmp_repo):
+    """The phase of a candidate nothing can read is UNKNOWN, and writing one would invent it.
+    Refusing is what makes the caller report the pass incomplete instead."""
+    candidate = _hold_one(tmp_repo, state="held")
+    (spool._held_dir(tmp_repo, candidate) / spool._META_NAME).write_text("{not json",
+                                                                        encoding="utf-8")
+
+    assert spool.update_candidate_state(tmp_repo, candidate, "settled") is False
+    assert spool.held_candidates(tmp_repo) == {candidate: {"unreadable": True}}
+
+
+def test_a_state_update_refuses_a_manifest_that_was_never_written(tmp_repo):
+    candidate = _hold_one(tmp_repo)
+    assert spool.update_candidate_state(tmp_repo, candidate, "settled") is False
+
+
+def test_an_unknown_state_is_rejected_at_the_write(tmp_repo):
+    candidate = _hold_one(tmp_repo, state="held")
+    with pytest.raises(ValueError, match="state must be one of"):
+        spool.update_candidate_state(tmp_repo, candidate, "nearly-done")
+
+
+def test_an_unknown_state_on_disk_is_diagnostic_never_destructive(tmp_repo):
+    """Something wrote a phase this version does not know. It is FLAGGED - never resumed, never
+    swept, never deleted - and it shows up in the diagnostics so it cannot accrue silently."""
+    candidate = _hold_one(tmp_repo, state="quantum", entry_id="gone-forever")
+
+    meta = spool.held_candidates(tmp_repo)[candidate]
+    assert meta["invalid_state"] is True and meta["state"] == "quantum"
+    assert spool.evidence_diagnostics(tmp_repo)["held_invalid_state"] == 1
+    assert spool.update_candidate_state(tmp_repo, candidate, "settled") is False
+    # Not even the orphan sweep touches it, though its `entry_id` names no decision at all.
+    assert spool.run_retention(tmp_repo)["finalized_orphans"] == []
+    assert len(spool.held_events(tmp_repo, candidate)) == 2
+
+
+@pytest.mark.parametrize("meta,expected", [
+    ({"entry_id": "dec-1", "status": "pending"}, "pending_review"),
+    ({"entry_id": "dec-1", "status": "dismissed"}, "settled"),
+    ({"entry_id": "", "status": "dismissed"}, "settled"),
+    ({"event_ids": ["x"], "status": "pending"}, "held"),
+])
+def test_a_legacy_manifest_is_migrated_on_read(tmp_repo, meta, expected):
+    """Held directories written before this state machine exist on real machines, so a manifest
+    with no `state` is DERIVED rather than stranded: a recorded disposition means it settled, a
+    named `entry_id` means it reached review, anything else is still held. A manifest that was
+    never written stays `{}` and gets no state at all - see the test below."""
+    candidate = _hold_one(tmp_repo, **meta)
+    assert spool.held_candidates(tmp_repo)[candidate]["state"] == expected
+
+
+def test_a_missing_manifest_is_left_stateless_rather_than_migrated(tmp_repo):
+    candidate = _hold_one(tmp_repo)
+    assert spool.held_candidates(tmp_repo) == {candidate: {}}
+
+
+def test_held_events_reads_back_what_a_hold_is_holding(tmp_repo):
+    ids = _spool_two(tmp_repo)
+    candidate = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, candidate, ids, meta={"state": "held"})
+
+    events = spool.held_events(tmp_repo, candidate)
+
+    assert [e["event_id"] for e in events] == ids       # oldest first, meta not among them
+    (spool._held_dir(tmp_repo, candidate) / f"20260101T000000000000Z-{ids[0]}.json").write_text(
+        "{not json", encoding="utf-8")
+    # An unreadable held event is skipped, never quarantined: moving it out would break the
+    # hold's own account of what it holds.
+    assert len(spool.held_events(tmp_repo, candidate)) == 2
+    assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
+
+
+def test_an_empty_hold_is_discarded_but_one_holding_evidence_is_not(tmp_repo):
+    """The only removal here that files no receipt, and it is safe because there is nothing to
+    file one about. A hold whose events were claimed by another candidate would otherwise
+    occupy its candidate id for good."""
+    keeper = _hold_one(tmp_repo, state="held")
+    empty = str(uuid.uuid4())
+    spool.hold_candidate_evidence(tmp_repo, empty, [], meta={"state": "held"})
+
+    assert spool.discard_empty_hold(tmp_repo, keeper) is False
+    assert spool.discard_empty_hold(tmp_repo, empty) is True
+    assert list(spool.held_candidates(tmp_repo)) == [keeper]
+    assert len(spool.held_events(tmp_repo, keeper)) == 2
 
 
 def test_finalize_returns_the_summary_and_removes_the_raw_events(tmp_repo):

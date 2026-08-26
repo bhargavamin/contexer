@@ -33,6 +33,7 @@ import io
 import json
 import os
 import random
+import shutil
 import statistics
 import time
 import types
@@ -476,49 +477,70 @@ def _crash(*_args, **_kwargs):
     raise RuntimeError("crash")
 
 
-def test_a_hold_whose_store_write_never_landed_keeps_its_evidence(tmp_repo):
+def test_a_hold_whose_store_write_never_landed_is_replayed_not_stranded(tmp_repo):
     """Scenario 10 - crash after the hold, before the store mutation.
 
-    The hold exists and names no `entry_id`, because nothing was stored. Invariants 3 and 4:
-    the raw evidence is still there, nothing is deleted, and no disposition is invented for a
-    candidate nothing can judge. It surfaces through `held_unattributed` instead.
+    The hold exists and names no `entry_id`, because nothing was stored. This is the state the
+    hold-first transition order makes ROUTINE rather than exotic, so it is the state recovery
+    is measured on: the held events are re-classified against the current store and
+    materialized under the SAME candidate id, and the evidence stays put throughout
+    (invariants 3 and 4). Before that replay existed such a hold was stranded for good, visible
+    only as `held_unattributed`.
+
+    The manifest is deliberately the pre-state-machine shape - no `state`, no `entry_id` - so
+    this also pins the legacy migration: `held` is what such a manifest reads as.
     """
     doc = _load("10-crash-after-hold-before-store-mutation")
     event_ids = _spool_events(tmp_repo, doc)
     candidate_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "orphan-hold"))
     spool.hold_candidate_evidence(tmp_repo, candidate_id, event_ids,
                                   meta={"event_ids": event_ids, "status": "pending"})
+    assert spool.held_candidates(tmp_repo)[candidate_id]["state"] == "held"
+    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
 
     receipt = reconcile.reconcile_session(tmp_repo)
 
-    assert receipt["proposed"] == 0 and receipt["duplicates"] == 0
+    assert receipt["proposed"] == 1 and receipt["duplicates"] == 0
     assert len(_held_event_files(tmp_repo, candidate_id)) == len(event_ids)
-    assert store.load(tmp_repo)["entries"] == []
-    # `held_unattributed`, not `held`: the weaker counter is satisfied by an ordinary hold
-    # that names an entry, which is exactly the state this scenario is NOT in.
-    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+    ((entry,),) = (store.load(tmp_repo)["entries"],)
+    assert store.entry_status(entry) == "pending_approval"
+    meta = spool.held_candidates(tmp_repo)[candidate_id]
+    assert (meta["state"], meta["entry_id"]) == ("pending_review", entry["id"])
+    assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 0
+
+    # And it is not proposed twice: the replay is idempotent under the same id.
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+    assert len(store.load(tmp_repo)["entries"]) == 1
 
 
-def test_a_decision_stored_before_its_hold_is_held_against_its_own_review(tmp_repo,
-                                                                         monkeypatch):
-    """Scenario 11 - crash after the store mutation, before the hold.
+def test_a_decision_stored_before_its_hold_is_held_against_its_own_review(tmp_repo):
+    """Scenario 11 - a decision stored with its evidence still pending.
 
-    The decision exists and every event is still pending, so the next pass re-aggregates them
-    and the aggregator matches them onto the decision they just became. Settling that as a
-    duplicate would delete the only evidence for a decision nobody has reviewed, so it is
-    HELD against that decision instead and reported as `already_pending`.
+    The transition order can no longer PRODUCE this state: the hold and its manifest land
+    before the store is touched, so a crash leaves the evidence either wholly pending or wholly
+    held. It is still reachable two other ways - a held directory written by the shipped
+    materialize-then-move order, which exists on real machines, and the store's own dedup
+    absorbing a restatement onto an entry still awaiting review - so it is constructed
+    directly here rather than by crashing a step that no longer runs in that order.
+
+    The requirement is unchanged. The next pass re-aggregates the events and the aggregator
+    matches them onto the decision they became; settling that as a duplicate would delete the
+    only evidence for a decision nobody has reviewed, so it is HELD against that decision and
+    reported as `already_pending`.
     """
     doc = _load("11-crash-after-store-mutation-before-hold")
     _spool_events(tmp_repo, doc)
-    # A nested context, never `monkeypatch.undo()`: undo is per-INSTANCE, and `tmp_repo`
-    # redirects `store.STORE_DIR` through this same instance - so undoing here would point
-    # the rest of the test at the developer's real store dir.
-    with monkeypatch.context() as crashed:
-        crashed.setattr(spool, "hold_candidate_evidence", _crash)
-        reconcile.reconcile_session(tmp_repo)
+    reconcile.reconcile_session(tmp_repo)
+    (stranded,) = spool.held_candidates(tmp_repo)
+    held_dir = spool._held_dir(tmp_repo, stranded)
+    for path in list(spool._event_files(held_dir)):
+        if path.name != spool._META_NAME:
+            path.rename(spool._pending_dir(tmp_repo) / path.name)
+    shutil.rmtree(held_dir)                  # nothing on disk connects decision and evidence
 
     entries = store.load(tmp_repo)["entries"]
     assert [store.entry_status(e) for e in entries] == ["pending_approval"]
+    assert spool.held_candidates(tmp_repo) == {}
 
     receipt = reconcile.reconcile_session(tmp_repo)
 

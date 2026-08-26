@@ -41,26 +41,41 @@ The receipt of a pass is LOGGED, never spooled (ruling R34): `.reconcile_<slug>.
 `.retrieval_<slug>.jsonl` precedent. Bookkeeping in the evidence spool is bookkeeping that
 retention eventually reports as lost evidence - see `_log_receipt`.
 
-ORDER MATTERS on the way in (revised plan B3 step 8): materialize FIRST, then move. A crash
-between the two leaves a candidate whose decision exists and whose events are split across
-`pending/` and `held/`; the next pass finishes the move from the candidate's own recorded
-`event_ids` (`_finish_interrupted_holds`) rather than re-aggregating the remainder into a
-second candidate under a different id.
+ORDER MATTERS, and it is a state machine rather than a sequence of hopeful writes. Every held
+candidate carries its phase in its own `candidate.json` (`spool.CANDIDATE_STATES`), and each
+transition is durable before the next one starts:
 
-That order leaves ONE window those recorded `event_ids` cannot cover: a crash before the hold
-exists at all. The decision is stored and every event is still in `pending/`, so the next pass
-re-aggregates them, the aggregator matches them against the decision they just became, and the
-candidate comes back as a `duplicate`. Settling that would file a `dismissed` receipt against a
-decision still awaiting review and delete the only evidence for it. So a duplicate of a decision
-that is ITSELF still awaiting review is HELD against that decision instead
-(`_settle_write_statuses`), and its disposition becomes whatever the developer's review turns out
-to be. Closing the window outright means writing the candidate id onto the entry in the SAME store
-call that creates it, which needs a store change this module cannot make on its own; holding
-rather than dismissing is what keeps the evidence and the decision connected until then.
+1. write the complete manifest in `held` state;
+2. move every named event into the held directory;
+3. VERIFY the manifest's event set against what is now there - a missing source with no held
+   target marks the pass incomplete and stops this candidate;
+4. flip the manifest to `materializing`;
+5. write through the ordinary store or lifecycle path;
+6. re-read the store and persist `pending_review` or `settled` from what it OBSERVES, never
+   from the write's own return value;
+7. after a review, record the compact evidence summary on the decision;
+8. persist `reviewed` with the disposition;
+9. only then remove the held directory.
 
-ORDER MATTERS on the way out too: the compact summary is recorded on the decision BEFORE the raw
-held events are deleted (`_finalize`). The other way round, one failed store write lost the
-evidence and the receipt for it together, permanently.
+Hold FIRST, materialize second. The reverse order (the shipped one until this task) left a
+window nothing on disk covered: a crash after the store write and before the hold left a
+decision whose evidence was still in `pending/`, connected to it by nothing. Now a crash
+anywhere leaves the evidence either wholly pending - so the next pass simply aggregates it
+again, under the same deterministic id - or wholly held behind a manifest that names both what
+it claims and how far it got. `_resume_holds` carries each of those forward, re-classifying a
+held candidate's own events against the CURRENT store so a replay recognizes the decision the
+interrupted pass already created instead of writing it twice.
+
+The window is closed, but its recovery stays: a store that dedups a restatement onto an entry
+still awaiting review, and legacy holds from the shipped order, both still produce a candidate
+that duplicates a decision nobody has reviewed. Settling that would file a `dismissed` receipt
+against a live review and delete the only evidence for it, so it is HELD against that decision
+instead (`_settle_write_statuses`) and its disposition becomes whatever the review turns out
+to be.
+
+On the way out the same rule reads backwards: the summary is durable before the manifest says
+`reviewed`, and the manifest says `reviewed` before a single raw event is deleted. Any other
+order loses the evidence and the receipt for it together, permanently.
 """
 
 import fcntl
@@ -198,11 +213,15 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
     """The disposition each held candidate has earned since the last pass,
     `{candidate_id: "approved"|"dismissed"}`.
 
-    The INPUT is the held directories and their `candidate.json` bookkeeping; a held directory
-    IS the pending state, so there is no status to filter on - a settled candidate's directory
-    is gone. The RULES are unchanged, and lazy on purpose: nothing hooks `approve_decision` or
-    `retire_decision`, so a candidate learns its decision's fate the next time reconciliation
-    runs. In the order they are tried:
+    The INPUT is the held directories and their `candidate.json` bookkeeping. This judges only
+    the candidates that have REACHED review (`pending_review`, and `settled` for one whose
+    finalize was interrupted): a candidate still `held` or `materializing` has no review to
+    have earned anything yet and belongs to `_resume_holds`, a `reviewed` one has already
+    earned its disposition, and an unknown state is never guessed at at all.
+
+    The rules are lazy on purpose: nothing hooks `approve_decision` or `retire_decision`, so a
+    candidate learns its decision's fate the next time reconciliation runs. In the order they
+    are tried:
 
     * the target was RETIRED - it is in the tombstone sidecar carrying a retirement record. For
       a lifecycle candidate that is precisely the outcome it proposed, so it reads `approved`;
@@ -234,19 +253,28 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
     by_id = {str(e.get("id") or ""): e for e in entries}
     flips = {}
     for candidate_id, meta in sorted(held.items()):
-        settled = str(meta.get("status") or "")
-        # Tested against the spool's own vocabulary, not merely `!= "pending"`: a hand-edited
-        # `candidate.json` would otherwise reach `finalize_candidate_evidence` with a status it
-        # rejects, and that ValueError aborts the WHOLE pass - on every run, for good.
-        if settled in spool.DISPOSITIONS:
-            # This candidate was ALREADY settled when it was held - a duplicate, or an update
-            # the store applied in place - and only the finalize that would have removed the
-            # directory is missing. Its disposition is what it was decided to be, not what the
-            # rules below would infer: without this, a crash between the hold and the finalize
-            # left a duplicate carrying an `entry_id` and no `lane`, and the last rule below
-            # read its target's `approved_by == "human"` as an APPROVAL of a candidate that was
-            # dismissed on arrival - the fabricated-approval class this whole function guards.
-            flips[candidate_id] = settled
+        state = meta.get("state")
+        if state == "settled":
+            # Settled before this pass - a duplicate, an update the store applied in place, or a
+            # disposition whose finalize was interrupted - and only the finalize that removes
+            # the directory is missing. The recorded disposition is what it was decided to be,
+            # never what the rules below would infer: without this, a crash between the hold and
+            # the finalize left a duplicate carrying an `entry_id` and no `lane`, and the last
+            # rule below read its target's `approved_by == "human"` as an APPROVAL of a
+            # candidate that was dismissed on arrival - the fabricated-approval class this whole
+            # function guards.
+            #
+            # Tested against the spool's own vocabulary, not merely `!= "pending"`: a
+            # hand-edited `candidate.json` would otherwise reach `finalize_candidate_evidence`
+            # with a disposition it rejects, and that ValueError aborts the WHOLE pass - on
+            # every run, for good.
+            settled = str(meta.get("status") or "")
+            if settled in spool.DISPOSITIONS:
+                flips[candidate_id] = settled
+            continue
+        if state != "pending_review":
+            # `held`/`materializing` belong to `_resume_holds`, `reviewed` has already earned
+            # its disposition, and a missing, unreadable or unknown state is never guessed at.
             continue
         entry_id = str(meta.get("entry_id") or "")
         if not entry_id:
@@ -282,17 +310,71 @@ def _dispositions(held: dict, entries: list, retired_ids: set) -> dict:
     return flips
 
 
-def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
-                 receipt: dict, writes: dict) -> None:
-    """Route ONE candidate: count it, recommend it, or store it. Fills `receipt`/`writes`.
+def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
+              created_at: str = "") -> dict:
+    """The complete `candidate.json` for one candidate, in `held` state.
 
-    A `writes` entry is the candidate's intended bookkeeping - `event_ids`, the `status` it
+    Written before a single event moves and before the store is touched at all, so it carries
+    everything a resumed pass needs to finish the work without re-aggregating: what the
+    candidate PROPOSES (`kind`, `target_decision_id`), the revision that proposal was formed
+    against (`basis_revision_id`), the events it claims, and the decision text itself.
+
+    `lane` and `revision_id` are deliberately ABSENT rather than null: absence is how the
+    content lane has always been spelled here, and `_dispositions` reads a stored
+    `revision_id` as "this materialized as a proposal" - a null one would be a third meaning
+    for a field with two.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    target = str(candidate.get("target_decision_id") or "") or None
+    return {
+        "schema_version": spool.MANIFEST_VERSION,
+        "candidate_id": candidate_id,
+        "state": "held",
+        "status": "pending",
+        "kind": candidate.get("kind") or "",
+        "target_decision_id": target,
+        "basis_revision_id": basis.get(target or "") or None,
+        "event_ids": list(event_ids),
+        "entry_id": "",
+        "candidate": {
+            "title": candidate.get("title") or "",
+            "content": candidate.get("content") or "",
+            "subtype": candidate.get("subtype") or "",
+            "source_files": list(candidate.get("source_files") or []),
+            "possible_source_files": list(candidate.get("possible_source_files") or []),
+            "score": candidate.get("score") or 0,
+        },
+        "created_at": created_at or now,
+        "updated_at": now,
+    }
+
+
+def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
+                 receipt: dict, writes: dict, basis: dict, *,
+                 candidate_id: str = "", prior: dict | None = None) -> None:
+    """Route ONE candidate: count it, recommend it, or hold-then-store it.
+
+    HOLD FIRST, then materialize (transitions 1-5). The manifest lands in `held` state, the
+    events move behind it, the move is VERIFIED, the manifest flips to `materializing`, and
+    only then does the store see anything. A crash at any of those points leaves evidence that
+    is either wholly in `pending/` or wholly held under a manifest naming what it claims -
+    never a decision whose evidence nothing on disk connects it to.
+
+    A hold that cannot account for its events stops the candidate here. Storing a decision
+    whose evidence was never verified as moved is what leaves the two to be reconciled by
+    guesswork later; the events stay where they are and the next pass tries again.
+
+    A `writes` entry is the candidate's observed bookkeeping - `event_ids`, the `status` it
     settles at (`pending` = awaiting review, anything else = settled in this same run), the
     `entry_id` it belongs to, and the lane/revision the disposition rules read. `_commit_writes`
-    is what turns it into a held directory, so nothing here touches the spool.
+    persists it onto the manifest as transition 6.
+
+    `candidate_id`/`prior` are the resume path (`_resume_holds`): the identity of a hold is the
+    directory it already occupies, never the id a re-classification would mint, and `prior`
+    keeps the moment the candidate was first claimed.
     """
     kind = candidate.get("kind")
-    candidate_id = candidate["candidate_id"]
+    candidate_id = candidate_id or candidate["candidate_id"]
     event_ids = [str(s.get("event_id") or "") for s in candidate.get("signals") or []]
 
     if kind == "insufficient":
@@ -300,10 +382,24 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # dismissal here would consume the events that would have completed it.
         receipt["insufficient"] += 1
         return
+    if dry_run:
+        # Counted and dropped BEFORE the first write of any kind - a dry run creates no
+        # manifest, moves no event and takes no lock. This is the only guard the preview
+        # needs on this path now that everything below it writes.
+        receipt["lifecycle_proposed" if kind in _LIFECYCLE_KINDS
+                else "duplicates" if kind == "duplicate" else "proposed"] += 1
+        return
+    if not _hold(repo_path, candidate_id, event_ids,
+                 meta=_manifest(candidate_id, candidate, event_ids, basis,
+                                created_at=str((prior or {}).get("created_at") or ""))):
+        receipt["incomplete"] = True
+        return
+    # Transition 4. Its return is deliberately not checked: a manifest still reading `held`
+    # replays through exactly the same path as one reading `materializing`, so a flip that did
+    # not land costs nothing, while transition 6 below writes to the same file and DOES report.
+    spool.update_candidate_state(repo_path, candidate_id, "materializing")
+
     if kind in _LIFECYCLE_KINDS:
-        if dry_run:
-            receipt["lifecycle_proposed"] += 1
-            return
         target = str(candidate.get("target_decision_id") or "")
         result = lifecycle.propose_lifecycle(
             repo_path, target, "retire",
@@ -315,8 +411,8 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
             # than re-aggregated into the same refusal on every future pass. Deliberately
             # uncounted: no receipt line claims a proposal that does not exist, and inventing
             # a "refused" counter for a case the developer cannot act on would be noise.
-            writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed",
-                                    "entry_id": target}
+            writes[candidate_id] = {"event_ids": event_ids, "kind": kind,
+                                    "status": "dismissed", "entry_id": target}
             return
         receipt["lifecycle_proposed"] += 1
         # `lane` is what `_dispositions` reads (off the held dir's `candidate.json`) to tell an
@@ -324,8 +420,8 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # dismissed one, without ever inferring either. Deliberately NO `revision_id`: a
         # revision advance is not an approval signal for this lane (ruling R25), so storing one
         # would only invite a reader to use it.
-        writes[candidate_id] = {"event_ids": event_ids, "status": "pending", "entry_id": target,
-                                "lane": "lifecycle"}
+        writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "pending",
+                                "entry_id": target, "lane": "lifecycle"}
         return
     if kind == "duplicate":
         # The store already holds this decision, so there is nothing to review - provided that
@@ -337,18 +433,9 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # a re-read of the store can tell whether the decision this duplicates is settled or is
         # ITSELF still awaiting review - `_settle_write_statuses` decides, and corrects the
         # receipt's duplicate count when it turns out not to be a settled duplicate after all.
-        # (No dry_run guard needed HERE: this branch only fills `writes`, and
-        # `_reconcile` discards that wholesale on a dry run - a second check would be a second
-        # place to get it wrong. The lifecycle branch above is the one that must guard itself,
-        # because `propose_lifecycle` writes the store DIRECTLY rather than through `writes`,
-        # so the wholesale discard cannot reach it. Any future lane that writes outside
-        # `writes` inherits that obligation.)
         receipt["duplicates"] += 1
-        writes[candidate_id] = {"event_ids": event_ids, "status": "pending", "duplicate": True,
+        writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "pending",
                                 "entry_id": str(candidate.get("target_decision_id") or "")}
-        return
-    if dry_run:
-        receipt["proposed"] += 1
         return
 
     # The ordinary capture path, deliberately: novelty filtering, revision construction,
@@ -374,13 +461,14 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # The recorded STATUS, though, is settled from what the store actually did rather
         # than from this optimism - see `_settle_write_statuses`.
         receipt["proposed"] += 1
-        writes[candidate_id] = {"event_ids": event_ids, "status": "pending",
+        writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "pending",
                                 "entry_id": str(entry_id)}
         return
     # The store's own filter rejected it - an existing decision already says this. That is a
     # duplicate, not an error, and it settles the events exactly like a matched one.
     receipt["duplicates"] += 1
-    writes[candidate_id] = {"event_ids": event_ids, "status": "dismissed", "entry_id": ""}
+    writes[candidate_id] = {"event_ids": event_ids, "kind": kind, "status": "dismissed",
+                            "entry_id": ""}
 
 
 def _settle_write_statuses(repo_path: str, writes: dict, receipt: dict) -> None:
@@ -420,7 +508,7 @@ def _settle_write_statuses(repo_path: str, writes: dict, receipt: dict) -> None:
         record = writes[candidate_id]
         entry = by_id.get(str(record.get("entry_id") or ""))
         awaiting_review = entry is not None and store.entry_status(entry) == "pending_approval"
-        if record.get("duplicate"):
+        if record.get("kind") == "duplicate":
             # Deliberately NOT the `proposed_revision` test below: a duplicate never proposed
             # that revision, so settling on somebody else's proposal would record an outcome
             # its own evidence never earned - and a target that is approved but carries a
@@ -440,11 +528,12 @@ def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run:
                               receipt: dict) -> list:
     """Drop every event an existing candidate already claims, finishing a half-done hold.
 
-    Materializing before moving (B3 step 8) means a crash between the two leaves a candidate
-    whose decision exists and whose events are split across `pending/` and `held/`. Aggregating
-    the remainder would mint a DIFFERENT candidate id - the seed is the sorted event ids - and
-    propose the same decision a second time, so the leftovers are recognized by the held
-    candidate's own recorded `event_ids` and moved into the directory that already claims them.
+    A crash partway through transition 2 leaves a candidate whose manifest names every event it
+    claims and whose events are split across `pending/` and `held/`. Aggregating the remainder
+    would mint a DIFFERENT candidate id - the seed is the sorted event ids - and propose the
+    same decision a second time, so the leftovers are recognized by the held candidate's own
+    recorded `event_ids` and moved into the directory that already claims them. This runs
+    BEFORE any resume, so a resumed candidate reads a hold that is whole again.
 
     A dry run excludes them from aggregation exactly the same way (that is what a real pass
     would do) but moves nothing, because a dry run writes nothing anywhere.
@@ -473,6 +562,74 @@ def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run:
     return kept
 
 
+def _resume_holds(repo_path: str, held: dict, projection: list, sessions: dict,
+                  receipt: dict, writes: dict, basis: dict) -> dict:
+    """Carry every interrupted candidate to its next durable phase. Returns the holds that
+    still stand, so the aggregation loop never counts a directory this pass just discarded.
+
+    One rule per phase, and each one is the recovery for a crash at a numbered transition:
+
+    * `reviewed` (crash at 9) - the disposition and its summary are both durable, so only the
+      raw cleanup is left. It is finished WITHOUT re-recording anything.
+    * `held` / `materializing` (crash at 2-5) - the events are held and no review exists yet.
+      The HELD events are re-classified against the CURRENT store and materialized through the
+      ordinary path, which is what makes the replay idempotent rather than merely retried: a
+      decision the interrupted pass already created comes back as a `duplicate` of itself and
+      is held against its own review, and one that never landed comes back as `new`. Asking the
+      aggregator is also the only inspection that stays honest as the store moves underneath a
+      stuck candidate.
+    * a hold holding no events at all is DISCARDED - it can never be materialized and it would
+      otherwise occupy its candidate id for good (`spool.discard_empty_hold`).
+    * anything else - a manifest that is missing, unreadable or carries an unknown state, and
+      any candidate already awaiting review - is left exactly as it is, for `_dispositions` and
+      the diagnostics counters to speak about.
+
+    The identity of a resumed candidate is the DIRECTORY it already occupies, never the id its
+    re-classification would mint: kind and target are part of that id, and both can legitimately
+    change between the crash and the replay.
+    """
+    standing = {}
+    for candidate_id, meta in sorted(held.items()):
+        state = meta.get("state")
+        if state == "reviewed":
+            spool.finalize_candidate_evidence(repo_path, candidate_id,
+                                              str(meta.get("status") or "dismissed"))
+            continue
+        if state not in ("held", "materializing"):
+            if not meta and spool.discard_empty_hold(repo_path, candidate_id):
+                # A directory whose manifest write never landed (transition 1) and which holds
+                # no events either: nothing can ever attribute it, and leaving it would occupy
+                # its candidate id, so the same evidence would read as already pending forever.
+                # A missing manifest with events in it is a different case entirely and is
+                # refused by `discard_empty_hold` itself.
+                continue
+            standing[candidate_id] = meta
+            continue
+        events = spool.held_events(repo_path, candidate_id)
+        if not events and spool.discard_empty_hold(repo_path, candidate_id):
+            continue
+        resumed = (candidates.aggregate_candidates(events, projection)["candidates"]
+                   if events else [])
+        if len(resumed) == 1:
+            # The events a hold claims were ONE candidate when it was written. Anything else
+            # is a corpus this pass cannot attribute to this directory, so it is reported
+            # rather than split, merged or guessed at.
+            #
+            # ponytail: a resume that comes back `insufficient` - the seed event was lost and
+            # what survives no longer clears the review bar - is counted and left held, so it
+            # is re-read on every pass and shows up as `held_unattributed` until a human acts.
+            # Accepted over the alternatives: settling it would delete evidence nobody reviewed,
+            # and retention deliberately never touches a held directory.
+            sessions.update({str(e.get("event_id") or ""): str(e.get("session_id") or "")
+                             for e in events})
+            _materialize(repo_path, resumed[0], sessions, False, receipt, writes, basis,
+                         candidate_id=candidate_id, prior=meta)
+        else:
+            receipt["incomplete"] = True
+        standing[candidate_id] = meta
+    return standing
+
+
 def _recorded_summaries(entries: list) -> set:
     """`(entry_id, candidate_id)` for every disposition already filed on a decision's history.
 
@@ -492,8 +649,8 @@ def _recorded_summaries(entries: list) -> set:
 
 def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str,
               event_ids: list, recorded: set, receipt: dict) -> None:
-    """Settle one candidate: preserve the summary on its decision, and only THEN delete the raw
-    held events.
+    """Settle one candidate: preserve the summary on its decision, record the outcome on its
+    manifest, and only THEN delete the raw held events (transitions 7, 8 and 9).
 
     The summary is the whole point of finalizing rather than deleting - once the events are
     gone, the decision's own `evidence_summary` history is the only place the disposition lives.
@@ -519,6 +676,13 @@ def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str
     retry a write that can never succeed, on every pass, forever - which is why the caller
     blanks an `entry_id` that no longer resolves rather than letting a `False` return stand in
     for it.
+
+    The manifest reaches `reviewed` BETWEEN the two, which is what makes the cleanup replayable
+    on its own: a crash at the delete leaves a hold whose disposition and summary are both
+    durable, so the next pass finishes the removal without asking the disposition rules
+    anything and without filing a second receipt. A manifest that refuses the update stops the
+    delete - `reviewed` is the record that the receipt IS durable, and deleting the evidence
+    without it would leave the next pass judging the candidate over again.
     """
     if entry_id and (entry_id, candidate_id) not in recorded:
         summary = {"candidate_id": candidate_id, "disposition": disposition,
@@ -531,23 +695,29 @@ def _finalize(repo_path: str, candidate_id: str, disposition: str, entry_id: str
         if not landed:
             receipt["incomplete"] = True
             return
+    # `status` only: the caller blanks an `entry_id` it could not file against, and writing
+    # that blank back would erase the manifest's own record of which decision this was about.
+    if not spool.update_candidate_state(repo_path, candidate_id, "reviewed",
+                                        status=disposition):
+        receipt["incomplete"] = True
+        return
     spool.finalize_candidate_evidence(repo_path, candidate_id, disposition)
 
 
 def _commit_writes(repo_path: str, writes: dict, recorded: set, filable: set, receipt: dict) -> None:
-    """Hold every materialized candidate's events, and finalize the ones already settled.
+    """Transition 6: persist each materialized candidate's OBSERVED state, then finalize the
+    ones with no review left to wait for.
 
-    The record is written to the hold's `candidate.json` WHOLE, `status` included: a candidate
-    that is settled on arrival (a duplicate, or an update the store applied in place) is
-    finalized on the next line, and if that never happens the recorded status is the only thing
-    that tells a resumed pass what this hold already was. See `_dispositions`' first rule.
+    The state comes from what a re-read of the store saw (`_settle_write_statuses`), never from
+    the write's own return value: `update_decision_with_meta` answers identically for a
+    brand-new pending entry, an attached proposal and a correction it applied in place, and only
+    the first two leave anything for a developer to look at. `pending_review` means somebody has
+    to look; `settled` means nobody does, and the disposition rides along as `status` so an
+    interrupted finalize is settled from its own hold rather than re-inferred.
 
-    An INCOMPLETE hold is never finalized. Finalizing writes an `evidence_summary` onto the
-    decision saying this event set was settled as `dismissed`/`approved`, and a hold that
-    reported `missing` or `failed` never verified that the events are where the summary claims
-    they are - so a clean disposition over them is a receipt for something that did not happen.
-    The recorded status stays on the hold, and `_dispositions`' first rule settles it on a
-    later pass, when the events can actually be accounted for.
+    A manifest that could not be updated is NEVER finalized: the phase on disk would still read
+    `materializing` while the evidence behind it was deleted. It is reported instead, and the
+    next pass settles the candidate with its evidence intact.
 
     `filable` is the same `_run_pass`-computed set the `flips` loop guards its own `entry_id`
     with (live decisions and tombstoned ones, tasks excluded on both sides): a decision materialized
@@ -555,14 +725,15 @@ def _commit_writes(repo_path: str, writes: dict, recorded: set, filable: set, re
     guard applies here too rather than only on the flips side.
     """
     for candidate_id, record in sorted(writes.items()):
-        complete = _hold(repo_path, candidate_id, record["event_ids"], meta=record)
-        if not complete:
-            # The decision is stored but some of its evidence still reads as pending, or was
-            # not found at all. Say so: the next pass finishes the move
-            # (`_finish_interrupted_holds`) rather than proposing it again, but this pass did
-            # not do everything it set out to.
+        settled = record["status"] != "pending"
+        fields = {key: record[key] for key in ("entry_id", "lane", "revision_id", "status")
+                  if key in record}
+        if not spool.update_candidate_state(repo_path, candidate_id,
+                                            "settled" if settled else "pending_review",
+                                            **fields):
             receipt["incomplete"] = True
-        if record["status"] != "pending" and complete:
+            continue
+        if settled:
             entry_id = str(record.get("entry_id") or "")
             _finalize(repo_path, candidate_id, record["status"],
                       entry_id if entry_id in filable else "",
@@ -670,7 +841,6 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
     # more a decision to classify against than a live one is.
     tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
                   if isinstance(e, dict) and e.get("type") == "decision"]
-    flips = {} if dry_run else _dispositions(held, entries, _retired_ids(tombstones))
 
     decisions = [e for e in entries if e.get("type") == "decision"]
     projection = [_projected(e, False) for e in decisions]
@@ -683,8 +853,18 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
     # failure to retry - see `_finalize`.
     recorded = _recorded_summaries(decisions + tombstones)
     filable = {str(e.get("id") or "") for e in decisions + tombstones}
+    # The revision a proposal is formed against, recorded on the manifest at hold time so a
+    # resumed pass can tell what the candidate was judged against even after HEAD moves.
+    basis = {str(e.get("id") or ""): str(e.get("current_revision_id") or "") for e in decisions}
 
     writes: dict = {}
+    flips: dict = {}
+    if not dry_run:
+        # Interrupted candidates first, and their dispositions off what SURVIVES that: a resume
+        # can discard a hold or carry it to a new phase, and both the flips below and the loop's
+        # own "already pending" test read `held`.
+        held = _resume_holds(repo_path, held, projection, sessions, receipt, writes, basis)
+        flips = _dispositions(held, entries, _retired_ids(tombstones))
     for candidate in candidates.aggregate_candidates(events, projection)["candidates"]:
         if candidate["candidate_id"] in held:
             # Already awaiting review under its deterministic id. Belt to the held-events
@@ -692,7 +872,7 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
             # never recorded the event ids `_finish_interrupted_holds` matches on.
             receipt["already_pending"] += 1
             continue
-        _materialize(repo_path, candidate, sessions, dry_run, receipt, writes)
+        _materialize(repo_path, candidate, sessions, dry_run, receipt, writes, basis)
 
     if dry_run:
         return receipt
