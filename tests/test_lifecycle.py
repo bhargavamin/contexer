@@ -890,11 +890,54 @@ class TestReconsiderationStaleness:
         assert lifecycle.reconsideration_stale(entry)
         assert not lifecycle.reconsider_decision(tmp_repo, eid, "restore")[0]
 
-    def test_a_concurrent_restore_never_leaves_two_live_copies(self, tmp_repo):
-        """The crash window `_restore_unlocked` mirrors, reached from this lane: the live
-        store is written first, so an interrupted restore leaves the entry in BOTH files and
-        the reconsideration answer must drop the stale tombstone rather than append a second
-        copy of the same id."""
+    def test_a_restore_that_crashed_before_clearing_the_sidecar_leaves_no_zombie(
+            self, tmp_repo, monkeypatch):
+        """The crash window itself, by fault injection rather than reconstruction: a
+        restoration writes the live store BEFORE it clears the tombstone sidecar (so a crash
+        duplicates rather than drops), and `_save_deleted` is the very last write.
+
+        Its answer is already durable at that point, so the review queue must go quiet - and
+        the residue must not survive the next time anything touches this lane. It used to: the
+        live-first lookup never saw the tombstone, so the stale copy kept its own question and
+        both `restore` and `dismiss` answered "has no reconsideration to answer" forever."""
+        eid = _retired(tmp_repo)
+        _reconsider(tmp_repo, eid)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("crash between the live save and the sidecar")
+
+        with monkeypatch.context() as crashed:
+            crashed.setattr(store, "_save_deleted", _boom)
+            with pytest.raises(RuntimeError):
+                lifecycle.reconsider_decision(tmp_repo, eid, "restore")
+
+        # Doubled on disk, which is the safe half of the window - and the answer is durable.
+        assert [e["id"] for e in store.load(tmp_repo)["entries"]] == [eid]
+        assert [e["id"] for e in store.load_deleted(tmp_repo)["entries"]] == [eid]
+        assert [r["disposition"] for r in _entry(tmp_repo, eid)["reconsideration_history"]] \
+            == ["approved"]
+        # Answered, so nothing is offered again - not the live copy, not the stale one.
+        assert store.get_pending_decisions(tmp_repo) == []
+        assert "reconsider_decision(" not in store.format_pending_review(tmp_repo)
+
+        # And the next touch of the lane heals the residue instead of answering off it.
+        assert lifecycle.reconsider_decision(tmp_repo, eid, "restore") \
+            == (False, f"Decision {eid[:8]} has no reconsideration to answer.")
+        entry = _entry(tmp_repo, eid)
+        assert store.load_deleted(tmp_repo)["entries"] == []
+        assert "deleted_at" not in entry and "deleted_by" not in entry
+
+    def test_a_doubled_state_still_carrying_the_question_is_answerable_exactly_once(
+            self, tmp_repo):
+        """The other shape of the same doubling - the live copy still carries the question,
+        which is what a `restore_decision` from another route racing a sitting one leaves.
+
+        Answered with RESTORE, the path the live-first lookup made unreachable: it used to
+        render three times, leave the tombstone and its proposal in place, and turn every
+        later answer into a permanent "has no reconsideration to answer". Restore is now
+        REFUSED, honestly and once, because the decision genuinely left the state the question
+        was about - and dismissal, which the refusal points at, settles it and clears the
+        residue."""
         eid = _retired(tmp_repo)
         _reconsider(tmp_repo, eid)
         graveyard = store.load_deleted(tmp_repo)
@@ -902,10 +945,18 @@ class TestReconsiderationStaleness:
         data["entries"].append(json.loads(json.dumps(graveyard["entries"][0])))
         store.save(tmp_repo, data)
 
-        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")
-        assert ok, message
+        assert [e["id"] for e in store.get_pending_decisions(tmp_repo)] == [eid]
+        assert store.format_pending_review(tmp_repo).count("reconsider_decision(") == 1
+
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "restore")
+        assert not ok and "Cannot restore" in message
         assert [e["id"] for e in store.load(tmp_repo)["entries"]] == [eid]
-        assert lifecycle.restore_decision(tmp_repo, eid)[0]
+        assert store.load_deleted(tmp_repo)["entries"] == []     # residue gone, not doubled
+        assert "deleted_at" not in _entry(tmp_repo, eid)
+
+        ok, message = lifecycle.reconsider_decision(tmp_repo, eid, "dismiss")
+        assert ok and "live again already" in message
+        assert store.get_pending_decisions(tmp_repo) == []
         assert [e["id"] for e in store.load(tmp_repo)["entries"]] == [eid]
 
 

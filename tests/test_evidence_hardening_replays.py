@@ -940,6 +940,83 @@ def test_dismissing_settles_the_candidate_against_a_decision_that_stays_inactive
     assert spool.held_candidates(tmp_repo) == {}
 
 
+def test_a_dismissal_is_never_filed_as_an_approval(tmp_repo):
+    """A `restored` lifecycle record is written by three different acts - this lane's own
+    restore, the `restore_decision` tool, and `contexer restore` - and says nothing about
+    which. Settling on that record alone recorded `approved` in the durable ledger for a
+    question the developer had explicitly DISMISSED, which is the fabricated-approval class
+    the disposition rules exist to prevent. The RECEIPT decides now, and it names the
+    candidate.
+
+    The developer's own route, not a crash and not hand-built state: they answer the question
+    with the other tool, which makes the reconsideration stale, and then dismiss it because
+    the review surface says dismissal still works.
+    """
+    entry_id = _restated(tmp_repo, retire=True)
+    assert lifecycle.restore_decision(tmp_repo, entry_id)[0]
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "dismiss")[0]
+
+    reconcile.reconcile_session(tmp_repo)
+
+    assert _summaries(tmp_repo, entry_id) == ["dismissed"]
+    assert spool.held_candidates(tmp_repo) == {}
+
+
+def test_a_second_restatement_displaced_by_the_first_is_settled_not_stranded(tmp_repo):
+    """An entry has ONE reconsideration slot, so a second directive restating the same
+    decision while the first question sits is HELD rather than proposed. When the developer
+    dismisses the sitting one, the receipt names only that candidate - and the held one used
+    to be stuck forever: no slot to wait on, no receipt of its own, and invisible to
+    `held_unattributed` because it does name an entry.
+
+    It asked the same question about the same decision at the same revision and was answered
+    by the same act, so the same-basis receipt settles it too.
+    """
+    entry_id = _restated(tmp_repo, retire=False)
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-b", source="replay",
+                             summary=RULE + " This still holds.")
+    assert reconcile.reconcile_session(tmp_repo)["already_pending"] == 1
+    assert len(spool.held_candidates(tmp_repo)) == 2
+
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "dismiss")[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    assert _summaries(tmp_repo, entry_id) == ["dismissed", "dismissed"]
+    assert spool.held_candidates(tmp_repo) == {}
+    assert store.entry_status(_inactive_entry(tmp_repo, entry_id)) == "ignored"
+
+
+def test_a_later_question_is_never_settled_by_an_earlier_answer(tmp_repo):
+    """The guard on the fix above. A restatement arriving AFTER a dismissal opens a NEW
+    question at the same basis, which the brief explicitly grants - and the earlier receipt
+    sits at that same basis, so a same-basis rule that ignored which candidate holds the slot
+    would settle the new question the moment it was asked."""
+    entry_id = _restated(tmp_repo, retire=False)
+    assert lifecycle.reconsider_decision(tmp_repo, entry_id, "dismiss")[0]
+    reconcile.reconcile_session(tmp_repo)
+
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-b", source="replay",
+                             summary=RULE + " I mean it.")
+    assert reconcile.reconcile_session(tmp_repo)["reconsidered"] == 1
+    reconcile.reconcile_session(tmp_repo)
+
+    assert _inactive_entry(tmp_repo, entry_id)["proposed_reconsideration"]
+    assert len(spool.held_candidates(tmp_repo)) == 1, "the new question was settled unasked"
+    assert _summaries(tmp_repo, entry_id) == ["dismissed"]
+
+
+@pytest.mark.parametrize("retire", [False, True])
+def test_a_pending_reconsideration_is_counted_at_session_start(tmp_repo, retire):
+    """It was the only proposal lane invisible there, and the mid-session nudge is fire-once -
+    so a question the developer did not act on that one time was never raised again. COUNT
+    only, never content, exactly like the other lanes."""
+    _restated(tmp_repo, retire=retire)
+    context = store.session_start_payload(tmp_repo)["context"]
+    assert "1 decision pending your review" in context
+    assert RULE not in context          # the count, never the content
+    assert store.pending_review_nudge(tmp_repo)
+
+
 def test_a_skipped_reconsideration_keeps_its_evidence_held(tmp_repo):
     """`skip` is not a disposition. Nothing settles, so nothing is deleted - the same rule
     that keeps a held candidate exempt from retention until somebody actually answers."""

@@ -312,6 +312,13 @@ def _restore_unlocked(repo_path: str, entry_id: str, reason: str = "",
     timeout: a second acquisition from the same process would wait on itself forever, so a
     caller that already holds the lock cannot reach `restore_decision` at all. Returns the
     restored entry so the caller can read what it just wrote.
+
+    `amend` never fires on the already-live branch, and deliberately so: the only caller that
+    passes one is the reconsideration lane, whose `_locate_inactive` has already healed the
+    doubled state before it decides which branch to take, so reaching here with an id that is
+    also live means the tombstone is pure residue and there is nothing left to settle. Running
+    the hook anyway would file the lane's receipt with no `restored` record beside it, which is
+    a receipt naming an approval that never happened.
     """
     graveyard = store.load_deleted(repo_path)
     entry = store.entry_by_id(graveyard["entries"], entry_id)
@@ -324,11 +331,6 @@ def _restore_unlocked(repo_path: str, entry_id: str, reason: str = "",
         graveyard["repo_path"] = repo_path
         graveyard["entries"] = [e for e in graveyard["entries"] if e is not entry]
         store._save_deleted(repo_path, graveyard)
-        if amend is not None:
-            # The restore itself already landed (its `restored` record went in before the live
-            # save); only the caller's own bookkeeping is outstanding.
-            amend(live)
-            store.save(repo_path, data)
         return True, (f"{entry['id'][:8]} was already in the live store - dropped the "
                       "leftover tombstone instead of storing a second copy."), live
     if len(data["entries"]) >= store.MAX_ENTRIES:
@@ -462,16 +464,45 @@ def _locate_inactive(repo_path: str, entry_id: str) -> tuple:
     saves whichever one actually holds the entry; the other stays None.
 
     Live first because an IGNORED decision never left the store - only a RETIRED one did.
+
+    HEALS the doubled state on the way past, which is the one thing live-first cannot simply
+    ignore. A restoration writes the live store before it clears the sidecar (`tombstone_entry`
+    mirrors it the other way round, so a crash duplicates rather than drops), so an interrupted
+    one leaves the same id in BOTH files. Left alone, this lane then answers every question
+    about that decision from the live copy while the tombstone keeps its own
+    `proposed_reconsideration` - a review item no action can ever clear, beside a live entry
+    still stamped `deleted_at`. The tombstone is unambiguously the stale copy here, so it is
+    dropped and the stamp popped, which is the same rule `_restore_unlocked` states for the
+    same window and the reason that branch exists at all.
     """
     data = store.load(repo_path)
     entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                               entry_id)
     if entry is not None:
+        stale = store.entry_by_id(store.load_deleted(repo_path)["entries"], entry["id"])
+        if stale is not None:
+            _drop_stale_tombstone(repo_path, entry, data)
         return entry, data, None
     graveyard = store.load_deleted(repo_path)
     entry = store.entry_by_id([e for e in graveyard["entries"]
                                if e.get("type") == "decision"], entry_id)
     return entry, None, graveyard
+
+
+def _drop_stale_tombstone(repo_path: str, live: dict, data: dict) -> None:
+    """Finish an interrupted restoration: drop the leftover tombstone for a decision that is
+    already live, and clear the `deleted_at`/`deleted_by` stamps the crash left behind.
+
+    Sidecar first, so a crash HERE leaves the entry in both places again rather than losing the
+    stamp with no tombstone to explain it - the same ordering rule both write paths follow."""
+    graveyard = store.load_deleted(repo_path)
+    graveyard["repo_path"] = repo_path
+    graveyard["entries"] = [e for e in graveyard["entries"]
+                            if str(e.get("id") or "") != str(live.get("id") or "")]
+    store._save_deleted(repo_path, graveyard)
+    live.pop("deleted_at", None)
+    live.pop("deleted_by", None)
+    store.save(repo_path, data)
 
 
 def propose_reconsideration(repo_path: str, entry_id: str, *, content: str, title: str,
@@ -521,13 +552,19 @@ def pending_reconsiderations(repo_path: str) -> list[dict]:
 
     A tombstoned entry is handed back as-is, carrying its `deleted_at`, which is what every
     render below reads to say "retired" rather than "ignored". Nothing here mutates.
+
+    A tombstone whose id is ALSO live is skipped: that is the interrupted-restoration residue
+    `_locate_inactive` heals, and the live copy is the current one. This read is on the review
+    surfaces, which must never offer the stale copy - answering it is what produced a review
+    item nothing could clear.
     """
-    ignored = [e for e in store.load(repo_path).get("entries", [])
-               if isinstance(e, dict) and e.get("type") == "decision"
-               and e.get(_RECONSIDER_SLOT)]
+    live = [e for e in store.load(repo_path).get("entries", [])
+            if isinstance(e, dict) and e.get("type") == "decision"]
+    live_ids = {str(e.get("id") or "") for e in live}
+    ignored = [e for e in live if e.get(_RECONSIDER_SLOT)]
     retired = [e for e in store.load_deleted(repo_path).get("entries", [])
                if isinstance(e, dict) and e.get("type") == "decision"
-               and e.get(_RECONSIDER_SLOT)]
+               and e.get(_RECONSIDER_SLOT) and str(e.get("id") or "") not in live_ids]
     return ignored + retired
 
 
@@ -600,6 +637,10 @@ def reconsider_decision(repo_path: str, entry_id: str, action: str,
         if action == "skip":
             return True, f"Left the reconsideration of {eid} pending."
         if action == "dismiss":
+            # Read BEFORE the pop: a stale question can sit on a decision that has since come
+            # back by another route, and "kept it inactive" would then be a plain untruth about
+            # a decision the developer can see in their context.
+            still_inactive = graveyard is not None or store.entry_status(entry) == "ignored"
             entry.pop(_RECONSIDER_SLOT, None)
             _reconsider_receipt(entry, prop, "dismissed", action, now)
             if graveyard is not None:
@@ -607,8 +648,10 @@ def reconsider_decision(repo_path: str, entry_id: str, action: str,
                 store._save_deleted(repo_path, graveyard)
             else:
                 store.save(repo_path, data)
-            return True, (f"Kept {eid} inactive. The question and its answer are recorded on "
-                          "the decision; a later directive from you can raise it again.")
+            head = (f"Kept {eid} inactive." if still_inactive
+                    else f"Dropped the reconsideration of {eid}, which is live again already.")
+            return True, (f"{head} The question and its answer are recorded on the decision; "
+                          "a later directive from you can raise it again.")
         if reconsideration_stale(entry):
             return False, (
                 f"Cannot restore {eid}: this reconsideration was raised against an earlier "
