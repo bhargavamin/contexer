@@ -1,7 +1,8 @@
 {
   "name": "09-inactive-decision-mentioned-by-a-conclusion",
-  "issue": null,
-  "summary": "A bare agent conclusion is too weak to reopen an inactive decision.",
+  "issue": 7,
+  "summary": "Agent-only evidence must not reopen an inactive decision.",
+  "expects_fix": true,
   "events": [
     {
       "schema_version": 1,
@@ -11,7 +12,7 @@
       "kind": "agent_conclusion",
       "occurred_at": "2026-08-01T10:00:00+00:00",
       "source": "replay",
-      "summary": "The generated client comes from the openapi schema.",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
       "files": [],
       "content_hash": null,
       "attributes": {}
@@ -29,17 +30,5 @@
       "current_revision_id": "rev-dec-ignored"
     }
   ],
-  "expected": [
-    {
-      "kind": "insufficient",
-      "title": "The generated client comes from the openapi schema.",
-      "subtype": "architecture",
-      "score": 15,
-      "target_decision_id": null,
-      "source_files": [],
-      "uncertainties": [
-        "score 15 is below the 25 review bar"
-      ]
-    }
-  ]
+  "expected": null
 }
