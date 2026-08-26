@@ -499,18 +499,38 @@ class TestRetireCandidate:
         assert _store_bytes(tmp_repo) == before
         assert _held(tmp_repo) == {}
 
-    def test_a_refused_proposal_settles_its_events_rather_than_retrying_forever(self, tmp_repo):
+    def test_a_refusal_over_a_live_proposal_is_held_against_that_review(self, tmp_repo):
+        """`propose_lifecycle` returns the same `ok: False` whether the target is gone, is not
+        live, or is holding a proposal that outranks this one - and only the last of those
+        means a retirement IS awaiting review.
+
+        Reading them as one fact settled the candidate `dismissed` and deleted its evidence
+        while a live retirement proposal sat on the decision. The events are held against that
+        review instead, and the disposition is whatever the review turns out to be. The events
+        still leave `pending/`, so nothing is re-proposed on every pass either.
+        """
         entry_id = _stored_decision(tmp_repo)
         assert lifecycle.propose_lifecycle(tmp_repo, entry_id, "retire", "I said so",
                                        source="human")["ok"]
         _emit(tmp_repo, "user_directive", RETIRES)
 
         receipt = reconcile.reconcile_session(tmp_repo)
-        assert receipt["lifecycle_proposed"] == 0
+        assert (receipt["lifecycle_proposed"], receipt["already_pending"]) == (0, 1)
         entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
         assert entry["proposed_lifecycle"]["reason"] == "I said so"   # human keeps the slot
         assert _pending(tmp_repo) == []
-        assert _held(tmp_repo) == {}                # settled in the same run, nothing awaited
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["lane"], meta["entry_id"]) == ("pending_review", "lifecycle",
+                                                                   entry_id)
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _dispositions_of(tmp_repo) == []      # no verdict on a review nobody has made
+
+        assert lifecycle.retire_decision(tmp_repo, entry_id, "the developer said so")[0]
+        reconcile.reconcile_session(tmp_repo)
+
+        (tombstone,) = store.load_deleted(tmp_repo)["entries"]
+        assert [s["disposition"] for s in tombstone["evidence_summary"]] == ["approved"]
+        assert _held(tmp_repo) == {}
 
 
 class TestProjectionIsDecisionsOnly:
@@ -1490,6 +1510,228 @@ class TestTransitionFaults:
 
         assert _held(tmp_repo) == {}
         assert _dispositions_of(tmp_repo) == [(target_id, "dismissed")]
+
+
+def _tombstone_dispositions(repo):
+    """Every disposition filed on a TOMBSTONED decision - where a lifecycle candidate's receipt
+    lands, since approving a retirement is what moves the decision out of the live store."""
+    return [(e["id"], s["disposition"]) for e in store.load_deleted(repo)["entries"]
+            for s in e.get("evidence_summary", [])]
+
+
+class TestLifecycleTransitionFaults:
+    """The lifecycle lane's own fault injection, transition by transition.
+
+    Transitions 1-4 are lane-agnostic (they run before `_materialize` dispatches on `kind`), so
+    the content-lane matrix above covers them. From 5 on the lane is a different write path
+    entirely - `lifecycle.propose_lifecycle` writes the store DIRECTLY rather than through
+    `writes`, and its disposition settles on the tombstone rather than on a revision - so each
+    of those needs its own crash and its own replay.
+
+    Transition 6 here is the regression test for the review's Critical 1: the resume re-proposes,
+    is refused because ITS OWN proposal from the interrupted pass holds the slot, and reading
+    that refusal as "nothing awaits review" filed a `dismissed` receipt against a live
+    retirement proposal and deleted the raw evidence.
+    """
+
+    def _retire_candidate(self, repo):
+        entry_id = _stored_decision(repo)
+        _emit(repo, "user_directive", RETIRES)
+        return entry_id
+
+    def _live(self, repo, entry_id):
+        return next(e for e in store.load(repo)["entries"] if e["id"] == entry_id)
+
+    def test_5_a_proposal_that_never_lands_replays_as_a_retirement(self, tmp_repo, monkeypatch):
+        entry_id = self._retire_candidate(tmp_repo)
+        real_propose = lifecycle.propose_lifecycle
+        monkeypatch.setattr(lifecycle, "propose_lifecycle", _boom)
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["kind"]) == ("materializing", "retire")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert "proposed_lifecycle" not in self._live(tmp_repo, entry_id)
+
+        monkeypatch.setattr(lifecycle, "propose_lifecycle", real_propose)
+        assert reconcile.reconcile_session(tmp_repo)["lifecycle_proposed"] == 1
+
+        assert self._live(tmp_repo, entry_id)["proposed_lifecycle"]["source"] == "ai"
+        _candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["lane"], meta["entry_id"]) == ("pending_review", "lifecycle",
+                                                                   entry_id)
+
+    def test_6_a_resume_never_dismisses_its_own_live_retirement_proposal(self, tmp_repo,
+                                                                        monkeypatch):
+        entry_id = self._retire_candidate(tmp_repo)
+        real_update = spool.update_candidate_state
+        monkeypatch.setattr(spool, "update_candidate_state",
+                            lambda repo, cid, state, **f: (
+                                False if state == "pending_review"
+                                else real_update(repo, cid, state, **f)))
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert (receipt["lifecycle_proposed"], receipt["incomplete"]) == (1, True)
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["kind"]) == ("materializing", "retire")
+        assert self._live(tmp_repo, entry_id)["proposed_lifecycle"]        # live and unreviewed
+
+        monkeypatch.setattr(spool, "update_candidate_state", real_update)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        # The proposal is still there, nothing was settled over it, and the evidence is intact.
+        assert receipt["already_pending"] == 1
+        assert self._live(tmp_repo, entry_id)["proposed_lifecycle"]
+        assert _dispositions_of(tmp_repo) == []
+        assert list(_held(tmp_repo)) == [candidate_id]
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _only_held(tmp_repo)[1]["lane"] == "lifecycle"
+
+        # And the disposition comes from the REVIEW, not from the refusal.
+        assert lifecycle.retire_decision(tmp_repo, entry_id, "the developer said so")[0]
+        reconcile.reconcile_session(tmp_repo)
+        assert _tombstone_dispositions(tmp_repo) == [(entry_id, "approved")]
+        assert _held(tmp_repo) == {}
+
+    def _retired_and_pending_finalize(self, repo):
+        """A lifecycle candidate whose retirement the developer has approved - the state every
+        transition from 7 on starts in."""
+        entry_id = self._retire_candidate(repo)
+        assert reconcile.reconcile_session(repo)["lifecycle_proposed"] == 1
+        assert lifecycle.retire_decision(repo, entry_id, "the developer said so")[0]
+        return entry_id, _only_held(repo)[0]
+
+    def test_7_a_summary_that_never_lands_keeps_the_lifecycle_evidence(self, tmp_repo,
+                                                                       monkeypatch):
+        entry_id, candidate_id = self._retired_and_pending_finalize(tmp_repo)
+        real_record = store.record_evidence_summary
+        monkeypatch.setattr(store, "record_evidence_summary", lambda *_a, **_k: False)
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        assert _only_held(tmp_repo)[1]["state"] == "pending_review"   # never advanced
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _tombstone_dispositions(tmp_repo) == []
+
+        monkeypatch.setattr(store, "record_evidence_summary", real_record)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _held(tmp_repo) == {}
+        assert _tombstone_dispositions(tmp_repo) == [(entry_id, "approved")]
+
+    def test_8_a_reviewed_state_that_never_lands_keeps_the_lifecycle_evidence(self, tmp_repo,
+                                                                              monkeypatch):
+        entry_id, candidate_id = self._retired_and_pending_finalize(tmp_repo)
+        real_update = spool.update_candidate_state
+        monkeypatch.setattr(spool, "update_candidate_state",
+                            lambda repo, cid, state, **f: (
+                                False if state == "reviewed"
+                                else real_update(repo, cid, state, **f)))
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        assert len(_held_events(tmp_repo, candidate_id)) == 1     # receipt durable, events kept
+        assert _tombstone_dispositions(tmp_repo) == [(entry_id, "approved")]
+
+        monkeypatch.setattr(spool, "update_candidate_state", real_update)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _held(tmp_repo) == {}
+        assert _tombstone_dispositions(tmp_repo) == [(entry_id, "approved")]   # filed once
+
+    def test_9_a_cleanup_that_fails_replays_without_a_second_receipt(self, tmp_repo,
+                                                                     monkeypatch):
+        entry_id, candidate_id = self._retired_and_pending_finalize(tmp_repo)
+        real_finalize = spool.finalize_candidate_evidence
+        monkeypatch.setattr(spool, "finalize_candidate_evidence", _boom)
+
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is True
+
+        assert _only_held(tmp_repo)[1]["state"] == "reviewed"
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _tombstone_dispositions(tmp_repo) == [(entry_id, "approved")]
+
+        monkeypatch.setattr(spool, "finalize_candidate_evidence", real_finalize)
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _held(tmp_repo) == {}
+        assert _tombstone_dispositions(tmp_repo) == [(entry_id, "approved")]
+
+
+class TestResumeDispositions:
+    """A resumed candidate must derive its disposition from real review state, and no path may
+    delete raw evidence it filed no receipt for. Both were found by review after the state
+    machine shipped; each test here is the reviewer's own reproduction."""
+
+    def test_a_resume_after_the_developer_approved_never_files_a_dismissal(self, tmp_repo,
+                                                                          monkeypatch):
+        """Review Important 1. A resumed hold duplicates the decision the interrupted pass
+        created, and `_settle_write_statuses` used to default that to `dismissed` the moment the
+        decision stopped awaiting review - so approving inferred content recorded that its
+        evidence was dismissed, and then deleted it."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with pytest.MonkeyPatch.context() as patch:      # crash at transition 6
+            patch.setattr(reconcile, "_commit_writes", _boom)
+            reconcile.reconcile_session(tmp_repo)
+        (created,) = store.get_pending_decisions(tmp_repo)
+        assert _only_held(tmp_repo)[1]["state"] == "materializing"
+
+        assert store.approve_decision(tmp_repo, created["id"], "approve")[0]
+        reconcile.reconcile_session(tmp_repo)
+
+        assert _dispositions_of(tmp_repo) == [(created["id"], "approved")]
+        assert _held(tmp_repo) == {}
+        assert len(store.load(tmp_repo)["entries"]) == 1
+
+    def test_evidence_arriving_beside_a_resume_is_never_lost(self, tmp_repo):
+        """Review Critical 2, reproduced exactly: one directive, a crash at transition 5, the
+        same directive again, then the pass that resumes.
+
+        The resume materializes mid-pass, so the aggregation loop that follows must classify the
+        NEW event against a store that already holds the decision - otherwise it reads `new`,
+        the store's own novelty filter rejects the capture, the record lands with no `entry_id`,
+        and the event is deleted with no receipt anywhere."""
+        _emit(tmp_repo, "user_directive", UNRELATED)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(store, "update_decision_with_meta", _boom)
+            reconcile.reconcile_session(tmp_repo)
+        _emit(tmp_repo, "user_directive", UNRELATED)     # said again before the next pass
+        assert len(_pending(tmp_repo)) == 1
+        acknowledged = 2
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        held_events = sum(len(_held_events(tmp_repo, cid)) for cid in _held(tmp_repo))
+        assert held_events + len(_pending(tmp_repo)) == acknowledged
+        assert (receipt["proposed"], receipt["already_pending"]) == (1, 1)
+        assert _dispositions_of(tmp_repo) == []          # nothing settled over a live review
+        assert len(store.load(tmp_repo)["entries"]) == 1
+
+    def test_a_settled_candidate_naming_no_decision_keeps_its_evidence(self, tmp_repo):
+        """The backstop under Critical 2, and the pre-existing sink it also closes.
+
+        The store's dedup is status-blind, so a restatement of an IGNORED decision is absorbed
+        as a recurrence and returns no entry id at all - while the aggregator, which is not
+        status-blind, classified it `new` and expected a review. Nothing can file a receipt for
+        that, so finalizing it deleted acknowledged evidence with no record anywhere. It stays
+        held and unattributed instead, which `contexer status` reports."""
+        entry_id = _stored_decision(tmp_repo)
+        assert store.approve_decision(tmp_repo, entry_id, "ignore")[0]
+        _emit(tmp_repo, "user_directive", STORED)
+
+        reconcile.reconcile_session(tmp_repo)
+
+        candidate_id, meta = _only_held(tmp_repo)
+        assert (meta["state"], meta["status"], meta["entry_id"]) == ("settled", "dismissed", "")
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
+        assert _dispositions_of(tmp_repo) == []
+        assert spool.evidence_diagnostics(tmp_repo)["held_unattributed"] == 1
+
+        # And it stays that way rather than being retried into a delete on the next pass.
+        reconcile.reconcile_session(tmp_repo)
+        assert len(_held_events(tmp_repo, candidate_id)) == 1
 
 
 class TestSessionScope:
