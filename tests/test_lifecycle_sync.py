@@ -919,3 +919,303 @@ def test_a_refused_lifecycle_reason_is_still_scrubbed_on_the_retry_path(
                      lifecycle=[{**_RETIRED, "reason": "rotated AKIAIOSFODNN7EXAMPLE"}])
     assert len(seen["pushes"]) == 2   # augmented refused, then legacy
     assert "AKIAIOSFODNN7EXAMPLE" not in repr(seen["pushes"])
+
+
+# ── the fallback partition (external review, Issue 3) ────────────────────────────
+# `lifecycle_pending` asserts "the base decision is already synced, only its history is
+# outstanding". Both fallbacks used to mark every lifecycle-carrying row blocked immediately after
+# the legacy retry CALL, before inspecting what came back, so a row the retry itself rejected was
+# filed as history-pending for a decision that does not exist remotely. Blocked records are now
+# created ONLY for ids the retry confirmed in `results`.
+
+def _partition_seam(monkeypatch, legacy, *, shape="whole_call", augmented=None):
+    """Advertising server that refuses any lifecycle-carrying batch in `shape`, then answers the
+    legacy retry with `legacy` (a {results, skipped} dict, or a callable taking the sent rows).
+
+    `augmented` overrides the FIRST response, for the per-row reasons the server mixes in.
+    """
+    seen = {"pushes": [], "legacy_pushes": []}
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        if name == "get_capabilities":
+            return _result(structured={"capabilities": {"decisionLifecycle": _LIFECYCLE_CAPS}})
+        seen["pushes"].append(arguments)
+        rows = arguments["decisions"]
+        carries = any("lifecycle" in d or "revision_id" in d for d in rows)
+        if carries:
+            if augmented is not None:
+                return _result(structured=augmented(rows) if callable(augmented) else augmented)
+            if shape == "per_row":
+                return _result(structured={
+                    "results": [],
+                    "skipped": [{"decisionId": d["decisionId"], "reason": "invalid_lifecycle"}
+                                for d in rows]})
+            return types.SimpleNamespace(
+                content=[_text("MCP error -32602: Input validation error")],
+                structuredContent=None, isError=True)
+        seen["legacy_pushes"].append(rows)
+        return _result(structured=legacy(rows) if callable(legacy) else legacy)
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    return seen
+
+
+def _rows(*ids):
+    return [{"type": "constraint", "content": f"rule {i}", "repo": "github.com/a/b",
+             "decision_id": i, "revision_id": "rev-3", "lifecycle": [_RETIRED]} for i in ids]
+
+
+def _push_rows(rs, ids, *, is_async=False):
+    if is_async:
+        import asyncio
+        return asyncio.run(rs.apush_decisions(_rows(*ids)))
+    return rs.push_decisions(_rows(*ids))
+
+
+_SAVED = {"results": [{"id": "srv-1", "decisionId": "dec-1"}], "skipped": []}
+_INVALID = {"results": [], "skipped": [{"decisionId": "dec-1", "reason": "invalid_content"}]}
+_QUOTA = {"results": [], "skipped": [{"decisionId": "dec-1", "reason": "quota_exceeded"}]}
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("shape", ["whole_call", "per_row"])
+def test_a_legacy_retry_that_saved_the_base_records_the_delta_as_blocked(
+        shape, is_async, wire_open, monkeypatch):
+    _partition_seam(monkeypatch, _SAVED, shape=shape)
+    rs = RemoteStore("https://t/mcp", "tok")
+    saved, skipped = _push_rows(rs, ["dec-1"], is_async=is_async)
+    assert saved == ["srv-1"] and skipped == []
+    assert [b["decision_id"] for b in rs.lifecycle_blocked] == ["dec-1"]
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("shape", ["whole_call", "per_row"])
+@pytest.mark.parametrize("legacy,reason", [(_INVALID, "invalid_content"),
+                                           (_QUOTA, "quota_exceeded")],
+                         ids=["permanent", "transient"])
+def test_a_legacy_retry_that_did_not_save_the_base_records_nothing_as_blocked(
+        shape, is_async, legacy, reason, wire_open, monkeypatch):
+    # The defect itself. The base decision does not exist remotely, so there is no synced decision
+    # for history to be outstanding ON - the row belongs to its own skip arm, not to lifecycle.
+    _partition_seam(monkeypatch, legacy, shape=shape)
+    rs = RemoteStore("https://t/mcp", "tok")
+    saved, skipped = _push_rows(rs, ["dec-1"], is_async=is_async)
+    assert saved == []
+    assert skipped == [{"decision_id": "dec-1", "reason": reason}]
+    assert rs.lifecycle_blocked == [], "a base that never saved has no history pending"
+
+
+def test_a_transient_base_failure_keeps_an_ordinary_row_carrying_the_full_lifecycle(
+        tmp_repo, wire_open, monkeypatch):
+    # The `quota_exceeded` arm end to end: the row stays an ORDINARY base-pending row (never
+    # `lifecycle_pending`), and it still carries the complete lifecycle payload, so the delta rides
+    # back out with the base once space frees.
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    _partition_seam(monkeypatch, {"results": [],
+                                  "skipped": [{"decisionId": did, "reason": "quota_exceeded"}]})
+    assert share.drain_outbox(profile=TEAM) == 0
+    rows = share._load_outbox()
+    assert [r.get("stage") for r in rows] == [None], "a base that never synced is not history-pending"
+    assert rows[0]["lifecycle"][0]["kind"] == "retired"
+    assert rows[0]["revision_id"]
+
+
+def test_a_permanent_base_rejection_during_a_drain_queues_no_pending_delta(
+        tmp_repo, wire_open, monkeypatch):
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    _partition_seam(monkeypatch, {"results": [],
+                                  "skipped": [{"decisionId": did, "reason": "invalid_content"}]})
+    share.drain_outbox(profile=TEAM)
+    assert share._load_outbox() == []          # dropped by the permanent-skip contract
+    assert not any(r.get("stage") == "lifecycle_pending" for r in share._load_outbox())
+
+
+def test_a_response_that_does_not_account_for_a_row_fails_the_batch(wire_open, monkeypatch):
+    # The unaccounted arm: the server confirmed nothing about this row, so the caller must keep it
+    # queued rather than treat silence as either outcome.
+    _partition_seam(monkeypatch, {"results": [], "skipped": []})
+    rs = RemoteStore("https://t/mcp", "tok")
+    with pytest.raises(RemoteStoreError, match="did not account for"):
+        rs.push_decisions(_rows("dec-1"))
+    assert rs.lifecycle_blocked == []
+
+
+def test_a_mixed_batch_partitions_every_row_into_its_own_arm(wire_open, monkeypatch):
+    # saved + quota + permanent-invalid + lifecycle-blocked, in ONE legacy response.
+    legacy = {"results": [{"id": "srv-1", "decisionId": "dec-saved"}],
+              "skipped": [{"decisionId": "dec-quota", "reason": "quota_exceeded"},
+                          {"decisionId": "dec-bad", "reason": "invalid_type"}]}
+    _partition_seam(monkeypatch, legacy)
+    rs = RemoteStore("https://t/mcp", "tok")
+    saved, skipped = rs.push_decisions(_rows("dec-saved", "dec-quota", "dec-bad"))
+    assert saved == ["srv-1"]
+    assert {s["decision_id"]: s["reason"] for s in skipped} == {
+        "dec-quota": "quota_exceeded", "dec-bad": "invalid_type"}
+    assert [b["decision_id"] for b in rs.lifecycle_blocked] == ["dec-saved"]
+
+
+def test_no_pending_row_exists_whose_base_was_not_in_the_confirmed_saved_results(
+        tmp_repo, wire_open, monkeypatch):
+    # The property, asserted over the whole outbox rather than one row: every `lifecycle_pending`
+    # row's decision id must appear in what the server confirmed it saved.
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    confirmed: list[str] = []
+
+    def legacy(rows):
+        # Save only the first row offered; anything else is refused permanently.
+        out = {"results": [], "skipped": []}
+        for i, d in enumerate(rows):
+            if i == 0:
+                confirmed.append(d["decisionId"])
+                out["results"].append({"id": "srv-1", "decisionId": d["decisionId"]})
+            else:
+                out["skipped"].append({"decisionId": d["decisionId"], "reason": "invalid_content"})
+        return out
+
+    _partition_seam(monkeypatch, legacy)
+    share.drain_outbox(profile=TEAM)
+    pending = [r for r in share._load_outbox() if r.get("stage") == "lifecycle_pending"]
+    assert {r["decision_id"] for r in pending} <= set(confirmed)
+    assert [r["decision_id"] for r in pending] == [did]
+
+
+def test_share_all_partitions_the_same_way_as_the_drain(tmp_repo, wire_open, monkeypatch):
+    # The direct path, not the outbox one: share_all pushes projections it just read.
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    _partition_seam(monkeypatch, {"results": [],
+                                  "skipped": [{"decisionId": did, "reason": "invalid_content"}]})
+    status = share.share_all(tmp_repo, profile=TEAM)
+    assert "Synced 0 decision(s)" in status
+    assert not any(r.get("stage") == "lifecycle_pending" for r in share._load_outbox())
+
+
+def test_share_all_records_the_delta_when_the_base_did_save(tmp_repo, wire_open, monkeypatch):
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    _partition_seam(monkeypatch, lambda rows: {
+        "results": [{"id": "srv-1", "decisionId": d["decisionId"]} for d in rows], "skipped": []})
+    share.share_all(tmp_repo, profile=TEAM)
+    rows = share._load_outbox()
+    assert [r.get("stage") for r in rows] == ["lifecycle_pending"]
+    assert rows[0]["decision_id"] == did
+
+
+def test_repeated_drains_after_a_partitioned_failure_do_not_storm(tmp_repo, wire_open, monkeypatch):
+    # Stability: the transient arm keeps ONE ordinary row and re-offers it once per drain (that is
+    # what a transient failure is for), and never mutates into a pending row along the way.
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    seen = _partition_seam(monkeypatch, {"results": [],
+                                         "skipped": [{"decisionId": did, "reason": "quota_exceeded"}]})
+    for _ in range(5):
+        share.drain_outbox(profile=TEAM)
+    rows = share._load_outbox()
+    assert len(rows) == 1 and rows[0].get("stage") is None
+    assert len(seen["legacy_pushes"]) == 5     # one legacy retry per drain, never more
+
+
+# ── lifecycle_conflict: the server refused the whole row on purpose ──────────────
+# The Teams side (Issue 4) added a reason that is the OPPOSITE of `invalid_lifecycle`. Nothing of
+# the row was saved, so re-pushing the base alone is the resurrection the server just refused.
+
+_CONFLICT_TEXT = ("lifecycle_conflict: event_id ev-1 is already recorded against a different "
+                  "decision; the decision was not saved.")
+
+
+def test_a_batch_lifecycle_conflict_is_never_re_pushed_as_legacy(wire_open, monkeypatch):
+    seen = _partition_seam(monkeypatch, _SAVED, augmented=lambda rows: {
+        "results": [], "skipped": [{"decisionId": d["decisionId"],
+                                    "reason": "lifecycle_conflict"} for d in rows]})
+    rs = RemoteStore("https://t/mcp", "tok")
+    saved, skipped = rs.push_decisions(_rows("dec-1"))
+    assert saved == []
+    assert skipped == [{"decision_id": "dec-1", "reason": "lifecycle_conflict"}]
+    assert seen["legacy_pushes"] == [], "a contested event id must never trigger a base-only retry"
+    assert rs.lifecycle_blocked == []
+
+
+def test_a_batch_lifecycle_conflict_never_queues_a_pending_delta(tmp_repo, wire_open, monkeypatch):
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    _partition_seam(monkeypatch, _SAVED, augmented=lambda rows: {
+        "results": [], "skipped": [{"decisionId": d["decisionId"],
+                                    "reason": "lifecycle_conflict"} for d in rows]})
+    share.drain_outbox(profile=TEAM)
+    assert did
+    assert not any(r.get("stage") == "lifecycle_pending" for r in share._load_outbox())
+
+
+def test_a_conflict_row_is_reported_in_its_own_words_not_as_bad_content(wire_open, monkeypatch):
+    # The decision's type and content were fine; telling the developer otherwise sends them to
+    # edit a decision that has nothing wrong with it.
+    retry, invalid, contested = share._split_skips(
+        [{"decision_id": "dec-1", "reason": "lifecycle_conflict"}])
+    assert retry == set() and invalid == 0 and contested == 1
+    status = share._batch_success_status(0, 0, 0, 0, contested)
+    assert "lifecycle event id is already recorded" in status
+    assert "unsupported type or content" not in status
+
+
+def test_a_singular_lifecycle_conflict_is_never_retried_as_legacy(wire_open, monkeypatch):
+    seen = _refusing_seam(monkeypatch, message=_CONFLICT_TEXT)
+    rs = RemoteStore("https://t/mcp", "tok")
+    with pytest.raises(RemoteStoreError, match="lifecycle_conflict"):
+        _push(rs, revision_id="rev-3", lifecycle=[_RETIRED])
+    assert len(seen["pushes"]) == 1, "the base must not be re-pushed without its lifecycle"
+    assert rs.lifecycle_blocked == []
+    assert rs._lifecycle_caps is not None, "a contested id says nothing about the capability"
+
+
+def test_a_singular_lifecycle_conflict_queues_no_pending_delta(tmp_repo, wire_open, monkeypatch):
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    _refusing_seam(monkeypatch, message=_CONFLICT_TEXT)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    share.share(tmp_repo, did, profile=TEAM)
+    assert not any(r.get("stage") == "lifecycle_pending" for r in share._load_outbox())
+
+
+# ── the outbox stage transition, stated explicitly ──────────────────────────────
+
+def test_an_ordinary_row_does_not_downgrade_a_pending_one(tmp_repo, wire_open, monkeypatch):
+    # The dedupe is keyed on decision_id and last write wins, which is right within a stage and
+    # wrong across stages: an ordinary row overwriting a pending one discards the capability
+    # fingerprint that stops the delta being re-offered against an unchanged server.
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    _drain_refusing_seam(monkeypatch, "per_row")
+    share.drain_outbox(profile=TEAM)
+    assert [r.get("stage") for r in share._load_outbox()] == ["lifecycle_pending"]
+
+    proj = store.get_shareable(tmp_repo, did)
+    share._enqueue(share._payload(proj, "github.com/a/b"))    # an ordinary row for the same id
+    rows = share._load_outbox()
+    assert [r.get("stage") for r in rows] == ["lifecycle_pending"]
+    assert rows[0]["capability"] == "v1:r1t1p1"
+    assert rows[0]["blocked_reason"]
+
+
+def test_a_pending_row_replaces_an_ordinary_one_and_a_fresher_pending_one(tmp_repo, wire_open,
+                                                                          monkeypatch):
+    # The two legitimate directions, both plain replaces.
+    did = _queued_offline_row(tmp_repo, monkeypatch)
+    _drain_refusing_seam(monkeypatch, "per_row")
+    share.drain_outbox(profile=TEAM)
+    assert [r.get("stage") for r in share._load_outbox()] == ["lifecycle_pending"]
+
+    share._enqueue({**share._payload(store.get_shareable(tmp_repo, did), "github.com/a/b"),
+                    "stage": "lifecycle_pending", "blocked_reason": "a newer refusal",
+                    "capability": "v2:r1t1p1"})
+    rows = share._load_outbox()
+    assert len(rows) == 1 and rows[0]["capability"] == "v2:r1t1p1"
+    assert rows[0]["blocked_reason"] == "a newer refusal"
