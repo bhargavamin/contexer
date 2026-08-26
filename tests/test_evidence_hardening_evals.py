@@ -18,7 +18,10 @@ Three jobs, in order:
 3. **The metrics report.** One `perf`-marked writer produces the machine-readable JSON and the
    short Markdown summary. It is perf-marked because it takes wall-clock medians, and this
    repository's convention is that timing lives in the perf tier - so `-m perf --no-cov` is
-   what produces the artifact, and the default tier stays free of wall-clock assertions.
+   what produces the artifact, and the default tier stays free of wall-clock assertions. The
+   FILE WRITE is additionally gated on `-m perf` being asked for by name, so a plain
+   `pytest tests/` cannot silently overwrite the recorded artifact with medians taken while the
+   rest of the suite was running.
 
 The hard thresholds themselves are asserted in the DEFAULT tier (below), never only inside the
 report: a threshold that is checked only when someone remembers to run `-m perf` is not a gate.
@@ -42,6 +45,7 @@ from contexer import (
     store,
 )
 from tests.test_evidence_hardening_replays import (
+    FIXTURES,
     GENERATED,
     _load,
     _median_ms,
@@ -221,7 +225,7 @@ def _relations(candidate: dict) -> dict:
             for row in candidate["signals"]}
 
 
-def test_a_directive_naming_one_file_ranks_its_sibling_strictly_lower(tmp_repo):
+def test_a_directive_naming_one_file_links_its_sibling_at_a_lower_certainty(tmp_repo):
     """Brief case: a directive names one file while an unrelated NEARBY file changes.
 
     Scenario 03 covers an unrelated edit in another part of the tree, BEFORE the directive.
@@ -488,7 +492,7 @@ def test_turning_the_guard_off_destroys_no_evidence_and_no_history(tmp_repo, mon
 
     guard_engine.disarm_guard(tmp_repo, entry_id)
     after = _snapshot()
-    assert after[:4] == before[:4] and after[4:] == before[4:]
+    assert after == before
     assert _armed(tmp_repo) == []
 
 
@@ -497,13 +501,25 @@ def test_turning_the_guard_off_destroys_no_evidence_and_no_history(tmp_repo, mon
 # Each metric is a function so the default-tier threshold tests and the perf-tier report read
 # the SAME number rather than two implementations of it.
 
-_LABELLED = ["01-directive-then-edit", "03-unrelated-edit-before-directive",
-             "04-directive-duplicates-live-decision",
-             "05-directive-repeated-in-a-second-session",
-             "06-agent-conclusion-with-rationale",
-             "07-ignored-decision-restated-by-a-directive",
-             "08-tombstoned-decision-restated-by-a-directive",
-             "18-wrong-session-and-wrong-repo-evidence"]
+def _labelled() -> list[str]:
+    """Every scenario carrying a golden, DERIVED rather than listed.
+
+    An earlier hand-written list held 8 of the 14, which held the wrong-file denominator down
+    to 3 anchored files for no stated reason - a self-imposed small sample beside a concern
+    complaining about the sample being small. Deriving it means a scenario that gains a golden
+    joins this corpus automatically and one that loses it cannot be silently left in.
+    """
+    return [name for name in _scenarios()
+            if json.loads((FIXTURES / f"{name}.json").read_text(
+                encoding="utf-8")).get("expected") is not None]
+
+
+# The floor the two must-be-zero gates below assert BEFORE they read their own rate. Both are
+# ratios over `attached_files`, so an empty denominator would report 0.0 and pass while every
+# anchor had vanished - the reviewer mutation-verified exactly that, two ways. The number is
+# the corpus's own measured total (8 across the 14 golden scenarios), stated as a floor rather
+# than an equality so a scenario that gains an anchor does not fail an unrelated gate.
+_MIN_ANCHORED_FILES = 8
 
 
 def _key(candidate: dict) -> tuple:
@@ -512,8 +528,9 @@ def _key(candidate: dict) -> tuple:
 
 def _candidate_quality() -> dict:
     """Recall, precision and wrong-file attachment over the labelled golden scenarios."""
+    labelled = _labelled()
     expected = produced = matched = files = wrong = uncertain_promoted = 0
-    for name in _LABELLED:
+    for name in labelled:
         doc = _load(name)
         got = candidates.aggregate_candidates(doc["events"], doc["decisions"])["candidates"]
         want = {_key(c): c for c in doc["expected"]}
@@ -530,7 +547,7 @@ def _candidate_quality() -> dict:
             uncertain_promoted += len(set(candidate.get("possible_source_files", []))
                                       & set(candidate["source_files"]))
     return {
-        "scenarios": len(_LABELLED),
+        "scenarios": len(labelled),
         "expected_candidates": expected, "produced_candidates": produced,
         "recall": matched / expected if expected else 1.0,
         "precision": matched / produced if produced else 1.0,
@@ -574,11 +591,21 @@ def _adversarial_file_attachment() -> dict:
     }
 
 
-def _agent_only_reconsideration_openings() -> int:
-    """Scenario 09: agent-only evidence mentioning an inactive decision. Must open nothing."""
+def _agent_only_reconsiderations() -> dict:
+    """Agent-only evidence mentioning an inactive decision. Must open nothing.
+
+    The denominator is ONE scenario and is reported as such rather than dressed up as a rate.
+    Scenario 09 is the only fixture of this shape, and widening it would mean inventing
+    fixtures, which is a corpus decision rather than an evaluation one. The invariant behind it
+    is not carried by this number alone: `candidates._classify` opens the lane only on an
+    explicit `user_directive` read across the group, and
+    `test_evidence_hardening_replays.py::test_agent_only_evidence_cannot_reopen_an_inactive_decision`
+    plus `test_a_human_directive_is_what_reopens_an_inactive_decision` pin both directions.
+    """
     doc = _load("09-inactive-decision-mentioned-by-a-conclusion")
     got = candidates.aggregate_candidates(doc["events"], doc["decisions"])["candidates"]
-    return len([c for c in got if c["kind"] == "reconsider"])
+    return {"scenarios": 1, "agent_only_events": len(doc["events"]),
+            "reconsiderations_opened": len([c for c in got if c["kind"] == "reconsider"])}
 
 
 def _review_items_for_a_realistic_session() -> int:
@@ -591,35 +618,49 @@ def _spool(repo: str, events) -> None:
         assert spool.append_evidence(repo, event)["status"] == "stored"
 
 
-def _replay_loss(repo: str) -> dict:
-    """Acknowledged-evidence loss and duplicate-proposal rate, measured on a real replay.
+def _replay_loss(root: str) -> dict:
+    """Acknowledged-evidence loss and duplicate-proposal rate, over the WHOLE golden corpus.
 
-    The events are acknowledged (`stored`), reconciled, then reconciled AGAIN. Nothing may be
-    lost across the two passes and the second pass may propose nothing: runbook invariants 3
-    and 7, expressed as the two rates the brief asks for.
+    Every scenario's events are acknowledged (`stored`), reconciled, then reconciled AGAIN.
+    Nothing may be lost across the two passes and the second pass may propose nothing: runbook
+    invariants 3 and 7, expressed as the two rates the brief asks for.
+
+    "Recoverable" is the invariant's own wording: still raw in `pending/`, or held under a
+    candidate awaiting its disposition. An event that reached neither is one the pipeline
+    acknowledged and then could not account for.
+
+    Each scenario gets its OWN repo, which is the load-bearing part. Measuring this over two
+    hand-built events was the reviewer's finding, but pouring all fourteen scenarios into one
+    spool is not the fix: the corpus is fourteen restatements of one rule, so merged into a
+    single session they aggregate to two insufficient candidates and propose nothing at all -
+    which would make the duplicate-proposal gate vacuous in exactly the way the empty
+    denominator made the file gates vacuous. Per-scenario isolation keeps every scenario doing
+    what it was written to do while the two rates sum over all of them.
     """
-    events = [
-        _event("loss-directive", "user_directive",
-               f"Do not edit {GENERATED} directly. Change openapi/schema.yaml and regenerate.",
-               offset=0),
-        _event("loss-edit", "file_changed", "regenerated the client", files=[GENERATED],
-               offset=30),
-    ]
-    _spool(repo, events)
-    first = reconcile.reconcile_session(repo)
-    second = reconcile.reconcile_session(repo)
+    acknowledged = recoverable = first_proposed = duplicates = 0
+    drops = 0
+    for i, name in enumerate(_labelled()):
+        repo = os.path.join(root, f"scenario-{i:02d}")
+        events = _load(name)["events"]
+        _spool(repo, events)
+        first_proposed += reconcile.reconcile_session(repo)["proposed"]
+        duplicates += reconcile.reconcile_session(repo)["proposed"]
 
-    held = {e["event_id"] for cid in spool.held_candidates(repo)
-            for e in spool.held_events(repo, cid)}
-    pending = {e["event_id"] for e in spool.list_pending_evidence(repo)}
-    acknowledged = {e["event_id"] for e in events}
+        held = {e["event_id"] for cid in spool.held_candidates(repo)
+                for e in spool.held_events(repo, cid)}
+        pending = {e["event_id"] for e in spool.list_pending_evidence(repo)}
+        ids = {e["event_id"] for e in events}
+        acknowledged += len(ids)
+        recoverable += len(ids & (held | pending))
+        drops += (spool.evidence_diagnostics(repo)["gap"] or {}).get("drops", 0)
     return {
-        "acknowledged": len(acknowledged),
-        "recoverable": len(acknowledged & (held | pending)),
-        "loss_rate": 1 - len(acknowledged & (held | pending)) / len(acknowledged),
-        "first_pass_proposed": first["proposed"],
-        "duplicate_proposals": second["proposed"],
-        "gap": (spool.evidence_diagnostics(repo)["gap"] or {}),
+        "scenarios": len(_labelled()),
+        "acknowledged": acknowledged,
+        "recoverable": recoverable,
+        "loss_rate": 1 - recoverable / acknowledged,
+        "first_pass_proposed": first_proposed,
+        "duplicate_proposals": duplicates,
+        "gap_drops": drops,
     }
 
 
@@ -681,13 +722,24 @@ def _hook_append(repo: str) -> dict:
 
 
 def _teams_lifecycle() -> dict:
-    """Retry and duplication counts for the lifecycle wire, read off the Task 08 suite rather
-    than re-driven here: those tests own the transport fakes and the contract fixture."""
+    """Teams lifecycle retry and duplication, CITED rather than measured here.
+
+    These two numbers are transcribed from the Task 08 suite, which owns the transport fakes
+    and the contract fixture, and they are labelled as such at every level: the key is
+    `cited_not_measured`, the values sit under `claim`, and the five tests that actually assert
+    them are named. An earlier version returned the same two literals under bare
+    `retries_per_refusal` / `duplicate_events_after_retry` keys, which the report then printed
+    in a column of measured rows - a citation wearing a measurement's clothes.
+
+    Re-driving the retry path in-process was the alternative and was not taken: it would mean
+    importing another suite's fixtures to re-derive a number that suite already asserts, which
+    buys a second, weaker copy of an existing gate rather than new evidence.
+    """
     return {
+        "cited_not_measured": True,
         "source": "tests/test_lifecycle_sync.py",
-        "retries_per_refusal": 1,
-        "duplicate_events_after_retry": 0,
-        "evidence": [
+        "claim": {"retries_per_refusal": 1, "duplicate_events_after_retry": 0},
+        "asserted_by": [
             "test_a_refused_lifecycle_payload_still_syncs_the_base_decision",
             "test_a_blocked_delta_stays_durably_pending_in_the_outbox",
             "test_a_pending_delta_is_not_re_offered_while_the_capability_is_unchanged",
@@ -700,22 +752,37 @@ def _teams_lifecycle() -> dict:
 # ── the hard thresholds, asserted in the default tier ────────────────────────────
 
 def test_no_uncertain_file_is_ever_promoted_to_an_anchor():
-    assert _candidate_quality()["uncertain_file_promotion_rate"] == 0.0
+    """The denominator assertion is the gate, not decoration. Both rates here are
+    `x / attached_files`, so an empty denominator reports 0.0 and passes while every anchor has
+    been stripped - which is indistinguishable from the property holding. Requiring the corpus
+    to actually anchor files first is what makes the 0.0 mean something."""
+    quality = _candidate_quality()
+    assert quality["attached_files"] >= _MIN_ANCHORED_FILES, "the rate below has no denominator"
+    assert quality["uncertain_file_promotion_rate"] == 0.0
 
 
 def test_no_labelled_candidate_attaches_a_file_its_golden_does_not_name():
-    assert _candidate_quality()["wrong_file_attachment_rate"] == 0.0
+    quality = _candidate_quality()
+    assert quality["attached_files"] >= _MIN_ANCHORED_FILES, "the rate below has no denominator"
+    assert quality["wrong_file_attachment_rate"] == 0.0
 
 
 def test_agent_only_evidence_opens_no_reconsideration():
-    assert _agent_only_reconsideration_openings() == 0
+    seen = _agent_only_reconsiderations()
+    assert seen["agent_only_events"] > 0, "nothing was offered to the lane"
+    assert seen["reconsiderations_opened"] == 0
 
 
 def test_acknowledged_evidence_survives_a_replay_with_no_duplicate_proposal(tmp_repo):
+    """Both denominators are asserted before their rate, for the reason spelled out on the two
+    file gates: a loss rate over zero acknowledged events, or a duplicate count against a first
+    pass that proposed nothing, cannot fail for the regression it names."""
     loss = _replay_loss(tmp_repo)
+    assert loss["acknowledged"] >= 20, "a loss rate needs events to lose"
+    assert loss["first_pass_proposed"] >= 5, "duplicates need a first pass that proposed"
     assert loss["loss_rate"] == 0.0
     assert loss["duplicate_proposals"] == 0
-    assert loss["gap"].get("drops", 0) == 0
+    assert loss["gap_drops"] == 0
 
 
 def test_the_policy_evaluator_neither_over_blocks_nor_under_blocks(tmp_repo):
@@ -741,13 +808,21 @@ def test_an_unavailable_host_signal_is_never_reported_as_captured_zero():
 # ── the report ───────────────────────────────────────────────────────────────────
 
 @pytest.mark.perf
-def test_the_evaluation_report_is_written(tmp_repo, monkeypatch):
+def test_the_evaluation_report_is_written(tmp_repo, request):
     """Produce the machine-readable JSON and the Markdown summary.
 
     `perf`-marked because the latency rows are wall-clock medians and this repository keeps
     timing in the perf tier - so `uv run pytest -m perf --no-cov` writes the artifact, and no
     default-tier run depends on a clock. Every threshold above is asserted in the default tier
     too, so this file is a report rather than the gate.
+
+    The marker alone does NOT keep this out of a plain `pytest tests/`: `perf` is deselected by
+    CI's `-m "not perf"` and skipped under coverage, but a bare run collects it and it then
+    rewrites the recorded artifact with medians taken under whatever else that run was doing.
+    That happened during review - the report quoted one set of numbers while the artifact on
+    disk held another. So the write itself is gated on `-m perf` having actually been asked
+    for. The body still runs either way, which is the point: every metric function is exercised
+    on every run, and only the recorded file is protected.
     """
     quality = _candidate_quality()
     directives = _directive_scores()
@@ -777,7 +852,7 @@ def test_the_evaluation_report_is_written(tmp_repo, monkeypatch):
         "candidate_quality": quality,
         "adversarial_file_attachment": _adversarial_file_attachment(),
         "directive_detection": directives,
-        "agent_only_reconsiderations": _agent_only_reconsideration_openings(),
+        "agent_only_reconsiderations": _agent_only_reconsiderations(),
         "review_items_per_realistic_session": _review_items_for_a_realistic_session(),
         "evidence_loss": loss,
         "policy_confusion": confusion,
@@ -786,10 +861,15 @@ def test_the_evaluation_report_is_written(tmp_repo, monkeypatch):
         "latency_ms": latency,
     }
 
+    rendered = _markdown(report)
+    assert rendered.startswith("# Task 09 evaluation"), "the summary renders on every run"
+
+    if "perf" not in (request.config.getoption("markexpr") or ""):
+        pytest.skip("artifact write is reserved for an explicit `-m perf` run")
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     (ARTIFACTS / "task-09-evaluation.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (ARTIFACTS / "task-09-evaluation.md").write_text(_markdown(report), encoding="utf-8")
+    (ARTIFACTS / "task-09-evaluation.md").write_text(rendered, encoding="utf-8")
 
     assert (ARTIFACTS / "task-09-evaluation.json").is_file()
     assert (ARTIFACTS / "task-09-evaluation.md").is_file()
@@ -807,9 +887,14 @@ def _markdown(report: dict) -> str:
         ("wrong-file attachment rate (adversarial sibling case)",
          f"{report['adversarial_file_attachment']['wrong_file_attachment_rate']:.2f}"),
         ("uncertain-file promotion rate", f"{quality['uncertain_file_promotion_rate']:.2f}"),
-        ("evidence acknowledgement-to-receipt loss rate", f"{loss['loss_rate']:.2f}"),
-        ("duplicate proposals after replay", str(loss["duplicate_proposals"])),
-        ("agent-only reconsiderations opened", str(report["agent_only_reconsiderations"])),
+        (f"evidence acknowledgement-to-receipt loss rate ({loss['acknowledged']} "
+         f"acknowledged events over {loss['scenarios']} scenarios)",
+         f"{loss['loss_rate']:.2f}"),
+        (f"duplicate proposals after replay ({loss['first_pass_proposed']} first-pass "
+         "proposals)", str(loss["duplicate_proposals"])),
+        (f"agent-only reconsiderations opened (1 scenario, "
+          f"{report['agent_only_reconsiderations']['agent_only_events']} agent-only event(s))",
+         str(report["agent_only_reconsiderations"]["reconsiderations_opened"])),
         ("explicit-directive recall", f"{directives['recall']:.2f}"),
         ("directive precision", f"{directives['precision']:.2f}"),
         ("review items per realistic session",
@@ -819,13 +904,14 @@ def _markdown(report: dict) -> str:
         ("concurrent hook writes surviving",
          f"{report['hook_append']['events_survived']}/"
          f"{report['hook_append']['concurrent_writers']}"),
-        ("Teams lifecycle duplicates after retry",
-         str(report["teams_lifecycle"]["duplicate_events_after_retry"])),
     ]
+    teams = report["teams_lifecycle"]
     latency = report["latency_ms"]
     lines = ["# Task 09 evaluation", "",
              "Generated by `uv run pytest -m perf --no-cov "
-             "tests/test_evidence_hardening_evals.py`.", "",
+             "tests/test_evidence_hardening_evals.py`.",
+             "Every row below is measured by this run. Numbers this evaluation only cites are "
+             "in their own section at the end.", "",
              "## Capture quality", "", "| Metric | Value |", "| --- | --- |"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     lines += ["", "## Latency", "",
@@ -842,4 +928,13 @@ def _markdown(report: dict) -> str:
               "a markdown blockquote) that `store._is_prescriptive_constraint` has no shape "
               "left to recognize. A capture that slips through is one reviewable decision: "
               "it arms no policy and anchors no file.", ""]
+    lines += ["## Cited, not measured here", "",
+              "Teams lifecycle retry and duplication are transcribed from "
+              f"`{teams['source']}`, which owns the transport fakes and the contract fixture. "
+              "This evaluation did not re-drive them.", "",
+              "| Claim | Value |", "| --- | --- |"]
+    lines += [f"| {name.replace('_', ' ')} | {value} |"
+              for name, value in teams["claim"].items()]
+    lines += ["", "Asserted by:", ""]
+    lines += [f"- `{name}`" for name in teams["asserted_by"]] + [""]
     return "\n".join(lines)
