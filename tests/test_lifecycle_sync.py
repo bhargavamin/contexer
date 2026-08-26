@@ -9,10 +9,15 @@ patches it, so every assertion here is against the REAL `_wire_args` output - ne
 projection. That distinction is the point of the E2 block: a projection can be honest and the
 wire still leak, so the never-sync items are pinned where the bytes actually go.
 
-`remote._WIRE_LIFECYCLE` ships CLOSED (the server's field spelling is unverified from this
-repo), so the tests that exercise the mechanism open it explicitly, and
-`test_closed_gate_ships_legacy_shape_even_to_an_advertising_server` pins the shipped default.
+`remote._WIRE_LIFECYCLE` ships OPEN since Task 08 (the server contract was read and proved live
+against a running migrated endpoint). The tests that exercise the mechanism still patch it
+explicitly, so they say what they depend on rather than inheriting it; the shipped value is
+pinned by `test_the_shipped_gate_is_open_and_negotiates`, and the one-line rollback the constant's
+comment promises by `test_a_closed_gate_ships_legacy_shape_even_to_an_advertising_server`.
 """
+import hashlib
+import json
+import pathlib
 import types
 import uuid
 from datetime import datetime, timezone
@@ -178,15 +183,27 @@ def test_tombstones_without_revisions_sends_no_revision_id(wire_open, monkeypatc
     assert "revision_id" not in seen["pushes"][0] and seen["pushes"][0]["lifecycle"]
 
 
-def test_closed_gate_ships_legacy_shape_even_to_an_advertising_server(monkeypatch):
-    # The shipped default. `_WIRE_LIFECYCLE` answers a different question from capability
-    # discovery - "do we know the field spelling" - so an advertising server changes nothing
-    # until a human opens it, and the probe is not even made.
-    assert remote._WIRE_LIFECYCLE is False
+def test_a_closed_gate_ships_legacy_shape_even_to_an_advertising_server(monkeypatch):
+    # `_WIRE_LIFECYCLE` answers a DIFFERENT question from capability discovery - "do we know the
+    # field spelling this server expects" - so with it closed an advertising server changes
+    # nothing and the probe is not even made. The constant is open as shipped (validated live
+    # against a real server, see its comment); this pins the rollback path still works, since a
+    # rollback is the one-line change that comment promises.
+    monkeypatch.setattr(remote, "_WIRE_LIFECYCLE", False)
     seen = _caps_seam(monkeypatch, {"decisionLifecycle": _LIFECYCLE_CAPS})
     _push(RemoteStore("https://t/mcp", "tok"), revision_id="rev-3", lifecycle=[_RETIRED])
     assert seen["pushes"] == [_legacy_args()]
     assert "get_capabilities" not in seen["names"]
+
+
+def test_the_shipped_gate_is_open_and_negotiates(monkeypatch):
+    # The shipped default, after the Task 08 live validation: an advertising server receives the
+    # deltas with no test-local patching of the constant.
+    assert remote._WIRE_LIFECYCLE is True
+    seen = _caps_seam(monkeypatch, {"decisionLifecycle": _LIFECYCLE_CAPS})
+    _push(RemoteStore("https://t/mcp", "tok"), revision_id="rev-3", lifecycle=[_RETIRED])
+    assert seen["pushes"][0]["revision_id"] == "rev-3"
+    assert seen["pushes"][0]["lifecycle"][0]["kind"] == "retired"
 
 
 def test_no_lifecycle_data_costs_no_capability_round_trip(wire_open, monkeypatch):
@@ -404,6 +421,7 @@ def test_a_completed_record_stays_home_for_an_old_server(tmp_repo, monkeypatch):
     store.approve_decision(tmp_repo, did, "approve")
     lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
     lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
     args = _wire_for(tmp_repo, did, caps=None, monkeypatch=monkeypatch)
     assert "lifecycle" not in args and "revision_id" not in args
 
@@ -416,6 +434,7 @@ def test_a_row_queued_before_discovery_drains_under_current_knowledge(tmp_repo, 
     did = _seed(tmp_repo)
     store.approve_decision(tmp_repo, did, "approve")
     lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
     lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
     proj = store.get_shareable(tmp_repo, did)
     share._enqueue(share._payload(proj, "github.com/a/b"))
@@ -457,6 +476,7 @@ def test_the_same_queued_row_stays_legacy_against_an_old_server(tmp_repo, monkey
     did = _seed(tmp_repo)
     store.approve_decision(tmp_repo, did, "approve")
     lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
     lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
     proj = store.get_shareable(tmp_repo, did)
     share._enqueue(share._payload(proj, "github.com/a/b"))
@@ -573,3 +593,252 @@ def test_the_remote_cursor_and_the_local_evidence_spool_advance_independently(
     team_context.pull(team_env, profile=TEAM)
     assert team_context._load_cache(team_env)["cursor"] == "c2"
     assert len(spool.list_pending_evidence(team_env)) == 2
+
+
+# ── the canonical contract fixture (Task 08) ─────────────────────────────────────
+# `tests/fixtures/lifecycle-contract.v1.json` is a BYTE-FOR-BYTE copy of the file generated in
+# the contexer-teams worktree (`packages/db/test/fixtures/lifecycle-contract.v1.json`), and both
+# suites assert against it. Two hand-written interpretations of one wire contract is exactly how
+# a field spelling drifts into a permanently stuck outbox row, so there is one file.
+#
+# The digest is the always-on drift detector: an edit to THIS copy fails here, and an edit to the
+# Teams copy fails the Teams suite (its own tests derive from the same file). Regenerating the
+# fixture means re-copying it and updating this constant in the same change.
+_CONTRACT_SHA256 = "3a50a747ad19e45ae86761f1116600301b563163d39ee02107240036025dc55b"
+_CONTRACT_PATH = pathlib.Path(__file__).parent / "fixtures" / "lifecycle-contract.v1.json"
+_CONTRACT = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+
+
+def test_the_contract_fixture_is_the_bytes_both_repositories_agreed_on():
+    digest = hashlib.sha256(_CONTRACT_PATH.read_bytes()).hexdigest()
+    assert digest == _CONTRACT_SHA256
+
+
+def test_the_client_wire_bounds_are_the_contract_bounds():
+    assert _CONTRACT["bounds"] == {
+        "maxEvents": remote._WIRE_LIFECYCLE_MAX_EVENTS,
+        "maxIdLength": remote._WIRE_LIFECYCLE_MAX_ID,
+        "maxReasonLength": remote._WIRE_LIFECYCLE_MAX_REASON,
+    }
+    assert tuple(_CONTRACT["kinds"]) == remote._WIRE_LIFECYCLE_KINDS
+    assert tuple(_CONTRACT["actors"]) == remote._WIRE_LIFECYCLE_ACTORS
+
+
+def test_the_serializer_emits_the_contract_payload_byte_for_byte(wire_open, monkeypatch):
+    seen = _caps_seam(monkeypatch, {"decisionLifecycle": _CONTRACT["capabilities"]["full"]})
+    RemoteStore("https://t/mcp", "tok").push_decision(
+        type="constraint", content="never commit directly to main", repo="github.com/a/b",
+        decision_id="dec-1", revision_id="rev-3", lifecycle=[_CONTRACT["events"]["full"]])
+    expected = dict(_CONTRACT["payloads"]["singularValid"])
+    # The serializer omits a null optional rather than sending it (the server reads an absent key
+    # as unset), so the fixture's explicit null is the only difference between the stored record
+    # and its wire projection.
+    expected["lifecycle"] = [{k: v for k, v in expected["lifecycle"][0].items() if v is not None}]
+    assert seen["pushes"][0] == expected
+
+
+def test_an_old_server_receives_the_contract_legacy_payload(wire_open, monkeypatch):
+    seen = _caps_seam(monkeypatch, {})
+    RemoteStore("https://t/mcp", "tok").push_decision(
+        type="constraint", content="never commit directly to main", repo="github.com/a/b",
+        decision_id="dec-1", revision_id="rev-3", lifecycle=[_CONTRACT["events"]["full"]])
+    assert seen["pushes"] == [_CONTRACT["payloads"]["legacy"]]
+
+
+# ── the optional-protocol fallback (Task 08) ─────────────────────────────────────
+# A server that ADVERTISED the capability and then refuses the augmented push. The base decision
+# is what the developer asked to sync; losing it to a mis-negotiated optional field is the whole
+# failure this gate was closed against.
+
+def _refusing_seam(monkeypatch, *, message="Invalid arguments for tool push_decision",
+                   fail_when=lambda args: "lifecycle" in args or "revision_id" in args,
+                   advertised=None, tool="push_decision", on_legacy=None):
+    """Advertises the lifecycle capability, then refuses any push matching `fail_when`."""
+    seen = {"pushes": [], "names": []}
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        seen["names"].append(name)
+        if name == "get_capabilities":
+            return _result(structured={"capabilities": {
+                "decisionLifecycle": advertised if advertised is not None else _LIFECYCLE_CAPS}})
+        seen["pushes"].append(arguments)
+        rows = arguments.get("decisions") or [arguments]
+        if any(fail_when(r) for r in rows):
+            return types.SimpleNamespace(content=[_text(message)], structuredContent=None,
+                                         isError=True)
+        return on_legacy or _result(
+            content=[_text("Saved decision srv-1 to your personal context.")])
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    return seen
+
+
+def test_a_refused_lifecycle_payload_still_syncs_the_base_decision(wire_open, monkeypatch):
+    seen = _refusing_seam(monkeypatch)
+    rs = RemoteStore("https://t/mcp", "tok")
+    assert _push(rs, revision_id="rev-3", lifecycle=[_RETIRED]) == "srv-1"
+    # Two pushes: the augmented one that was refused, then the byte-identical legacy shape.
+    assert len(seen["pushes"]) == 2
+    assert seen["pushes"][1] == _legacy_args()
+    assert [b["decision_id"] for b in rs.lifecycle_blocked] == ["dec-1"]
+    assert rs.lifecycle_blocked[0]["capability"] == "v1:r1t1p1"
+
+
+def test_the_capability_is_disabled_after_a_refusal_so_the_next_push_is_legacy(
+        wire_open, monkeypatch):
+    seen = _refusing_seam(monkeypatch)
+    rs = RemoteStore("https://t/mcp", "tok")
+    _push(rs, revision_id="rev-3", lifecycle=[_RETIRED])
+    seen["pushes"].clear()
+    _push(rs, revision_id="rev-3", lifecycle=[_RETIRED])
+    # One push, already legacy: the client does not re-offer a field this server just refused.
+    assert seen["pushes"] == [_legacy_args()]
+    assert seen["names"].count("get_capabilities") == 1
+
+
+def test_an_auth_failure_is_never_retried_as_legacy(wire_open, monkeypatch):
+    seen = _refusing_seam(monkeypatch, message="insufficient_scope: write scope required")
+    rs = RemoteStore("https://t/mcp", "tok")
+    with pytest.raises(remote.RemoteAuthError):
+        _push(rs, revision_id="rev-3", lifecycle=[_RETIRED])
+    assert len(seen["pushes"]) == 1
+    assert rs.lifecycle_blocked == []
+
+
+def test_a_quota_failure_is_never_retried_as_legacy(wire_open, monkeypatch):
+    seen = _refusing_seam(
+        monkeypatch, message="Rate limit exceeded - too many requests. Retry in 42s.")
+    rs = RemoteStore("https://t/mcp", "tok")
+    with pytest.raises(RemoteStoreError):
+        _push(rs, revision_id="rev-3", lifecycle=[_RETIRED])
+    assert len(seen["pushes"]) == 1
+    assert rs.lifecycle_blocked == []
+
+
+def test_an_unrelated_validation_failure_raises_and_records_no_lifecycle_blockage(
+        wire_open, monkeypatch):
+    # The retry IS the discriminator: the legacy payload fails identically, so the fields were
+    # never the problem. The original error propagates and nothing is marked lifecycle-blocked.
+    seen = _refusing_seam(monkeypatch, message="content must not be empty",
+                          fail_when=lambda args: True)
+    rs = RemoteStore("https://t/mcp", "tok")
+    with pytest.raises(RemoteStoreError, match="content must not be empty"):
+        _push(rs, revision_id="rev-3", lifecycle=[_RETIRED])
+    assert len(seen["pushes"]) == 2      # tried, retried as legacy, gave up
+    assert rs.lifecycle_blocked == []
+
+
+def test_a_batch_row_the_server_rejects_for_lifecycle_is_re_pushed_as_legacy(
+        wire_open, monkeypatch):
+    saved = _result(structured={"results": [{"id": "s1", "decisionId": "dec-1"}], "skipped": []})
+    rejected = _result(structured={
+        "results": [], "skipped": [{"decisionId": "dec-1", "reason": "invalid_lifecycle"}]})
+    seen = {"pushes": []}
+
+    async def fake(endpoint, token, name, arguments, timeout):
+        if name == "get_capabilities":
+            return _result(structured={"capabilities": {"decisionLifecycle": _LIFECYCLE_CAPS}})
+        seen["pushes"].append(arguments)
+        carries = any("lifecycle" in d for d in arguments["decisions"])
+        return rejected if carries else saved
+
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    rs = RemoteStore("https://t/mcp", "tok")
+    saved_ids, skipped = rs.push_decisions([{
+        "type": "constraint", "content": "never commit to main", "repo": "github.com/a/b",
+        "decision_id": "dec-1", "revision_id": "rev-3", "lifecycle": [_RETIRED]}])
+    # The base row saved on the legacy retry, and `invalid_lifecycle` never reaches the caller as
+    # a skip - left there it would read as a PERMANENT rejection and the decision would be dropped.
+    assert saved_ids == ["s1"] and skipped == []
+    assert [b["decision_id"] for b in rs.lifecycle_blocked] == ["dec-1"]
+    assert "lifecycle" not in seen["pushes"][1]["decisions"][0]
+
+
+def test_a_blocked_delta_stays_durably_pending_in_the_outbox(tmp_repo, wire_open, monkeypatch):
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    _refusing_seam(monkeypatch)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+
+    status = share.share(tmp_repo, did, profile=TEAM)
+    assert "Synced decision" in status and "retirement history was refused" in status
+    rows = share._load_outbox()
+    assert [r["stage"] for r in rows] == ["lifecycle_pending"]
+    assert rows[0]["lifecycle"][0]["kind"] == "retired"
+    assert rows[0]["capability"] == "v1:r1t1p1"
+    assert rows[0]["blocked_reason"]
+
+
+def test_a_pending_delta_is_not_re_offered_while_the_capability_is_unchanged(
+        tmp_repo, wire_open, monkeypatch):
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    seen = _refusing_seam(monkeypatch)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    share.share(tmp_repo, did, profile=TEAM)
+
+    seen["pushes"].clear()
+    assert share.drain_outbox(profile=TEAM) == 0
+    assert seen["pushes"] == []          # nothing re-asked: the server's answer has not moved
+    assert [r["stage"] for r in share._load_outbox()] == ["lifecycle_pending"]
+
+
+def test_a_pending_delta_is_re_offered_once_the_capability_changes(
+        tmp_repo, wire_open, monkeypatch):
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    _refusing_seam(monkeypatch)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    share.share(tmp_repo, did, profile=TEAM)
+
+    # The server ships a fix: a NEW advertisement, and it now accepts the payload.
+    seen = _caps_seam(monkeypatch, {"decisionLifecycle": {**_LIFECYCLE_CAPS, "version": 2}})
+    assert share.drain_outbox(profile=TEAM) == 1
+    assert share._load_outbox() == []
+    assert seen["pushes"][0]["lifecycle"][0]["kind"] == "retired"
+
+
+def test_a_blocked_delta_is_never_quarantined_or_dropped(tmp_repo, wire_open, monkeypatch):
+    # Ten drains against a server that keeps refusing: the delta is still there, still complete,
+    # and no attempt storm was spent on it.
+    did = _seed(tmp_repo)
+    store.approve_decision(tmp_repo, did, "approve")
+    lifecycle.retire_decision(tmp_repo, did, "the queue moved to Kafka")
+    lifecycle.restore_decision(tmp_repo, did, "the migration was reverted")
+    seen = _refusing_seam(monkeypatch)
+    monkeypatch.setattr(share.RemoteStore, "from_profile",
+                        staticmethod(lambda p, **kw: RemoteStore("https://t/mcp", "tok")))
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    share.share(tmp_repo, did, profile=TEAM)
+
+    seen["pushes"].clear()
+    for _ in range(10):
+        share.drain_outbox(profile=TEAM)
+    rows = share._load_outbox()
+    assert len(rows) == 1 and rows[0]["stage"] == "lifecycle_pending"
+    assert rows[0]["lifecycle"][0]["reason"] == "the queue moved to Kafka"
+    assert seen["pushes"] == []
+
+
+def test_a_refused_lifecycle_reason_is_still_scrubbed_on_the_retry_path(
+        wire_open, monkeypatch):
+    # Redaction is last-mile, so it must hold on BOTH the augmented push and the legacy retry.
+    seen = _refusing_seam(monkeypatch)
+    rs = RemoteStore("https://t/mcp", "tok")
+    rs.push_decision(type="constraint", content="never commit AKIAIOSFODNN7EXAMPLE to main",
+                     repo="github.com/a/b", decision_id="dec-1", revision_id="rev-3",
+                     lifecycle=[{**_RETIRED, "reason": "rotated AKIAIOSFODNN7EXAMPLE"}])
+    assert len(seen["pushes"]) == 2   # augmented refused, then legacy
+    assert "AKIAIOSFODNN7EXAMPLE" not in repr(seen["pushes"])

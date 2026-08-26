@@ -1613,9 +1613,9 @@ def _push(pushes_for, advertised, monkeypatch):
 @pytest.mark.parametrize("variant", ["lifecycle_capable", "old", "mis_advertising",
                                      "rolled_back"])
 def test_each_teams_server_shape_receives_only_what_it_advertised(variant, monkeypatch):
-    """Scenario 16, and runbook invariant 11. `_WIRE_LIFECYCLE` is opened here because the
-    mechanism under test is the NEGOTIATION - the shipped constant is pinned separately
-    below, and outstanding issue 5 is why it stays closed until a live validation."""
+    """Scenario 16, and runbook invariant 11. `_WIRE_LIFECYCLE` is patched here rather than
+    inherited: the mechanism under test is the NEGOTIATION, so the test says what it depends on.
+    The shipped value, and its rollback, are pinned separately below."""
     server = next(s for s in _load("16-teams-server-variants")["servers"]
                   if s["variant"] == variant)
     monkeypatch.setattr(remote, "_WIRE_LIFECYCLE", True)
@@ -1633,10 +1633,21 @@ def test_each_teams_server_shape_receives_only_what_it_advertised(variant, monke
         assert after["content"] == RULE
 
 
-def test_the_lifecycle_wire_gate_ships_closed(monkeypatch):
-    """Outstanding issue 5, pinned rather than re-raised as a bug. The field spellings are
-    guesses, so an advertising server changes nothing until a human validates them live."""
-    assert remote._WIRE_LIFECYCLE is False
+def test_the_lifecycle_wire_gate_is_open_after_live_validation(monkeypatch):
+    """Outstanding issue 5, closed by Task 08. The field spellings were guesses until the server
+    contract was read and proved live against a running migrated endpoint; the gate now ships
+    OPEN, and this pins that an advertising server actually receives the deltas."""
+    assert remote._WIRE_LIFECYCLE is True
+    server = next(s for s in _load("16-teams-server-variants")["servers"]
+                  if s["variant"] == "lifecycle_capable")
+    (args,) = _push([], server["advertised"], monkeypatch)
+    assert "lifecycle" in args and "revision_id" in args
+
+
+def test_rolling_the_lifecycle_gate_back_still_ships_the_legacy_shape(monkeypatch):
+    """The rollback its comment promises is still one line. An advertising server receives the
+    pre-feature payload with the constant closed, and the capability probe is not even made."""
+    monkeypatch.setattr(remote, "_WIRE_LIFECYCLE", False)
     server = next(s for s in _load("16-teams-server-variants")["servers"]
                   if s["variant"] == "lifecycle_capable")
     (args,) = _push([], server["advertised"], monkeypatch)
