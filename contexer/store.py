@@ -1324,6 +1324,13 @@ _MAX_DIRECTIVE_LEN = 300
 _SYSTEM_TEXT_PREFIXES = (
     "<task-notification", "<system-reminder", "<persisted-output",
     "[contexer", "contexer:",
+    # Claude Code's usage-limit-reset notice arrives as UNTAGGED user-turn text, and its
+    # "do not repeat work" clause is a full prohibition trigger - it was auto-captured as
+    # a trusted constraint on every limit reset (twice on one real machine), and retiring
+    # it re-opened a reconsideration on the next reset. The prefix stops before "has
+    # reset" so a rewording of the tail still matches; no genuine user directive starts
+    # with this harness-owned sentence.
+    "your claude.ai usage limit",
 )
 
 # Deictic referents point at an object only this conversation can resolve - a strong
