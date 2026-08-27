@@ -435,8 +435,13 @@ def _spawn_refresh(repo_path: str) -> None:
     """Start a detached background refresher — the hook process never waits on it."""
     # argv is fixed and points at our own interpreter and module — no shell, and no part of
     # it is caller- or user-supplied except repo_path, which arrives as its own argv element.
+    # `-P` for the same reason the installed hooks carry it: `-m` prepends the process cwd
+    # to sys.path, and this child inherits the per-prompt hook's cwd = the project root, so
+    # a session in a checked-out contexer repo would import that repo's own contexer/ source
+    # instead of the installed package. stderr is DEVNULL here, so the resulting crash would
+    # be invisible rather than reported.
     subprocess.Popen(
-        [sys.executable, "-m", "contexer.team_context", repo_path],
+        [sys.executable, "-P", "-m", "contexer.team_context", repo_path],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )

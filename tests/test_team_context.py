@@ -1401,3 +1401,21 @@ def test_team_poll_all_architecture_still_injects_deferred_line(monkeypatch):
     assert out != "{}"
     assert "Team picked Postgres over MySQL" not in out
     assert "1 team architecture decision" in out
+
+
+def test_the_detached_refresher_is_spawned_isolated_from_the_cwd(monkeypatch):
+    """`-P` on the spawn argv. This child is started from the per-prompt hook, so it
+    inherits cwd = the project root, and `-m` prepends that to sys.path exactly as `-c`
+    does: in a checked-out contexer repo the refresher would import that repo's own
+    contexer/ source instead of the installed package. Its stderr is DEVNULL, so the
+    resulting crash is invisible rather than reported."""
+    import sys as _sys
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+
+    monkeypatch.setattr(team_context.subprocess, "Popen", _FakePopen)
+    team_context._spawn_refresh("/repo")
+    assert captured["argv"] == [_sys.executable, "-P", "-m", "contexer.team_context", "/repo"]

@@ -412,9 +412,12 @@ def _spawn_login(endpoint: str):
 
     `-u` is load-bearing: the child's stdout is a pipe, so Python would block-buffer it and
     the authorize URL printed at the START of the flow would not reach us until the END of it
-    — minutes after the only moment it is useful."""
+    - minutes after the only moment it is useful.
+
+    `-P` keeps the child off the cwd: `-m` prepends it to sys.path, and the cwd here is
+    wherever the developer ran the CLI (see team_context._spawn_refresh)."""
     return subprocess.Popen(
-        [sys.executable, "-u", "-m", "contexer", "login", "--endpoint", endpoint],
+        [sys.executable, "-P", "-u", "-m", "contexer", "login", "--endpoint", endpoint],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         start_new_session=True, text=True, errors="replace")
 

@@ -826,7 +826,7 @@ def install(home: Path) -> list[str]:
 
     # Migrate: these four hooks predating -P (see the post_write migration above for why
     # cwd-shadowing an older contexer/ source directory matters) had no prior upgrade path
-    # at all — each ran unchanged from first install until now, so this is their first.
+    # at all - each ran unchanged from first install until now, so this is their first.
     # `_strip_stale`, not a marker-presence check: `ups` holds several distinct hooks in
     # one list (boot_code among them, migrated above), and `_in_groups(ups, "-P -c")`
     # would read as globally satisfied the moment ANY one of them picks up -P, leaving

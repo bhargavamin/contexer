@@ -233,7 +233,7 @@ def capture_task(repo_path: str, raw: str) -> str:
         if isinstance(hk, dict) and isinstance(hk.get("beforeSubmitPrompt"), list):
             bsp = hk["beforeSubmitPrompt"]
             after = [h for h in bsp
-                     if not (isinstance(h, dict) and _HOOK_MARKER_TASK in h.get("command", ""))]
+                     if _HOOK_MARKER_TASK not in base._hook_command(h)]
             if after != bsp:
                 if after:
                     hk["beforeSubmitPrompt"] = after
@@ -256,7 +256,7 @@ def _cmd(entry: str) -> str:
 
 
 def _has(hook_list: list, marker: str) -> bool:
-    return any(marker in h.get("command", "") for h in hook_list)
+    return any(marker in base._hook_command(h) for h in hook_list)
 
 
 def install(home: Path) -> list[str]:
@@ -275,25 +275,21 @@ def install(home: Path) -> list[str]:
     cfg["version"] = 1
     hk = cfg.setdefault("hooks", {})
 
-    # Converge each Contexer hook on its exact current command (the claude.py/codex.py
-    # `_strip_stale` rule, restated for Cursor's FLAT hook shape - these lists hold bare
-    # `{type, command}` dicts, not the grouped shape `_strip_stale` walks): a drift the
-    # marker checks below don't know about - the -P flag (without which `python -c`
-    # prepends cwd to sys.path and a checked-out contexer repo shadows the installed
-    # package) - would otherwise leave an installed hook running the old command forever.
-    def _converge(hook_list: list, marker: str, current: str) -> None:
-        hook_list[:] = [h for h in hook_list
-                        if marker not in h.get("command", "") or h.get("command") == current]
-
+    # Converge each Contexer hook on its exact current command (`base._strip_stale_flat`,
+    # the claude.py/codex.py `_strip_stale` rule for Cursor's FLAT hook shape - these lists
+    # hold bare `{type, command}` dicts, not the grouped shape): a drift the marker checks
+    # below don't know about - the -P flag (without which `python -c` prepends cwd to
+    # sys.path and a checked-out contexer repo shadows the installed package) - would
+    # otherwise leave an installed hook running the old command forever.
     ss = hk.setdefault("sessionStart", [])
-    _converge(ss, _HOOK_MARKER_SS, _cmd("session_start"))
+    base._strip_stale_flat(ss, _HOOK_MARKER_SS, _cmd("session_start"))
     if not _has(ss, _HOOK_MARKER_SS):
         ss.append({"type": "command", "command": _cmd("session_start")})
 
     bsp = hk.setdefault("beforeSubmitPrompt", [])
     # Retire any previously-installed task-capture hook (the feature was removed).
-    bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in h.get("command", "")]
-    _converge(bsp, _HOOK_MARKER_CON, _cmd("capture_constraint"))
+    bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in base._hook_command(h)]
+    base._strip_stale_flat(bsp, _HOOK_MARKER_CON, _cmd("capture_constraint"))
     if not _has(bsp, _HOOK_MARKER_CON):
         bsp.append({"type": "command", "command": _cmd("capture_constraint")})
 
@@ -326,7 +322,7 @@ def uninstall(home: Path) -> list[str]:
         }.items():
             before = hk.get(event, [])
             after = [h for h in before
-                     if not any(m in h.get("command", "") for m in markers)]
+                     if not any(m in base._hook_command(h) for m in markers)]
             if after != before:
                 changed = True
                 if after:
@@ -346,7 +342,7 @@ def _mcp_and_hooks_ok(home: Path) -> tuple:
     mcp = base._load_safe(cursor_dir / "mcp.json").get("mcpServers", {}).get("contexer")
     hk = base._load_safe(cursor_dir / "hooks.json").get("hooks", {})
     ss = hk.get("sessionStart", []) if isinstance(hk, dict) else []
-    hooks_ok = any(_HOOK_MARKER_SS in h.get("command", "") for h in ss)
+    hooks_ok = any(_HOOK_MARKER_SS in base._hook_command(h) for h in ss)
     return mcp, hooks_ok
 
 
