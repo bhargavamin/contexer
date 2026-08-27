@@ -114,17 +114,51 @@ def _filter_groups(groups: list, markers: list) -> list:
     ]
 
 
+_OWNER_MARKER = "contexer"
+
+
+def _hook_command(hook) -> str:
+    """Command of one hook, tolerating hand-edited shapes: a non-dict hook, or an explicit
+    `"command": null` (the `str(... or "")` rule `_in_commands` documents - a plain
+    `.get("command", "")` defaults only when the key is ABSENT and returns None here,
+    which turns the next `marker in cmd` into a TypeError mid-install)."""
+    return str(hook.get("command") or "") if isinstance(hook, dict) else ""
+
+
+def _is_ours(cmd: str, ident_markers: list) -> bool:
+    """True when `cmd` is a Contexer hook of this identity: it names the package AND
+    carries one of `ident_markers`.
+
+    The owner half is what makes convergence safe to run unconditionally. Some identity
+    markers are generic English or a generic function name ("compaction starting",
+    "sync_memory"), so a bare marker match reads a user's own hook as ours - and since
+    stripping drops the whole GROUP, an unrelated sibling command in it goes too,
+    silently and permanently. Every Contexer command names the package (an import, the
+    `uv run --directory <clone>` path, or the `contexer-managed-hook` sentinel) in every
+    shape convergence has to recognize, including the pre-sentinel and from-source ones,
+    so this excludes foreign hooks without excusing any of ours."""
+    return _OWNER_MARKER in cmd and any(m in cmd for m in ident_markers)
+
+
 def _strip_stale(groups: list, ident_markers: list, current_cmd: str) -> list:
-    """Drop any group that is a Contexer hook of this identity (a command containing
-    one of ident_markers) but whose command differs from current_cmd — i.e. a stale
-    version from an older install: different phrasing, a from-source `uv run
-    --directory <clone>` path, or a pre-sentinel command. Keeps the current group and
-    every non-Contexer group, so reinstall converges instead of stacking duplicates."""
+    """Drop any group that is a Contexer hook of this identity (see `_is_ours`) but whose
+    command differs from current_cmd - i.e. a stale version from an older install:
+    different phrasing, a from-source `uv run --directory <clone>` path, or a
+    pre-sentinel command. Keeps the current group and every non-Contexer group, so
+    reinstall converges instead of stacking duplicates."""
     out = []
     for grp in groups:
-        cmds = [h.get("command", "") for h in _hooks_of(grp)]
-        is_this_hook = any(m in c for m in ident_markers for c in cmds)
-        if is_this_hook and current_cmd not in cmds:
+        cmds = [_hook_command(h) for h in _hooks_of(grp)]
+        if any(_is_ours(c, ident_markers) for c in cmds) and current_cmd not in cmds:
             continue
         out.append(grp)
     return out
+
+
+def _strip_stale_flat(hooks: list, marker: str, current_cmd: str) -> None:
+    """`_strip_stale` for a FLAT hook list (Cursor's shape: bare `{type, command}` dicts,
+    no groups). Same rule, in place: drop our own hooks of this identity unless the
+    command is already the current one."""
+    hooks[:] = [h for h in hooks
+                if not _is_ours(_hook_command(h), [marker])
+                or _hook_command(h) == current_cmd]

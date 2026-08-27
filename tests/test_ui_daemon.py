@@ -315,7 +315,9 @@ def test_ensure_running_cold_spawns_detached(monkeypatch, spawns):
     port, token = result
     assert port == 9999 and len(token) > 20
     call = spawns[0]
-    assert call["argv"] == [sys.executable, "-m", "contexer.ui.server", "--port", "9999"]
+    # `-P`: `-m` prepends the process cwd to sys.path, so a daemon started from a
+    # checked-out contexer repo would import that source tree, not the installed package.
+    assert call["argv"] == [sys.executable, "-P", "-m", "contexer.ui.server", "--port", "9999"]
     assert call["start_new_session"] is True
     assert call["stdin"] is subprocess.DEVNULL
     assert call["stdout"] is call["stderr"]  # both tail into ui.log
@@ -327,7 +329,7 @@ def test_ensure_running_cold_spawns_detached(monkeypatch, spawns):
 def test_ensure_running_spawns_the_patched_target(monkeypatch, spawns):
     monkeypatch.setattr(daemon, "SPAWN_TARGET", "tests.fake_server")
     daemon.ensure_running(9999)
-    assert spawns[0]["argv"][2] == "tests.fake_server"
+    assert spawns[0]["argv"][3] == "tests.fake_server"
 
 
 def test_ensure_running_never_waits_on_the_child(monkeypatch):

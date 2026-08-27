@@ -275,9 +275,9 @@ def install(home: Path) -> list[str]:
         hooks["SessionStart"] = ss
     # Converge on the exact current command (`_strip_stale`, mirroring claude.py): the
     # marker gates above only know the historical shapes somebody enumerated, and a drift
-    # they don't name — the -P flag (without which `python -c` prepends cwd to sys.path, so
+    # they don't name - the -P flag (without which `python -c` prepends cwd to sys.path, so
     # a session opened at the root of a checked-out contexer repo shadows the installed
-    # package with that repo's own contexer/ source) — left installed hooks running the
+    # package with that repo's own contexer/ source) - left installed hooks running the
     # old command forever while install reported success.
     ss = base._strip_stale(ss, ["get_session_start_context"], _py(ss_code))
     hooks["SessionStart"] = ss

@@ -377,3 +377,158 @@ class TestCursorEntrypoints:
     def test_entrypoints_never_raise(self, tmp_repo):
         assert _json.loads(cursor.capture_constraint(tmp_repo, "garbage")) == {"continue": True}
         assert _json.loads(cursor.session_start("", "garbage"))  # returns dict, no raise
+
+
+class TestHookConvergenceSafety:
+    """`install` converges every python-carrying hook on its exact current command
+    (`base._strip_stale` / `_strip_stale_flat`), unconditionally and on every run. Two
+    properties make that safe, and nothing in the suite pinned either one:
+
+      1. It may only ever strip a hook CONTEXER installed. Stripping drops the whole
+         GROUP, and some identity markers are generic ("compaction starting",
+         "sync_memory"), so a bare marker match ate a user's own hook plus every
+         unrelated sibling command beside it - silently, permanently, on a command the
+         user ran deliberately and was told succeeded.
+      2. It must tolerate a hand-edited config. `"command": null` is a real shape (the
+         default in `.get("command", "")` applies only when the key is ABSENT), and an
+         unhandled TypeError out of `install` aborts the remaining `--target all`
+         adapters mid-run.
+
+    Every case here runs against an isolated temp home with cwd redirected, the fixture
+    pattern `test_post_write_prefix_matches_sibling_user_prompt_submit_hooks` documents:
+    `claude.install` also cleans <cwd git root>/.claude/settings.json, which HOME alone
+    does not contain."""
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+
+    def _settings(self, home, name=".claude/settings.json"):
+        return _json.loads((home / name).read_text())
+
+    def _write(self, home, cfg, name=".claude/settings.json"):
+        (home / name).write_text(_json.dumps(cfg, indent=2))
+
+    def _cmds(self, groups):
+        return [h.get("command") for grp in groups for h in grp.get("hooks", [])]
+
+    # --- 1. foreign hooks survive -------------------------------------------------
+
+    def test_claude_foreign_marker_bearing_group_survives_install(self, tmp_path, monkeypatch):
+        """A user's own PreCompact group whose command merely CONTAINS the generic
+        "compaction starting" marker - along with the unrelated backup command beside
+        it, which carries no marker at all."""
+        self._isolate(tmp_path, monkeypatch)
+        claude.install(tmp_path)
+
+        foreign = {"hooks": [
+            {"type": "command", "command": 'echo "compaction starting, backing up notes"'},
+            {"type": "command", "command": "cp ~/notes.md ~/notes.bak"},
+        ]}
+        cfg = self._settings(tmp_path)
+        cfg["hooks"]["PreCompact"].append(_json.loads(_json.dumps(foreign)))
+        self._write(tmp_path, cfg)
+
+        claude.install(tmp_path)
+        assert foreign in self._settings(tmp_path)["hooks"]["PreCompact"]
+
+    def test_claude_foreign_sync_memory_hook_survives_install(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        claude.install(tmp_path)
+
+        foreign = {"hooks": [{"type": "command", "command": "python3 ~/bin/sync_memory.py"}]}
+        cfg = self._settings(tmp_path)
+        cfg["hooks"]["SessionEnd"].append(_json.loads(_json.dumps(foreign)))
+        self._write(tmp_path, cfg)
+
+        claude.install(tmp_path)
+        assert foreign in self._settings(tmp_path)["hooks"]["SessionEnd"]
+
+    def test_codex_foreign_marker_bearing_group_survives_install(self, tmp_path, monkeypatch):
+        from contexer.adapters import codex
+        self._isolate(tmp_path, monkeypatch)
+        codex.install(tmp_path)
+
+        foreign = {"hooks": [{"type": "command",
+                              "command": "python3 ~/bin/log.py --tag claude.rationale"}]}
+        cfg = self._settings(tmp_path, ".codex/hooks.json")
+        cfg["hooks"]["UserPromptSubmit"].append(_json.loads(_json.dumps(foreign)))
+        self._write(tmp_path, cfg, ".codex/hooks.json")
+
+        codex.install(tmp_path)
+        assert foreign in self._settings(tmp_path, ".codex/hooks.json")["hooks"]["UserPromptSubmit"]
+
+    def test_cursor_foreign_marker_bearing_hook_survives_install(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        cursor.install(tmp_path)
+
+        foreign = {"type": "command", "command": 'echo "cursor.session_start fired"'}
+        cfg = self._settings(tmp_path, ".cursor/hooks.json")
+        cfg["hooks"]["sessionStart"].append(dict(foreign))
+        self._write(tmp_path, cfg, ".cursor/hooks.json")
+
+        cursor.install(tmp_path)
+        assert foreign in self._settings(tmp_path, ".cursor/hooks.json")["hooks"]["sessionStart"]
+
+    # --- 2. our own stale hooks still converge -------------------------------------
+
+    def test_claude_stale_own_hooks_still_converge(self, tmp_path, monkeypatch):
+        """The property the convergence exists for: a config downgraded to the pre-`-P`
+        command self-heals on a plain reinstall, with no duplicate stacked beside it."""
+        self._isolate(tmp_path, monkeypatch)
+        claude.install(tmp_path)
+
+        cfg = self._settings(tmp_path)
+        for groups in cfg["hooks"].values():
+            for grp in groups:
+                for h in grp.get("hooks", []):
+                    if isinstance(h.get("command"), str):
+                        h["command"] = h["command"].replace('" -P -c "', '" -c "')
+        self._write(tmp_path, cfg)
+
+        claude.install(tmp_path)
+        cmds = [c for groups in self._settings(tmp_path)["hooks"].values()
+                for c in self._cmds(groups) if isinstance(c, str)]
+        assert not [c for c in cmds if '" -c "' in c], "a pre--P command survived reinstall"
+        assert len(cmds) == len(set(cmds)), "reinstall stacked a duplicate hook"
+
+    def test_cursor_stale_own_hook_still_converges(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        cursor.install(tmp_path)
+
+        cfg = self._settings(tmp_path, ".cursor/hooks.json")
+        for h in cfg["hooks"]["sessionStart"]:
+            h["command"] = h["command"].replace('" -P -c "', '" -c "')
+        self._write(tmp_path, cfg, ".cursor/hooks.json")
+
+        cursor.install(tmp_path)
+        ss = self._settings(tmp_path, ".cursor/hooks.json")["hooks"]["sessionStart"]
+        cmds = [h["command"] for h in ss]
+        assert not [c for c in cmds if '" -c "' in c]
+        assert len(cmds) == len(set(cmds))
+
+    # --- 3. hand-edited shapes abort nothing ---------------------------------------
+
+    def test_claude_install_tolerates_a_null_command_hook(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        claude.install(tmp_path)
+
+        odd = {"hooks": [{"type": "command", "command": None}]}
+        cfg = self._settings(tmp_path)
+        cfg["hooks"]["SessionStart"].append(_json.loads(_json.dumps(odd)))
+        self._write(tmp_path, cfg)
+
+        claude.install(tmp_path)          # must not raise
+        assert odd in self._settings(tmp_path)["hooks"]["SessionStart"]
+
+    def test_cursor_install_tolerates_null_command_and_non_dict_hooks(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        cursor.install(tmp_path)
+
+        cfg = self._settings(tmp_path, ".cursor/hooks.json")
+        cfg["hooks"]["sessionStart"].extend([{"type": "command", "command": None}, "junk"])
+        self._write(tmp_path, cfg, ".cursor/hooks.json")
+
+        cursor.install(tmp_path)          # must not raise
+        ss = self._settings(tmp_path, ".cursor/hooks.json")["hooks"]["sessionStart"]
+        assert {"type": "command", "command": None} in ss and "junk" in ss

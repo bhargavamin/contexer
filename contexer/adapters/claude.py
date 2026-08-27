@@ -679,10 +679,10 @@ def install(home: Path) -> list[str]:
         hooks["SessionStart"] = ss
     # Converge on the exact current command (`_strip_stale`, the gemini.py "Fix 2" shape):
     # the marker gates above only know the historical shapes somebody enumerated, and a
-    # drift they don't name — the -P flag (without which `python -c` prepends cwd to
+    # drift they don't name - the -P flag (without which `python -c` prepends cwd to
     # sys.path, so a session opened at the root of a checked-out contexer repo shadows the
     # installed package with that repo's own contexer/ source: stale code, or a crash on a
-    # signature the shadowed copy predates) — left every installed hook running the old
+    # signature the shadowed copy predates) - left every installed hook running the old
     # command forever while install reported success.
     ss = _strip_stale(ss, ["get_session_start_context"], _py(ss_code))
     hooks["SessionStart"] = ss
@@ -840,7 +840,7 @@ def install(home: Path) -> list[str]:
 
     # Migrate: these four hooks predating -P (see the post_write migration above for why
     # cwd-shadowing an older contexer/ source directory matters) had no prior upgrade path
-    # at all — each ran unchanged from first install until now, so this is their first.
+    # at all - each ran unchanged from first install until now, so this is their first.
     # `_strip_stale`, not a marker-presence check: `ups` holds several distinct hooks in
     # one list (boot_code among them, migrated above), and `_in_groups(ups, "-P -c")`
     # would read as globally satisfied the moment ANY one of them picks up -P, leaving
