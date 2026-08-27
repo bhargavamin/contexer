@@ -1673,6 +1673,20 @@ class TestConstraintNoiseGuards:
         text = "I got this issue now ```\nError: you must always set repo_path\n```"
         assert store._is_prescriptive_constraint(text)[0] is False
 
+    def test_harness_usage_limit_notice_is_not_a_constraint(self):
+        # Claude Code injects this as untagged user-turn text on every limit reset;
+        # its "do not repeat work" clause trips the prohibition trigger and it was
+        # captured as a trusted constraint twice on a real machine.
+        text = ("Your claude.ai usage limit has reset. Continue the task you were "
+                "working on when the limit was reached; do not repeat work that is "
+                "already complete")
+        assert store._is_prescriptive_constraint(text)[0] is False
+
+    def test_usage_limit_prose_from_the_user_still_captured(self):
+        # the prefix is harness-specific; a user rule mentioning limits stays a directive
+        assert store._is_prescriptive_constraint(
+            "never retry a request after the usage limit is hit")[0] is True
+
     def test_short_genuine_directive_still_captured(self):
         # the guards must not break real directive capture
         assert store._is_prescriptive_constraint("always use conventional commits") == (True, "constraint")
