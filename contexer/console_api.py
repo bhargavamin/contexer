@@ -546,7 +546,10 @@ def session_transcript(repo_path: str, session_id: str) -> dict | None:
     counts), `pending`, `open_conflict`, and `anchor_commit` (not on `_console_summary`, which
     stays cheap for the console's 10-second poll). `open` is also returned as its own list, in
     the same oldest-first order, so the console can pin those rows at the top."""
-    if session_id == "memory-sync":
+    if session_id == "memory-sync" or not session_id:
+        # An empty id is not "unknown" by the prefix rule below - `"".startswith("")` is True
+        # for every session, so without this it would silently pick whichever session a
+        # `set` happens to iterate first instead of reporting "no such session".
         return None
     data, _error, _mtime = _read_store(repo_path)
     entries = [e for e in data.get("entries", []) if e.get("type") == "decision"

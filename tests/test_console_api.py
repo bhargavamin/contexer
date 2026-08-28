@@ -392,6 +392,12 @@ class TestSessionTranscript:
         _seed(tmp_repo, "A decision", "s1")
         assert console_api.session_transcript(tmp_repo, "not-a-real-session") is None
 
+    def test_empty_session_id_is_none_not_an_arbitrary_session(self, tmp_repo):
+        # Every session id "starts with" "" - the prefix-match fallback must not treat an
+        # empty id as a vacuous match for whichever session a set happens to iterate first.
+        _seed(tmp_repo, "A decision", "s1")
+        assert console_api.session_transcript(tmp_repo, "") is None
+
     def test_memory_sync_literal_is_none(self, tmp_repo):
         _seed(tmp_repo, "Imported fact", "memory-sync", memory_key="claude-memory:foo.md#S",
              created_by="memory")
