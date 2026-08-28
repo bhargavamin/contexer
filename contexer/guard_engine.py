@@ -1086,8 +1086,48 @@ def guard_candidates(repo_path: str, paths: list[str] | None = None, explain: bo
 # (nothing here is ever surfaced repeatedly at commit time, so there is
 # nothing to suppress). Every non-ignored entry of BOTH stores participates.
 
+def _parse_iso(ts: str) -> datetime | None:
+    """Offset-aware datetime from an ISO string, None on garbage. Store stamps are
+    +00:00 while git %aI/%cI carry local offsets, so STRING comparison across the
+    two lies by up to a day — every timestamp comparison here parses first."""
+    try:
+        parsed = datetime.fromisoformat(ts)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def temporal_authority(entry: dict, window_start: str, window_end: str) -> str:
+    """Was this decision governing law for work done in [window_start, window_end]?
+
+    'prior'      — captured before the window opened: real prior authority.
+    'concurrent' — captured inside the window: the work documenting ITSELF
+                   (evidence of intent, never governance — the self-capture trap
+                   the 2026-08-27 falsification test hit on 5 of 24 PRs).
+    'retroactive'— captured after the window closed: can describe the work,
+                   cannot have governed it (the #122 supersession miss: successor
+                   approved ~1min after the merge it names).
+
+    Capture time = the earliest of entry.timestamp and the first revision's
+    created_at. Unparseable timestamps degrade to 'prior' — the pre-existing
+    behavior — so bookkeeping damage never silently demotes a real decision."""
+    stamps = [entry.get("timestamp") or ""]
+    stamps += [r.get("created_at") or "" for r in (entry.get("revisions") or [])]
+    parsed = [p for p in (_parse_iso(s) for s in stamps if s) if p]
+    start, end = _parse_iso(window_start), _parse_iso(window_end)
+    if not parsed or not start or not end:
+        return "prior"
+    born = min(parsed)
+    if born > end:
+        return "retroactive"
+    if born >= start:
+        return "concurrent"
+    return "prior"
+
+
 def decisions_for_files(repo_path: str, files: list[str],
-                         decisions: list[dict] | None = None) -> list[dict]:
+                         decisions: list[dict] | None = None,
+                         commit_window: tuple[str, str] | None = None) -> list[dict]:
     """Which stored decisions govern the given files: `[{decision_id, title, status,
     scope, files_matched, reason}]`, one entry per matching decision. `files` may be
     repo-relative or absolute; each is canonicalized via `_guard_relpath` and any
@@ -1113,6 +1153,20 @@ def decisions_for_files(repo_path: str, files: list[str],
 
     `decisions=` overrides BOTH loaded stores with the given list (tagged
     scope="personal"), the same extension point `_guard_pairs` offers.
+
+    `commit_window=(start_iso, end_iso)` — for reviewing work done in a known time
+    span (a PR's first commit -> merge): each hit gains an `authority` field from
+    `temporal_authority`, so a caller can separate prior governance from the
+    work's own self-capture ('concurrent') or a post-hoc record ('retroactive').
+    Nothing is dropped — tagging only, the caller decides. Validated on the
+    24-PR applicability benchmark (benchmarks/applicability/): filtering to
+    'prior' removed 7 false pairings at ZERO true-positive cost. A title-token
+    second-signal gate was tried in the same change and REJECTED by the same
+    benchmark (dropped 3 real hits on large diffs while denting noise by ~7%);
+    it lives on only as an experimental variant inside the benchmark runner.
+
+    Default None -> output byte-identical to the previous shape (no new key),
+    so no current caller changes behavior.
 
     Fail-soft: any exception -> []."""
     try:
@@ -1157,15 +1211,153 @@ def decisions_for_files(repo_path: str, files: list[str],
                 reason = ("source_files match"
                           if any(r == "source_files match" for r in matched.values())
                           else matched[files_matched[0]])
-                hits.append({
+                hit = {
                     "decision_id": decision_id,
                     "title": title,
                     "status": store.entry_status(entry),
                     "scope": scope,
                     "files_matched": files_matched,
                     "reason": reason,
-                })
+                }
+                if commit_window is not None:
+                    hit["authority"] = temporal_authority(entry, *commit_window)
+                hits.append(hit)
         return hits
     except Exception:
         return []
+
+
+# Ranked applicability (issue: hub-file over-fire). Both constants are MEASURED on the
+# 24-PR oracle (benchmarks/applicability/diagnose.py, 2026-08-28), not tuned: strong=3
+# matched mechanical recall at 3.2x its precision; a BM25 pool of 10 reached 25/45 GT
+# decisions where the mechanical lane alone reached 16. Do not adjust either without a
+# held-out corpus (docs/internal/applicability-redteam-2026-08-28.md section 6).
+_RANK_STRONG = 3
+_RANK_BM25_POOL = 10
+
+
+def rank_applicable(repo_path: str, files: list[str], change_text: str,
+                    decisions: list[dict] | None = None,
+                    commit_window: tuple[str, str] | None = None) -> dict:
+    """Tiered applicability: `{"strong": [...], "candidates": [...]}` — rank, never filter.
+
+    Two lanes over the same stores `decisions_for_files` reads:
+
+    * the mechanical lane — `decisions_for_files(files)` verbatim, every hit KEPT
+      (an anchor match can never be ranked out of existence: 4 of the benchmark's
+      16 true mechanical hits sit at BM25 ranks 22-74, so a hard cap would lose them);
+    * a BM25 lane — `change_text` tokenized as the query and scored against every
+      non-ignored decision's content, catching decisions that govern the change
+      without sharing a file signal. Pass INTENT PROSE ahead of the diff when the
+      caller has it (a PR's title+description, a commit message): decisions are
+      written in intent vocabulary, and the frozen-corpus measurement gained 2 TPs
+      (strong recall 31.11% -> 35.56%) from exactly that prefix.
+
+    `strong` is drawn from the top `_RANK_STRONG` ranks ONLY (prior-authority required
+    when `commit_window` is given — a concurrent/retroactive capture never leads, the
+    fix-1 principle — and a skipped rank is NOT backfilled from deeper in the ranking:
+    an under-full strong tier is honest, a promoted weak hit is not); each hit carries
+    `bm25_rank` and, when it also matched mechanically, the mechanical
+    `files_matched`/`reason`. `candidates` is everything else from
+    either lane — the full mechanical hit list plus BM25 ranks down to
+    `_RANK_BM25_POOL` — ordered by BM25 rank with rank-less mechanical hits last.
+    Nothing from either lane is dropped; the caller renders strong in full and
+    candidates as one-liners (the prompt router's STRONG/pointer ladder shape).
+
+    Empty/unscoreable `change_text` -> `strong` is empty and `candidates` is exactly
+    the mechanical hits: the BM25 lane degrades to absence, never to a guess.
+
+    Fail-soft: any exception -> both tiers empty."""
+    try:
+        mechanical = decisions_for_files(repo_path, files, decisions=decisions,
+                                         commit_window=commit_window)
+        if decisions is not None:
+            pools: list[tuple[list[dict], str]] = [(decisions, "personal")]
+        else:
+            pools = [(store._load(repo_path).get("entries") or [], "personal"),
+                     (store._load_global().get("entries") or [], "global")]
+
+        # Index shape mirrors store._build_retrieval_index (production parity: one index
+        # shape in the product): tf over the CURRENT content only — title stays metadata,
+        # an open conflict's proposal terms fold in — and the query double-weights
+        # path/module artifacts exactly as get_context_for_prompt does. On the frozen
+        # corpus, parity measured within label noise (-1 TP) of a title-in-tf draft and
+        # +2 TP once the query carries intent prose; self-consistency breaks the tie.
+        from contexer import conflicts, retrieval
+        docs: dict[str, dict] = {}
+        meta: dict[str, tuple[dict, str, str]] = {}  # id -> (entry, scope, title)
+        df: dict[str, int] = {}
+        for entries, scope in pools:
+            for entry in entries:
+                if entry.get("type") != "decision" or store._entry_status(entry) == "ignored":
+                    continue
+                did = entry.get("id", "")
+                if not did or did in docs:
+                    continue
+                rev = store._current_revision(entry)
+                content = rev.get("content", "") if rev else entry.get("content", "")
+                title = entry.get("title") or store._derive_title(content)
+                prop = ((entry.get("proposed_revision") or {}).get("content", "")
+                        if conflicts._has_open_conflict(entry) else "")
+                toks = retrieval.index_tokens(f"{content} {prop}" if prop else content)
+                tf: dict[str, int] = {}
+                for t in toks:
+                    tf[t] = tf.get(t, 0) + 1
+                docs[did] = {"tf": tf, "len": len(toks)}
+                for t in tf:
+                    df[t] = df.get(t, 0) + 1
+                meta[did] = (entry, scope, title)
+        n_docs = len(docs)
+        avgdl = (sum(d["len"] for d in docs.values()) / n_docs) if n_docs else 0.0
+        index = {"docs": docs, "df": df, "n_docs": n_docs, "avgdl": avgdl}
+
+        query = retrieval.index_tokens(change_text or "")
+        query += retrieval.extract_artifacts(change_text or "")
+        ranked = retrieval.bm25_rank(query, index) if query else []
+        rank_of = {did: i + 1 for i, (did, _, _, _) in enumerate(ranked)}
+        # First-wins on a duplicated id (repo + global can share one, e.g. the
+        # memory-sync sentinel): personal-store hits precede global in `mechanical`,
+        # so the more specific hit's files_matched/reason is the one kept.
+        mech_by_id: dict[str, dict] = {}
+        for h in mechanical:
+            mech_by_id.setdefault(h["decision_id"], h)
+
+        def as_hit(did: str) -> dict:
+            base = mech_by_id.get(did)
+            if base is None:
+                entry, scope, title = meta[did]
+                base = {"decision_id": did, "title": title,
+                        "status": store._entry_status(entry), "scope": scope,
+                        "files_matched": [], "reason": "bm25"}
+                if commit_window is not None:
+                    base["authority"] = temporal_authority(entry, *commit_window)
+            hit = dict(base)
+            if did in rank_of:
+                hit["bm25_rank"] = rank_of[did]
+            return hit
+
+        # Strong draws ONLY from the top _RANK_STRONG ranks — a non-prior hit there is
+        # skipped to candidates, never backfilled from deeper ranks (review F1: deep
+        # scanning promoted a rank-12 doc on one shared common token, an unmeasured
+        # path; an under-full strong tier is honest, a promoted weak hit is not).
+        strong: list[dict] = []
+        for did, _score, _hits, _dhits in ranked[:_RANK_STRONG]:
+            hit = as_hit(did)
+            if commit_window is not None and hit.get("authority") != "prior":
+                continue
+            strong.append(hit)
+        strong_ids = {h["decision_id"] for h in strong}
+
+        seen = set(strong_ids)
+        pool_ids: list[str] = []
+        for did in ([d for d, *_ in ranked[:_RANK_BM25_POOL]]
+                    + [h["decision_id"] for h in mechanical]):
+            if did not in seen:
+                seen.add(did)
+                pool_ids.append(did)
+        candidates = sorted((as_hit(d) for d in pool_ids),
+                            key=lambda h: h.get("bm25_rank", 10 ** 6))
+        return {"strong": strong, "candidates": candidates}
+    except Exception:
+        return {"strong": [], "candidates": []}
 

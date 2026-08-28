@@ -1498,6 +1498,195 @@ class TestDecisionsForFiles:
 
 # ── anchor_candidates_for_backfill (Task 1 of #175) ───────────────────────────
 
+class TestTemporalAuthority:
+    """temporal_authority + the commit_window tagging on decisions_for_files.
+
+    The failure class this pins (24-PR falsification test, 2026-08-27, and the
+    applicability benchmark in benchmarks/applicability/): a decision captured
+    DURING the PR it supposedly governs — or after its merge — read back as
+    prior authority. 5 of 24 real PRs hit it; filtering to 'prior' removed 7
+    false pairings at zero true-positive cost on the same benchmark."""
+
+    W_START = "2026-08-08T10:00:00+00:00"
+    W_END = "2026-08-08T20:00:00+00:00"
+
+    def _entry(self, ts, rev_ts=None):
+        revs = [{"created_at": rev_ts}] if rev_ts else []
+        return {"timestamp": ts, "revisions": revs}
+
+    def test_prior(self):
+        e = self._entry("2026-08-01T12:00:00+00:00")
+        assert guard_engine.temporal_authority(e, self.W_START, self.W_END) == "prior"
+
+    def test_concurrent_self_capture(self):
+        e = self._entry("2026-08-08T15:00:00+00:00")
+        assert guard_engine.temporal_authority(e, self.W_START, self.W_END) == "concurrent"
+
+    def test_retroactive(self):
+        # the #122 shape: successor decision captured ~1min after the merge it names
+        e = self._entry("2026-08-08T20:01:00+00:00")
+        assert guard_engine.temporal_authority(e, self.W_START, self.W_END) == "retroactive"
+
+    def test_offsets_compared_as_instants_not_strings(self):
+        # window end 21:58+02:00 == 19:58 UTC; a 20:04+00:00 capture is AFTER it.
+        # A string comparison says "20:04" < "21:58" -> wrongly concurrent.
+        e = self._entry("2026-08-08T20:04:00+00:00")
+        assert guard_engine.temporal_authority(
+            e, "2026-08-08T12:00:00+02:00", "2026-08-08T21:58:00+02:00") == "retroactive"
+
+    def test_earliest_revision_wins_over_entry_timestamp(self):
+        # rewritten entry.timestamp must not launder an old decision into the window
+        e = self._entry("2026-08-08T15:00:00+00:00", rev_ts="2026-08-01T09:00:00+00:00")
+        assert guard_engine.temporal_authority(e, self.W_START, self.W_END) == "prior"
+
+    def test_no_timestamps_degrades_to_prior(self):
+        # strip mutation: bookkeeping damage must not silently demote a decision —
+        # 'prior' is the pre-commit_window behavior for every entry.
+        assert guard_engine.temporal_authority({}, self.W_START, self.W_END) == "prior"
+        assert guard_engine.temporal_authority(
+            {"timestamp": "not-a-date", "revisions": []}, self.W_START, self.W_END) == "prior"
+
+    def test_default_call_shape_unchanged(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        hits = guard_engine.decisions_for_files(str(repo), ["auth/jwt.py"])
+        assert len(hits) == 1
+        assert "authority" not in hits[0]
+
+    def test_commit_window_tags_hits(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        # seeded entry's timestamp is "now"; a window ending before it -> retroactive,
+        # a window opening after it would be prior. Use a past window: retroactive.
+        hits = guard_engine.decisions_for_files(
+            str(repo), ["auth/jwt.py"],
+            commit_window=("2020-01-01T00:00:00+00:00", "2020-01-02T00:00:00+00:00"))
+        assert len(hits) == 1
+        assert hits[0]["authority"] == "retroactive"
+        # and a window that hasn't closed yet -> the capture is inside it: concurrent
+        hits = guard_engine.decisions_for_files(
+            str(repo), ["auth/jwt.py"],
+            commit_window=("2020-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"))
+        assert hits[0]["authority"] == "concurrent"
+
+
+class TestRankApplicable:
+    """rank_applicable: the tiered BM25-over-change + mechanical union.
+
+    Pins the two rules the 24-PR oracle earned (docs/internal/
+    applicability-redteam-2026-08-28.md section 7): a mechanical anchor hit is
+    NEVER discarded by ranking (4 of 16 real hits ranked 22-74), and the strong
+    tier is led by BM25 with prior-authority required when a window is given."""
+
+    def test_bm25_reaches_decision_with_no_file_signal(self, repo):
+        _seed_entry(repo, "Serve argon2id password hashing from the login service "
+                          "because bcrypt truncates at 72 bytes")
+        tiers = guard_engine.rank_applicable(
+            str(repo), [], "switch signup flow to argon2id hashing")
+        assert [h["reason"] for h in tiers["strong"]] == ["bm25"]
+        assert tiers["strong"][0]["bm25_rank"] == 1
+        assert tiers["strong"][0]["files_matched"] == []
+
+    def test_mechanical_hit_with_zero_term_overlap_survives_in_candidates(self, repo):
+        anchored = _seed_entry(repo, "Decided to use JWT for auth",
+                               source_files=["auth/jwt.py"])
+        _seed_entry(repo, "Serve argon2id password hashing from the login service")
+        tiers = guard_engine.rank_applicable(
+            str(repo), ["auth/jwt.py"], "switch signup flow to argon2id hashing")
+        everything = tiers["strong"] + tiers["candidates"]
+        kept = [h for h in everything if h["decision_id"] == anchored["id"]]
+        assert kept and kept[0]["reason"] == "source_files match"
+        assert "bm25_rank" not in kept[0]          # zero overlap: rank-less, sorted last
+        assert everything[-1]["decision_id"] == anchored["id"]
+
+    def test_strong_caps_at_three_and_drops_nothing(self, repo):
+        ids = {_seed_entry(repo, f"Rely on argon2id hashing variant number "
+                                 f"{'unique' * (i + 1)}")["id"] for i in range(5)}
+        tiers = guard_engine.rank_applicable(str(repo), [], "argon2id hashing rollout")
+        assert len(tiers["strong"]) == 3
+        surfaced = {h["decision_id"] for h in tiers["strong"] + tiers["candidates"]}
+        assert ids <= surfaced                     # rank, never filter
+
+    def test_empty_change_text_degrades_to_mechanical_only(self, repo):
+        _seed_entry(repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
+        tiers = guard_engine.rank_applicable(str(repo), ["auth/jwt.py"], "")
+        assert tiers["strong"] == []
+        assert [h["reason"] for h in tiers["candidates"]] == ["source_files match"]
+
+    def test_ignored_decision_invisible_to_both_lanes(self, repo):
+        _seed_entry(repo, "Serve argon2id password hashing from the login service",
+                    status="ignored", source_files=["auth/hash.py"])
+        tiers = guard_engine.rank_applicable(
+            str(repo), ["auth/hash.py"], "switch signup flow to argon2id hashing")
+        assert tiers == {"strong": [], "candidates": []}
+
+    def test_non_prior_capture_never_leads_strong(self, repo):
+        # seeded entry's timestamp is "now"; a past window makes it retroactive.
+        _seed_entry(repo, "Serve argon2id password hashing from the login service")
+        tiers = guard_engine.rank_applicable(
+            str(repo), [], "switch signup flow to argon2id hashing",
+            commit_window=("2020-01-01T00:00:00+00:00", "2020-01-02T00:00:00+00:00"))
+        assert tiers["strong"] == []
+        assert [h["authority"] for h in tiers["candidates"]] == ["retroactive"]
+
+    def test_dual_lane_hit_carries_both_signals(self, repo):
+        _seed_entry(repo, "Serve argon2id password hashing from auth/hash.py",
+                    source_files=["auth/hash.py"])
+        tiers = guard_engine.rank_applicable(
+            str(repo), ["auth/hash.py"], "switch signup flow to argon2id hashing")
+        assert tiers["strong"][0]["reason"] == "source_files match"
+        assert tiers["strong"][0]["files_matched"] == ["auth/hash.py"]
+        assert tiers["strong"][0]["bm25_rank"] == 1
+
+    def test_fail_soft_returns_empty_tiers(self, repo, monkeypatch):
+        _seed_entry(repo, "Serve argon2id password hashing from the login service")
+        monkeypatch.setattr("contexer.retrieval.bm25_rank",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        tiers = guard_engine.rank_applicable(str(repo), [], "argon2id hashing")
+        assert tiers == {"strong": [], "candidates": []}
+
+    @staticmethod
+    def _entry_at(content, ts):
+        e = store._new_decision_entry(content, "s", "architecture",
+                                      created_by="human", status="approved")
+        e["timestamp"] = ts
+        for r in e["revisions"]:
+            r["created_at"] = ts
+        return e
+
+    def test_skipped_non_prior_rank_is_never_backfilled_from_deeper_ranks(self):
+        # Review F1 repro: top ranks all non-prior + one weakly-matching prior doc
+        # deeper down. The prior doc must NOT be promoted into strong on the strength
+        # of one shared token — strong runs under-full and the doc stays a candidate.
+        window = ("2020-06-01T00:00:00+00:00", "2020-06-02T00:00:00+00:00")
+        entries = [self._entry_at(
+            f"Rely on argon2id hashing for credentials {'filler' * i}",
+            "2020-06-01T12:00:00+00:00") for i in range(3)]          # concurrent
+        weak_prior = self._entry_at(
+            "Ship the billing ledger export nightly with argon2id nowhere near it",
+            "2019-01-01T00:00:00+00:00")                              # prior, weak match
+        tiers = guard_engine.rank_applicable(
+            "/nonexistent", [], "argon2id hashing rollout",
+            decisions=entries + [weak_prior], commit_window=window)
+        assert tiers["strong"] == []
+        cand_ids = [h["decision_id"] for h in tiers["candidates"]]
+        assert weak_prior["id"] in cand_ids
+
+    def test_duplicate_decision_id_across_hits_yields_one_row_first_hit_wins(self):
+        # Review F2 repro: one id emitting two mechanical hits (repo+global share an
+        # id, e.g. the memory-sync sentinel). Pre-fix this produced duplicate rows
+        # both cloned from the LAST hit, erasing the first hit's files_matched.
+        first = self._entry_at("Decided to use JWT for auth", "2019-01-01T00:00:00+00:00")
+        second = dict(self._entry_at("Decided to use JWT for auth elsewhere",
+                                     "2019-01-01T00:00:00+00:00"), id=first["id"])
+        first["source_files"] = ["auth/jwt.py"]
+        second["source_files"] = ["auth/other.py"]
+        tiers = guard_engine.rank_applicable(
+            "/nonexistent", ["auth/jwt.py", "auth/other.py"], "",
+            decisions=[first, second])
+        rows = [h for h in tiers["candidates"] if h["decision_id"] == first["id"]]
+        assert len(rows) == 1
+        assert rows[0]["files_matched"] == ["auth/jwt.py"]
+
+
 class TestAnchorCandidatesForBackfill:
     def test_trusted_unanchored_content_path_candidate(self, repo):
         _write(repo, "auth/jwt.py", "token = 0\n")
