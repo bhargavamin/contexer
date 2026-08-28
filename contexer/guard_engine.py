@@ -1274,8 +1274,8 @@ def rank_applicable(repo_path: str, files: list[str], change_text: str,
         if decisions is not None:
             pools: list[tuple[list[dict], str]] = [(decisions, "personal")]
         else:
-            pools = [(store._load(repo_path).get("entries") or [], "personal"),
-                     (store._load_global().get("entries") or [], "global")]
+            pools = [(store.load(repo_path).get("entries") or [], "personal"),
+                     (store.load_global().get("entries") or [], "global")]
 
         # Index shape mirrors store._build_retrieval_index (production parity: one index
         # shape in the product): tf over the CURRENT content only — title stays metadata,
@@ -1289,14 +1289,14 @@ def rank_applicable(repo_path: str, files: list[str], change_text: str,
         df: dict[str, int] = {}
         for entries, scope in pools:
             for entry in entries:
-                if entry.get("type") != "decision" or store._entry_status(entry) == "ignored":
+                if entry.get("type") != "decision" or store.entry_status(entry) == "ignored":
                     continue
                 did = entry.get("id", "")
                 if not did or did in docs:
                     continue
-                rev = store._current_revision(entry)
+                rev = revisions.current_revision(entry)
                 content = rev.get("content", "") if rev else entry.get("content", "")
-                title = entry.get("title") or store._derive_title(content)
+                title = entry.get("title") or revisions.derive_title(content)
                 prop = ((entry.get("proposed_revision") or {}).get("content", "")
                         if conflicts._has_open_conflict(entry) else "")
                 toks = retrieval.index_tokens(f"{content} {prop}" if prop else content)
@@ -1327,7 +1327,7 @@ def rank_applicable(repo_path: str, files: list[str], change_text: str,
             if base is None:
                 entry, scope, title = meta[did]
                 base = {"decision_id": did, "title": title,
-                        "status": store._entry_status(entry), "scope": scope,
+                        "status": store.entry_status(entry), "scope": scope,
                         "files_matched": [], "reason": "bm25"}
                 if commit_window is not None:
                     base["authority"] = temporal_authority(entry, *commit_window)
