@@ -23,6 +23,7 @@ import ast
 import pathlib
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -196,3 +197,219 @@ class TestCallTimeResolution:
         ok, message = console_api.delete_global_rule(rules["rules"][0]["id"])
         assert ok, message
         assert console_api.list_global_rules()["rules"] == []
+
+
+# ── list_sessions / session_transcript (issue #256) ─────────────────────────────────────
+
+def _seed(repo: str, content: str, session_id: str, subtype: str = "architecture", *,
+         status: str = "approved", ts: str | None = None, memory_key: str | None = None,
+         created_by: str = "ai") -> str:
+    """Build one decision entry with exact control over session_id/status/timestamp -
+    `update_decision`'s public path routes through novelty filtering and status
+    classification, neither of which these tests want to fight (borrowed pattern:
+    test_guard_engine.py's `_entry_at`)."""
+    entry = store._new_decision_entry(content, session_id, subtype, created_by=created_by,
+                                      status=status, memory_key=memory_key)
+    if not session_id:
+        del entry["session_id"]
+    if ts is not None:
+        entry["timestamp"] = ts
+        entry["updated_at"] = ts
+    data = store.load(repo)
+    data["entries"].append(entry)
+    store.save(repo, data)
+    return entry["id"]
+
+
+def _seed_conflict(repo: str, session_id: str, standing: str, update: str,
+                   subtype: str = "architecture") -> str:
+    """An approved decision carrying a real (non-bookkeeping) Suggested Update, originated by
+    `session_id` - the shape `has_open_conflict` renders as open (borrowed pattern:
+    test_conflicts.py's `_conflicted`)."""
+    store.update_decision(repo, standing, session_id, subtype)
+    data = store.load(repo)
+    entry = next(e for e in data["entries"] if e["content"].startswith(standing[:20]))
+    entry["status"] = "approved"
+    store.save(repo, data)
+    eid = entry["id"]
+    ok, rid = store.update_decision(repo, update, session_id, subtype, replace_id=eid)
+    assert ok and rid == eid and store.entry_by_id(
+        store.load(repo)["entries"], eid).get("proposed_revision")
+    return eid
+
+
+class TestListSessions:
+    def test_groups_by_originating_session_only(self, tmp_repo):
+        # created by s1; a later session (s2) merely recurs the same content, which adds it
+        # to session_ids WITHOUT changing the entry's originating session_id.
+        eid = _seed(tmp_repo, "Use Postgres for the decision store", "s1")
+        data = store.load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        entry["session_ids"] = ["s1", "s2"]
+        store.save(tmp_repo, data)
+
+        rows = console_api.list_sessions(tmp_repo)["sessions"]
+        assert [r["session_id"] for r in rows] == ["s1"]
+        assert rows[0]["count"] == 1
+
+    def test_memory_sync_excluded_and_counted_separately(self, tmp_repo):
+        _seed(tmp_repo, "Never store plaintext passwords", "s1", subtype="constraint")
+        _seed(tmp_repo, "Imported fact from the memory tool", "memory-sync",
+             subtype="convention", memory_key="claude-memory:foo.md#Section",
+             created_by="memory")
+
+        result = console_api.list_sessions(tmp_repo)
+        assert result["total_decisions"] == 2
+        assert result["memory_import_count"] == 1
+        assert [r["session_id"] for r in result["sessions"]] == ["s1"]
+
+    def test_null_bucket_present_labeled_and_sorted_last(self, tmp_repo):
+        _seed(tmp_repo, "Use uv for dependency management", "s1",
+             subtype="convention", ts="2026-08-27T00:00:00+00:00")
+        # No session_id at all (predates session attribution) - and deliberately the NEWEST
+        # timestamp, to prove the null bucket sorts last regardless of its own activity.
+        _seed(tmp_repo, "Legacy decision with no session id", "", subtype="convention",
+             ts="2026-08-28T00:00:00+00:00")
+
+        rows = console_api.list_sessions(tmp_repo)["sessions"]
+        assert [r["session_id"] for r in rows] == ["s1", None]
+        assert rows[-1]["short_id"] == ""
+
+    def test_sessions_sorted_by_last_at_descending(self, tmp_repo):
+        _seed(tmp_repo, "Old decision", "s-old", ts="2026-08-01T00:00:00+00:00")
+        _seed(tmp_repo, "New decision", "s-new", ts="2026-08-20T00:00:00+00:00")
+        _seed(tmp_repo, "Middle decision", "s-mid", ts="2026-08-10T00:00:00+00:00")
+
+        rows = console_api.list_sessions(tmp_repo)["sessions"]
+        assert [r["session_id"] for r in rows] == ["s-new", "s-mid", "s-old"]
+
+    def test_first_at_and_last_at_span_the_session(self, tmp_repo):
+        _seed(tmp_repo, "First decision", "s1", ts="2026-08-01T00:00:00+00:00")
+        _seed(tmp_repo, "Second decision", "s1", ts="2026-08-15T00:00:00+00:00")
+
+        row = console_api.list_sessions(tmp_repo)["sessions"][0]
+        assert row["first_at"] == "2026-08-01T00:00:00+00:00"
+        assert row["last_at"] == "2026-08-15T00:00:00+00:00"
+        assert row["count"] == 2
+
+    def test_open_count_pending_and_conflict_not_bookkeeping(self, tmp_repo):
+        _seed(tmp_repo, "Never ship a migration without a rollback plan", "s1",
+             subtype="constraint", status="pending_approval")
+        _seed_conflict(tmp_repo, "s1",
+                      "Use Postgres for the decision store; SQLite won't handle concurrency",
+                      "Switch to DynamoDB for the decision store; Postgres is superseded")
+        bookkeeping_id = _seed(tmp_repo, "Config is expressed in TOML", "s1",
+                               subtype="convention")
+        data = store.load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == bookkeeping_id)
+        entry["proposed_revision"] = {
+            "content": "Config is expressed in YAML", "title": "", "source": "scan",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        store.save(tmp_repo, data)
+
+        row = console_api.list_sessions(tmp_repo)["sessions"][0]
+        assert row["count"] == 3
+        assert row["open_count"] == 2
+
+    def test_unreadable_store_fails_soft(self, tmp_repo):
+        store._store_path(tmp_repo).write_text('{"repo_path": "/x", "entries": [{"id": "1"',
+                                                encoding="utf-8")
+        assert console_api.list_sessions(tmp_repo) == {
+            "sessions": [], "memory_import_count": 0, "total_decisions": 0}
+
+
+class TestSessionTranscript:
+    def test_entries_ascend_by_timestamp_capture_order(self, tmp_repo):
+        old_id = _seed(tmp_repo, "Old decision", "s1", ts="2026-08-01T00:00:00+00:00")
+        new_id = _seed(tmp_repo, "New decision", "s1", ts="2026-08-10T00:00:00+00:00",
+                       status="pending_approval")
+
+        transcript = console_api.session_transcript(tmp_repo, "s1")
+        assert [e["id"] for e in transcript["entries"]] == [old_id, new_id]
+        assert transcript["count"] == 2
+        assert transcript["first_at"] == "2026-08-01T00:00:00+00:00"
+        assert transcript["last_at"] == "2026-08-10T00:00:00+00:00"
+
+    def test_open_pending_and_conflict_flags(self, tmp_repo):
+        pending_id = _seed(tmp_repo, "Never ship without a rollback plan", "s1",
+                           subtype="constraint", status="pending_approval",
+                           ts="2026-08-01T00:00:00+00:00")
+        conflict_id = _seed_conflict(
+            tmp_repo, "s1",
+            "Use Postgres for the decision store; SQLite won't handle concurrency",
+            "Switch to DynamoDB for the decision store; Postgres is superseded")
+        plain_id = _seed(tmp_repo, "Name test files test_<module>.py", "s1",
+                         subtype="convention", ts="2026-08-03T00:00:00+00:00")
+
+        transcript = console_api.session_transcript(tmp_repo, "s1")
+        rows = {r["id"]: r for r in transcript["entries"]}
+        assert rows[pending_id]["pending"] is True
+        assert rows[pending_id]["open"] is True
+        assert rows[pending_id]["open_conflict"] is False
+        assert rows[conflict_id]["open_conflict"] is True
+        assert rows[conflict_id]["open"] is True
+        assert rows[conflict_id]["pending"] is False
+        assert rows[plain_id]["open"] is False
+        assert [r["id"] for r in transcript["open"]] == [pending_id, conflict_id]
+
+    def test_bookkeeping_proposal_does_not_count_as_open(self, tmp_repo):
+        eid = _seed(tmp_repo, "Config is expressed in TOML", "s1", subtype="convention")
+        data = store.load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        entry["proposed_revision"] = {
+            "content": "Config is expressed in YAML", "title": "", "source": "scan",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        store.save(tmp_repo, data)
+
+        transcript = console_api.session_transcript(tmp_repo, "s1")
+        assert transcript["entries"][0]["open"] is False
+        assert transcript["entries"][0]["open_conflict"] is False
+        assert transcript["open"] == []
+
+    def test_anchor_commit_is_carried(self, tmp_repo):
+        eid = _seed(tmp_repo, "Use uv for dependency management", "s1", subtype="convention")
+        data = store.load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        entry["anchor_commit"] = "deadbeef"
+        store.save(tmp_repo, data)
+
+        transcript = console_api.session_transcript(tmp_repo, "s1")
+        assert transcript["entries"][0]["anchor_commit"] == "deadbeef"
+
+    def test_full_and_short_id_addressing(self, tmp_repo):
+        sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+        _seed(tmp_repo, "A decision", sid)
+
+        full = console_api.session_transcript(tmp_repo, sid)
+        short = console_api.session_transcript(tmp_repo, sid[:8])
+        assert full is not None and short is not None
+        assert full["session_id"] == sid == short["session_id"]
+        assert full["short_id"] == sid[:8] == short["short_id"]
+
+    def test_unknown_session_is_none(self, tmp_repo):
+        _seed(tmp_repo, "A decision", "s1")
+        assert console_api.session_transcript(tmp_repo, "not-a-real-session") is None
+
+    def test_memory_sync_literal_is_none(self, tmp_repo):
+        _seed(tmp_repo, "Imported fact", "memory-sync", memory_key="claude-memory:foo.md#S",
+             created_by="memory")
+        assert console_api.session_transcript(tmp_repo, "memory-sync") is None
+
+    def test_none_addresses_the_null_bucket(self, tmp_repo):
+        eid = _seed(tmp_repo, "Legacy decision with no session id", "")
+        transcript = console_api.session_transcript(tmp_repo, "none")
+        assert transcript is not None
+        assert transcript["session_id"] is None
+        assert transcript["short_id"] == ""
+        assert [e["id"] for e in transcript["entries"]] == [eid]
+
+    def test_none_with_no_null_bucket_entries_is_none(self, tmp_repo):
+        _seed(tmp_repo, "A decision", "s1")
+        assert console_api.session_transcript(tmp_repo, "none") is None
+
+    def test_unreadable_store_fails_soft(self, tmp_repo):
+        store._store_path(tmp_repo).write_text('{"repo_path": "/x", "entries": [{"id": "1"',
+                                                encoding="utf-8")
+        assert console_api.session_transcript(tmp_repo, "s1") is None

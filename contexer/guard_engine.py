@@ -1298,7 +1298,7 @@ def rank_applicable(repo_path: str, files: list[str], change_text: str,
                 content = rev.get("content", "") if rev else entry.get("content", "")
                 title = entry.get("title") or revisions.derive_title(content)
                 prop = ((entry.get("proposed_revision") or {}).get("content", "")
-                        if conflicts._has_open_conflict(entry) else "")
+                        if conflicts.has_open_conflict(entry) else "")
                 toks = retrieval.index_tokens(f"{content} {prop}" if prop else content)
                 tf: dict[str, int] = {}
                 for t in toks:

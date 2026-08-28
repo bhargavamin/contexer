@@ -337,6 +337,8 @@ def test_an_unknown_slug_is_a_404(console):
     assert read(console, "/api/store/does-not-exist").status == 404
     assert read(console, "/api/store/does-not-exist/decisions").status == 404
     assert read(console, "/api/team/does-not-exist").status == 404
+    assert read(console, "/api/store/does-not-exist/sessions").status == 404
+    assert read(console, "/api/store/does-not-exist/sessions/s1").status == 404
 
 
 # --- decision list ---------------------------------------------------------------------
@@ -442,6 +444,82 @@ def test_an_overlong_file_value_is_a_400(console, files_repo):
     value = "a" * (api.MAX_FILE_LEN + 1)
     reply = read(console, f"/api/store/{files_repo['slug']}/decisions?file={value}")
     assert reply.status == 400
+
+
+# --- sessions (issue #256) --------------------------------------------------------------
+
+def test_sessions_route_lists_one_row_per_originating_session(console, repo):
+    result = ok(console, f"/api/store/{repo['slug']}/sessions")
+    assert set(result) == {"sessions", "memory_import_count", "total_decisions"}
+    assert result["total_decisions"] == 3
+    assert result["memory_import_count"] == 0
+    assert [r["session_id"] for r in result["sessions"]] == ["s1"]
+    assert result["sessions"][0]["count"] == 3
+    # `pending` plus the `approved` decision's genuine (non-bookkeeping) proposed_revision.
+    assert result["sessions"][0]["open_count"] == 2
+
+
+def test_session_transcript_route_returns_the_originating_entries(console, repo):
+    transcript = ok(console, f"/api/store/{repo['slug']}/sessions/s1")
+    assert transcript["session_id"] == "s1"
+    assert transcript["count"] == 3
+    assert {e["id"] for e in transcript["entries"]} == {
+        repo["approved"], repo["pending"], repo["plain"]}
+    assert {e["id"] for e in transcript["open"]} == {repo["approved"], repo["pending"]}
+    conflicted = next(e for e in transcript["entries"] if e["id"] == repo["approved"])
+    assert conflicted["open_conflict"] is True and conflicted["pending"] is False
+    pending = next(e for e in transcript["entries"] if e["id"] == repo["pending"])
+    assert pending["pending"] is True and pending["open_conflict"] is False
+
+
+def test_session_transcript_route_resolves_a_short_id(console, tmp_path):
+    path = str(tmp_path / "sessions-widgets")
+    sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+    _ok, eid = store.update_decision(path, "Use uv for dependency management", sid,
+                                     subtype="convention", created_by="human")
+    slug = store.repo_slug(path)
+
+    full = ok(console, f"/api/store/{slug}/sessions/{sid}")
+    short = ok(console, f"/api/store/{slug}/sessions/{sid[:8]}")
+    assert full["session_id"] == short["session_id"] == sid
+    assert full["entries"][0]["id"] == eid
+
+
+def test_session_transcript_route_null_bucket_via_none(console, tmp_path):
+    path = str(tmp_path / "legacy-widgets")
+    data = store.load(path)
+    entry = store._new_decision_entry("Legacy decision with no session id", "s-legacy",
+                                      "convention", created_by="human", status="approved")
+    del entry["session_id"]
+    data["entries"].append(entry)
+    store.save(path, data)
+    slug = store.repo_slug(path)
+
+    transcript = ok(console, f"/api/store/{slug}/sessions/none")
+    assert transcript["session_id"] is None
+    assert transcript["entries"][0]["id"] == entry["id"]
+
+
+def test_session_transcript_route_unknown_session_is_a_404(console, repo):
+    assert read(console, f"/api/store/{repo['slug']}/sessions/not-a-real-session").status == 404
+
+
+def test_session_transcript_route_memory_sync_literal_is_a_404(console, tmp_path):
+    path = str(tmp_path / "memory-widgets")
+    data = store.load(path)
+    entry = store._new_decision_entry("Imported fact from the memory tool", "memory-sync",
+                                      "convention", created_by="memory", status="approved",
+                                      memory_key="claude-memory:foo.md#S")
+    data["entries"].append(entry)
+    store.save(path, data)
+    slug = store.repo_slug(path)
+    assert read(console, f"/api/store/{slug}/sessions/memory-sync").status == 404
+
+
+def test_sessions_routes_only_accept_get(console, repo):
+    assert write(console, "POST", f"/api/store/{repo['slug']}/sessions", body={}).status == 404
+    assert write(console, "POST", f"/api/store/{repo['slug']}/sessions/s1",
+                body={}).status == 404
 
 
 # --- decision detail -------------------------------------------------------------------

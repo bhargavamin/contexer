@@ -157,6 +157,15 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
             offset=_int_param(query, "offset", MAX_OFFSET),
         )
 
+    if rest == ["sessions"] and method == "GET":
+        return 200, console_api.list_sessions(repo_path)
+
+    if len(rest) == 2 and rest[0] == "sessions" and method == "GET":
+        transcript = console_api.session_transcript(repo_path, rest[1])
+        if transcript is None:
+            raise ApiError(404, "no such session")
+        return 200, transcript
+
     if rest == ["pull"] and method == "POST":
         return _pull(repo_path)
 
