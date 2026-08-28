@@ -183,7 +183,9 @@ def main() -> int:
                     drops.append(f"{repo}#{num}:{h['decision_id'][:8]} dropped by "
                                  f"authority={h.get('authority', 'prior')}/"
                                  f"tier={h.get('tier', 'governs')} | {h['title'][:60]}")
-        tp += pr_tp; fp += pr_fp; fn += pr_fn
+        tp += pr_tp
+        fp += pr_fp
+        fn += pr_fn
         rows.append((f"{repo}#{num}", pr_tp, pr_fp, pr_fn, len(gt_prior)))
 
         if args.rank:

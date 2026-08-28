@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -153,12 +153,12 @@ def main() -> int:
         running += n
         m = fp_meta[did]
         print(f"  {n:>3}  ({running/total_fp:>5.1%} cum)  {did[:8]}  [{m['reason'][:28]}] {m['title']}")
-    print(f"\ntop matched files (FP pairings attributed to that file):")
+    print("\ntop matched files (FP pairings attributed to that file):")
     for f, n in fp_by_file.most_common(10):
         print(f"  {n:>3}  {f}")
 
     # ---- report B -----------------------------------------------------------
-    print(f"\n== B. ranked-retrieval oracle (BM25 over title+content, diff as query) ==")
+    print("\n== B. ranked-retrieval oracle (BM25 over title+content, diff as query) ==")
     print(f"GT-prior denominator: {gt_total}; per-PR index sizes ~"
           f"{sorted({r[4] for r in fn_rows}) if fn_rows else 'n/a'} docs")
     for k in sorted(k_hits):
