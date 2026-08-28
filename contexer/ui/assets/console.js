@@ -1915,7 +1915,7 @@
             class: "muted",
             text:
               num(data.memory_import_count) +
-              " memory-imported decisions not shown — imports, not session activity.",
+              " memory-imported decisions not shown - imports, not session activity.",
           })
         : null;
 
