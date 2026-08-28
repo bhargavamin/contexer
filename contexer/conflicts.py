@@ -5,7 +5,7 @@ between the two is recorded.
 Extracted out of store.py (same directive that produced `anchors.py`: one module per cohesive
 concern, store.py stays a thin call-site facade). store.py keeps only the seams — the four
 render loops (`get_context`, `_render_prompt_decisions`, `_local_session_start_payload`,
-`_rehydrate_working_set`) call `_conflict_view`/`_has_open_conflict` and append `_CONFLICT_GUIDE`,
+`_rehydrate_working_set`) call `_conflict_view`/`has_open_conflict` and append `_CONFLICT_GUIDE`,
 `format_pending_review` calls `_conflict_pair_key` for its memo lines, and the two lifecycle
 sites (`_promote_proposal`, `_apply_approval`'s dismiss branch) pop `conflict_memo` directly.
 `record_conflict_memo` stays reachable as `store.record_conflict_memo` (server.py's
@@ -52,7 +52,7 @@ def _conflict_pair_key(entry: dict) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
-def _has_open_conflict(entry: dict) -> bool:
+def has_open_conflict(entry: dict) -> bool:
     """Whether a proposal renders as a conversational conflict (issue #193). Excludes
     bookkeeping proposals — a scan-sourced convention withdrawal or an anchor retirement
     re-proposes on every 24h TTL cycle after a dismiss, and "only the developer knows" is
@@ -85,7 +85,7 @@ def _conflict_view(entry: dict) -> tuple[str, str | None, list[str]]:
     is only ever read while a proposal is present, and the `created_at` in the pair key stops
     a rebuilt proposal from reviving it."""
     standing_title, standing_body = store.title_and_body(entry)
-    if not _has_open_conflict(entry):
+    if not has_open_conflict(entry):
         return standing_title, standing_body, []
     prop = entry["proposed_revision"]
     prop_date = (prop.get("created_at") or "")[:10]
@@ -153,7 +153,7 @@ def record_conflict_memo(repo_path: str, entry_id: str, choice: str,
             return False, f"Decision {entry_id!r} not found."
         if not entry.get("proposed_revision"):
             return False, "That decision has no pending update — there is no conflict to resolve."
-        if not _has_open_conflict(entry):
+        if not has_open_conflict(entry):
             return False, ("That pending update is bookkeeping or title-only, not a conflict — "
                            "approve or dismiss it via approve_decision instead.")
         entry["conflict_memo"] = {

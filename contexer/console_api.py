@@ -44,6 +44,7 @@ import os
 import time
 from pathlib import Path
 
+from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
 
@@ -467,6 +468,123 @@ def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
         } for r in entry.get("revisions") or []],
         "proposed_revision": _console_proposed(proposal) if proposal else None,
         "share": _console_share_state(entry.get("id", "")),
+    }
+
+
+def _is_memory_import(entry: dict) -> bool:
+    """Whether this entry came from `memory_sync`, whose session id is not a real session
+    (every repo that ever imported one carries the literal `"memory-sync"`).
+
+    Mirrors `scope_audit._sessions_in`'s exclusion (kept as a separate copy on purpose - that
+    module reads raw, never-migrated JSON for a cross-store audit, this one reads through
+    `_read_store`'s migrated shape for a single-repo view, and the two have no reason to share
+    a dependency). Three checks for the same reason as there: an entry predating one signal is
+    still caught by the others."""
+    return (entry.get("created_by") == "memory"
+            or bool(entry.get("memory_key"))
+            or entry.get("session_id") == "memory-sync")
+
+
+def _is_open(entry: dict) -> bool:
+    """Whether one entry counts as "needs you" on a session row: awaiting first review, or
+    carrying an unreviewed conflicting update (`conflicts.has_open_conflict` already excludes
+    bookkeeping and title-only proposals)."""
+    return store.entry_status(entry) == "pending_approval" or conflicts.has_open_conflict(entry)
+
+
+def list_sessions(repo_path: str) -> dict:
+    """The console's Sessions view: one row per session that ORIGINATED a decision in this
+    store, newest activity first.
+
+    Grouped by `session_id` (the originating session), never `session_ids` (every session that
+    has since touched the entry) - a decision revisited by a second session is normal, not a
+    second origin. A memory-sync import's `session_id` is not a session at all (every import
+    carries the same literal value), so those entries are counted separately in
+    `memory_import_count` rather than forming a fake session row. An entry with no `session_id`
+    (predates session attribution) groups into the `session_id: None` bucket, sorted last
+    regardless of its own activity - it is the leftover bucket, not a session to jump to.
+    Fail-soft like `store_summary`: an unreadable store degrades to zero rows, never a raise."""
+    data, _error, _mtime = _read_store(repo_path)
+    entries = [e for e in data.get("entries", []) if e.get("type") == "decision"]
+    memory_import_count = sum(1 for e in entries if _is_memory_import(e))
+    by_session: dict[str | None, list[dict]] = {}
+    for entry in entries:
+        if _is_memory_import(entry):
+            continue
+        sid = entry.get("session_id")
+        by_session.setdefault(sid if isinstance(sid, str) and sid else None, []).append(entry)
+
+    rows = []
+    for sid, rows_for_session in by_session.items():
+        stamps = sorted(e.get("timestamp") or "" for e in rows_for_session)
+        rows.append({
+            "session_id": sid,
+            "short_id": sid[:8] if sid else "",
+            "first_at": stamps[0],
+            "last_at": stamps[-1],
+            "count": len(rows_for_session),
+            "open_count": sum(1 for e in rows_for_session if _is_open(e)),
+        })
+    named = sorted((r for r in rows if r["session_id"] is not None),
+                   key=lambda r: r["last_at"], reverse=True)
+    null_bucket = [r for r in rows if r["session_id"] is None]
+    return {"sessions": named + null_bucket, "memory_import_count": memory_import_count,
+            "total_decisions": len(entries)}
+
+
+def session_transcript(repo_path: str, session_id: str) -> dict | None:
+    """Every decision one session originated, oldest first (capture order) - the console's
+    per-session drill-down. None for a session id that names nothing here: the literal
+    `"memory-sync"` (not a real session - see `list_sessions`), an id that matches no
+    originating session, or the `session_id: None` bucket when it is empty.
+
+    `session_id` accepts a full id or the 8-char short id shown in `list_sessions`, matched the
+    same way `store.entry_by_id` matches a decision id (exact, then prefix); the literal
+    `"none"` addresses the null bucket instead of being looked up as a prefix. Each entry row is
+    `_console_summary(entry)` plus the flags a session view needs that a decisions list doesn't:
+    `open` (pending review OR an open conflict - the union `list_sessions`' `open_count`
+    counts), `pending`, `open_conflict`, and `anchor_commit` (not on `_console_summary`, which
+    stays cheap for the console's 10-second poll). `open` is also returned as its own list, in
+    the same oldest-first order, so the console can pin those rows at the top."""
+    if session_id == "memory-sync" or not session_id:
+        # An empty id is not "unknown" by the prefix rule below - `"".startswith("")` is True
+        # for every session, so without this it would silently pick whichever session a
+        # `set` happens to iterate first instead of reporting "no such session".
+        return None
+    data, _error, _mtime = _read_store(repo_path)
+    entries = [e for e in data.get("entries", []) if e.get("type") == "decision"
+              and not _is_memory_import(e)]
+
+    if session_id == "none":
+        target: str | None = None
+        rows = [e for e in entries if not e.get("session_id")]
+    else:
+        sids = {e["session_id"] for e in entries if e.get("session_id")}
+        target = session_id if session_id in sids else next(
+            (s for s in sids if s.startswith(session_id)), None)
+        if target is None:
+            return None
+        rows = [e for e in entries if e.get("session_id") == target]
+    if not rows:
+        return None
+
+    rows.sort(key=lambda e: e.get("timestamp") or "")
+    projected = []
+    for entry in rows:
+        open_conflict = conflicts.has_open_conflict(entry)
+        pending = store.entry_status(entry) == "pending_approval"
+        projected.append({**_console_summary(entry), "open": pending or open_conflict,
+                          "pending": pending, "open_conflict": open_conflict,
+                          "anchor_commit": entry.get("anchor_commit")})
+    stamps = [e.get("timestamp") or "" for e in rows]
+    return {
+        "session_id": target,
+        "short_id": target[:8] if target else "",
+        "first_at": min(stamps),
+        "last_at": max(stamps),
+        "count": len(rows),
+        "open": [r for r in projected if r["open"]],
+        "entries": projected,
     }
 
 

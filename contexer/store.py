@@ -614,7 +614,7 @@ def matches_query(pat: "re.Pattern", row: dict) -> bool:
     would return a row showing none of the words asked for."""
     from contexer import conflicts   # function-level (import cycle); a sys.modules hit per row
     prop = ((row.get("proposed_revision") or {}).get("content", "")
-            if conflicts._has_open_conflict(row) else "")
+            if conflicts.has_open_conflict(row) else "")
     return bool(pat.search(row.get("content", "")) or pat.search(row.get("title") or "")
                 or (prop and pat.search(prop)))
 
@@ -4262,7 +4262,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                 "(Convention/pattern rules are titles only - call get_context for any rule's "
                 "full reasoning.)")
     if global_rules or pre_loaded:
-        if any(conflicts._has_open_conflict(d) for d in pre_loaded):
+        if any(conflicts.has_open_conflict(d) for d in pre_loaded):
             sys_parts.append(f"\n{conflicts._CONFLICT_GUIDE}")  # blank line off the decision bullets
         sys_parts.append(
             "If the current task conflicts with any of these decisions, "
@@ -4586,7 +4586,7 @@ def _build_retrieval_index(data: dict) -> dict:
         # title-only proposal never renders, so ranking on its terms would inject a decision
         # showing none of them.
         prop_content = ((e.get("proposed_revision") or {}).get("content", "")
-                        if conflicts._has_open_conflict(e) else "")
+                        if conflicts.has_open_conflict(e) else "")
         toks = retrieval.index_tokens(f"{content} {prop_content}" if prop_content else content)
         tf: dict[str, int] = {}
         for t in toks:
@@ -5635,7 +5635,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 lines.append(f"    {body}")
             for extra in extras:
                 lines.append(f"    {extra}")
-        if any(conflicts._has_open_conflict(d) for d in shown):
+        if any(conflicts.has_open_conflict(d) for d in shown):
             lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
         lines.append(
             "\nIf the current task conflicts with any of these decisions, "

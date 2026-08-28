@@ -478,6 +478,38 @@ def test_every_view_names_itself_in_the_tab(script):
     assert "document.title" in script, "the titles are computed but never applied"
 
 
+# --- Sessions view (issue #256) ---------------------------------------------------------
+
+def test_render_dispatches_the_sessions_route_to_view_sessions(script):
+    """`render()`'s if/else ladder is the only place a parsed route name is wired to a view
+    function. Dropping this branch leaves `#/store/<slug>/sessions` parsing fine and rendering
+    nothing new underneath - the API and console_api suites don't catch it, because neither one
+    exercises render()'s dispatch table."""
+    body = _code(_function_body(script, "render"))
+    assert re.search(
+        r'route\.name === "sessions"\)\s*node = await viewSessions\(route\.slug, route\.id\)',
+        body,
+    ), 'render() must dispatch route.name === "sessions" to viewSessions(route.slug, route.id):\n' + body[:800]
+
+
+def test_capture_session_row_links_with_the_full_session_id_not_the_short_label(script):
+    """Interface decision carried from the Task 1 review (binding): a row's `short_id` is not
+    unique on prefix collisions, so every navigation link must be built from the full
+    `session_id`, never the truncated display label - swapping the href's source to the label
+    silently mis-routes on any collision while every existing assertion (which only checks the
+    label is SHOWN, not what the link is built from) stays green."""
+    body = _code(_function_body(script, "captureSessionRow"))
+    m = re.search(r'href:\s*hrefFor\("sessions",\s*slug,\s*([^)]+)\)', body)
+    assert m, 'captureSessionRow must link via hrefFor("sessions", slug, ...):\n' + body
+    href_arg = m.group(1)
+    assert "sid" in href_arg, (
+        "the href must be built from the full session id (sid), not the short label:\n" + href_arg
+    )
+    assert "label" not in href_arg, (
+        "the href must not be built from the short/display label:\n" + href_arg
+    )
+
+
 # --- The proposed-update diff ----------------------------------------------------------
 
 # The review card used to pick between two shapes by the SIZE of the LCS table: under budget it
