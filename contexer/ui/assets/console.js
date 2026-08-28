@@ -28,6 +28,7 @@
   const VIEW_TITLE = {
     dashboard: { label: "Dashboard", scoped: true },
     decisions: { label: "Decisions", scoped: true },
+    sessions: { label: "Sessions", scoped: true },
     review: { label: "Review", scoped: true },
     deleted: { label: "Deleted", scoped: true },
     global: { label: "Global rules", scoped: false },
@@ -741,6 +742,7 @@
       const slug = dec(parts[1]);
       const leaf = parts[2] || "";
       if (leaf === "decisions") return { name: "decisions", slug, id: dec(parts[3] || "") };
+      if (leaf === "sessions") return { name: "sessions", slug, id: dec(parts[3] || "") };
       if (leaf === "review") return { name: "review", slug, id: "" };
       if (leaf === "deleted") return { name: "deleted", slug, id: "" };
       return { name: "dashboard", slug, id: "" };
@@ -756,6 +758,8 @@
     if (name === "dashboard") return "#/store/" + s;
     if (name === "decisions")
       return "#/store/" + s + "/decisions" + (id ? "/" + encodeURIComponent(id) : "");
+    if (name === "sessions")
+      return "#/store/" + s + "/sessions" + (id ? "/" + encodeURIComponent(id) : "");
     if (name === "review") return "#/store/" + s + "/review";
     if (name === "deleted") return "#/store/" + s + "/deleted";
     return "#/config";
@@ -824,6 +828,7 @@
     const activeNav = {
       dashboard: "dashboard",
       decisions: "decisions",
+      sessions: "sessions",
       review: "review",
       global: "global",
       team: "team",
@@ -1039,6 +1044,9 @@
           d.has_proposal ? h("span", { class: "badge badge-warn", text: "update pending" }) : null,
           num(d.occurrence_count) > 1
             ? h("span", { class: "badge", text: "×" + num(d.occurrence_count) })
+            : null,
+          d.anchor_commit
+            ? h("span", { class: "drow-when", text: "@" + shortId(d.anchor_commit) })
             : null,
           h("span", {
             class: "drow-when",
@@ -1850,6 +1858,119 @@
         },
       },
     });
+  }
+
+  // ── View: sessions ────────────────────────────────────────────────────────────────────
+  /** One row per originating session: short id (monospace), a relative date range, the decision
+   *  count, and — only when non-zero — an open-count badge. The `session_id: null` bucket (predates
+   *  session attribution) renders as "(no session recorded)" and still links to its own transcript
+   *  via the literal `"none"` id `console_api.session_transcript` reserves for it. Always the FULL
+   *  `session_id` in the href, never `short_id` — short ids are not unique on prefix collisions. */
+  function captureSessionRow(slug, r) {
+    const sid = String(r.session_id || "");
+    const label = sid ? shortId(sid) : "(no session recorded)";
+    return h("a", { class: "drow", href: hrefFor("sessions", slug, sid || "none") }, [
+      h("span", { class: "drow-title mono", text: label }),
+      h("span", { class: "drow-meta" }, [
+        h("span", { class: "drow-when", text: fmtAgo(r.first_at) + " – " + fmtAgo(r.last_at) }),
+        h("span", { class: "badge", text: num(r.count) + (num(r.count) === 1 ? " decision" : " decisions") }),
+        num(r.open_count) > 0
+          ? h("span", { class: "badge badge-warn", text: num(r.open_count) + " open" })
+          : null,
+      ]),
+    ]);
+  }
+
+  /** List mode (no id) shows one row per session; detail mode (id given) shows that session's
+   *  transcript. `id` reaches here already through `hrefFor`, so it is always a full session id or
+   *  the literal `"none"` — never a bare `short_id`. */
+  async function viewSessions(slug, id) {
+    if (id) {
+      const data = await req(
+        "/api/store/" + encodeURIComponent(slug) + "/sessions/" + encodeURIComponent(id)
+      ).catch((err) => {
+        if (err instanceof NetworkError) throw err;
+        return { __error: (err && err.message) || "no such session" };
+      });
+      return sessionDetail(slug, data);
+    }
+
+    const data = (await req("/api/store/" + encodeURIComponent(slug) + "/sessions")) || {};
+    const rows = asList(data, "sessions");
+
+    const head = pageHead(
+      "· sessions",
+      ["Capture ", h("span", { class: "serif-em", text: "sessions" })],
+      "One row per session that originated a decision in this store, newest activity first.",
+      [num(data.total_decisions) + " decisions", rows.length + " sessions"]
+    );
+
+    if (rows.length === 0) {
+      return frag([head, h("div", { class: "card" }, [emptyState("No sessions recorded", bootstrapHint())])]);
+    }
+
+    const importNote =
+      num(data.memory_import_count) > 0
+        ? h("p", {
+            class: "muted",
+            text:
+              num(data.memory_import_count) +
+              " memory-imported decisions not shown — imports, not session activity.",
+          })
+        : null;
+
+    return frag([
+      head,
+      h("div", { class: "card" }, [
+        h("div", { class: "list list-scroll" }, rows.map((r) => captureSessionRow(slug, r))),
+      ]),
+      importNote,
+    ]);
+  }
+
+  /** The per-session transcript: an honest scope note (this is what one session captured, not a
+   *  conversation log), an "Open threads" section first when anything in it is unreviewed, then
+   *  the full transcript oldest-first, both built from the same `decisionRow` the Decisions view
+   *  uses so each entry links to its real decision detail. */
+  function sessionDetail(slug, d) {
+    const back = h("a", { class: "btn btn-ghost btn-sm", href: hrefFor("sessions", slug), text: "Back to sessions" });
+
+    if (d.__error) {
+      return frag([
+        pageHead("· sessions", ["Session not found"], null, null, [back]),
+        notice("bad", [String(d.__error)]),
+      ]);
+    }
+
+    const sid = String(d.session_id || "");
+    const open = asList(d.open, "open");
+    const entries = asList(d.entries, "entries");
+
+    const head = pageHead(
+      "· session",
+      [sid ? shortId(sid) : "(no session recorded)"],
+      "Capture-session transcript - decisions captured this session, not a conversation log.",
+      [fmtAgo(d.first_at) + " – " + fmtAgo(d.last_at), num(d.count) + " decisions"],
+      [back]
+    );
+
+    if (entries.length === 0) {
+      return frag([head, h("div", { class: "card" }, [emptyState("Nothing captured", ["This session has no decisions."])])]);
+    }
+
+    const openSection = open.length
+      ? h("div", { class: "card" }, [
+          h("div", { class: "card-head" }, [h("h3", { class: "card-title", text: "Open threads" })]),
+          h("div", { class: "list" }, open.map((e) => decisionRow(slug, e, ""))),
+        ])
+      : null;
+
+    const transcript = h("div", { class: "card" }, [
+      h("div", { class: "card-head" }, [h("h3", { class: "card-title", text: "Transcript" })]),
+      h("div", { class: "list" }, entries.map((e) => decisionRow(slug, e, ""))),
+    ]);
+
+    return frag([head, openSection, transcript]);
   }
 
   // ── View: review ──────────────────────────────────────────────────────────────────────
@@ -2755,6 +2876,7 @@
     try {
       if (route.name === "dashboard") node = await viewDashboard(route.slug);
       else if (route.name === "decisions") node = await viewDecisions(route.slug, route.id);
+      else if (route.name === "sessions") node = await viewSessions(route.slug, route.id);
       else if (route.name === "review") node = await viewReview(route.slug);
       else if (route.name === "global") node = await viewGlobal();
       else if (route.name === "team") node = await viewTeam(route.slug);
