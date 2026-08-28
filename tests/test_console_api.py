@@ -511,3 +511,73 @@ class TestTranscriptLink:
         _seed(tmp_repo, "Legacy decision with no session id", "")
         transcript = console_api.session_transcript(tmp_repo, "none")
         assert transcript["transcript_available"] is False
+
+    # --- path-traversal regression (fix round after review) ---------------------------------
+    # `session_id` reaches `_claude_transcript_path` from a URL path segment. `ui/api.py`'s
+    # `dispatch` splits the raw request path on '/' BEFORE unquoting each segment, so a
+    # percent-encoded '/' (`%2F`) survives routing as one segment and only becomes a literal
+    # '/' once it lands here - a caller authenticated for repo A could smuggle `../<repo B's
+    # slug>/<session>` and read repo B's real transcript, or `../../secret` to read any file
+    # under `~/.claude`. These tests call console_api directly with a session_id that ALREADY
+    # contains the dangerous character, since that is the actual vulnerable surface regardless
+    # of which URL-encoding trick produces it.
+
+    def test_session_id_containing_a_slash_is_rejected(self, tmp_repo, tmp_path, monkeypatch):
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        # A second repo's real transcript - the file the crafted session_id tries to reach.
+        victim_repo = "/some/other/repo"
+        victim_dir = fake_home / ".claude" / "projects" / victim_repo.replace("/", "-")
+        victim_dir.mkdir(parents=True)
+        (victim_dir / "victim-session.jsonl").write_text("SECRET other-repo transcript\n",
+                                                          encoding="utf-8")
+
+        traversal_id = "../" + victim_repo.replace("/", "-") + "/victim-session"
+        assert console_api._claude_transcript_path(tmp_repo, traversal_id) is None
+        assert console_api.transcript_exists(tmp_repo, traversal_id) is False
+        assert console_api.read_transcript(tmp_repo, traversal_id) is None
+
+    def test_session_id_containing_a_backslash_is_rejected(self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api.read_transcript(tmp_repo, "..\\secret") is None
+
+    def test_session_id_escaping_entirely_outside_projects_is_rejected(
+            self, tmp_repo, tmp_path, monkeypatch):
+        """The second live PoC from the review: `../../secret` reaching a file entirely
+        outside any project directory, e.g. `~/.claude/secret.jsonl`."""
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        claude_dir = fake_home / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "secret.jsonl").write_text("SECRET machine-wide file\n", encoding="utf-8")
+
+        assert console_api.read_transcript(tmp_repo, "../../secret") is None
+
+    def test_session_id_of_dotdot_alone_is_rejected_even_without_a_slash(
+            self, tmp_repo, tmp_path, monkeypatch):
+        """`..` on its own never contains '/', so the slash check alone would not catch it -
+        it needs its own explicit rejection. (In this function specifically the trailing
+        `.jsonl` suffix would neutralise it into a harmless single filename component anyway,
+        but the rejection is explicit rather than relying on that incidental fact.)"""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api._claude_transcript_path(tmp_repo, "..") is None
+        assert console_api.read_transcript(tmp_repo, "..") is None
+
+    def test_session_id_of_single_dot_is_rejected(self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api._claude_transcript_path(tmp_repo, ".") is None
+
+    def test_a_normal_uuid_session_id_still_resolves_after_the_traversal_fix(
+            self, tmp_repo, tmp_path, monkeypatch):
+        """The fix must not collateral-damage the legitimate case."""
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+        project_dir = fake_home / ".claude" / "projects" / tmp_repo.replace("/", "-")
+        project_dir.mkdir(parents=True)
+        (project_dir / f"{sid}.jsonl").write_text("hello\n", encoding="utf-8")
+
+        assert console_api._claude_transcript_path(tmp_repo, sid) is not None
+        assert console_api.transcript_exists(tmp_repo, sid) is True
+        assert console_api.read_transcript(tmp_repo, sid) == "hello\n"

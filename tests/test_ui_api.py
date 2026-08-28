@@ -575,6 +575,52 @@ def test_transcript_raw_route_only_accepts_get(console, repo, tmp_path, monkeypa
                 body={}).status == 404
 
 
+def test_transcript_raw_route_rejects_a_percent_encoded_slash_traversal(console, repo, tmp_path,
+                                                                        monkeypatch):
+    """Live reproduction of the review-round path-traversal finding: `dispatch()` splits the
+    raw request path on '/' BEFORE unquoting each segment, so a percent-encoded '/' (`%2F`)
+    inside the session-id segment survives routing as one component and only decodes to a
+    literal '/' once it reaches `console_api` - which let an attacker authenticated for ONE
+    repo smuggle `../<other repo's slug>/<session>` and read that other repo's real transcript.
+    Must 404, and the victim content must never appear in the response."""
+    # Repo A's own project directory has to actually exist (as it would for any real paired
+    # console) so the OS can walk `<repoA-slug>/../<victim-slug>/...` at all - POSIX path
+    # resolution requires each component before the final one to resolve to a real directory,
+    # so without this the '..' segment fails for an unrelated reason (a missing intermediate
+    # directory) and this test would still pass even with the traversal guard removed.
+    _seed_transcript(tmp_path, monkeypatch, repo["path"], "s1")
+    fake_home = tmp_path / "fakehome"
+
+    victim_slug = "other-repo-slug"
+    victim_dir = fake_home / ".claude" / "projects" / victim_slug
+    victim_dir.mkdir(parents=True)
+    (victim_dir / "victim-session.jsonl").write_text("SECRET other-repo transcript\n",
+                                                      encoding="utf-8")
+
+    traversal_path = (f"/api/store/{repo['slug']}/sessions/"
+                      f"..%2F{victim_slug}%2Fvictim-session/transcript/raw")
+    reply = read(console, traversal_path)
+    assert reply.status == 404
+    assert b"SECRET" not in reply.body
+
+
+def test_transcript_raw_route_rejects_dotdot_escaping_outside_projects(console, repo, tmp_path,
+                                                                       monkeypatch):
+    """The second live PoC from the review: reaching a file entirely outside any project
+    directory (e.g. `~/.claude/secret.jsonl`) via `../../secret`."""
+    # Same reasoning as the sibling test above: repo A's own project directory must exist for
+    # the '..' segments to resolve through the filesystem at all.
+    _seed_transcript(tmp_path, monkeypatch, repo["path"], "s1")
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".claude" / "secret.jsonl").write_text("SECRET machine-wide file\n",
+                                                         encoding="utf-8")
+
+    traversal_path = f"/api/store/{repo['slug']}/sessions/..%2F..%2Fsecret/transcript/raw"
+    reply = read(console, traversal_path)
+    assert reply.status == 404
+    assert b"SECRET" not in reply.body
+
+
 # --- RawBody dispatch-contract regression proof (issue #261) ----------------------------
 # `RawBody` is additive: `Handler._handle` branches `isinstance(payload, api.RawBody)` before
 # choosing `_respond` over `_json`, and every OTHER route's payload is still a plain dict.

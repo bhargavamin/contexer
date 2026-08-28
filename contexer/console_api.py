@@ -536,20 +536,35 @@ def list_sessions(repo_path: str) -> dict:
             "total_decisions": len(entries)}
 
 
-def _claude_transcript_path(repo_path: str, session_id: str) -> Path:
+def _claude_transcript_path(repo_path: str, session_id: str) -> Path | None:
     """The candidate file for the REAL Claude Code conversation behind one session (issue
-    #261) - `~/.claude/projects/<slug>/<session_id>.jsonl`.
+    #261) - `~/.claude/projects/<slug>/<session_id>.jsonl`. None when `session_id` is REJECTED
+    (see below) rather than raising - existence-check semantics, same as a genuinely missing
+    file.
 
     `session_id` is used exactly as given, never resolved through the store's full/short-id
     matching `session_transcript` does: Claude Code's own filenames are always the full UUID,
     so a short id passed here simply won't exist - the existence check below fails closed
     rather than needing its own prefix-matching rule.
 
+    SECURITY: `session_id` reaches here from a URL path segment (`ui/api.py`'s `dispatch`
+    unquotes each segment AFTER splitting on the raw path, so a percent-encoded '/' survives
+    routing as one segment and only becomes a literal '/' here). Without a guard, a crafted
+    `session_id` containing '/' or '..' turns `f"{session_id}.jsonl"` from a single path
+    component into a traversal - reading another repo's real transcript, or any file under
+    `~/.claude`, regardless of which store the caller is authenticated for. Rejected outright
+    (returns None) rather than only trusting `Path.resolve().is_relative_to(...)`: a plain
+    character-class check is simpler to reason about and matches this module's existing
+    fail-soft style. A real session id is a plain UUID and never contains any of these.
+
     Slug is v1 scope only: `repo_path.replace('/', '-')`, the confirmed common-case transform.
     Claude Code's real algorithm also collapses a literal '.' in the path, which is deliberately
     NOT reproduced here - out of scope, YAGNI. A repo path containing a '.' simply resolves to a
     candidate that will not exist, which is the same "no link" outcome as today's baseline
     (no such feature existed before this)."""
+    if (not session_id or "/" in session_id or "\\" in session_id
+            or session_id == "." or ".." in session_id):
+        return None
     slug = repo_path.replace("/", "-")
     return Path.home() / ".claude" / "projects" / slug / f"{session_id}.jsonl"
 
@@ -560,18 +575,21 @@ def transcript_exists(repo_path: str, session_id: str) -> bool:
     link, without paying for a read of a file that can run several MB.
 
     Fail-soft like every other read in this module: any error resolving the path (a home
-    directory that cannot be stat'd, a permissions error) reads as "no transcript", never an
-    exception surfaced to the console."""
+    directory that cannot be stat'd, a permissions error, or a `session_id` rejected by
+    `_claude_transcript_path`'s traversal guard) reads as "no transcript", never an exception
+    surfaced to the console."""
     try:
-        return _claude_transcript_path(repo_path, session_id).is_file()
+        path = _claude_transcript_path(repo_path, session_id)
+        return path is not None and path.is_file()
     except OSError:
         return False
 
 
 def read_transcript(repo_path: str, session_id: str) -> str | None:
     """The raw content of one session's real Claude Code transcript, or None when none exists
-    (missing file, unreadable, or any other error resolving/reading the candidate path) - the
-    read behind the console's `.../transcript/raw` route.
+    (missing file, unreadable, a `session_id` rejected by `_claude_transcript_path`'s traversal
+    guard, or any other error resolving/reading the candidate path) - the read behind the
+    console's `.../transcript/raw` route.
 
     Fail-soft and existence-gated: this never raises, and any error reads as "no transcript",
     the same as a genuinely absent file - informational-only, nothing here is worth surfacing
@@ -581,6 +599,8 @@ def read_transcript(repo_path: str, session_id: str) -> str | None:
     directly on disk - this is still "available" (not None), the route still answers 200 with
     it as the body."""
     path = _claude_transcript_path(repo_path, session_id)
+    if path is None:
+        return None
     try:
         if not path.is_file():
             return None
