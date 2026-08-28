@@ -281,6 +281,57 @@ class TestMemorySyncMigration:
         assert len(groups) == 1
 
 
+class TestSiblingBranchHookSkew:
+    """A hook written by a NEWER or sibling-branch install carries every current marker
+    as a superset (observed live: a 4-arg get_session_start_context call with a consumer
+    arg from a feature branch), so a marker-missing migration gate never replaces it and
+    it crashes with TypeError on every session start. Reinstall must converge on the
+    exact current command."""
+
+    STALE_4ARG = (
+        'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "py" -P -c '
+        '"from contexer import store; from contexer.adapters import claude as _c; '
+        "import json,sys; repo=sys.argv[1]; raw=sys.stdin.read(); store.anchor_repo(repo); "
+        "_c.sync_memory(repo); _c.pull_team(repo); "
+        "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
+        "store.session_from_hook_stdin(raw), 'claude')))\" \"$REPO\" # contexer-managed-hook"
+    )
+
+    def _write(self, home, command):
+        settings_path = home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({"hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": command}]},
+                {"hooks": [{"type": "command", "command": "echo foreign-hook"}]},
+            ],
+        }}))
+        return settings_path
+
+    def test_marker_superset_hook_is_replaced_on_reinstall(self, clean_home):
+        path = self._write(clean_home, self.STALE_4ARG)
+        install()
+        groups = json.loads(path.read_text())["hooks"]["SessionStart"]
+        ours = [h["command"] for grp in groups for h in grp["hooks"]
+                if "get_session_start_context" in h["command"]]
+        assert len(ours) == 1
+        assert "'claude'" not in ours[0]  # the incompatible 4th arg is gone
+
+    def test_reinstall_is_idempotent_once_converged(self, clean_home):
+        path = self._write(clean_home, self.STALE_4ARG)
+        install()
+        first = path.read_text()
+        install()
+        assert path.read_text() == first
+
+    def test_foreign_session_start_hook_survives(self, clean_home):
+        path = self._write(clean_home, self.STALE_4ARG)
+        install()
+        cmds = [h["command"] for grp in json.loads(path.read_text())["hooks"]["SessionStart"]
+                for h in grp["hooks"]]
+        assert "echo foreign-hook" in cmds
+
+
 class TestInstallDoesNotImplyAConsole:
     """`[ui] autostart` is opt-in: installing an OSS tool must not leave a listener behind."""
 
