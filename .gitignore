@@ -47,3 +47,4 @@ docs/internal/
 .claude/
 graphify-out/
 e2e_commit_promotion.py
+CLAUDE.local.md

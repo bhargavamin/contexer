@@ -242,16 +242,12 @@ def install(home: Path) -> list[str]:
     hooks = cfg.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: an older SessionStart group predates the team-context pull (T2), predates
-    # session-id threading (compact-source working-set rehydration), or predates the
-    # fail-soft repo anchor (#152 — the unguarded `.current_repo` write that aborted the
-    # whole hook under Codex's sandbox) — replace it so the current ss_code is installed.
-    # Mirrors claude.py's SessionStart migration gate.
-    if base._in_groups(ss, "get_session_start_context") and not (
-            base._in_groups(ss, "pull_team") and base._in_groups(ss, "session_from_hook_stdin")
-            and base._in_groups(ss, "anchor_repo")):
-        ss = base._filter_groups(ss, ["get_session_start_context"])
-        hooks["SessionStart"] = ss
+    # Migrate: replace any installed SessionStart group whose command isn't byte-identical
+    # to the current ss_code (_strip_stale). Mirrors claude.py's SessionStart gate — see
+    # its comment for why marker-missing checks can't catch a NEWER/sibling-branch hook
+    # (a marker superset with an incompatible signature that crashes every session start).
+    ss = base._strip_stale(ss, ["get_session_start_context"], _py(ss_code))
+    hooks["SessionStart"] = ss
     if not base._in_groups(ss, "get_session_start_context"):
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...", "command": _py(ss_code)}]})
@@ -293,11 +289,10 @@ def install(home: Path) -> list[str]:
             "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'"}]})
 
     poc = hooks.setdefault("PostCompact", [])
-    # Migrate: an older PostCompact group predates session-id threading (working-set
-    # rehydration) — replace it so the current post_code (reads session_id from stdin) runs.
-    if base._in_groups(poc, "get_post_compact_context") and not base._in_groups(poc, "session_from_hook_stdin"):
-        poc = base._filter_groups(poc, ["get_post_compact_context"])
-        hooks["PostCompact"] = poc
+    # Migrate: replace any installed PostCompact group whose command isn't byte-identical
+    # to the current post_code (_strip_stale) — same skew class as the SessionStart gate.
+    poc = base._strip_stale(poc, ["get_post_compact_context"], _py(post_code))
+    hooks["PostCompact"] = poc
     if not base._in_groups(poc, "get_post_compact_context"):
         poc.append({"hooks": [{"type": "command",
             "statusMessage": "Reloading context after compact...", "command": _py(post_code)}]})
