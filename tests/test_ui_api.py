@@ -522,6 +522,77 @@ def test_sessions_routes_only_accept_get(console, repo):
                 body={}).status == 404
 
 
+# --- transcript raw route (issue #261) --------------------------------------------------
+
+def _seed_transcript(tmp_path, monkeypatch, repo_path: str, session_id: str,
+                     content: str = '{"type": "user"}\n') -> None:
+    """Seeds a fake `~/.claude/projects/<slug>/<session_id>.jsonl` under a fake home, never
+    the real `~/.claude` - `Path.home` is patched directly, the same pattern
+    test_readonly_store_dir.py uses, since `console_api._claude_transcript_path` resolves it
+    at call time."""
+    fake_home = tmp_path / "fakehome"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    project_dir = fake_home / ".claude" / "projects" / repo_path.replace("/", "-")
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / f"{session_id}.jsonl").write_text(content, encoding="utf-8")
+
+
+def test_transcript_raw_route_serves_the_real_content(console, repo, tmp_path, monkeypatch):
+    content = '{"type": "user", "message": {"role": "user", "content": "hi"}}\n'
+    _seed_transcript(tmp_path, monkeypatch, repo["path"], "s1", content=content)
+
+    reply = read(console, f"/api/store/{repo['slug']}/sessions/s1/transcript/raw")
+    assert reply.status == 200
+    assert reply.headers["Content-Type"] == "text/plain; charset=utf-8"
+    assert reply.body.decode("utf-8") == content
+
+
+def test_transcript_raw_route_is_a_404_when_no_transcript_exists(console, repo, tmp_path,
+                                                                  monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+    reply = read(console, f"/api/store/{repo['slug']}/sessions/s1/transcript/raw")
+    assert reply.status == 404
+    assert reply.data["error"]  # the existing JSON error shape ({"error": "..."})
+
+
+def test_transcript_raw_route_rejects_an_unauthenticated_request(console, repo, tmp_path,
+                                                                  monkeypatch):
+    """`ROUTES`/`test_no_route_is_reachable_without_a_credential` in test_ui_auth.py already
+    proves this against a nonexistent store; this proves it against a transcript that
+    genuinely exists, so a special-cased branch could not accidentally serve it first."""
+    _seed_transcript(tmp_path, monkeypatch, repo["path"], "s1")
+    reply = call(console, "GET", f"/api/store/{repo['slug']}/sessions/s1/transcript/raw")
+    assert reply.status == 403
+
+
+def test_transcript_raw_route_unknown_slug_is_a_404(console):
+    assert read(console, "/api/store/does-not-exist/sessions/s1/transcript/raw").status == 404
+
+
+def test_transcript_raw_route_only_accepts_get(console, repo, tmp_path, monkeypatch):
+    _seed_transcript(tmp_path, monkeypatch, repo["path"], "s1")
+    assert write(console, "POST", f"/api/store/{repo['slug']}/sessions/s1/transcript/raw",
+                body={}).status == 404
+
+
+# --- RawBody dispatch-contract regression proof (issue #261) ----------------------------
+# `RawBody` is additive: `Handler._handle` branches `isinstance(payload, api.RawBody)` before
+# choosing `_respond` over `_json`, and every OTHER route's payload is still a plain dict.
+# These pin that a representative sample of existing GET routes still comes back as JSON
+# (Content-Type application/json, a dict body) after the branch was added - the mutation
+# check for this (forcing the isinstance branch to always/never fire) is in the task report,
+# not the suite, since it is a manual one-time proof rather than something worth carrying as
+# a permanent test.
+
+def test_other_routes_still_answer_through_the_json_path(console, repo):
+    for path in ("/api/stores", f"/api/store/{repo['slug']}/sessions",
+                f"/api/store/{repo['slug']}/sessions/s1"):
+        reply = read(console, path)
+        assert reply.status == 200, path
+        assert reply.headers["Content-Type"] == "application/json", path
+        assert isinstance(reply.data, (dict, list)), path
+
+
 # --- decision detail -------------------------------------------------------------------
 
 def test_the_detail_resolves_a_full_id_and_an_eight_char_prefix(console, repo):

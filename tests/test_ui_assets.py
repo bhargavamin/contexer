@@ -510,6 +510,38 @@ def test_capture_session_row_links_with_the_full_session_id_not_the_short_label(
     )
 
 
+def test_transcript_link_is_built_from_the_full_session_id_and_gated_on_availability(script):
+    """Issue #261's "View full transcript" link, same binding rule as the row above applied to
+    `sessionDetail`: the href must be built from the full `session_id` (`sid`), never
+    `short_id`, and must render only when `d.transcript_available` is true - never constructed
+    speculatively. Mirrors
+    test_capture_session_row_links_with_the_full_session_id_not_the_short_label's shape."""
+    body = _code(_function_body(script, "sessionDetail"))
+    m = re.search(r"transcript_available\s*\?\s*h\(\s*\"a\",\s*\{([^}]*)\}", body, re.DOTALL)
+    assert m, ('sessionDetail must gate the transcript link on `d.transcript_available`:\n'
+              + body)
+    anchor_opts = m.group(1)
+
+    href_m = re.search(r'href:\s*([^,]+),', anchor_opts)
+    assert href_m, "the transcript link must set an href:\n" + anchor_opts
+    href_expr = href_m.group(1)
+    assert "encodeURIComponent(sid)" in href_expr, (
+        "the href must be built from the full session id (sid), not the short label:\n"
+        + href_expr
+    )
+    assert "short_id" not in href_expr and "shortId(" not in href_expr, (
+        "the href must not be built from the short id:\n" + href_expr
+    )
+    assert '"transcript/raw"' in href_expr or "/transcript/raw" in href_expr, (
+        "the href must point at the raw transcript route:\n" + href_expr
+    )
+    assert 'target: "_blank"' in anchor_opts, "the link must open in a new tab:\n" + anchor_opts
+    assert "hrefFor(" not in href_expr, (
+        "the transcript link is a direct API URL, not an internal hash route via hrefFor:\n"
+        + href_expr
+    )
+
+
 # --- The proposed-update diff ----------------------------------------------------------
 
 # The review card used to pick between two shapes by the SIZE of the LCS table: under budget it

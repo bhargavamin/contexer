@@ -10,6 +10,7 @@ that owns every projection this file renders, not a file read here.
 Field names are the console's contract (`assets/console.js` codes against them), so a rename
 here silently blanks a pane there.
 """
+from typing import NamedTuple
 from urllib.parse import unquote
 
 from contexer import auth, config, console_api, share, share_status, store, team_context
@@ -51,6 +52,21 @@ LOGIN_FIXES = ("expired", "refresh_failed", "none")
 # Written into every revision this surface creates, so the revision timeline shows which
 # changes a human made in the console vs. what an agent captured.
 SOURCE = "ui"
+
+
+class RawBody(NamedTuple):
+    """A non-JSON `dispatch()` payload (issue #261): raw bytes with a caller-chosen
+    Content-Type, for the one route (the session transcript raw view) that must hand back a
+    file's real content instead of a JSON-able shape.
+
+    `dispatch`'s contract is otherwise JSON-only end to end - `Handler._handle` in
+    `contexer/ui/server.py` branches on `isinstance(payload, RawBody)` before choosing
+    `_respond` over `_json`, additively; every other route's payload is still a dict and still
+    flows through `_json` unchanged. This keeps `ui/api.py` the sole production caller of
+    `console_api` - `Handler` never reaches into `console_api` directly to serve this route,
+    the way `_static()`'s fixed `ASSETS` allowlist does for the console's own JS/CSS/HTML."""
+    content_type: str
+    body: bytes
 
 
 class ApiError(Exception):
@@ -165,6 +181,17 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
         if transcript is None:
             raise ApiError(404, "no such session")
         return 200, transcript
+
+    if (len(rest) == 4 and rest[0] == "sessions" and rest[2:] == ["transcript", "raw"]
+            and method == "GET"):
+        # Issue #261: the real underlying Claude Code conversation, raw - not the store's own
+        # session_transcript projection above. `rest[1]` reaches `console_api.read_transcript`
+        # exactly as given, never resolved through the store's full/short-id matching (that
+        # resolution belongs to the `sessions/<sid>` route, not this filesystem read).
+        content = console_api.read_transcript(repo_path, rest[1])
+        if content is None:
+            raise ApiError(404, "no transcript available for this session")
+        return 200, RawBody("text/plain; charset=utf-8", content.encode("utf-8"))
 
     if rest == ["pull"] and method == "POST":
         return _pull(repo_path)

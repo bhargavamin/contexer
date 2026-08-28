@@ -237,7 +237,12 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and parsed.path == "/healthz":
                 return self._json(200, self._healthz())
             status, payload = api.dispatch(method, parsed.path, query, self._read_body())
-            self._json(status, payload)
+            if isinstance(payload, api.RawBody):
+                # The one non-JSON `dispatch()` payload (issue #261) - everything else stays
+                # on the `_json` path below, unchanged.
+                self._respond(status, payload.content_type, payload.body)
+            else:
+                self._json(status, payload)
         except _BodyTooLarge:
             self._json(413, {"error": f"request body over {BODY_LIMIT} bytes"})
         except api.ApiError as exc:
