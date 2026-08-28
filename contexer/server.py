@@ -5,7 +5,7 @@ import uuid
 from mcp.server.fastmcp import FastMCP
 from contexer import conflicts, store
 
-SESSION_ID = str(uuid.uuid4())
+SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or str(uuid.uuid4())
 
 # Bulk approval is refused rather than supported. Every approve stamps approved_by="human",
 # which makes even an ai-sourced decision guard-trusted at commit time - so one blanket
