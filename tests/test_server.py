@@ -8,7 +8,11 @@ pytest-asyncio: the async tool is driven with asyncio.run(...), matching test_re
 import asyncio
 import inspect
 import json
+import os
+import subprocess
+import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -528,3 +532,42 @@ def test_update_context_bounces_a_multi_section_document(tmp_repo, monkeypatch):
     out = server.update_context(content=blob)
     assert "multi-section document" in out
     assert store.load(tmp_repo)["entries"] == []      # nothing written
+
+
+# ── SESSION_ID: real host session id when the CLI's env carries it ─────────────────────────
+
+def _session_id_from_subprocess(env_overrides):
+    # SESSION_ID is read once, at module import time - the only honest way to test that is a
+    # fresh subprocess with a controlled env (pytest has already imported contexer.server in
+    # this process, so an in-process monkeypatch of os.environ would prove nothing). Mirrors
+    # the sys.executable + "-c" probe pattern in test_anchors.py/test_guard_engine.py's
+    # TestImportOrderRegression.
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
+    env.update(env_overrides)
+    probe = "import contexer.server as s; print(s.SESSION_ID)"
+    result = subprocess.run([sys.executable, "-c", probe],
+                             capture_output=True, text=True, timeout=30, env=env)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_session_id_uses_host_env_var_when_present():
+    seen = _session_id_from_subprocess({"CLAUDE_CODE_SESSION_ID": "real-transcript-session-id"})
+    assert seen == "real-transcript-session-id"
+
+
+def test_session_id_falls_back_to_a_fresh_uuid4_when_env_var_absent():
+    first = _session_id_from_subprocess({})
+    second = _session_id_from_subprocess({})
+    assert uuid.UUID(first).version == 4
+    assert uuid.UUID(second).version == 4
+    assert first != second  # a fresh random id per process, not a constant
+
+
+def test_session_id_falls_back_when_env_var_is_empty_string():
+    # The reason for `os.environ.get(...) or ...` rather than `.get(key, default)`: a `.get`
+    # with a default would return "" here (the key IS present, just empty), stamping every
+    # decision this process ever writes with an empty session id. `or` catches that.
+    seen = _session_id_from_subprocess({"CLAUDE_CODE_SESSION_ID": ""})
+    assert seen != ""
+    assert uuid.UUID(seen).version == 4
