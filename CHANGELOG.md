@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.41.0](https://github.com/bhargavamin/contexer/compare/v0.40.0...v0.41.0) (2026-08-28)
+
+
+### Features
+
+* add ranked applicability retrieval (rank_applicable) ([45e708b](https://github.com/bhargavamin/contexer/commit/45e708b68474f262d565455e3fd23fea10f2927a))
+
+
+### Bug Fixes
+
+* **remote:** classify a rate limit as its own error type ([99d9fad](https://github.com/bhargavamin/contexer/commit/99d9fad46d0709753fd69d3488607654eb56d9d5))
+* replace marker-presence hook migration with exact-command currency ([e7f33a6](https://github.com/bhargavamin/contexer/commit/e7f33a64a361d7164259acb9e266e1d61750af27))
+
+
+### Documentation
+
+* make CLAUDE.md the public contract ([6434fde](https://github.com/bhargavamin/contexer/commit/6434fdee8feb840066f84169e09a089745b78763))
+* record the share seam, the rate-limit type and the outbox lock ([3c0724c](https://github.com/bhargavamin/contexer/commit/3c0724cbf6060b53298d458fbe543dc22fce9c9b))
+
 ## [0.40.0](https://github.com/bhargavamin/contexer/compare/v0.39.0...v0.40.0) (2026-08-24)
 
 
