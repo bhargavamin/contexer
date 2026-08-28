@@ -297,6 +297,39 @@ class TestCodexInstall:
         assert any("not valid TOML" in line for line in log)
 
 
+class TestCodexSiblingBranchHookSkew:
+    """Mirror of test_install.py's TestSiblingBranchHookSkew: a marker-superset hook from
+    a sibling-branch install (extra positional arg, incompatible signature) must be
+    replaced by reinstall, for both SessionStart and PostCompact."""
+
+    def _write(self, home, event, fn):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        stale = (f'"py" -c "raw=1; store.anchor_repo(repo); _c.pull_team(repo); '
+                 f"print({fn}(repo, store.source_from_hook_stdin(raw), "
+                 f"store.session_from_hook_stdin(raw), 'codex'))\"")
+        hooks_path.write_text(json.dumps({"hooks": {
+            event: [{"hooks": [{"type": "command", "command": stale}]}],
+        }}))
+        return hooks_path
+
+    def test_stale_session_start_superset_is_replaced(self, home):
+        self._write(home, "SessionStart", "store.get_session_start_context")
+        codex.install(home)
+        ours = [h["command"] for g in _hooks(home)["hooks"]["SessionStart"]
+                for h in g["hooks"] if "get_session_start_context" in h["command"]]
+        assert len(ours) == 1
+        assert "'codex'" not in ours[0]
+
+    def test_stale_post_compact_superset_is_replaced(self, home):
+        self._write(home, "PostCompact", "store.get_post_compact_context")
+        codex.install(home)
+        ours = [h["command"] for g in _hooks(home)["hooks"]["PostCompact"]
+                for h in g["hooks"] if "get_post_compact_context" in h["command"]]
+        assert len(ours) == 1
+        assert "'codex'" not in ours[0]
+
+
 class TestCodexBookkeepingWritesAreFailSoft:
     """#152 was reported against Codex specifically: its managed sandbox leaves the
     workspace writable while ~/.contexer may not be, so the SessionStart hook's

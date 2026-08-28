@@ -17,6 +17,7 @@ from contexer.adapters.base import (
     _load,
     _load_safe,
     _save,
+    _strip_stale,
 )
 
 NAME = "claude"
@@ -581,17 +582,17 @@ def install(home: Path) -> list[str]:
     hooks = settings.setdefault("hooks", {})
 
     ss = hooks.setdefault("SessionStart", [])
-    # Migrate: old SessionStart hook didn't read the session source from stdin, predates
-    # memory-tool sync, predates session-id threading (compact-source working-set
-    # rehydration), or predates the fail-soft repo anchor (#152 — an unwritable
-    # ~/.contexer aborted the hook, injecting nothing); replace it so the current
-    # ss_code is installed.
-    if _in_groups(ss, "get_session_start_context") and not (
-            _in_groups(ss, "source_from_hook_stdin") and _in_groups(ss, "sync_memory")
-            and _in_groups(ss, "session_from_hook_stdin")
-            and _in_groups(ss, "anchor_repo")):
-        ss = _filter_groups(ss, ["get_session_start_context"])
-        hooks["SessionStart"] = ss
+    # Migrate: replace any installed SessionStart hook whose command isn't byte-identical
+    # to the current ss_code (_strip_stale, the gemini.py pattern). The previous gate
+    # listed markers a CURRENT hook must carry and stripped only when one was missing —
+    # which detects older hooks but not different ones: a hook written by a NEWER or
+    # sibling-branch install (observed live: a 4-arg get_session_start_context call from
+    # a branch that added a consumer param) carries every marker as a superset, survives
+    # reinstall forever, and crashes with TypeError on every session start — costing the
+    # session its entire context injection. Exact-command currency subsumes all the old
+    # marker checks and self-maintains as ss_code evolves.
+    ss = _strip_stale(ss, ["get_session_start_context"], _py(ss_code))
+    hooks["SessionStart"] = ss
     if not _in_groups(ss, "get_session_start_context"):
         ss.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Loading session context...",
