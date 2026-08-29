@@ -460,8 +460,10 @@ def _enqueue(payload: dict) -> None:
 
 def _enqueue_unlocked(payload: dict) -> None:
     """Queue a failed push. Dedupes by decision_id (re-sharing the same decision while
-    offline replaces the queued entry - fresh content wins) and caps at _OUTBOX_CAP,
-    dropping the oldest entries beyond that.
+    offline replaces the queued entry - fresh content wins) and caps at _OUTBOX_CAP.
+    Ordinary rows retain the historical oldest-first eviction policy, but a durable
+    `lifecycle_pending` row is never silently evicted: if every row is lifecycle-pending,
+    the new enqueue is refused and the caller reports that it could not be queued.
 
     Reads through `_read_outbox` and REFUSES on a read error rather than writing. This used to
     read through the fail-soft `_load_outbox`, which answers "empty" for a file it cannot parse,
@@ -483,7 +485,14 @@ def _enqueue_unlocked(payload: dict) -> None:
     payload = _staged_merge(loaded, payload)
     entries.append(payload)
     if len(entries) > _OUTBOX_CAP:
-        entries = entries[-_OUTBOX_CAP:]
+        # Only a row that was already queued may be evicted. If the sole ordinary row is the
+        # payload we just appended, popping it and returning would falsely report success while
+        # persisting nothing of the new share.
+        evict = next((i for i, entry in enumerate(entries[:-1])
+                      if entry.get("stage") != _LIFECYCLE_PENDING), None)
+        if evict is None:
+            raise RuntimeError("share retry queue has no safely evictable row")
+        entries.pop(evict)
     _save_outbox(entries)
 
 
@@ -661,11 +670,15 @@ def _reconcile_with_disk(tail: list[dict], sent_ids: set,
     which is what `settled_pending` carries."""
     disk_entries = _load_outbox()
     settled = settled_pending or set()
-    tail_ids = {e.get("decision_id") for e in tail}
+    def identity(entry: dict) -> tuple[object, str]:
+        return (entry.get("decision_id"),
+                _LIFECYCLE_PENDING if entry.get("stage") == _LIFECYCLE_PENDING else "base")
+
+    tail_keys = {identity(e) for e in tail}
     extra = []
     for d in disk_entries:
         decision_id = d.get("decision_id")
-        if decision_id in tail_ids:
+        if identity(d) in tail_keys:
             continue
         if d.get("stage") == _LIFECYCLE_PENDING:
             if decision_id not in settled:
@@ -1067,10 +1080,10 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
         _queue_blocked_lifecycle(remote, {e.get("decision_id"): e for e in chunk})
     settled, still_pending = _retry_lifecycle_pending(remote, pending, profile.endpoint)
     sent += len(settled)
-    _save_outbox(_reconcile_with_disk([], sent_ids, settled))
-    for row in still_pending:
-        with contextlib.suppress(Exception):
-            _enqueue_unlocked(row)
+    # Persist the retry result in the same atomic rewrite that removes delivered base rows.
+    # Saving first and re-enqueueing pending rows afterwards creates a crash window in which
+    # acknowledged lifecycle history disappears even though the base remains synced.
+    _save_outbox(_reconcile_with_disk(still_pending, sent_ids, settled))
     return sent
 
 

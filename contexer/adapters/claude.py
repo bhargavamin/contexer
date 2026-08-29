@@ -10,8 +10,8 @@ from contexer import evidence, memory_sync, sidecars, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
+    _filter_hooks,
     _filter_groups,
-    _hooks_of,
     _in_commands,
     _in_groups,
     _load,
@@ -55,7 +55,9 @@ _ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
 # Modern hooks are never written to repo-level settings, so these substrings can only
 # match hooks we owned; anything else in the file is foreign and must survive.
 _LEGACY_REPO_HOOK_MARKERS = [
-    "Contexer:",                                   # inline SessionStart/PreCompact/PostCompact echoes
+    "Contexer: context compaction starting",       # inline PreCompact echo
+    "Contexer: no context stored",                 # inline legacy empty PostCompact
+    "decision(s) available",                       # inline legacy populated PostCompact
     "get_session_start_context",                   # repo-level SessionStart (dead-clone uv run)
     "capture_context",                             # mcp_tool hook for the removed tool
     "Reminder: if you make a significant decision",  # unconditional every-prompt reminder echo
@@ -90,10 +92,9 @@ def clean_legacy_repo_settings(repo_path: str) -> bool:
             if not isinstance(before, list):
                 continue
             after = _filter_groups(before, _LEGACY_REPO_HOOK_MARKERS)
-            after = [grp for grp in after if not any(
+            after = _filter_hooks(after, lambda h: (
                 isinstance(h, dict) and h.get("type") == "mcp_tool"
-                and h.get("server") == "contexer"
-                for h in _hooks_of(grp))]
+                and h.get("server") == "contexer"))
             if after != before:
                 changed = True
                 if after:
@@ -980,13 +981,9 @@ def uninstall(home: Path) -> list[str]:
             after = _filter_groups(before, markers)
             if event == "UserPromptSubmit":
                 # Also strip any legacy mcp_tool capture hooks (pre-migration installs).
-                after = [
-                    grp for grp in after
-                    if not any(
-                        h.get("type") == "mcp_tool" and h.get("server") == "contexer"
-                        for h in (grp.get("hooks", []) if isinstance(grp, dict) else [])
-                    )
-                ]
+                after = _filter_hooks(after, lambda h: (
+                    isinstance(h, dict) and h.get("type") == "mcp_tool"
+                    and h.get("server") == "contexer"))
             if after != before:
                 changed = True
                 if after:

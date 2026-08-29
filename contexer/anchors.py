@@ -94,7 +94,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import review, revisions      # pure stdlib leaf (no cycle): revision lifecycle
+from contexer import revisions              # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import sidecars
 from contexer import lifecycle      # module object too, same reason: see docstring above
 from contexer import store          # module object, not `from`-imports: see docstring above

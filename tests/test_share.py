@@ -830,6 +830,40 @@ def test_enqueue_caps_at_50_drops_oldest(tmp_repo):
     assert "d54" in ids  # newest kept
 
 
+def test_enqueue_at_cap_never_evicts_a_pending_lifecycle_delta(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 2)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+    share._enqueue({"decision_id": "ordinary-1", "content": "one", "attempts": 0})
+    share._enqueue({"decision_id": "ordinary-2", "content": "two", "attempts": 0})
+
+    entries = share._load_outbox()
+    assert [(e["decision_id"], e.get("stage")) for e in entries] == [
+        ("pending", "lifecycle_pending"), ("ordinary-2", None)]
+
+
+def test_enqueue_refuses_instead_of_evicting_when_cap_is_all_lifecycle(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+
+    with pytest.raises(RuntimeError, match="no safely evictable row"):
+        share._enqueue({"decision_id": "new", "content": "new", "attempts": 0,
+                        "stage": "lifecycle_pending", "capability": "v2"})
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
+
+
+def test_enqueue_does_not_report_success_after_evicting_its_own_ordinary_row(
+        tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+
+    with pytest.raises(RuntimeError, match="no safely evictable row"):
+        share._enqueue({"decision_id": "ordinary", "content": "body", "attempts": 0})
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
+
+
 # ── outbox: drain_outbox ──────────────────────────────────────────────────────────
 
 def test_drain_outbox_noop_when_empty(tmp_repo, monkeypatch):
@@ -1052,6 +1086,22 @@ def test_a_failed_queue_is_reported_as_not_queued_not_as_queued(tmp_repo, monkey
     status = share._finish_share(dec, "r", None, "https://example.test")
     assert status.outcome == share_status.NOT_QUEUED
     assert (status.lost, status.queued) == (1, 0)   # unsaved, and it does not claim a retry
+
+
+def test_share_reports_not_queued_when_lifecycle_rows_consume_the_cap(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+    store.update_decision(tmp_repo, "a new decision cannot displace lifecycle history", "s1",
+                          subtype="constraint")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+
+    status = share.share(tmp_repo, profile=TEAM)
+
+    assert status.outcome == share_status.NOT_QUEUED
+    assert (status.lost, status.queued) == (1, 0)
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
 
 
 def test_cancellation_still_wins_when_queueing_fails(tmp_repo, monkeypatch):

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from contexer import adapters, spool, store
-from contexer.adapters import claude, cursor
+from contexer.adapters import base, claude, cursor
 
 
 class TestRegistry:
@@ -413,6 +413,100 @@ class TestHookConvergenceSafety:
         return [h.get("command") for grp in groups for h in grp.get("hooks", [])]
 
     # --- 1. foreign hooks survive -------------------------------------------------
+
+    def test_claude_fresh_install_preserves_foreign_compaction_marker(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / ".claude").mkdir()
+        foreign = {"hooks": [{"type": "command",
+                               "command": 'echo "compaction starting, backing up notes"'}]}
+        self._write(tmp_path, {"hooks": {"PreCompact": [foreign]}})
+
+        claude.install(tmp_path)
+
+        assert foreign in self._settings(tmp_path)["hooks"]["PreCompact"]
+
+    def test_claude_fresh_install_preserves_foreign_uv_postcompact(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / ".claude").mkdir()
+        foreign = {"hooks": [{"type": "command",
+                               "command": "uv run --directory /tmp/my-tool python backup.py"}]}
+        self._write(tmp_path, {"hooks": {"PostCompact": [foreign]}})
+
+        claude.install(tmp_path)
+
+        assert foreign in self._settings(tmp_path)["hooks"]["PostCompact"]
+
+    def test_claude_fresh_install_does_not_claim_a_foreign_update_context_filename(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / ".claude").mkdir()
+        foreign = {"hooks": [{"type": "command",
+                               "command": ("uv run --directory /tmp/my-tool python "
+                                           "update_context.py")}]}
+        self._write(tmp_path, {"hooks": {"PostCompact": [foreign]}})
+
+        claude.install(tmp_path)
+
+        assert foreign in self._settings(tmp_path)["hooks"]["PostCompact"]
+
+    def test_claude_fresh_uninstall_preserves_foreign_generic_marker(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        (tmp_path / ".claude").mkdir()
+        foreign = {"hooks": [{"type": "command",
+                               "command": 'echo "compaction starting, backing up notes"'}]}
+        self._write(tmp_path, {"hooks": {"PreCompact": [foreign]}})
+
+        claude.uninstall(tmp_path)
+
+        assert foreign in self._settings(tmp_path)["hooks"]["PreCompact"]
+
+    def test_grouped_convergence_preserves_foreign_sibling_and_matcher(self):
+        current = "python -c 'from contexer import store; store.get_session_start_context()'"
+        stale = "python -c 'from contexer import store; store.get_session_start_context(old)'"
+        foreign = {"type": "command", "command": "echo foreign-owned-command"}
+        group = {"matcher": "startup", "hooks": [
+            {"type": "command", "command": stale}, foreign]}
+
+        assert base._strip_stale(
+            [group], ["get_session_start_context"], current) == [
+                {"matcher": "startup", "hooks": [foreign]}]
+
+    def test_grouped_convergence_removes_stale_sibling_beside_current(self):
+        current = "python -c 'from contexer import store; store.get_session_start_context()'"
+        stale = "python -c 'from contexer import store; store.get_session_start_context(old)'"
+        current_hook = {"type": "command", "command": current}
+        group = {"matcher": "startup", "hooks": [
+            current_hook, {"type": "command", "command": stale}]}
+
+        assert base._strip_stale(
+            [group], ["get_session_start_context"], current) == [
+                {"matcher": "startup", "hooks": [current_hook]}]
+
+    def test_marker_filter_preserves_foreign_sibling_and_matcher(self):
+        foreign = {"type": "command", "command": "echo foreign-owned-command"}
+        group = {"matcher": "stop", "hooks": [
+            {"type": "command", "command": "touch ~/.contexer/.pending_capture"}, foreign]}
+
+        assert base._filter_groups([group], [".pending_capture"]) == [
+            {"matcher": "stop", "hooks": [foreign]}]
+
+    def test_claude_stop_migration_preserves_foreign_same_group_sibling(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        claude.install(tmp_path)
+        foreign = {"type": "command", "command": "echo foreign-stop-command"}
+        cfg = self._settings(tmp_path)
+        cfg["hooks"]["Stop"] = [{"matcher": "stop", "hooks": [
+            {"type": "command", "command": "touch ~/.contexer/.pending_capture"}, foreign]}]
+        self._write(tmp_path, cfg)
+
+        claude.install(tmp_path)
+
+        assert self._settings(tmp_path)["hooks"]["Stop"] == [
+            {"matcher": "stop", "hooks": [foreign]}]
 
     def test_claude_foreign_marker_bearing_group_survives_install(self, tmp_path, monkeypatch):
         """A user's own PreCompact group whose command merely CONTAINS the generic

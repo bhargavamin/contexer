@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import pytest
 
 import contexer.remote as remote
-from contexer import config, lifecycle, share, spool, store, team_context
+from contexer import config, lifecycle, share, share_status, spool, store, team_context
 from contexer.remote import (
     RemoteContext,
     RemoteDecision,
@@ -765,7 +765,10 @@ def test_a_blocked_delta_stays_durably_pending_in_the_outbox(tmp_repo, wire_open
     monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
 
     status = share.share(tmp_repo, did, profile=TEAM)
-    assert "Synced decision" in status and "retirement history was refused" in status
+    assert status.outcome == share_status.SYNCED
+    assert status.lifecycle_pending == 1 and status.lifecycle_lost == 0
+    rendered = share_status.describe(status)
+    assert "Synced decision" in rendered and "lifecycle update" in rendered
     rows = share._load_outbox()
     assert [r["stage"] for r in rows] == ["lifecycle_pending"]
     assert rows[0]["lifecycle"][0]["kind"] == "retired"
@@ -1091,7 +1094,9 @@ def test_share_all_partitions_the_same_way_as_the_drain(tmp_repo, wire_open, mon
     _partition_seam(monkeypatch, {"results": [],
                                   "skipped": [{"decisionId": did, "reason": "invalid_content"}]})
     status = share.share_all(tmp_repo, profile=TEAM)
-    assert "Synced 0 decision(s)" in status
+    assert status.outcome == share_status.BATCH_DONE
+    assert status.sent == 0 and status.invalid == 1
+    assert "Synced 0 decision(s)" in share_status.describe(status)
     assert not any(r.get("stage") == "lifecycle_pending" for r in share._load_outbox())
 
 
@@ -1158,9 +1163,11 @@ def test_a_conflict_row_is_reported_in_its_own_words_not_as_bad_content(wire_ope
     retry, invalid, contested = share._split_skips(
         [{"decision_id": "dec-1", "reason": "lifecycle_conflict"}])
     assert retry == set() and invalid == 0 and contested == 1
-    status = share._batch_success_status(0, 0, 0, 0, contested)
-    assert "lifecycle event id is already recorded" in status
-    assert "unsupported type or content" not in status
+    status = share_status.ShareStatus(
+        share_status.BATCH_DONE, contested=contested, total=contested)
+    rendered = share_status.describe(status)
+    assert "lifecycle event id is already recorded" in rendered
+    assert "unsupported type or content" not in rendered
 
 
 def test_a_singular_lifecycle_conflict_is_never_retried_as_legacy(wire_open, monkeypatch):
