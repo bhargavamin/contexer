@@ -182,7 +182,10 @@ def test_share_decision_previews_by_default_without_pushing(monkeypatch):
     # confirm=False (default) + skip_confirm off -> preview only, NOTHING is pushed.
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
     # Team-configured + authenticated: the preview gate only fires when a push could actually happen.
-    monkeypatch.setattr(_config_mod, "load_profile",
+    # Patched on share.py's own bare-name binding (`from contexer.config import load_profile`),
+    # since share_decision_flow now owns the preview gate and reads that binding, not
+    # contexer.config's module attribute.
+    monkeypatch.setattr(share_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
     monkeypatch.setattr(server.store, "format_share_preview", lambda r, d, profile=None: "PREVIEW-TEXT")
@@ -202,7 +205,7 @@ def test_share_decision_previews_by_default_without_pushing(monkeypatch):
 def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
     # A developer who set skip_confirm bypasses the preview even with confirm=False.
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(_config_mod, "load_profile",
+    monkeypatch.setattr(share_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(skip_confirm=True))
 
     async def fake_share_ids(repo, ids, **k):
@@ -217,7 +220,7 @@ def test_share_decision_skip_confirm_pushes_without_preview(monkeypatch):
 def test_share_decision_local_mode_skips_preview(monkeypatch):
     # #2: with no team configured, don't preview a push that would no-op - go straight to share().
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(_config_mod, "load_profile", lambda *a, **k: _config_mod.Profile())  # local
+    monkeypatch.setattr(share_mod, "load_profile", lambda *a, **k: _config_mod.Profile())  # local
     previewed = {"n": 0}
     monkeypatch.setattr(server.store, "format_share_preview",
                         lambda *a, **k: previewed.__setitem__("n", previewed["n"] + 1) or "PREVIEW")
@@ -235,7 +238,7 @@ def test_share_decision_local_mode_skips_preview(monkeypatch):
 def test_share_decision_team_no_token_skips_preview(monkeypatch):
     # #B: team mode + endpoint but no resolvable token -> from_profile None -> no misleading preview.
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(_config_mod, "load_profile",
+    monkeypatch.setattr(share_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: None)
     previewed = {"n": 0}
@@ -373,7 +376,7 @@ def test_list_shareable_returns_list(monkeypatch):
 
 def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(_config_mod, "load_profile",
+    monkeypatch.setattr(share_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     monkeypatch.setattr("contexer.remote.RemoteStore.from_profile", lambda p: object())
     got = {}
@@ -390,7 +393,10 @@ def test_share_decision_multi_id_previews_whole_selection(monkeypatch):
 
 def test_share_decision_multi_id_pushes_parsed_ids(monkeypatch):
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo")
-    monkeypatch.setattr(_config_mod, "load_profile",
+    # confirm=True short-circuits the preview gate regardless of the profile's content, but
+    # share_decision_flow still calls load_profile() unconditionally - patch it anyway so this
+    # stays hermetic instead of reading the real ~/.contexer/config.toml.
+    monkeypatch.setattr(share_mod, "load_profile",
                         lambda *a, **k: _config_mod.Profile(mode="team", endpoint="https://x/mcp"))
     got = {}
 

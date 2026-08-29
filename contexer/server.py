@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import uuid
@@ -254,68 +253,10 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "Skipped - repo path not detected."
-    from contexer import config as _config
-
-    profile = _config.load_profile()  # preview state only; the push reloads under the outbox lock
-    from contexer.remote import RemoteStore
-
-    # Safe-by-default: a personal-cloud push is OUTWARD (the decision leaves the machine and may
-    # be cached/indexed even if later deleted). Preview only when a push could ACTUALLY happen -
-    # the SAME configured/authenticated check as the push path (team mode + endpoint + a resolvable
-    # token), so we never advertise a push that would no-op. Otherwise share() reports the
-    # not-configured result itself. This pushes nothing; from_profile may refresh an expired token
-    # exactly as the push would, but sends no decision. confirm=True / skip_confirm bypass the gate.
-    if not confirm and not profile.skip_confirm and RemoteStore.from_profile(profile) is not None:
-        return store.format_share_preview(resolved, decision_id, profile=profile)
-
     from contexer import share as _share
 
-    ids = [i.strip() for i in decision_id.split(",") if i.strip()]  # multi-select support
-
-    # This is the ONE MCP tool that reaches the network from inside FastMCP's event loop, so
-    # it AWAITS the async-native share path (share_ids_async -> RemoteStore.apush_decision ->
-    # awaited httpx transport) rather than calling the blocking sync share() inline (which,
-    # since asyncio.run can't run inside a running loop, previously failed outright and
-    # misreported "endpoint unreachable"). The loop stays free for every other tool.
-    #
-    # Bounded by _SHARE_TIMEOUT so a wedged transport can't hang the tool call. Because the
-    # push is AWAITED (not offloaded to an un-cancellable worker thread), wait_for CANCELS it
-    # on timeout: the cancellation propagates into the async transport and closes the socket,
-    # so nothing lingers in the background (#108). share_ids_async is local-first + outbox-
-    # backed, so a false trip is harmless - the decision is saved and the outbox retries it.
-    from contexer import share_status as _share_status
-
-    try:
-        # The tool answers a model, so the sentence is what it needs, and the status is rendered
-        # and discarded right here. A caller that wants the counts calls share_ids_async itself.
-        return _share_status.describe(await asyncio.wait_for(
-            _share.share_ids_async(resolved, ids),
-            timeout=_SHARE_TIMEOUT,
-        ))
-    except TimeoutError:
-        # The awaited push was cancelled at the deadline. Cancellation bypasses share_async's
-        # own enqueue-on-failure, so queue the selection here (off the loop) to make the
-        # "outbox retries it" promise real - idempotent, so re-queuing an already-sent id is
-        # safe. Best-effort: the local decision is unchanged and re-shareable regardless.
-        #
-        # The RESULT is what decides the message, not just whether the call raised. Queuing can
-        # legitimately record nothing: `enqueue_ids_for_retry` refuses outright when the outbox
-        # cannot be read (see share._enqueue_unlocked, which will not overwrite a queue it could
-        # not parse), and it returns 0 when no id resolved to a shareable decision. Promising an
-        # automatic retry in either case states something untrue, which is the same standard
-        # `share._finish_share` keeps for its own failure branch: the message must not promise a
-        # retry that was never recorded.
-        try:
-            queued = await asyncio.to_thread(_share.enqueue_ids_for_retry, resolved, ids)
-        except Exception:
-            queued = 0
-        head = f"Saved locally - the team cloud did not respond within {int(_SHARE_TIMEOUT)}s."
-        if queued:
-            return (f"{head} The push was cancelled and the outbox retries it automatically; "
-                    "your local decision is unchanged.")
-        return (f"{head} The push was cancelled and could NOT be queued for retry, so nothing "
-                "will resend it on its own; share it again when the cloud is reachable. Your "
-                "local decision is unchanged.")
+    return await _share.share_decision_flow(
+        resolved, decision_id, confirm=confirm, timeout=_SHARE_TIMEOUT)
 
 
 @mcp.tool()

@@ -1480,6 +1480,34 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
     return share_status.with_unknown(status, missing)
 
 
+async def share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool,
+                              timeout: float, profile: Profile | None = None) -> str:
+    """Full server.share_decision behavior: preview gate, bounded awaited push, and the
+    timeout -> cancel -> best-effort retry-queue fallback. `timeout` and its rationale stay
+    owned by the caller (the MCP tool's own round-trip backstop); this is the reusable
+    mechanic."""
+    profile = profile or load_profile()
+    if not confirm and not profile.skip_confirm and RemoteStore.from_profile(profile) is not None:
+        return store.format_share_preview(repo_path, decision_id, profile=profile)
+    ids = [i.strip() for i in decision_id.split(",") if i.strip()]
+    try:
+        status = await asyncio.wait_for(
+            share_ids_async(repo_path, ids, profile=profile), timeout=timeout)
+        return share_status.describe(status)
+    except TimeoutError:
+        try:
+            queued = await asyncio.to_thread(enqueue_ids_for_retry, repo_path, ids)
+        except Exception:
+            queued = 0
+        head = f"Saved locally - the team cloud did not respond within {int(timeout)}s."
+        if queued:
+            return (f"{head} The push was cancelled and the outbox retries it automatically; "
+                    "your local decision is unchanged.")
+        return (f"{head} The push was cancelled and could NOT be queued for retry, so nothing "
+                "will resend it on its own; share it again when the cloud is reachable. Your "
+                "local decision is unchanged.")
+
+
 def enqueue_ids_for_retry(repo_path: str, decision_ids: list) -> int:
     """Queue the given decisions (by id) into the outbox so a later drain retries them.
 
