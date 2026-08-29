@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.42.0](https://github.com/bhargavamin/contexer/compare/v0.41.0...v0.42.0) (2026-08-29)
+
+
+### Features
+
+* console Sessions view - per-session decision transcript ([#256](https://github.com/bhargavamin/contexer/issues/256)) ([a66558e](https://github.com/bhargavamin/contexer/commit/a66558ef3fc82453e22a70b866a0deee77317fb9))
+* console Sessions view rendering per-session decision transcripts ([1ec5002](https://github.com/bhargavamin/contexer/commit/1ec5002116c3dc8b8e60f17db6aeb05eecc3b4e3))
+* link a session's transcript to its real Claude Code conversation when available ([df11bdf](https://github.com/bhargavamin/contexer/commit/df11bdf7aeb629c828eb149532f599f4e5ffe09b))
+* link a session's transcript to its real Claude Code conversation when available ([d5a044d](https://github.com/bhargavamin/contexer/commit/d5a044d47a7ccb76ddaf76c09d42ec9a0047e6bf))
+* per-session transcript reads in console_api (list_sessions, session_transcript) ([68164ae](https://github.com/bhargavamin/contexer/commit/68164ae08db8f150006c325dc3ab87b75543fc9a))
+
+
+### Bug Fixes
+
+* reject a session_id containing a path separator or '..' in the transcript route ([abbe78a](https://github.com/bhargavamin/contexer/commit/abbe78a9fdab2bef3a13c0bb168a1a5c57a6d251))
+* session_transcript rejects an empty session id instead of matching arbitrarily ([db20161](https://github.com/bhargavamin/contexer/commit/db2016137a36067d287fcf643ef069889e60b465))
+* stamp the host's real session id from CLAUDE_CODE_SESSION_ID when present ([6dac3ba](https://github.com/bhargavamin/contexer/commit/6dac3baaafd57acf651f8111148c83cfa9f324ec))
+* stamp the host's real session id from CLAUDE_CODE_SESSION_ID when present ([5e96dbc](https://github.com/bhargavamin/contexer/commit/5e96dbce163f38dee8ddb6f83ca2ec8d97b39f07))
+
+
+### Documentation
+
+* add thin-MCP-tools design constraint ([#253](https://github.com/bhargavamin/contexer/issues/253)) ([70ca300](https://github.com/bhargavamin/contexer/commit/70ca300c4733eaacd13971546b42f9afadb7def8))
+* add thin-MCP-tools design constraint ([#253](https://github.com/bhargavamin/contexer/issues/253)) ([d8092fd](https://github.com/bhargavamin/contexer/commit/d8092fdb8e2e90bc8b9561e6805b60a52646e599))
+
 ## [0.41.0](https://github.com/bhargavamin/contexer/compare/v0.40.0...v0.41.0) (2026-08-28)
 
 
