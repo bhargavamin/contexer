@@ -89,7 +89,8 @@ _WIRE_SOURCE_FILES_MAX_LEN = 300
 # OPENED on 2026-08-26. The pre-flip checklist was five items - three guessed field names and two
 # closed vocabularies, a strictly bigger set of unknowns than `source_files` had - and every one
 # of them was settled by READING the server's schema and then proving it live, not by inference.
-# What the server now defines (contexer-teams commit c3fbccc, `packages/db/src/validation.ts` +
+# What the server now defines (contexer-teams lifecycle merge f216db9, reverified against
+# origin/main 0a3111b during the 2026-08-30 integration, `packages/db/src/validation.ts` +
 # `decision-lifecycle.ts` + migration 0063, `apps/mcp-server/src/tools.ts`):
 #   1. Record-list field name: `lifecycle`. Confirmed - the guess was right.
 #   2. Revision-identity field name: `revision_id`, snake_case. This was the WEAKEST guess, with
@@ -365,9 +366,10 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
             args["source_files"] = bounded
     if _WIRE_LIFECYCLE and lifecycle_caps is not None:
         if lifecycle_caps.revisions and revision_id:
-            # `revision_id`, snake_case, CONFIRMED (2026-08-26) against contexer-teams c3fbccc:
-            # `pushDecisionFields` in `apps/mcp-server/src/tools.ts`, and proved live on both
-            # write tools. This was the weakest of the three guesses and the counter-evidence is
+            # `revision_id`, snake_case, CONFIRMED against contexer-teams lifecycle merge
+            # f216db9 and reverified on origin/main 0a3111b: `pushDecisionFields` in
+            # `apps/mcp-server/src/tools.ts`, and proved live on both write tools. This was the
+            # weakest of the three guesses and the counter-evidence is
             # still real - `asubmit_team_decision` below spells the same CONCEPT `"revisionId"`
             # (camelCase) at its own tool's top level - so the two spellings are not a typo to
             # tidy up: that is a different tool's field, and the push fields are snake_case
