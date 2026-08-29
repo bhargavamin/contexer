@@ -1946,12 +1946,28 @@
     const open = asList(d.open, "open");
     const entries = asList(d.entries, "entries");
 
+    // Issue #261: the REAL underlying Claude Code conversation, when one exists locally for
+    // this exact session - existence-gated by `transcript_available` (never constructed
+    // speculatively), and always built from the full `session_id`, never `short_id`. A plain
+    // same-origin link, not `hrefFor` (that builds internal hash routes; this is a direct API
+    // URL the browser navigates to in a new tab, carrying the `ctx_ui` cookie automatically).
+    const transcriptLink = d.transcript_available
+      ? h("a", {
+          class: "btn btn-ghost btn-sm",
+          href: "/api/store/" + encodeURIComponent(slug) + "/sessions/" +
+            encodeURIComponent(sid) + "/transcript/raw",
+          target: "_blank",
+          rel: "noopener",
+          text: "View full transcript ↗",
+        })
+      : null;
+
     const head = pageHead(
       "· session",
       [sid ? shortId(sid) : "(no session recorded)"],
       "Capture-session transcript - decisions captured this session, not a conversation log.",
       [fmtAgo(d.first_at) + " – " + fmtAgo(d.last_at), num(d.count) + " decisions"],
-      [back]
+      [back, transcriptLink]
     );
 
     if (entries.length === 0) {

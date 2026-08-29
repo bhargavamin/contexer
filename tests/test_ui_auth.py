@@ -147,6 +147,7 @@ ROUTES = [
     ("GET", "/api/config"),
     ("GET", "/api/global"),
     ("GET", "/api/store/anything"),
+    ("GET", "/api/store/anything/sessions/anything/transcript/raw"),
     ("GET", "/api/team/anything"),
     ("POST", "/api/global"),
     ("PUT", "/api/config"),

@@ -419,3 +419,165 @@ class TestSessionTranscript:
         store._store_path(tmp_repo).write_text('{"repo_path": "/x", "entries": [{"id": "1"',
                                                 encoding="utf-8")
         assert console_api.session_transcript(tmp_repo, "s1") is None
+
+
+# ── transcript link (issue #261) ──────────────────────────────────────────────────────────
+
+class TestTranscriptLink:
+    """The "View full transcript" link's backing reads: existence-gated, fail-soft, and owned
+    by console_api (never a raw file open in ui/api.py - see `_claude_transcript_path`'s
+    docstring). `_claude_transcript_path` resolves `Path.home()` at CALL time (not a module
+    constant), so every test here patches `Path.home` itself - the same pattern
+    test_readonly_store_dir.py uses - rather than touching the real `~/.claude`; the
+    session-scoped `console_paths_never_resolve_the_real_home` fixture in conftest.py already
+    guarantees a leak here would fail the run."""
+
+    def _seed_transcript(self, tmp_path, monkeypatch, repo: str, session_id: str,
+                         content: str = "{}\n") -> Path:
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        project_dir = fake_home / ".claude" / "projects" / repo.replace("/", "-")
+        project_dir.mkdir(parents=True, exist_ok=True)
+        path = project_dir / f"{session_id}.jsonl"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_transcript_exists_finds_a_seeded_file(self, tmp_repo, tmp_path, monkeypatch):
+        self._seed_transcript(tmp_path, monkeypatch, tmp_repo, "sess-full-123")
+        assert console_api.transcript_exists(tmp_repo, "sess-full-123") is True
+
+    def test_transcript_exists_is_false_for_a_missing_file(self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api.transcript_exists(tmp_repo, "no-such-session") is False
+
+    def test_transcript_exists_never_resolves_a_short_id(self, tmp_repo, tmp_path, monkeypatch):
+        sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+        self._seed_transcript(tmp_path, monkeypatch, tmp_repo, sid)
+        assert console_api.transcript_exists(tmp_repo, sid) is True
+        # The store's full/short-id prefix matching (session_transcript's own addressing) is
+        # deliberately NOT reproduced for the real transcript file - Claude Code's own
+        # filenames are always the full id, so a short id must fail closed, not resolve.
+        assert console_api.transcript_exists(tmp_repo, sid[:8]) is False
+
+    def test_read_transcript_returns_the_raw_content(self, tmp_repo, tmp_path, monkeypatch):
+        content = '{"type": "user", "message": {"role": "user", "content": "hi"}}\n'
+        self._seed_transcript(tmp_path, monkeypatch, tmp_repo, "sess-1", content=content)
+        assert console_api.read_transcript(tmp_repo, "sess-1") == content
+
+    def test_read_transcript_is_none_for_a_missing_file(self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api.read_transcript(tmp_repo, "sess-1") is None
+
+    def test_read_transcript_never_resolves_a_short_id(self, tmp_repo, tmp_path, monkeypatch):
+        sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+        self._seed_transcript(tmp_path, monkeypatch, tmp_repo, sid, content="hello\n")
+        assert console_api.read_transcript(tmp_repo, sid) == "hello\n"
+        assert console_api.read_transcript(tmp_repo, sid[:8]) is None
+
+    def test_read_transcript_over_the_size_cap_returns_a_pointer_not_the_bytes(
+            self, tmp_repo, tmp_path, monkeypatch):
+        path = self._seed_transcript(tmp_path, monkeypatch, tmp_repo, "sess-big",
+                                     content="x" * 100)
+        monkeypatch.setattr(console_api, "_TRANSCRIPT_SIZE_CAP", 10)
+
+        message = console_api.read_transcript(tmp_repo, "sess-big")
+        assert message is not None
+        assert "x" * 100 not in message
+        assert str(path) in message
+
+    def test_session_transcript_carries_transcript_available_true_for_full_and_short_id(
+            self, tmp_repo, tmp_path, monkeypatch):
+        sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+        _seed(tmp_repo, "A decision", sid)
+        self._seed_transcript(tmp_path, monkeypatch, tmp_repo, sid)
+
+        # Addressed by full id and by the #256 short-id fallback alike - the flag is computed
+        # from the RESOLVED full session id (`target`) either way, never the short one passed in.
+        assert console_api.session_transcript(tmp_repo, sid)["transcript_available"] is True
+        assert console_api.session_transcript(tmp_repo, sid[:8])["transcript_available"] is True
+
+    def test_session_transcript_carries_transcript_available_false_when_absent(
+            self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        _seed(tmp_repo, "A decision", "s1")
+        transcript = console_api.session_transcript(tmp_repo, "s1")
+        assert transcript["transcript_available"] is False
+
+    def test_session_transcript_null_bucket_transcript_unavailable(
+            self, tmp_repo, tmp_path, monkeypatch):
+        # The null bucket has no session id at all (`target` is None) - there is nothing to
+        # look a transcript up by, so this must never even attempt the filesystem check.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        _seed(tmp_repo, "Legacy decision with no session id", "")
+        transcript = console_api.session_transcript(tmp_repo, "none")
+        assert transcript["transcript_available"] is False
+
+    # --- path-traversal regression (fix round after review) ---------------------------------
+    # `session_id` reaches `_claude_transcript_path` from a URL path segment. `ui/api.py`'s
+    # `dispatch` splits the raw request path on '/' BEFORE unquoting each segment, so a
+    # percent-encoded '/' (`%2F`) survives routing as one segment and only becomes a literal
+    # '/' once it lands here - a caller authenticated for repo A could smuggle `../<repo B's
+    # slug>/<session>` and read repo B's real transcript, or `../../secret` to read any file
+    # under `~/.claude`. These tests call console_api directly with a session_id that ALREADY
+    # contains the dangerous character, since that is the actual vulnerable surface regardless
+    # of which URL-encoding trick produces it.
+
+    def test_session_id_containing_a_slash_is_rejected(self, tmp_repo, tmp_path, monkeypatch):
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        # A second repo's real transcript - the file the crafted session_id tries to reach.
+        victim_repo = "/some/other/repo"
+        victim_dir = fake_home / ".claude" / "projects" / victim_repo.replace("/", "-")
+        victim_dir.mkdir(parents=True)
+        (victim_dir / "victim-session.jsonl").write_text("SECRET other-repo transcript\n",
+                                                          encoding="utf-8")
+
+        traversal_id = "../" + victim_repo.replace("/", "-") + "/victim-session"
+        assert console_api._claude_transcript_path(tmp_repo, traversal_id) is None
+        assert console_api.transcript_exists(tmp_repo, traversal_id) is False
+        assert console_api.read_transcript(tmp_repo, traversal_id) is None
+
+    def test_session_id_containing_a_backslash_is_rejected(self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api.read_transcript(tmp_repo, "..\\secret") is None
+
+    def test_session_id_escaping_entirely_outside_projects_is_rejected(
+            self, tmp_repo, tmp_path, monkeypatch):
+        """The second live PoC from the review: `../../secret` reaching a file entirely
+        outside any project directory, e.g. `~/.claude/secret.jsonl`."""
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        claude_dir = fake_home / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "secret.jsonl").write_text("SECRET machine-wide file\n", encoding="utf-8")
+
+        assert console_api.read_transcript(tmp_repo, "../../secret") is None
+
+    def test_session_id_of_dotdot_alone_is_rejected_even_without_a_slash(
+            self, tmp_repo, tmp_path, monkeypatch):
+        """`..` on its own never contains '/', so the slash check alone would not catch it -
+        it needs its own explicit rejection. (In this function specifically the trailing
+        `.jsonl` suffix would neutralise it into a harmless single filename component anyway,
+        but the rejection is explicit rather than relying on that incidental fact.)"""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api._claude_transcript_path(tmp_repo, "..") is None
+        assert console_api.read_transcript(tmp_repo, "..") is None
+
+    def test_session_id_of_single_dot_is_rejected(self, tmp_repo, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        assert console_api._claude_transcript_path(tmp_repo, ".") is None
+
+    def test_a_normal_uuid_session_id_still_resolves_after_the_traversal_fix(
+            self, tmp_repo, tmp_path, monkeypatch):
+        """The fix must not collateral-damage the legitimate case."""
+        fake_home = tmp_path / "fakehome"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        sid = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb"
+        project_dir = fake_home / ".claude" / "projects" / tmp_repo.replace("/", "-")
+        project_dir.mkdir(parents=True)
+        (project_dir / f"{sid}.jsonl").write_text("hello\n", encoding="utf-8")
+
+        assert console_api._claude_transcript_path(tmp_repo, sid) is not None
+        assert console_api.transcript_exists(tmp_repo, sid) is True
+        assert console_api.read_transcript(tmp_repo, sid) == "hello\n"
