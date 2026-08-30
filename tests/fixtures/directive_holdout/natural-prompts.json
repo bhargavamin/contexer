@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-08-30",
-  "collection": "Manually labelled paraphrases of ordinary developer prompts represented in existing Contexer tests and documentation. Labels were assigned from the prompt's conversational meaning before the Task 04 classifier change or any detector run over this file. The corpus excludes the frozen adversarial container fixtures and is reported separately; it is not a tuning set.",
+  "recorded_at": "2026-08-30",
+  "labeling_owner": "Codex implementation session 01a04fa3-045d-7380-b462-f6562909594f",
+  "collection": "Manually labelled paraphrases of ordinary developer prompts represented in existing Contexer tests and documentation. This fixture and the Task 04 classifier change landed in the same commit, so repository history does not establish independent pre-tuning holdout provenance. The corpus excludes the frozen adversarial container fixtures, is reported separately as labeled regression evidence, and must not be used as a tuning set.",
   "cases": [
     {"id": "durable-uv", "directive": true, "text": "Always use uv when you add or update Python dependencies."},
     {"id": "durable-main", "directive": true, "text": "Never commit directly to main in this repository."},
