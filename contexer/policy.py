@@ -765,5 +765,3 @@ def worst_verdict(verdicts) -> str:
     applied, so nothing objected."""
     return max((_checked(v, VERDICTS, "verdict") for v in verdicts or []),
                key=_VERDICT_RANK.__getitem__, default="allow")
-
-

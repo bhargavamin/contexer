@@ -358,4 +358,3 @@ def test_a_caller_that_ran_no_pass_renders_capabilities_alone():
                    "conclusions agent-reported, test results unavailable, diffs unavailable"
     assert "reconciliation" not in line and "dropped" not in line
     assert evidence.format_coverage(block).startswith(line + ";")
-
