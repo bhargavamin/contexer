@@ -96,8 +96,8 @@ Contexer documentation follow-up PR: <https://github.com/bhargavamin/contexer/pu
 Contexer plan present in reviewed follow-up tree: yes, `bb6ad9b`
 Contexer ledger present in reviewed follow-up tree: yes, `bb6ad9b`
 Closeout file present in reviewed follow-up tree: yes, `bb6ad9b`
-Teams pointer follow-up PR: <https://github.com/contexer-ai/contexer-teams/pull/190>
-Teams pointer merged SHA: `07b458e0f772dd912ca9efdfb409cc7dcbe97a19`
+Initial Teams pointer follow-up PR/merge: <https://github.com/contexer-ai/contexer-teams/pull/190> / `07b458e0f772dd912ca9efdfb409cc7dcbe97a19`
+Final Teams pointer correction PR/head/merge: <https://github.com/contexer-ai/contexer-teams/pull/192> / `c055f740ae89f8d7d1f2aaa2d3fb8621d68d0dab` / `7191f12b7ebdf540ea6c12835cfa19ce81ac39a6`
 ```
 
 Gate:
@@ -137,8 +137,8 @@ Evidence required:
 ```text
 Ledger correction entry date/session: 2026-08-30 / Codex review-closeout session
 Correct Contexer final SHA recorded: yes; a696201 reviewed head, 97c479c product merge, d278102 canonical-record merge
-Correct Teams feature and main SHAs recorded: yes; fde3408 reviewed head, 48b0211 product squash merge, 07b458e pointer squash merge
-PR and merge states recorded: yes; Contexer #268/#270 and Teams #189/#190
+Correct Teams feature and main SHAs recorded: yes; fde3408 reviewed head, 48b0211 product squash merge, 07b458e initial pointer and 7191f12 corrected pointer merges
+PR and merge states recorded: yes; Contexer #268/#270/#272 and Teams #189/#190/#192
 Python 3.14 failure/fix/rerun recorded: yes; additive correction entry, a696201 repair, both reruns green
 Deviation table populated: yes; Section 9 records installation, acceptance, fixes, PRs, merges and documentation follow-ups
 Blank summary fields resolved: yes; Sections 4 and 7 contain the authoritative baseline/evaluation results
@@ -342,8 +342,10 @@ Completed by: Codex review-closeout session
 Maintainer ratification: Bhargav Amin, 2026-08-30; R08-R12 as proposed; C05 Option A
 Final Contexer product PR/head/merge SHA: #268 / a696201f2e38b2f70353404fe4620abe4e3dd372 / 97c479c86aeaf36ab1311298fd4837b8f37bc18e
 Canonical Contexer record PR/head/merge SHA: #270 / 61ed51ae15d18789bda55af5a39a5a4fb5a47470 / d278102d2e2beaa1d01560b134408dca824f4661
-Final Teams pointer PR/head/merge SHA: #190 / 4fd0687c773928267923508f8a3b7732cf9a6f45 / 07b458e0f772dd912ca9efdfb409cc7dcbe97a19
+Contexer completion record PR/head/merge SHA: #272 / fe5e872d49886f5092cd9b3ee0936da6e3ae6b12 / 71c0f0cea227a726f03156a47b45acfdc4e8316f
+Initial Teams pointer PR/head/merge SHA: #190 / 4fd0687c773928267923508f8a3b7732cf9a6f45 / 07b458e0f772dd912ca9efdfb409cc7dcbe97a19
+Final Teams pointer PR/head/merge SHA: #192 / c055f740ae89f8d7d1f2aaa2d3fb8621d68d0dab / 7191f12b7ebdf540ea6c12835cfa19ce81ac39a6
 C05 issue or PR: https://github.com/contexer-ai/contexer-teams/issues/191
-Final verification commands/results: fetched both origin/main refs; canonical ls-tree discovery PASS; Contexer a696201 ancestry and a696201/97c479c tree equality PASS; Teams fde3408/48b0211 tree equality PASS; immutable absolute pointer links PASS; R08-R12 maintainer/date PASS; regression-corpus wording PASS; C05 issue readback PASS
+Final verification commands/results: fetched both origin/main refs; canonical ls-tree discovery PASS; Contexer a696201 ancestry and a696201/97c479c tree equality PASS; Teams fde3408/48b0211 tree equality PASS; corrected pointer at 7191f12 reports complete and its immutable absolute links resolve to completed Contexer 71c0f0c; R08-R12 maintainer/date PASS; regression-corpus wording PASS; C05 issue readback PASS
 Residual limitations accepted by: Bhargav Amin through C05 Option A on 2026-08-30; promotion-time backfill remains tracked in issue #191, and an independently frozen natural-prompt holdout remains future evaluation work
 ```
