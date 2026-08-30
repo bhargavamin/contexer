@@ -639,24 +639,38 @@ def test_age_is_the_files_mtime_never_the_stamp_in_its_own_name(tmp_repo):
 
 def test_a_file_that_cannot_be_stat_ed_is_kept(tmp_repo, monkeypatch):
     """Fail-soft means never dropping evidence over a failure to MEASURE it: this file is old
-    enough to evict, and the only reason it survives is that its age could not be read."""
-    spool.append_evidence(tmp_repo, _event())
+    enough to evict, and the only reason it survives is that its age could not be read. A second
+    measurable old file must still be swept, proving the per-file failure does not abort the pass."""
+    spool.append_evidence(tmp_repo, _event(summary="unmeasurable"))
     event_file = next(iter(_pending(tmp_repo).iterdir()))
+    spool.append_evidence(tmp_repo, _event(summary="measurable"))
+    measurable_file = next(path for path in _pending(tmp_repo).iterdir()
+                           if path != event_file)
     _age(event_file, spool._MAX_PENDING_AGE_DAYS + 1)
-    real_stat, seen = Path.stat, set()
+    _age(measurable_file, spool._MAX_PENDING_AGE_DAYS + 1)
+    real_stat = Path.stat
+    real_event_files = spool._event_files
 
     def flaky(self, *args, **kwargs):
-        # Fail only the AGE read. The listing stats each file once to classify it, and a file
-        # that failed THAT stat would never be listed at all - a different branch entirely.
-        if self.suffix == ".json" and self.parent.name == "pending" and self in seen:
+        if self == event_file:
             raise OSError("no stat")
-        seen.add(self)
         return real_stat(self, *args, **kwargs)
 
+    def listed(directory):
+        # Path.is_file() called Path.stat() through Python 3.13, but Python 3.14 may stat via
+        # os.stat() instead. Supply the already-classified pending listing so this test always
+        # targets _sweep_events' age read rather than depending on that pathlib implementation
+        # detail. Every other directory still exercises the production listing path.
+        if directory == _pending(tmp_repo):
+            return sorted([event_file, measurable_file], key=lambda path: path.name)
+        return real_event_files(directory)
+
     with monkeypatch.context() as patched:
+        patched.setattr(spool, "_event_files", listed)
         patched.setattr(Path, "stat", flaky)
-        assert spool.run_retention(tmp_repo)["dropped_pending"] == 0
-    assert len(spool.list_pending_evidence(tmp_repo)) == 1
+        assert spool._sweep_events(_pending(tmp_repo)) == 1
+    assert [event["summary"] for event in spool.list_pending_evidence(tmp_repo)] == [
+        "unmeasurable"]
 
 
 def test_held_events_are_exempt_from_retention(tmp_repo, monkeypatch):
