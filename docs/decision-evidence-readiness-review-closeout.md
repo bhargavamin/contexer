@@ -1,12 +1,12 @@
 # Decision evidence readiness review closeout
 
-Status: `closeout_pending`
+Status: `complete`
 
 Created: 2026-08-30
 
 Scope: Contexer PR #268 and Contexer Teams PR #189
 
-Owner: next implementation/release session, with maintainer ratification where identified
+Owner: Bhargav Amin; executed by the Codex review-closeout session
 
 ## 1. Purpose
 
@@ -96,8 +96,8 @@ Contexer documentation follow-up PR: <https://github.com/bhargavamin/contexer/pu
 Contexer plan present in reviewed follow-up tree: yes, `bb6ad9b`
 Contexer ledger present in reviewed follow-up tree: yes, `bb6ad9b`
 Closeout file present in reviewed follow-up tree: yes, `bb6ad9b`
-Teams pointer follow-up PR: <URL>
-Teams pointer merged SHA: <SHA>
+Teams pointer follow-up PR: <https://github.com/contexer-ai/contexer-teams/pull/190>
+Teams pointer merged SHA: `07b458e0f772dd912ca9efdfb409cc7dcbe97a19`
 ```
 
 Gate:
@@ -135,13 +135,13 @@ Required actions:
 Evidence required:
 
 ```text
-Ledger correction entry date/session: <value>
-Correct Contexer final SHA recorded: <yes>
-Correct Teams feature and main SHAs recorded: <yes>
-PR and merge states recorded: <yes>
-Python 3.14 failure/fix/rerun recorded: <yes>
-Deviation table populated: <yes>
-Blank summary fields resolved: <yes>
+Ledger correction entry date/session: 2026-08-30 / Codex review-closeout session
+Correct Contexer final SHA recorded: yes; a696201 reviewed head, 97c479c product merge, d278102 canonical-record merge
+Correct Teams feature and main SHAs recorded: yes; fde3408 reviewed head, 48b0211 product squash merge, 07b458e pointer squash merge
+PR and merge states recorded: yes; Contexer #268/#270 and Teams #189/#190
+Python 3.14 failure/fix/rerun recorded: yes; additive correction entry, a696201 repair, both reruns green
+Deviation table populated: yes; Section 9 records installation, acceptance, fixes, PRs, merges and documentation follow-ups
+Blank summary fields resolved: yes; Sections 4 and 7 contain the authoritative baseline/evaluation results
 ```
 
 ### C03 - Ratify the five implementation choices
@@ -223,7 +223,7 @@ Gate:
 
 Chosen disposition: Option A.
 Maintainer/date: Bhargav Amin, 2026-08-30.
-Follow-up issue: pending creation.
+Follow-up issue: <https://github.com/contexer-ai/contexer-teams/issues/191>.
 Reason: preserve the reviewed and merged product behavior while tracking promotion-time backfill as
 a focused, content-free, tenant-fenced and deduplicated Teams change.
 
@@ -263,10 +263,11 @@ Choose and record exactly one disposition:
 Required record:
 
 ```text
-Chosen disposition: <A or B>
-Maintainer/date: <value>
-Follow-up issue or PR: <URL>
-Reason: <value>
+Chosen disposition: A
+Maintainer/date: Bhargav Amin, 2026-08-30
+Follow-up issue or PR: https://github.com/contexer-ai/contexer-teams/issues/191
+Reason: preserve the reviewed product contract and track focused content-free, tenant-fenced,
+deduplicated promotion-time backfill for all currently open same-team divergences
 ```
 
 ## 4. Final execution order
@@ -317,31 +318,32 @@ Then verify:
 ## 6. Final acceptance checklist
 
 - [x] C01 canonical Contexer documents are tracked and reviewable.
-- [ ] C01 Teams pointer is tracked through a follow-up PR and uses a durable link.
+- [x] C01 Teams pointer is tracked through a follow-up PR and uses a durable link.
 - [x] C02 progress ledger matches actual SHAs, PRs, merges, fixes, and deviations.
 - [x] C03 R08-R12 are explicitly ratified or their alternatives are implemented and tested.
 - [x] C04 current evaluation evidence is labeled accurately.
 - [x] C04 future independent-holdout work is recorded.
-- [ ] C05 newly promoted lead behavior has an explicit disposition and issue/PR.
+- [x] C05 newly promoted lead behavior has an explicit disposition and issue/PR.
 - [x] Contexer Python 3.12/3.13/3.14, benchmark, Ruff, and Guard checks pass at `a696201`.
 - [x] Teams PR #189 is merged and its full validation was green.
 - [x] Contexer PR #268 is merged with explicit approval and its merge SHA is recorded.
-- [ ] Implementation worktrees have no uncommitted closeout changes; all pre-existing user-owned
+- [x] Implementation worktrees have no uncommitted closeout changes; all pre-existing user-owned
       dirty/untracked files remain preserved.
-- [ ] Progress ledger overall status is `complete`.
-- [ ] This closeout status is `complete`.
+- [x] Progress ledger overall status is `complete`.
+- [x] This closeout status is `complete`.
 
 ## 7. Completion record
 
 Fill this section only after every unchecked item above is satisfied.
 
 ```text
-Completed at:
-Completed by:
-Maintainer ratification:
-Final Contexer PR/head/merge SHA:
-Final Teams pointer PR/merge SHA:
-C05 issue or PR:
-Final verification commands/results:
-Residual limitations accepted by:
+Completed at: 2026-08-30
+Completed by: Codex review-closeout session
+Maintainer ratification: Bhargav Amin, 2026-08-30; R08-R12 as proposed; C05 Option A
+Final Contexer product PR/head/merge SHA: #268 / a696201f2e38b2f70353404fe4620abe4e3dd372 / 97c479c86aeaf36ab1311298fd4837b8f37bc18e
+Canonical Contexer record PR/head/merge SHA: #270 / 61ed51ae15d18789bda55af5a39a5a4fb5a47470 / d278102d2e2beaa1d01560b134408dca824f4661
+Final Teams pointer PR/head/merge SHA: #190 / 4fd0687c773928267923508f8a3b7732cf9a6f45 / 07b458e0f772dd912ca9efdfb409cc7dcbe97a19
+C05 issue or PR: https://github.com/contexer-ai/contexer-teams/issues/191
+Final verification commands/results: fetched both origin/main refs; canonical ls-tree discovery PASS; Contexer a696201 ancestry and a696201/97c479c tree equality PASS; Teams fde3408/48b0211 tree equality PASS; immutable absolute pointer links PASS; R08-R12 maintainer/date PASS; regression-corpus wording PASS; C05 issue readback PASS
+Residual limitations accepted by: Bhargav Amin through C05 Option A on 2026-08-30; promotion-time backfill remains tracked in issue #191, and an independently frozen natural-prompt holdout remains future evaluation work
 ```
