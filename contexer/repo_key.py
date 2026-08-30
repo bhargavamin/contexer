@@ -16,8 +16,11 @@ deliberately has no alias step - aliases are a local concept and only resolved
 keys ever go over the wire. Fail-soft: if ssh is missing or errors, the host is
 used as written (pre-fix behavior).
 """
+import os
 import subprocess
 from functools import lru_cache
+
+from contexer import store
 
 _SCHEMES = ("https://", "http://", "git://", "ssh://")
 
@@ -85,6 +88,46 @@ def canonical_repo_key(remote: str | None) -> str | None:
     result = result.rstrip("/")
 
     return result.lower()
+
+
+def compare_evidence_repo_identity(repo_path: str, observed_key: object) -> dict:
+    """Compare one event's repository identity with the spool that contains it.
+
+    Current host emitters stamp a local path, so local identities use the store's exact
+    linked-worktree collapse and a realpath comparison. A remote-shaped key is accepted only
+    when this checkout has a canonical origin key to compare it with. Any other non-empty
+    spelling is unverifiable, never assumed equivalent.
+
+    Schema V1 has always required a non-empty ``repo_key``; ``missing`` is therefore an
+    invalid legacy event, not a compatibility exemption. The spool consumer records its
+    missing-identity receipt and quarantines it before candidate aggregation.
+    """
+    expected_local = os.path.realpath(store.canonical_store_key(os.path.realpath(repo_path)))
+    observed = observed_key.strip() if isinstance(observed_key, str) else ""
+    if not observed:
+        return {"matches": False, "expected_key": expected_local, "observed_key": "",
+                "reason": "missing"}
+
+    if os.path.isabs(observed):
+        observed_local = os.path.realpath(
+            store.canonical_store_key(os.path.realpath(observed)))
+        return {
+            "matches": observed_local == expected_local,
+            "expected_key": expected_local,
+            "observed_key": observed,
+            "reason": "match_local" if observed_local == expected_local else "mismatch_local",
+        }
+
+    expected_remote = canonical_repo_key(
+        store.run_git(repo_path, "remote", "get-url", "origin"))
+    observed_remote = canonical_repo_key(observed)
+    if expected_remote and observed_remote:
+        matches = observed_remote == expected_remote
+        return {"matches": matches, "expected_key": expected_remote,
+                "observed_key": observed,
+                "reason": "match_remote" if matches else "mismatch_remote"}
+    return {"matches": False, "expected_key": expected_local, "observed_key": observed,
+            "reason": "unverifiable"}
 
 
 def _strip_userinfo(s: str, delim: str) -> str:

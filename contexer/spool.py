@@ -48,7 +48,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import evidence, store
+from contexer import evidence, repo_key, store
 
 # Measured implementation constants, not product promises. 1000 pending events at the 8KB
 # per-event ceiling validation already enforces is ~8MB of spool a reconciliation pass can
@@ -84,6 +84,11 @@ _META_NAME = "candidate.json"
 # that lost its oldest rows says so instead of reading as a complete account.
 _ORPHAN_RECEIPTS_NAME = ".orphan_receipts.json"
 MAX_ORPHAN_RECEIPTS = 200
+
+# Terminal routing receipts for valid events that reached the wrong repository spool. The raw
+# event moves to quarantine, while this bounded ledger preserves why it can never be consumed.
+_IDENTITY_RECEIPTS_NAME = ".identity_receipts.json"
+MAX_IDENTITY_RECEIPTS = 200
 
 # The one reason this ledger is ever written, stated once. Both callers file the same fact -
 # the sweep and reconciliation's own finalize reach it from different directions - so it is a
@@ -158,6 +163,10 @@ def _gap_path(repo_path: str, slug: str = "") -> Path:
 
 def _orphan_receipts_path(repo_path: str, slug: str = "") -> Path:
     return _repo_dir(repo_path, slug) / _ORPHAN_RECEIPTS_NAME
+
+
+def _identity_receipts_path(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / _IDENTITY_RECEIPTS_NAME
 
 
 def spool_slugs() -> list[str]:
@@ -354,13 +363,25 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
 
 # ── read (the reconciliation path) ───────────────────────────────────────────────
 
-def _quarantine(repo_path: str, path: Path) -> None:
+def _quarantine(repo_path: str, path: Path) -> bool:
     """Isolate one unreadable file so it never hides its valid siblings again. Best-effort:
-    a file that cannot be moved is simply read and rejected again next pass."""
+    a file that cannot be moved is simply read and rejected again next pass. The boolean lets
+    reconciliation report that incomplete routing instead of claiming a clean pass."""
     try:
         os.replace(path, _ensure_dir(_quarantine_dir(repo_path)) / path.name)
     except OSError:
-        pass
+        return False
+    return True
+
+
+def _read_event_detail(path: Path) -> tuple[dict | None, object, list[str]]:
+    """Normalized event plus the raw value and validation errors, without raising."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None, ["event is unreadable"]
+    normalized, errors = evidence.validate_event(raw)
+    return normalized, raw, errors
 
 
 def _read_event(path: Path) -> dict | None:
@@ -370,20 +391,20 @@ def _read_event(path: Path) -> dict | None:
     nothing for a healthy file and catches a hand-edited or schema-drifted one at the only
     point where it could otherwise reach the policy pass as if it were trustworthy.
     """
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    normalized, _errors = evidence.validate_event(raw)
+    normalized, _raw, _errors = _read_event_detail(path)
     return normalized
 
 
-def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
+def list_pending_evidence(repo_path: str, session_id: str = "", *,
+                          route_invalid: bool = True, issues: list | None = None) -> list[dict]:
     """Every unheld event, oldest first; `session_id=""` means every session.
 
     Malformed files are MOVED to `quarantine/` as they are met, so one bad event can never
-    hide the valid ones beside it. Lock-free: atomic writes mean a reader never sees a torn
-    file, and a file renamed out from under this listing simply reads as absent.
+    hide the valid ones beside it. A schema-invalid event whose only defect is a missing
+    repository key takes the stronger identity route: durable receipt first, atomic move
+    second. If either route cannot complete, ``issues`` tells reconciliation not to claim a
+    complete pass. Lock-free: atomic writes mean a reader never sees a torn file, and a file
+    renamed out from under this listing simply reads as absent.
 
     Filtered by the event's own `session_id` and never by `repo_key`: a linked worktree
     shares the main worktree's canonical spool while its events carry the physical worktree
@@ -399,14 +420,131 @@ def list_pending_evidence(repo_path: str, session_id: str = "") -> list[dict]:
     except OSError:
         return []
     for path in paths:
-        event = _read_event(path)
+        event, raw, errors = _read_event_detail(path)
         if event is None:
-            _quarantine(repo_path, path)
+            missing_key = isinstance(raw, Mapping) and (
+                not isinstance(raw.get("repo_key"), str) or not raw.get("repo_key", "").strip())
+            if not route_invalid:
+                if issues is not None:
+                    issues.append({"path": path.name,
+                                   "reason": "missing" if missing_key else "malformed"})
+                continue
+            routed = False
+            if missing_key and isinstance(raw.get("event_id"), str):
+                comparison = repo_key.compare_evidence_repo_identity(repo_path, None)
+                try:
+                    routed = quarantine_identity_event(
+                        repo_path, raw["event_id"], observed_key="",
+                        expected_key=comparison["expected_key"], reason="missing")
+                except ValueError:
+                    # A receipt needs a valid event id. If the malformed row cannot supply
+                    # one, it belongs to the ordinary malformed quarantine path instead of
+                    # becoming an immortal pending file that suppresses retention forever.
+                    routed = _quarantine(repo_path, path)
+            else:
+                routed = _quarantine(repo_path, path)
+            if not routed and issues is not None:
+                issues.append({"path": path.name,
+                               "reason": "missing" if missing_key else "malformed",
+                               "errors": errors})
             continue
         if session_id and event.get("session_id") != session_id:
             continue
         events.append(event)
     return events
+
+
+def _read_identity_receipts(repo_path: str, slug: str = "") -> dict:
+    """Identity-routing ledger, with unreadable kept distinct from absent."""
+    try:
+        raw = _identity_receipts_path(repo_path, slug).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return {"unreadable": True}
+    try:
+        ledger = json.loads(raw)
+    except ValueError:
+        return {"unreadable": True}
+    return ledger if isinstance(ledger, dict) else {"unreadable": True}
+
+
+def quarantine_identity_event(repo_path: str, event_id: str, *, observed_key: str,
+                              expected_key: str, reason: str) -> bool:
+    """Durably route one foreign/unverifiable event out of ``pending``.
+
+    The receipt is written first. That keeps a receipt failure non-destructive and makes the
+    only crash window idempotently recoverable: if the process dies before the atomic move,
+    the next pass finds the existing receipt and completes the move without a second row.
+    ``False`` means the raw event remains pending and reconciliation must report incomplete.
+    """
+    event_id = _checked_id(event_id, "event_id")
+    ledger = _read_identity_receipts(repo_path)
+    if ledger.get("unreadable"):
+        return False
+    observed_key = str(observed_key)
+    expected_key = str(expected_key)
+    reason = str(reason)
+    rows = [row for row in ledger.get("receipts") or [] if isinstance(row, dict)]
+    recorded = any(
+        str(row.get("event_id") or "").lower() == event_id.lower()
+        and str(row.get("observed_key") or "") == observed_key[:300]
+        and str(row.get("expected_key") or "") == expected_key[:300]
+        and str(row.get("reason") or "") == reason[:64]
+        for row in rows
+    )
+
+    pending = None
+    try:
+        for path in _event_files(_pending_dir(repo_path)):
+            match = _EVENT_ID_IN_NAME.search(path.name)
+            if not match or match.group(1).lower() != event_id.lower():
+                continue
+            normalized, raw, _errors = _read_event_detail(path)
+            raw_id = ((normalized or {}).get("event_id")
+                      if normalized is not None else
+                      raw.get("event_id") if isinstance(raw, Mapping) else None)
+            raw_key = ((normalized or {}).get("repo_key")
+                       if normalized is not None else
+                       raw.get("repo_key") if isinstance(raw, Mapping) else None)
+            # event_id is caller-controlled data despite also appearing in the filename. Bind
+            # the route to BOTH normalized fields, not merely the suffix: two valid files may
+            # legally share a UUID, and moving the first one let a same-ID foreign event reach
+            # aggregation behind a receipt for the matching event.
+            if (isinstance(raw_id, str) and raw_id.lower() == event_id.lower()
+                    and (raw_key.strip() if isinstance(raw_key, str) else "") == observed_key):
+                pending = path
+                break
+    except OSError:
+        return False
+
+    if not recorded:
+        if pending is None:
+            return False
+        rows.append({
+            "event_id": event_id,
+            "observed_key": observed_key[:300],
+            "expected_key": expected_key[:300],
+            "reason": reason[:64],
+            "occurred_at": _now().isoformat(),
+        })
+        try:
+            _write_json(_ensure_dir(_repo_dir(repo_path)), _IDENTITY_RECEIPTS_NAME,
+                        {"receipts": rows[-MAX_IDENTITY_RECEIPTS:],
+                         "dropped": _count(ledger.get("dropped"))
+                         + max(0, len(rows) - MAX_IDENTITY_RECEIPTS)})
+        except (OSError, TypeError, ValueError):
+            return False
+
+    if pending is None:
+        # Receipt plus no pending source means the prior move already completed (or retention
+        # later expired the quarantined raw event). Either way routing is terminal.
+        return True
+    try:
+        os.replace(pending, _ensure_dir(_quarantine_dir(repo_path)) / pending.name)
+    except OSError:
+        return False
+    return True
 
 
 # ── hold / finalize (the candidate lifecycle) ────────────────────────────────────

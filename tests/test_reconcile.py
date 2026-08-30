@@ -121,6 +121,191 @@ def _boom_oserror(*_a, **_k):
     raise OSError("no")
 
 
+def _identity_event(repo_key, seed="foreign"):
+    return {
+        "schema_version": evidence.SCHEMA_VERSION,
+        "event_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"identity:{seed}")),
+        "session_id": SESSION,
+        "repo_key": repo_key,
+        "kind": "user_directive",
+        "occurred_at": "2026-08-30T00:00:00+00:00",
+        "source": "test",
+        "summary": "Always verify repository identity before consuming evidence.",
+        "files": [],
+        "content_hash": None,
+        "attributes": {},
+    }
+
+
+class TestEvidenceRepoIdentity:
+    def test_matching_key_passes_unchanged(self, tmp_repo):
+        event = _identity_event(tmp_repo, "matching")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
+
+    def test_foreign_key_receipt_precedes_quarantine_and_status_reports_count(self, tmp_repo):
+        event = _identity_event("/definitely/another/repository", "foreign-receipt")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["proposed"] == 0
+        assert store.load(tmp_repo)["entries"] == []
+        assert spool.list_pending_evidence(tmp_repo) == []
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+        (row,) = spool._read_identity_receipts(tmp_repo)["receipts"]
+        assert row["event_id"] == event["event_id"]
+        assert row["observed_key"] == event["repo_key"]
+        assert row["expected_key"]
+        assert row["reason"] == "mismatch_local"
+        assert row["occurred_at"]
+
+    def test_missing_legacy_key_has_no_compatibility_exemption(self, tmp_repo):
+        raw = _identity_event(tmp_repo, "missing")
+        raw.pop("repo_key")
+        pending = spool._ensure_dir(spool._pending_dir(tmp_repo))
+        spool._write_json(pending, f"20260830T000000000000Z-{raw['event_id']}.json", raw)
+
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+        (receipt,) = spool._read_identity_receipts(tmp_repo)["receipts"]
+        assert receipt["event_id"] == raw["event_id"]
+        assert receipt["reason"] == "missing"
+
+    def test_missing_key_routing_failure_is_incomplete_and_preserves_raw(
+            self, tmp_repo, monkeypatch):
+        raw = _identity_event(tmp_repo, "missing-move-failure")
+        raw.pop("repo_key")
+        pending = spool._ensure_dir(spool._pending_dir(tmp_repo))
+        spool._write_json(pending, f"20260830T000000000000Z-{raw['event_id']}.json", raw)
+        real_replace = spool.os.replace
+
+        def fail_move(src, dst):
+            if Path(dst).parent.name == "quarantine":
+                raise OSError("quarantine unavailable")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(spool.os, "replace", fail_move)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["incomplete"] is True
+        assert receipt["coverage"]["reconciliation"] == "partial"
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 1
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
+        assert len(spool._read_identity_receipts(tmp_repo)["receipts"]) == 1
+
+    def test_malformed_missing_key_and_invalid_id_uses_generic_quarantine(self, tmp_repo):
+        raw = _identity_event(tmp_repo, "bad-id")
+        raw.pop("repo_key")
+        raw["event_id"] = "not-a-uuid"
+        pending = spool._ensure_dir(spool._pending_dir(tmp_repo))
+        spool._write_json(pending, "20260830T000000000000Z-not-a-uuid.json", raw)
+
+        first = reconcile.reconcile_session(tmp_repo)
+        second = reconcile.reconcile_session(tmp_repo)
+
+        assert first["incomplete"] is False
+        assert second["incomplete"] is False
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+        assert spool._read_identity_receipts(tmp_repo) == {}
+
+    @pytest.mark.parametrize("kind", ["policy_evaluation", "session_reconcile"])
+    def test_foreign_bookkeeping_kind_is_identity_routed_before_candidate_filtering(
+            self, tmp_repo, kind):
+        event = _identity_event("/definitely/another/repository", f"foreign-{kind}")
+        event["kind"] = kind
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["proposed"] == 0
+        assert receipt["events_observed"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+        (row,) = spool._read_identity_receipts(tmp_repo)["receipts"]
+        assert row["event_id"] == event["event_id"]
+        assert row["reason"] == "mismatch_local"
+
+    def test_duplicate_id_cannot_route_matching_file_and_materialize_foreign_one(
+            self, tmp_repo):
+        matching = _identity_event(tmp_repo, "same-id-matching")
+        foreign = _identity_event("/foreign/repo", "same-id-foreign")
+        foreign["event_id"] = matching["event_id"]
+        foreign["occurred_at"] = "2026-08-30T00:00:01+00:00"
+        matching["occurred_at"] = "2026-08-30T00:00:00+00:00"
+        assert spool.append_evidence(tmp_repo, matching)["status"] == "stored"
+        assert spool.append_evidence(tmp_repo, foreign)["status"] == "stored"
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["proposed"] == 1
+        ((_candidate_id, meta),) = spool.held_candidates(tmp_repo).items()
+        held = spool.held_events(tmp_repo, _candidate_id)
+        assert meta["event_ids"] == [matching["event_id"]]
+        assert [event["repo_key"] for event in held] == [tmp_repo]
+        quarantined = [spool._read_event(path)
+                       for path in spool._event_files(spool._quarantine_dir(tmp_repo))]
+        assert [event["repo_key"] for event in quarantined] == ["/foreign/repo"]
+        (identity_receipt,) = spool._read_identity_receipts(tmp_repo)["receipts"]
+        assert identity_receipt["observed_key"] == "/foreign/repo"
+
+    def test_receipt_failure_preserves_raw_event_and_marks_pass_incomplete(
+            self, tmp_repo, monkeypatch):
+        event = _identity_event("/another/repo", "receipt-failure")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        real_write = spool._write_json
+
+        def fail_receipt(directory, name, payload):
+            if name == spool._IDENTITY_RECEIPTS_NAME:
+                raise OSError("receipt unavailable")
+            return real_write(directory, name, payload)
+
+        monkeypatch.setattr(spool, "_write_json", fail_receipt)
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["incomplete"] is True
+        assert receipt["coverage"]["reconciliation"] == "partial"
+        assert [e["event_id"] for e in spool.list_pending_evidence(tmp_repo)] == [event["event_id"]]
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_crash_between_receipt_and_move_recovers_without_duplicate_receipt(
+            self, tmp_repo, monkeypatch):
+        event = _identity_event("/another/repo", "move-crash")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        real_replace = spool.os.replace
+
+        def crash_move(src, dst):
+            if Path(dst).parent.name == "quarantine":
+                raise OSError("crash before move")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(spool.os, "replace", crash_move)
+        first = reconcile.reconcile_session(tmp_repo)
+        assert first["incomplete"] is True
+        assert [e["event_id"] for e in spool.list_pending_evidence(tmp_repo)] == [event["event_id"]]
+        assert len(spool._read_identity_receipts(tmp_repo)["receipts"]) == 1
+
+        monkeypatch.setattr(spool.os, "replace", real_replace)
+        second = reconcile.reconcile_session(tmp_repo)
+        assert second["incomplete"] is False
+        assert spool.list_pending_evidence(tmp_repo) == []
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+        assert len(spool._read_identity_receipts(tmp_repo)["receipts"]) == 1
+
+    def test_identity_receipts_are_bounded_and_record_truncation(self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(spool, "MAX_IDENTITY_RECEIPTS", 2)
+        for i in range(3):
+            event = _identity_event(f"/foreign/repo-{i}", f"bounded-{i}")
+            assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+            assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+        ledger = spool._read_identity_receipts(tmp_repo)
+        assert len(ledger["receipts"]) == 2
+        assert ledger["dropped"] == 1
+
+
 def test_the_fixture_texts_sit_in_the_bands_that_classify_them():
     """The four texts above are not arbitrary prose: each one is chosen for its token overlap
     with STORED, and that is what decides its candidate kind. Pinned here so a reworded fixture

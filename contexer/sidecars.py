@@ -84,11 +84,13 @@ KINDS: tuple[Kind, ...] = (
     Kind("shared_markers",   ".shared.jsonl",              DURABLE,   "which decisions went where; drives the shared tick"),
     Kind("team_creds",       ".team_auth.json",            DURABLE,   "the team bearer token"),
     Kind("guard_dismissed",  ".guard_dismissed_{slug}.json", DURABLE, "explicit per-pair human dismissals, permanent"),
+    Kind("reconcile_lock",  ".reconcile_{slug}.lock",      DURABLE, "flock target for the evidence consumer"),
 
 
     # ── session bookkeeping: the session it belonged to is over ────────────────────────
     Kind("working_set",      ".ws_{slug}_{session}.json",  SESSION,   "per-session working set; dedup is done"),
     Kind("retrieval_log",    ".retrieval_{slug}.jsonl",    SESSION,   "per-repo retrieval log, tail-capped"),
+    Kind("reconcile_log",    ".reconcile_{slug}.jsonl",    SESSION,   "per-repo reconciliation receipt log, tail-capped"),
     Kind("bootstrap_offered", ".bootstrap_offered_{slug}", SESSION,   "once-per-session offer flag"),
     Kind("edited_files",     ".edited_{slug}.json",        SESSION,   "recent edits; freshness window is 30 min"),
     Kind("resume_mining",    ".resume_mining",             SESSION,   "consumed on the first prompt"),

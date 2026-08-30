@@ -88,7 +88,7 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from contexer import candidates, evidence, lifecycle, spool, store
+from contexer import candidates, evidence, lifecycle, repo_key, sidecars, spool, store
 
 # Kinds a candidate can be built out of. The rest of `evidence.EVENT_KINDS` is bookkeeping
 # ABOUT candidates (`policy_evaluation`, `session_reconcile`), which never groups into one, so
@@ -171,7 +171,7 @@ def _reconcile_lock(repo_path: str):
     all fails OPEN (yield True) - an unwritable STORE_DIR must not silently disable the
     pipeline, and it is the contention case, not the I/O case, this exists to answer.
     """
-    path = store.STORE_DIR / f".reconcile_{store.repo_slug(repo_path)}.lock"
+    path = store.STORE_DIR / sidecars.filename("reconcile_lock", slug=store.repo_slug(repo_path))
     try:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         # Binary, and it stays empty: nothing is ever written to or read from this file -
@@ -1095,7 +1095,7 @@ def _log_receipt(repo_path: str, session_id: str, receipt: dict) -> None:
     precedent: never user-facing, tail-capped, and fail-soft including the read-back, since a
     log that picked up non-UTF-8 bytes must not break a session start over a bookkeeping file.
     """
-    path = store.STORE_DIR / f".reconcile_{store.repo_slug(repo_path)}.jsonl"
+    path = store.STORE_DIR / sidecars.filename("reconcile_log", slug=store.repo_slug(repo_path))
     try:
         store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -1154,9 +1154,16 @@ def _has_work(repo_path: str, session_id: str) -> bool:
     An unreadable spool is reported where a developer can act on it - `contexer status`, off
     `spool.evidence_diagnostics`' own `readable` flag - rather than costing a pass here.
     """
-    return bool(spool.held_candidates(repo_path)
-                or [e for e in spool.list_pending_evidence(repo_path, session_id)
-                    if e.get("kind") in _EVIDENCE_KINDS])
+    routing_issues = []
+    pending = spool.list_pending_evidence(
+        repo_path, session_id, route_invalid=False, issues=routing_issues)
+    observed_keys = {str(event.get("repo_key") or "") for event in pending}
+    identity_work = any(
+        not repo_key.compare_evidence_repo_identity(repo_path, observed)["matches"]
+        for observed in observed_keys
+    )
+    return bool(spool.held_candidates(repo_path) or routing_issues or identity_work
+                or [e for e in pending if e.get("kind") in _EVIDENCE_KINDS])
 
 
 def _snapshot(repo_path: str) -> dict:
@@ -1204,12 +1211,41 @@ def _snapshot(repo_path: str) -> dict:
 
 
 def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> dict:
-    events = [e for e in spool.list_pending_evidence(repo_path, session_id)
-              if e.get("kind") in _EVIDENCE_KINDS]
+    routing_issues = []
+    pending = spool.list_pending_evidence(
+        repo_path, session_id, route_invalid=not dry_run, issues=routing_issues)
+    accepted = []
+    identity_incomplete = bool(routing_issues) and not dry_run
+    if identity_incomplete:
+        receipt["incomplete"] = True
+    comparisons = {}
+    # Identity is the consumer chokepoint for EVERY valid event. Candidate eligibility is a
+    # later concern: filtering bookkeeping kinds first let foreign policy/session records sit
+    # in pending forever without either materializing or receiving a terminal quarantine.
+    for event in pending:
+        observed = str(event.get("repo_key") or "")
+        if observed not in comparisons:
+            comparisons[observed] = repo_key.compare_evidence_repo_identity(repo_path, observed)
+        comparison = comparisons[observed]
+        if comparison["matches"]:
+            accepted.append(event)
+            continue
+        if dry_run:
+            continue
+        routed = spool.quarantine_identity_event(
+            repo_path, str(event.get("event_id") or ""),
+            observed_key=comparison["observed_key"],
+            expected_key=comparison["expected_key"], reason=comparison["reason"])
+        if not routed:
+            identity_incomplete = True
+            receipt["incomplete"] = True
+    events = [event for event in accepted if event.get("kind") in _EVIDENCE_KINDS]
     held = spool.held_candidates(repo_path)
     if not events and not held:
         # The work the fast path saw is gone: another pass took it while this one waited for
         # the lock. Nothing to do, and nothing to report about it.
+        if identity_incomplete:
+            _recoverage(receipt, "partial")
         return receipt
     events = _finish_interrupted_holds(repo_path, events, held, dry_run, receipt)
     # ponytail: counted AFTER the recovery strips events an existing candidate already claims,
@@ -1259,6 +1295,11 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
         meta = held[candidate_id]
         _finalize(repo_path, candidate_id, disposition, str(meta.get("entry_id") or ""),
                   snap["filable"], meta.get("event_ids") or [], snap["recorded"], receipt)
+    if identity_incomplete:
+        # A failed receipt/move must leave its raw source exactly where it was. Retention could
+        # otherwise evict that same pending file in this pass, contradicting the failure result.
+        _recoverage(receipt, "partial")
+        return receipt
     retention = spool.run_retention(repo_path)
     if retention.get("orphans_unreceipted"):
         # An orphaned hold whose terminal receipt could not be written is still holding its raw

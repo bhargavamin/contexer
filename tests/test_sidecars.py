@@ -26,6 +26,7 @@ class TestClassification:
         ".guard_dismissed_x.json",        # explicit human dismissals
         ".pending_review_x",              # only a NEW pending decision re-arms it
         ".outbox.lock", ".shared.lock", ".team_auth.lock",   # dotted lock slugs
+        ".reconcile_x.lock",              # evidence consumer lock
         "ui.json", "ui.log",             # console daemon owns these
     ])
     def test_durable_names_are_never_sweepable(self, name):
@@ -35,7 +36,7 @@ class TestClassification:
         ".ws_x_y.json", ".retrieval_x.jsonl", ".bootstrap_offered_x", ".edited_x.json",
         ".resume_mining", ".gemini_first_prompt_x",
         ".gemini_pending_capture", ".gemini_pending_reload",
-        ".team_pending_x.json",
+        ".team_pending_x.json", ".reconcile_x.jsonl",
     ])
     def test_session_bookkeeping_expires(self, name):
         assert sidecars.lifetime_for(name) == sidecars.SESSION
@@ -108,10 +109,12 @@ class TestClassification:
         "shared_markers":   ("share._shared_path", {}),
         "team_creds":       ("auth._creds_path", {}),
         "guard_dismissed":  ("guard_engine._guard_dismissed_path", {"slug": None}),
+        "reconcile_lock":   (None, {"slug": None}),       # reconcile builds through filename
         "console_state":    (None, {}),                      # ui/daemon.py keeps its own literal
         "console_log":      (None, {}),                      # (import allowlist; see sidecars.py)
         "working_set":      (None, {"slug": None, "session": "abc"}),   # _ws_path hashes the id
         "retrieval_log":    (None, {"slug": None}),          # built inline in two places
+        "reconcile_log":    (None, {"slug": None}),          # reconcile builds through filename
         "bootstrap_offered": ("store._offer_flag", {"slug": None}),
         "edited_files":     ("store._edited_files_path", {"slug": None}),
         "resume_mining":    (None, {}),                      # built inline at two session-start sites

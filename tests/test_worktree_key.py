@@ -1,4 +1,4 @@
-"""Tests for worktree store-key canonicalization (_canonical_store_key) and the
+"""Tests for worktree store-key canonicalization (canonical_store_key) and the
 pre-fix stray-store migration (migrate_worktree_strays).
 
 All linked worktrees of a repo must share the main worktree's store file; submodules,
@@ -61,7 +61,7 @@ def wt_repo(tmp_path):
 class TestCanonicalStoreKey:
     def test_worktree_collapses_to_main(self, wt_repo, store_dir):
         main, wt = wt_repo
-        assert store._canonical_store_key(wt) == main
+        assert store.canonical_store_key(wt) == main
         assert store.repo_slug(wt) == store.repo_slug(main)
         assert store._legacy_slug(wt) == store._legacy_slug(main)
         assert store._store_path(wt) == store._store_path(main)
@@ -75,7 +75,7 @@ class TestCanonicalStoreKey:
         # would collapse into the repo store whenever cwd is a worktree.
         _main, wt = wt_repo
         monkeypatch.chdir(wt)
-        assert store._canonical_store_key("") == ""
+        assert store.canonical_store_key("") == ""
         expected = f"-{hashlib.sha1(b'').hexdigest()[:8]}"
         assert store.repo_slug("") == expected
 
@@ -85,7 +85,7 @@ class TestCanonicalStoreKey:
         (d / ".git").write_text("gitdir: /some/where/.git/modules/x\n")
         calls = []
         monkeypatch.setattr(store.subprocess, "run", lambda *a, **k: calls.append(a))
-        assert store._canonical_store_key(str(d)) == str(d)
+        assert store.canonical_store_key(str(d)) == str(d)
         assert calls == []
 
     def test_separate_git_dir_no_collapse(self, tmp_path, monkeypatch):
@@ -101,7 +101,7 @@ class TestCanonicalStoreKey:
         calls = []
         monkeypatch.setattr(store.subprocess, "run", lambda *a, **k: calls.append(a))
         # gitdir is .../backup/.git (no /worktrees/) — must NOT mis-key to <tmp>/backup.
-        assert store._canonical_store_key(str(repo)) == str(repo)
+        assert store.canonical_store_key(str(repo)) == str(repo)
         assert calls == []
 
     def test_main_repo_and_non_git_dir_unchanged_no_subprocess(self, tmp_path, monkeypatch):
@@ -111,8 +111,8 @@ class TestCanonicalStoreKey:
         plain.mkdir()
         calls = []
         monkeypatch.setattr(store.subprocess, "run", lambda *a, **k: calls.append(a))
-        assert store._canonical_store_key(main) == main            # .git is a directory
-        assert store._canonical_store_key(str(plain)) == str(plain)  # no .git at all
+        assert store.canonical_store_key(main) == main            # .git is a directory
+        assert store.canonical_store_key(str(plain)) == str(plain)  # no .git at all
         assert calls == []
 
     def test_failure_is_transparent_and_not_cached(self, wt_repo, monkeypatch):
@@ -128,17 +128,17 @@ class TestCanonicalStoreKey:
 
         monkeypatch.setattr(store.subprocess, "run", fake_run)
         # Transient git failure → uncollapsed, pre-fix behavior.
-        assert store._canonical_store_key(wt) == wt
+        assert store.canonical_store_key(wt) == wt
         # Failure must not be cached: same call now succeeds and collapses.
         state["fail"] = False
-        assert store._canonical_store_key(wt) == main
+        assert store.canonical_store_key(wt) == main
 
     def test_insane_root_never_selected(self, wt_repo, monkeypatch):
         main, wt = wt_repo
         real = store.is_sane_repo
         monkeypatch.setattr(store, "is_sane_repo",
                             lambda p: False if p == main else real(p))
-        assert store._canonical_store_key(wt) == wt
+        assert store.canonical_store_key(wt) == wt
 
     def test_worktree_path_reuse_by_different_repo_not_stale_cached(self, tmp_path):
         # A worktree path removed and later reused by a DIFFERENT repo's worktree in
@@ -149,10 +149,10 @@ class TestCanonicalStoreKey:
         repo_b = _make_repo(root / "repo_b")
         p = str(root / "shared_wt")
         _git("worktree", "add", p, cwd=repo_a)
-        assert store._canonical_store_key(p) == repo_a
+        assert store.canonical_store_key(p) == repo_a
         _git("worktree", "remove", "--force", p, cwd=repo_a)
         _git("worktree", "add", p, cwd=repo_b)
-        assert store._canonical_store_key(p) == repo_b
+        assert store.canonical_store_key(p) == repo_b
 
     def test_team_context_cache_path_collapses(self, wt_repo, store_dir):
         from contexer import team_context

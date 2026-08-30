@@ -188,7 +188,7 @@ def _hook_repo_verbose(repo_path: str) -> tuple[str, str]:
         source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
     return repo, source
 
-# _canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
+# canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
 # functools.lru_cache: failures must return uncached (a transient git timeout would
 # otherwise pin the wrong key for the life of the long-lived MCP server), and lru_cache
 # cannot express "cache only on success". A hit is honored ONLY when the path's current
@@ -199,7 +199,7 @@ _CANON_CACHE: dict[str, tuple[str, str]] = {}
 _CANON_CACHE_MAX = 256
 
 
-def _canonical_store_key(path: str) -> str:
+def canonical_store_key(path: str) -> str:
     """STORE-KEY canonicalization only: the main-worktree root for a linked-worktree
     path, else `path` unchanged. Linked git worktrees each report their own
     `--show-toplevel`, so without this every worktree got its own store file.
@@ -281,7 +281,7 @@ def _legacy_slug(repo_path: str) -> str:
     # `/a/my repo` all collapsed to the same file. Retained only to migrate old stores.
     # Canonicalizes identically to repo_slug - otherwise the pre-hash migration compare in
     # _store_path and console_api._resolve_store's reverse mapping go inconsistent.
-    return _legacy_raw_slug(_canonical_store_key(repo_path))
+    return _legacy_raw_slug(canonical_store_key(repo_path))
 
 
 def _raw_slug(repo_path: str) -> str:
@@ -297,7 +297,7 @@ def repo_slug(repo_path: str) -> str:
     # readable base (a `.`/space vs a literal `_`) no longer share one store file.
     # The path is canonicalized first so every worktree of a repo shares the main
     # worktree's store (and every slug-keyed sidecar: lock, .deleted, flags, indexes).
-    return _raw_slug(_canonical_store_key(repo_path))
+    return _raw_slug(canonical_store_key(repo_path))
 
 
 def _store_path(repo_path: str) -> Path:
@@ -374,7 +374,7 @@ def save(repo_path: str, data: dict) -> None:
     # Record the CANONICAL repo path so a store written from any linked worktree stops
     # flip-flopping its recorded path between last-writer worktrees. (The global store
     # never routes through here - save_global writes it directly.)
-    data["repo_path"] = _canonical_store_key(data.get("repo_path") or repo_path)
+    data["repo_path"] = canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
     atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
     # The retrieval index is a disposable sidecar maintained ONLY here - every store
@@ -5360,7 +5360,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
 
     Before store keys were canonicalized, each linked worktree wrote its own
     `~/.contexer/<raw slug>.json`. This standalone entrypoint folds those strays into the
-    main store. NEVER call it from repo_slug/_canonical_store_key (every writer acquires
+    main store. NEVER call it from repo_slug/canonical_store_key (every writer acquires
     store_lock(repo_slug(repo)), so a merge fired during slug computation would deadlock or
     do an unlocked read-modify-write). Candidates come ONLY from self-detection (the
     incoming path itself collapsed) and `git worktree list` enumeration - LIVE worktrees
@@ -5373,10 +5373,10 @@ def migrate_worktree_strays(repo_path: str) -> int:
     Fail-soft throughout: never raises; returns the number of entries merged."""
     try:
         resolved = resolve_repo(repo_path) or repo_path
-        canonical = _canonical_store_key(resolved)
+        canonical = canonical_store_key(resolved)
         if not is_sane_repo(canonical):
             return 0
-        incoming_collapsed = _canonical_store_key(resolved) != resolved
+        incoming_collapsed = canonical_store_key(resolved) != resolved
         # Cheap gate: .git/worktrees exists only when worktrees were ever added.
         if not (incoming_collapsed
                 or os.path.isdir(os.path.join(canonical, ".git", "worktrees"))):

@@ -288,9 +288,10 @@ def test_two_repos_with_the_same_basename_keep_separate_spools(tmp_repo):
     right = os.path.join(tmp_repo, "team-b", "app")
     assert os.path.basename(left) == os.path.basename(right)
 
-    spool.append_evidence(left, _event("basename-left", "user_directive", "always use uv"))
+    spool.append_evidence(left, _event("basename-left", "user_directive", "always use uv")
+                          | {"repo_key": left})
     spool.append_evidence(right, _event("basename-right", "user_directive",
-                                        "always use poetry"))
+                                        "always use poetry") | {"repo_key": right})
 
     assert store.repo_slug(left) != store.repo_slug(right)
     assert [e["summary"] for e in spool.list_pending_evidence(left)] == ["always use uv"]
@@ -300,7 +301,7 @@ def test_two_repos_with_the_same_basename_keep_separate_spools(tmp_repo):
 def test_a_worktree_and_its_main_checkout_share_one_spool(tmp_path, monkeypatch):
     """Brief case: a worktree and the main checkout share canonical memory.
 
-    `_canonical_store_key` collapses a linked worktree onto its main worktree for every
+    `canonical_store_key` collapses a linked worktree onto its main worktree for every
     slug-keyed artifact, and `spool._repo_dir` is slug-keyed - so evidence appended from a
     worktree session is reconciled by a session in the main checkout rather than stranded in a
     second spool nobody scans. The alternative fails silently, which is why it is pinned here
@@ -324,10 +325,13 @@ def test_a_worktree_and_its_main_checkout_share_one_spool(tmp_path, monkeypatch)
 
     try:
         spool.append_evidence(worktree, _event("worktree-directive", "user_directive",
-                                               "always run the suite before pushing"))
+                                               "always run the suite before pushing")
+                              | {"repo_key": worktree})
         assert [e["summary"] for e in spool.list_pending_evidence(str(main))] == [
             "always run the suite before pushing"]
         assert spool._repo_dir(worktree) == spool._repo_dir(str(main))
+        assert reconcile.reconcile_session(str(main))["proposed"] == 1
+        assert spool.evidence_diagnostics(str(main))["quarantine"] == 0
     finally:
         store._CANON_CACHE.clear()
 
@@ -615,7 +619,7 @@ def _review_items_for_a_realistic_session() -> int:
 
 def _spool(repo: str, events) -> None:
     for event in events:
-        assert spool.append_evidence(repo, event)["status"] == "stored"
+        assert spool.append_evidence(repo, event | {"repo_key": repo})["status"] == "stored"
 
 
 def _replay_loss(root: str) -> dict:

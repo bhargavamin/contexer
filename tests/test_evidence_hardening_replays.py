@@ -285,8 +285,8 @@ def test_another_repositorys_evidence_never_enters_this_repos_candidates(tmp_rep
     """
     doc = _load("18-wrong-session-and-wrong-repo-evidence")
     other_repo = str(tmp_path / "other-repo")
-    ours = doc["events"][0]
-    theirs = doc["foreign_repo_event"]
+    ours = doc["events"][0] | {"repo_key": tmp_repo}
+    theirs = doc["foreign_repo_event"] | {"repo_key": other_repo}
     assert spool.append_evidence(tmp_repo, ours)["status"] == "stored"
     assert spool.append_evidence(other_repo, theirs)["status"] == "stored"
 
@@ -299,26 +299,17 @@ def test_another_repositorys_evidence_never_enters_this_repos_candidates(tmp_rep
         == [theirs["event_id"]], "reconciling repo A consumed repo B's evidence"
 
 
-def test_repo_key_is_not_a_guard_and_the_corpus_says_so(tmp_repo):
-    """The limitation behind the isolation above, stated out loud rather than left implied.
-
-    `spool.append_evidence` keys the spool by its `repo_path` ARGUMENT and never reads the
-    event's own `repo_key`; the field appears nowhere in `candidates.py` or `reconcile.py`
-    either. So an event carrying another repo's `repo_key` that lands in this repo's
-    `pending/` - through a worktree or slug resolution change, say - is aggregated and
-    proposed into this repo's store like any other.
-
-    Asserted as the current TRUTH, not as an xfail: nobody has ruled that `repo_key` should
-    become a guard, and inventing an xfail nobody owns would be a requirement written by a
-    test. If a later task does add the check, this test is what tells them the corpus assumed
-    the old behaviour.
-    """
+def test_foreign_repo_key_is_quarantined_before_aggregation(tmp_repo):
+    """An event physically misrouted into this spool must never become this repo's decision."""
     foreign = _load("18-wrong-session-and-wrong-repo-evidence")["foreign_repo_event"]
     assert foreign["repo_key"] != tmp_repo
     spool.append_evidence(tmp_repo, foreign)
 
-    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
-    assert len(store.load(tmp_repo)["entries"]) == 1
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+    assert store.load(tmp_repo)["entries"] == []
+    assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+    (receipt,) = spool._read_identity_receipts(tmp_repo)["receipts"]
+    assert receipt["event_id"] == foreign["event_id"]
 
 
 # ── the reproduced gaps ──────────────────────────────────────────────────────────
@@ -891,7 +882,7 @@ def _replay_inactive_twin(repo: str, *, retire: bool) -> None:
 def _spool_events(repo: str, doc: dict) -> list[str]:
     """Put the scenario's corpus into the repo's spool, returning the event ids in order."""
     for event in doc["events"]:
-        assert spool.append_evidence(repo, event)["status"] == "stored"
+        assert spool.append_evidence(repo, event | {"repo_key": repo})["status"] == "stored"
     return [e["event_id"] for e in doc["events"]]
 
 

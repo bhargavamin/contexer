@@ -186,11 +186,11 @@ class TestAuditSessions:
         """A pre-fix stray worktree store sitting beside its canonical file.
 
         Written under EXPLICIT filenames, not via `_slug`: `_slug` itself canonicalizes
-        through `_canonical_store_key`, so patching that helper would collapse both writes
+        through `canonical_store_key`, so patching that helper would collapse both writes
         onto one filename and the fixture would silently test nothing. A real pre-fix stray
         has its own slug precisely because it was written before that canonicalization.
         """
-        monkeypatch.setattr(store, "_canonical_store_key",
+        monkeypatch.setattr(store, "canonical_store_key",
                             lambda p: "/repo/main" if p in ("/repo/main", "/repo/wt") else p)
         (store_dir / "canonical.json").write_text(json.dumps(
             {"repo_path": "/repo/main", "entries": [_decision("m1", "sess-1")]}))
