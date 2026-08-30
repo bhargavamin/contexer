@@ -1308,6 +1308,41 @@ def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_cli_share_help_is_read_only(flag, monkeypatch, capsys):
+    """Help must return before repo/profile reads or any share/outbox replay."""
+    from contexer import cli, config
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("share help performed operational work")
+
+    monkeypatch.setattr(store, "git_root", unexpected)
+    monkeypatch.setattr(config, "load_profile", unexpected)
+    monkeypatch.setattr(share, "share", unexpected)
+    monkeypatch.setattr(share, "share_all", unexpected)
+    monkeypatch.setattr(share, "share_global", unexpected)
+
+    cli.share_cmd([flag])
+
+    out = capsys.readouterr().out
+    assert "Usage: contexer share" in out
+    assert "without contacting the cloud or replaying queued shares" in out
+
+
+def test_cli_share_rejects_unknown_option_before_operational_work(monkeypatch, capsys):
+    """A misspelled flag is not a decision id and cannot trigger an outbox drain."""
+    from contexer import cli
+
+    monkeypatch.setattr(store, "git_root", lambda *_: pytest.fail("resolved repo"))
+    monkeypatch.setattr(share, "share", lambda *_a, **_k: pytest.fail("pushed"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.share_cmd(["--hlep"])
+
+    assert exc.value.code == 1
+    assert "Unknown option: --hlep" in capsys.readouterr().err
+
+
 def test_cli_share_prints_result(monkeypatch, capsys):
     from contexer import cli
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
