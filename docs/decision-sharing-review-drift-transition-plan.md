@@ -1,6 +1,6 @@
 # Decision sharing, review, and drift-transition implementation plan
 
-Status: Phase 0 baseline reconciliation in progress
+Status: Phase 0 complete; Phase A may resume at A1
 Originally drafted: 2026-08-28
 Refreshed: 2026-08-30
 Canonical progress ledger: `docs/decision-sharing-review-drift-transition-progress.md`
@@ -11,7 +11,8 @@ Repositories:
 
 ## 0. Phase 0 reconciliation and authoritative baselines
 
-Phase A is paused until the Phase 0 gate in the progress ledger is complete. All implementation
+The Phase 0 gate in the progress ledger is complete. Phase A may resume at A1, but has not started
+on these documentation branches. All implementation
 work must use clean worktrees created from the latest fetched `origin/main`; the normal checkouts
 contain user-owned dirty and untracked files and are not implementation surfaces.
 
@@ -658,7 +659,7 @@ Suggested sidecar kinds:
 - `.team-proposal-outbox.json`
 - `.team-proposal-receipts.jsonl`
 - `.team-proposal-attention.json`
-- dedicated lock slugs for policy, outbox/drainer, receipts, and attention
+- dedicated lock slugs for policy, outbox, drainer, receipts, and attention
 
 Use existing `atomic_write` and sidecar naming. Cap queue size and JSONL growth, compact under the
 same lock used by append, and preserve records racing a drain.
@@ -922,3 +923,8 @@ Before declaring complete:
 - [ ] Documentation in both repositories explains the final behavior and security boundaries.
 - [ ] The result has been reviewed by an agent/person who did not implement it, with special focus on
       tenant isolation, unintended egress, gate bypass, and false success messages.
+
+## 12. Unresolved questions
+
+- None for Phase 0. If A1 exposes a contract choice not covered by the six ratified rulings, stop
+  and obtain an explicit maintainer decision rather than inventing a default.

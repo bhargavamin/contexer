@@ -2,7 +2,7 @@
 
 Canonical plan: `docs/decision-sharing-review-drift-transition-plan.md`
 Created: 2026-08-30
-Overall status: `phase_0_in_progress`
+Overall status: `phase_0_complete`
 
 This is the single durable cross-repository progress ledger. Contexer Teams carries only an
 immutable pointer to the plan and this ledger; it must not grow a second ledger.
@@ -125,10 +125,18 @@ Deviations:
   broadly with current ownership and contains none of A1/A2's feature contracts. This is a
   deliberate selective-replay result, not lost work.
 
-### 2026-08-30 - Documentation reconciliation - in_progress
+### 2026-08-30 - Documentation reconciliation - complete
 
-Refreshing the plan against current main, recording this ledger, publishing the immutable Contexer
-commit, adding the Teams pointer, and running the Phase 0 review gate.
+Refreshed the plan against current main, recorded this ledger, published Contexer commit
+`c620d1e1437d9f777708447beb56e30937101390`, and added the Teams immutable pointer in commit
+`b237bff7f9de6b7621175b82ac79133ffeed9e84`. Opened Contexer PR #275 and Teams PR #195 for review;
+both remain unmerged under R06.
+
+The independent reviewer reported no Critical or Important findings. Its only Minor finding was
+that the phrase `outbox/drainer` could imply one shared lock; the plan now lists independent
+`outbox` and `drainer` locks. The reviewer confirmed the six rulings, baselines, Phase A checkpoint,
+immutable pointer, no-second-ledger boundary, dirty-checkout preservation, diff checks, and correct
+A1 resume point.
 
 ## 7. Phase 0 gate
 
@@ -139,24 +147,29 @@ commit, adding the Teams pointer, and running the Phase 0 review gate.
 - [x] #191/#194 is treated as completed baseline behavior.
 - [x] All six maintainer rulings are recorded.
 - [x] Current #193/#194/#274 and lifecycle/notification/reconciliation seams were checked.
-- [ ] Refreshed Contexer plan and this ledger are committed and remotely reachable.
-- [ ] Teams pointer is committed and resolves to immutable Contexer documentation links.
-- [ ] `git diff --check` passes in both implementation repositories.
-- [ ] Normal dirty/untracked checkouts are verified unchanged after documentation work.
-- [ ] Independent review has no unresolved Important finding.
-- [ ] This ledger records `phase_0_complete` before Phase A resumes.
+- [x] Refreshed Contexer plan and this ledger are committed and remotely reachable.
+- [x] Teams pointer is committed and resolves to immutable Contexer documentation links.
+- [x] `git diff --check` passes in both implementation repositories.
+- [x] Normal dirty/untracked checkouts are verified unchanged after documentation work.
+- [x] Independent review has no unresolved Important finding.
+- [x] This ledger records `phase_0_complete` before Phase A resumes.
 
 ## 8. Tests, review, deviations, and unresolved items
 
-Tests completed so far:
+Tests and review completed:
 
 - Preserved checkpoint: `git diff --check` passed.
 - Preserved checkpoint: `uv run pytest tests/test_share.py tests/test_share_persistence.py
   tests/test_share_contract.py tests/test_share_cli.py --no-cov -q` -> `131 passed`.
 
-Documentation diff checks and independent review remain pending. No production test suite is
-required for a documentation-only Phase 0 commit; if replay or review changes production code,
-the owning focused and full gates become mandatory before completion.
+- Full-range `git diff --check origin/main..HEAD` passed in both documentation worktrees.
+- Contexer PR #275: Guard passed and GitHub reported a clean merge state.
+- Teams PR #195: Build & test, Guard, and change detection passed; documentation-only Docker jobs
+  were skipped as expected; GitHub reported a clean merge state.
+- Independent review: no Critical or Important findings; the one Minor wording ambiguity was fixed.
+
+No production test suite was required for the documentation-only Phase 0 commits. If later replay
+or implementation changes production code, the owning focused and full gates are mandatory.
 
 Unresolved items:
 
