@@ -591,12 +591,9 @@ class TestGuardPairs:
         assert len(pairs) == 1
         assert pairs[0]["file"] == "auth/jwt.py"
 
-    def test_anchor_candidates_never_pair_but_pair_after_approval(self, repo):
-        """THE invariant test for issue #175 Task 3: a decision captured without
-        source_files, whose session edited auth/jwt.py, accrues that file only as an
-        `anchor_candidates` guess — never real `source_files` — so it must pair NOTHING
-        with the guard while pending. Only the human's approval blesses the candidate
-        into a real anchor via _anchor_sources, at which point it pairs normally.
+    def test_recent_edit_candidates_never_pair_or_promote_on_plain_approval(self, repo):
+        """A recent-edit sidecar is proximity, not scope. It pairs nothing while pending,
+        and approving only the decision text expires the guess without anchoring it.
 
         created_by="plan" (not the "ai" default) so the entry both lands pending_approval
         (constraint subtype forces approval_required for plan too, same as ai) AND is a
@@ -618,6 +615,21 @@ class TestGuardPairs:
         assert pairs == []
 
         ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok
+        entry = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        assert not entry.get("source_files")
+        assert "anchor_candidates" not in entry
+        assert guard_engine._guard_pairs(str(repo), ["auth/jwt.py"]) == []
+
+    def test_explicit_file_selection_promotes_and_pairs(self, repo):
+        store.record_edited_file(str(repo), "auth/jwt.py")
+        stored, eid = store.update_decision(
+            str(repo), "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="plan")
+        assert stored
+
+        ok, _msg = store.approve_decision(
+            str(repo), eid, "approve", source_files=["auth/jwt.py"])
         assert ok
         entry = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert entry["source_files"] == ["auth/jwt.py"]
@@ -752,7 +764,8 @@ class TestGuardStaged:
         _git(repo, "add", "auth/jwt.py")
         assert guard_engine.guard_staged(str(repo))["advisories"] == []
 
-        ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        ok, _msg = store.approve_decision(
+            str(repo), eid, "approve", source_files=["auth/jwt.py"])
         assert ok
         advisories = guard_engine.guard_staged(str(repo))["advisories"]
         assert len(advisories) == 1

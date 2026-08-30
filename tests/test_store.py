@@ -4115,11 +4115,8 @@ class TestShareProjectionSourceFiles:
         store._anchor_sources(tmp_repo, entry, ["auth/jwt.py", "auth/session.py"])
         assert "source_files_total" not in entry
 
-    def test_preview_labels_candidate_files_as_unconfirmed(self, tmp_repo, monkeypatch):
-        """Sharing is outward and hard to undo, so the confirm-preview must label a guess as a
-        guess - the same thing `would anchor:` does at every other human-facing surface. Without
-        the label, a candidate reads identically to a human-blessed anchor at the one screen
-        where the developer signs off on sending it."""
+    def test_preview_excludes_recent_edit_candidates_from_team_scope(self, tmp_repo, monkeypatch):
+        """A recent-edit guess cannot cross the Teams applicability boundary."""
         from contexer import remote
         monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
         store.record_edited_file(tmp_repo, "auth/jwt.py")
@@ -4127,8 +4124,9 @@ class TestShareProjectionSourceFiles:
             tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
         assert not store.load(tmp_repo)["entries"][0].get("source_files")  # candidates only
         out = store.format_share_preview(tmp_repo, eid)
-        assert "files: auth/jwt.py" in out
-        assert "unconfirmed" in out
+        assert "files: auth/jwt.py" not in out
+        assert store._share_projection(
+            store.load(tmp_repo)["entries"][0], redact_on=False)["source_files"] == []
 
     def test_preview_does_not_label_a_blessed_anchor_unconfirmed(self, tmp_repo, monkeypatch):
         from contexer import remote
@@ -5018,11 +5016,12 @@ class TestAnchorCandidates:
         entry = store.load(tmp_repo)["entries"][0]
         assert "anchor_candidates" not in entry
 
-    def test_approval_blesses_candidates_into_a_real_anchor(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py")
-        _stored, eid = store.update_decision(
-            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+    def test_approval_blesses_structurally_confirmed_candidates(self, tmp_repo):
+        _stored, eid, _meta = store.update_decision_with_meta(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            anchor_candidates=["auth/jwt.py"], anchor_candidates_confirmed=True)
         assert self._entry(tmp_repo, eid)["anchor_candidates"] == ["auth/jwt.py"]
+        assert self._entry(tmp_repo, eid)["anchor_candidates_confirmed"] is True
 
         ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok
@@ -5031,10 +5030,10 @@ class TestAnchorCandidates:
         assert "anchor_commit" in entry
         assert "anchor_candidates" not in entry
 
-    def test_approval_edit_also_blesses_candidates(self, tmp_repo):
-        store.record_edited_file(tmp_repo, "auth/jwt.py")
-        _stored, eid = store.update_decision(
-            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
+    def test_approval_edit_also_blesses_structurally_confirmed_candidates(self, tmp_repo):
+        _stored, eid, _meta = store.update_decision_with_meta(
+            tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint",
+            anchor_candidates=["auth/jwt.py"], anchor_candidates_confirmed=True)
         ok, _msg = store.approve_decision(tmp_repo, eid, "edit", "Use JWT with RS256")
         assert ok
         entry = self._entry(tmp_repo, eid)
@@ -5073,7 +5072,7 @@ class TestAnchorCandidates:
         assert entry["status"] == "pending_approval"
         assert entry["anchor_candidates"] == ["auth/jwt.py"]
 
-    def test_suggested_update_promotion_fills_gap_with_candidates(self, tmp_repo):
+    def test_suggested_update_promotion_does_not_promote_recent_edit_guess(self, tmp_repo):
         # A trivial (human-sourced) capture is born approved with no anchor. A later AI-inferred
         # correction to a high-stakes subtype attaches a Suggested Update instead of applying
         # immediately; the correction session's edited files become candidates on the base entry.
@@ -5092,6 +5091,25 @@ class TestAnchorCandidates:
         assert ok
         assert self._entry(tmp_repo, eid).get("proposed_revision")
 
+        ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        entry = self._entry(tmp_repo, eid)
+        assert not entry.get("source_files")
+        assert "anchor_candidates" not in entry
+
+    def test_suggested_update_promotion_fills_gap_with_confirmed_candidate(self, tmp_repo):
+        stored, eid = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth", "s1", "constraint", created_by="human")
+        assert stored
+        data = store.load(tmp_repo)
+        data["entries"][0]["anchor_candidates"] = ["auth/jwt.py"]
+        data["entries"][0]["anchor_candidates_confirmed"] = True
+        store.save(tmp_repo, data)
+
+        ok, _msg = store.update_decision(
+            tmp_repo, "Decided to use JWT for auth, rotated every 30 days", "s2",
+            "constraint", replace_id=eid)
+        assert ok
         ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok
         entry = self._entry(tmp_repo, eid)
@@ -5115,16 +5133,14 @@ class TestAnchorCandidates:
         assert entry["source_files"] == ["auth/jwt.py"]  # proposal's own stash wins
         assert "anchor_candidates" not in entry
 
-    def test_single_approve_blesses_candidates(self, tmp_repo):
-        # Was a bulk-path test; bulk approval is gone, so candidate blessing is pinned on the
-        # only remaining route.
+    def test_plain_approve_expires_recent_edit_candidates(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok
         entry = self._entry(tmp_repo, eid)
-        assert entry["source_files"] == ["auth/jwt.py"]
+        assert not entry.get("source_files")
         assert "anchor_candidates" not in entry
 
     def test_share_projection_never_carries_anchor_candidates(self, tmp_repo):
@@ -5137,19 +5153,26 @@ class TestAnchorCandidates:
         projected = store._share_projection(entry, redact_on=False)
         assert "anchor_candidates" not in projected  # never its own wire field
 
-    def test_share_projection_falls_back_to_candidates_for_source_files(self, tmp_repo):
-        """An unanchored but shareable decision sends its candidates as source_files. Teams
-        labels received files as claimed/unverified, which is exactly a candidate's trust
-        level - so the guess is safe on the wire while `source_files` stays unwritten locally
-        (the commit guard's Tier-1 pairing must keep reading only human-blessed anchors)."""
+    def test_share_projection_excludes_recent_edit_candidates(self, tmp_repo):
+        """An unanchored recent-edit guess never becomes Teams Check scope."""
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         _stored, eid = store.update_decision(
             tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         entry = self._entry(tmp_repo, eid)
         assert not entry.get("source_files")  # precondition: nothing anchored yet
         projected = store._share_projection(entry, redact_on=False)
-        assert projected["source_files"] == ["auth/jwt.py"]
+        assert projected["source_files"] == []
         assert not self._entry(tmp_repo, eid).get("source_files")  # local anchor still unwritten
+
+    def test_share_projection_carries_only_structurally_confirmed_candidates(self, tmp_repo):
+        _stored, eid, _meta = store.update_decision_with_meta(
+            tmp_repo, "Generated client calls /v1/context", "sess-1", "constraint",
+            anchor_candidates=["src/generated/client.ts"],
+            anchor_candidates_confirmed=True)
+        entry = self._entry(tmp_repo, eid)
+        projected = store._share_projection(entry, redact_on=False)
+        assert projected["source_files"] == ["src/generated/client.ts"]
+        assert "anchor_candidates" not in projected
 
     def test_share_projection_prefers_real_anchor_over_candidates(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/session.py")
@@ -5161,11 +5184,12 @@ class TestAnchorCandidates:
         projected = store._share_projection(entry, redact_on=False)
         assert projected["source_files"] == ["auth/jwt.py"]  # blessed anchor wins
 
-    def test_review_surfaces_would_anchor_line_for_new_pending_decision(self, tmp_repo):
+    def test_review_surfaces_recent_edit_candidate_as_possible_only(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "sess-1", "constraint")
         out = store.format_pending_review(tmp_repo)
-        assert "Would anchor: auth/jwt.py" in out
+        assert "Possible files: auth/jwt.py" in out
+        assert "NOT anchored on approval" in out
 
     def test_review_omits_would_anchor_line_when_no_candidates(self, tmp_repo):
         store.update_decision(tmp_repo, "Decided to use JWT for auth", "s1", "constraint")
@@ -5245,20 +5269,32 @@ class TestConstraintCaptureCandidates:
         eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
         assert "anchor_candidates" not in self._entry(tmp_repo, eid)
 
-    def test_candidates_render_in_the_review_surface(self, tmp_repo):
+    def test_candidates_render_as_possible_in_the_review_surface(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
-        assert "Would anchor: auth/jwt.py" in store.format_pending_review(tmp_repo)
+        out = store.format_pending_review(tmp_repo)
+        assert "Possible files: auth/jwt.py" in out
+        assert "NOT anchored on approval" in out
 
-    def test_approval_blesses_them_into_a_real_anchor(self, tmp_repo):
+    def test_plain_approval_does_not_bless_recent_edit_candidates(self, tmp_repo):
         store.record_edited_file(tmp_repo, "auth/jwt.py")
         eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
         ok, _msg = store.approve_decision(tmp_repo, eid, "approve")
         assert ok
         entry = self._entry(tmp_repo, eid)
+        assert not entry.get("source_files")
+        assert "anchor_commit" not in entry
+        assert "anchor_candidates" not in entry
+
+    def test_explicit_selection_blesses_recent_edit_candidate(self, tmp_repo):
+        store.record_edited_file(tmp_repo, "auth/jwt.py")
+        eid, _content, _status = store.capture_user_constraint(tmp_repo, self.DEICTIC, "s1")
+        ok, _msg = store.approve_decision(
+            tmp_repo, eid, "approve", source_files=["auth/jwt.py"])
+        assert ok
+        entry = self._entry(tmp_repo, eid)
         assert entry["source_files"] == ["auth/jwt.py"]
         assert "anchor_commit" in entry
-        assert "anchor_candidates" not in entry
 
 
 class TestLegacyFallback:

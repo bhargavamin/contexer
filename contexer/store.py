@@ -1155,6 +1155,8 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
 # al+w(?:ay|ya)s catches "always", "allways" (double-l), "alwyas" (transposition).
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
+    r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
+    r"|"
     r"al+w(?:ay|ya)s"               # always + common typos: allways, alwyas
     r"|never"                        # never
     r"|must\s+(?:always|never)"      # must always / must never
@@ -1333,6 +1335,155 @@ _SYSTEM_TEXT_PREFIXES = (
     "your claude.ai usage limit",
 )
 
+# Prescriptive words quoted inside recognizable output/document containers are observations,
+# not clean user directives. This is deliberately SHAPE-based and anchored: an ordinary prompt
+# may discuss logs, changelogs or README files without becoming output itself. A suspicious row
+# rejected here can still be recorded by the evidence pipeline through an explicit agent report;
+# what it cannot do is bypass review as a human-stated standing rule.
+_NON_DIRECTIVE_CONTAINER = re.compile(
+    r"^\s*(?:"
+    r">\s+"                                      # Markdown blockquote
+    r"|\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\]\s+"
+    r"(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b"
+    r"|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?\s+(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b"
+    r"|File\s+[\"'][^\"']+[\"'],\s+line\s+\d+\b"  # Python traceback frame
+    r"|\[?(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\]?(?:\s|:)"
+    r"|pytest(?:\s+output)?\s*:"                 # labelled pytest output
+    r"|[EF]\s{3,}(?:[A-Za-z_][\w.]*(?:Error|Exception)|AssertionError)\s*:"
+    r"|FAILED\s+\S+::\S+\s+-\s+"
+    r"|[A-Za-z_][\w.]*(?:Error|Exception):\s+"   # traceback exception tail
+    r"|(?:[^:\n]+[/\\])?[^:\n]+:\d+:\s+"      # grep -n / ripgrep row
+    r"|[-*]\s+(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)"
+    r"(?:\([^)]+\))?!?:"                         # Conventional Commit changelog row
+    r"|\+(?:\s|\S)"                             # lifted added diff content line
+    r"|-(?:\t|\s{2,}|\S)"                      # lifted removed line; '- rule' stays a bullet
+    r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
+    r"|(?:the\s+)?(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
+    r"\s+(?:says?|said|states?|reads)\b"
+    r"|(?:as\s+)?(?:the\s+|our\s+)?(?:README|documentation|docs?|release\s+notes?|"
+    r"issues?|changelog|log|output|CI\s+(?:error|output)|lead|manager|developer|maintainer|"
+    r"reviewer|(?!I\b)[A-Z][A-Za-z.'-]*)\s+"
+    r"(?:says?|said|states?|stated|writes?|wrote|recommends?|recommended|"
+    r"tells?(?:\s+(?:me|us|you))?\s+to|told(?:\s+(?:me|us|you))?\s+to)\s*[:,]?[ \t]+"
+    r"(?:(?:that\s+)?(?:we|you|they|I)\s+|that\s+)?"
+    r"(?=(?:always|never|must\b|do\s+not\b|don['’]t\b|from\s+now\s+on\b|"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))"
+    r"|[A-Z][A-Za-z .'-]{0,40}\s+(?:says?|said|states?|stated|writes?|wrote|"
+    r"recommends?|recommended|tells?|told)\s*,?\s*[\"“]"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _explicit_correction_tail(line: str) -> str:
+    """Return a developer-voice correction after attributed content, never quoted content.
+
+    Bare adversatives remain part of the reported statement. Only an explicit authority reset
+    ("from now on", "going forward", or "I am telling/asking you") can cross back into the
+    developer's voice, and a reset still inside an open quote is refused.
+    """
+    match = re.search(
+        r"(?:\bbut\b|\bhowever\b)[\s,:-]*"
+        r"(?P<tail>(?:from\s+now\s+on\b|going\s+forward\b|"
+        r"I(?:'m|\s+am)\s+(?:telling|asking)\s+you\s+to\b).*)$",
+        line, flags=re.IGNORECASE)
+    if match is None:
+        return ""
+    prefix = line[:match.start("tail")]
+    if prefix.count('"') % 2 or prefix.count("“") > prefix.count("”"):
+        return ""
+    return re.sub(
+        r"^\s*I(?:'m|\s+am)\s+(?:telling|asking)\s+you\s+to\s+",
+        "", match.group("tail"), flags=re.IGNORECASE).strip()
+
+
+def _directive_candidate_text(text: str) -> str:
+    """Remove recognizable quoted/output lines while preserving clean directive siblings.
+
+    Rejecting a whole mixed prompt because one line was a log hides an explicit directive on
+    the next line. Conversely, storing the original mixed prompt would promote the log as part
+    of the rule. This small line-state parser returns only text eligible for directive capture;
+    indented traceback continuations stay inside the container until an unindented line begins.
+    """
+    raw = str(text or "")
+    if raw.strip().lower().startswith(
+            ("[contexer", "contexer:", "your claude.ai usage limit")):
+        # These injected shapes have no closing delimiter, so there is no sound boundary after
+        # which a line can be attributed back to the developer. Refuse the whole prompt.
+        return ""
+    kept = []
+    after_container = False
+    in_fence = ""
+    in_injected_tag = ""
+    for line in raw.splitlines():
+        if in_fence:
+            close_at = line.find(in_fence)
+            if close_at < 0:
+                continue
+            line = line[close_at + len(in_fence):]
+            in_fence = ""
+            if not line.strip():
+                after_container = True
+                continue
+        fence_hits = [(line.find(marker), marker) for marker in ("```", "~~~")
+                      if line.find(marker) >= 0]
+        if fence_hits:
+            open_at, marker = min(fence_hits)
+            prefix = line[:open_at].strip()
+            if prefix and _CONSTRAINT_TRIGGER.search(prefix):
+                kept.append(prefix)
+            elif not prefix and kept and kept[-1].rstrip().endswith(":") \
+                    and not _CONSTRAINT_TRIGGER.search(kept[-1]):
+                kept.pop()
+            remainder = line[open_at + len(marker):]
+            close_at = remainder.find(marker)
+            if close_at < 0:
+                in_fence = marker
+                after_container = True
+                continue
+            line = remainder[close_at + len(marker):]
+            if not line.strip():
+                after_container = True
+                continue
+        stripped = line.strip()
+        if in_fence:
+            continue
+        lower = stripped.lower()
+        if in_injected_tag:
+            if f"</{in_injected_tag}>" in lower:
+                in_injected_tag = ""
+            continue
+        injected_tag = next((tag for tag in (
+            "system-reminder", "persisted-output", "task-notification")
+            if lower.startswith(f"<{tag}")), "")
+        if injected_tag:
+            if f"</{injected_tag}>" not in lower:
+                in_injected_tag = injected_tag
+            after_container = True
+            continue
+        if lower.startswith(_SYSTEM_TEXT_PREFIXES):
+            after_container = True
+            continue
+        if _NON_DIRECTIVE_CONTAINER.search(line):
+            # A quoted statement and the developer's own correction can share one line:
+            # `README says X, but from now on Y`. Keep only the clear adversative clause.
+            tail = _explicit_correction_tail(line)
+            if tail and _CONSTRAINT_TRIGGER.search(tail):
+                kept.append(tail)
+            after_container = True
+            continue
+        if after_container and (not line.strip() or line[:1].isspace()):
+            continue
+        after_container = False
+        kept.append(line)
+    return "\n".join(kept)
+
+
+_DIRECTIVE_WRAPPER_ONLY = re.compile(
+    r"^(?:store\s+this\s+decision|from\s+now\s+on|going\s+forward|henceforth|"
+    r"as\s+a\s+rule|rule)\s*[:.!-]?\s*$", re.IGNORECASE)
+
 # Deictic referents point at an object only this conversation can resolve - a strong
 # signal the directive is session-scoped intent, not a standing rule. Still stored
 # (never dropped), just not auto-trusted. Narrowly scoped to avoid v1's false positives:
@@ -1346,7 +1497,8 @@ _SYSTEM_TEXT_PREFIXES = (
 # Bare "that" is dropped entirely: relative/complementizer uses ("code that fails",
 # "ensure that X") dominate and are never deictic.
 _DEICTIC_THIS_THESE_THOSE = re.compile(
-    r"\b(?:this|these|those)\b(?!\s+(?:repo|repository|project|codebase)\b)", re.IGNORECASE)
+    r"\b(?:this|these|those)\b"
+    r"(?!\s+(?:repo|repository|project|codebase)\b|\s+decision\s*:)", re.IGNORECASE)
 _DEICTIC_IT = re.compile(r"(?<!make\s)\bit\b(?!\s+a\s+\w)", re.IGNORECASE)
 _DEICTIC_HERE = re.compile(r"\bhere\b(?!\W*$)", re.IGNORECASE)
 # "for now" scopes a directive to the current moment, same conversation-local signal as
@@ -1397,21 +1549,23 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
     Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
     and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
-    t = text.strip()
+    t = _directive_candidate_text(text).strip()
     # Pasted blobs and tool/system-injected text are never clean user directives.
     if not t or len(t) > _MAX_DIRECTIVE_LEN:
+        return False, ""
+    if _DIRECTIVE_WRAPPER_ONLY.fullmatch(t):
         return False, ""
     if t.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in t:
         return False, ""
     if t.endswith("?"):
         return False, ""
-    if _SARCASM_EXCLUDES.search(text.strip()):
+    if _SARCASM_EXCLUDES.search(t):
         return False, ""
-    if not _CONSTRAINT_TRIGGER.search(text):
+    if not _CONSTRAINT_TRIGGER.search(t):
         return False, ""
     # Strip soft conversational prose ("don't worry", "I don't know"); if a broadened
     # prohibition trigger only matched inside that prose, it was not a directive.
-    deprosed = _SOFT_PROSE_EXCLUDE.sub("", text)
+    deprosed = _SOFT_PROSE_EXCLUDE.sub("", t)
     if not _CONSTRAINT_TRIGGER.search(deprosed):
         return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive
@@ -1517,7 +1671,7 @@ def capture_user_constraint_with_meta(
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
         return None, None, None, {}
-    content = _sanitize_directive(prompt.strip())[:600]
+    content = _sanitize_directive(_directive_candidate_text(prompt).strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content)
@@ -1576,12 +1730,11 @@ def capture_user_constraint_with_meta(
             entry["repo_source"] = repo_source
         # Guard anchor accrual (issue #175): a deictic directive lands pending_approval and
         # created_by="human" - the ONE provenance that is guard-TRUSTED the moment it is
-        # approved - so it is the highest-value candidate carrier there is. Same status gate
-        # as update_decision's: only a pending entry can ever see the pending->approved
-        # transition where _apply_approval blesses candidates into a real anchor; a clean
-        # directive is born approved and would just strand them. Same never-guard-input
-        # semantics too: _guard_pairs never reads `anchor_candidates`, and the review surface
-        # renders them as `would anchor:` before the developer signs off.
+        # approved - so its nearby edits must be especially careful not to become authority.
+        # Same status gate as update_decision's: a clean directive is born approved and would
+        # just strand this review-only metadata. `_guard_pairs` never reads
+        # `anchor_candidates`; the review surface labels these sidecar guesses as possible and
+        # plain approval expires them unless the reviewer explicitly selects source_files.
         if status == "pending_approval":
             candidates = _read_edited_files(repo_path)
             if candidates:
@@ -2447,6 +2600,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                               repo_source: str = "",
                               force_pending: bool = False,
                               anchor_candidates: list | None = None,
+                              anchor_candidates_confirmed: bool = False,
                               ) -> tuple[bool, str | None, dict]:
     """Store (or route) one decision, plus a `meta` dict - `{}` except on a refused proposal
     slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
@@ -2486,7 +2640,12 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
     `source_files` and so never lets a merely-nearby edit become an anchor guess. `None` (every
     other caller) keeps the sidecar accrual exactly as it was. Like the sidecar guess it
     replaces, it is never guard input: `_guard_pairs` reads `source_files` only, and a human
-    approval is still what turns a candidate into an anchor."""
+    approval is still what turns a candidate into an anchor. `anchor_candidates_confirmed`
+    is accepted only with an explicit candidate list and records that its paths came from a
+    structural evidence link; sidecar guesses remain non-authoritative unless the reviewer
+    passes them back explicitly through `approve_decision(source_files=...)`."""
+    if anchor_candidates_confirmed and anchor_candidates is None:
+        raise ValueError("confirmed anchor candidates require an explicit candidate list")
     content = revisions.normalize_content(content)
     with store_lock(repo_slug(repo_path)):
         data = load(repo_path)
@@ -2581,7 +2740,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                     # and _apply_approval's pending edit: rewrite the current revision, mint
                     # no new version, stay pending_approval so the WHOLE amended draft still
                     # gets its one human review. anchor_candidates/memory_key are untouched -
-                    # candidates are blessed at approval, not here.
+                    # confirmed candidates may promote at approval; sidecar guesses expire.
                     if entry_status(target) == "pending_approval":
                         rev = revisions.current_revision(target)
                         if rev is not None:
@@ -2670,14 +2829,14 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
             entry["repo_source"] = repo_source
         _anchor_sources(repo_path, entry, source_files)
         # Guard anchor accrual (issue #175 Task 3): when the model didn't name source_files
-        # itself, the session's recently-edited files are a candidate anchor - NOT a real one.
+        # itself, the session's recently-edited files are a possible relationship - NOT an
+        # anchor. Reconciliation may instead pass structurally confirmed candidates explicitly.
         # `anchor_candidates` is a distinct field the guard's pairing engine never reads
-        # (_guard_pairs only consumes `source_files`), so a candidate can never pair before a
-        # human blesses it via approval (see _apply_approval). Gated on the entry's ACTUAL
-        # resulting status (pending_approval), not on created_by alone: pending_approval is
-        # exactly the status _apply_approval's plain approve/edit flow blesses on a
-        # pending->approved transition, so gating on that outcome directly is self-enforcing -
-        # a future created_by value can't silently strand candidates on a born-approved or
+        # (_guard_pairs only consumes `source_files`). Plain approval promotes only a candidate
+        # marked structurally confirmed; a recent-edit guess requires explicit reviewer-selected
+        # `source_files` and otherwise expires. Gated on the entry's ACTUAL resulting status
+        # (pending_approval), not on created_by alone, so a future created_by value cannot
+        # silently strand candidates on a born-approved or
         # born-suggested entry the way an enumerated created_by tuple could (a "human" capture
         # is always born approved via _classify_level, so the old created_by-only gate WAS
         # stranding candidates on it). The status gate alone isn't quite enough, though: a
@@ -2692,8 +2851,8 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         # sidecar and the aggregator's `temporal_backward` window are the SAME 1800 seconds,
         # written by the same PostToolUse call, so every backward-linked path is guaranteed to
         # be a fresh sidecar entry at the moment reconciliation materializes the decision - and
-        # a candidate the aggregator refused to anchor was landing here as an anchor guess a
-        # developer could bless (runbook invariant 6, caught in review).
+        # a candidate the aggregator refused to anchor was otherwise landing here as a sidecar
+        # guess indistinguishable from scope. The explicit empty list prevents that re-entry.
         if (not entry.get("source_files")
                 and created_by not in ("scan", "bootstrap", "memory")
                 and entry_status(entry) == "pending_approval"):
@@ -2701,6 +2860,8 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                        else [f for f in anchor_candidates if isinstance(f, str) and f])
             if guesses:
                 entry["anchor_candidates"] = guesses[-MAX_SOURCE_FILES:]
+                if anchor_candidates_confirmed:
+                    entry["anchor_candidates_confirmed"] = True
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         save(repo_path, data)
@@ -2758,6 +2919,7 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
                 # session's edited files described a guess that's now moot, cleared rather
                 # than left dangling on an already-anchored entry.
                 entry.pop("anchor_candidates", None)
+                entry.pop("anchor_candidates_confirmed", None)
                 changed = True
         if changed:
             save(repo_path, data)
@@ -2777,8 +2939,8 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
 
     `has_caller_source_files`: True when `approve_decision` was itself given `source_files` -
     it applies those (and clears any `anchor_candidates`) AFTER this returns, so this function
-    must not waste a git call promoting candidates that are about to be overridden anyway (see
-    the candidate-blessing branches below, issue #175 Task 3)."""
+    must not waste a git call promoting a structurally confirmed candidate that is about to be
+    overridden anyway (see the confirmed-candidate branches below, issue #175 Task 3)."""
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
     if entry is None and entry_id:
         entry = next((e for e in data["entries"] if e.get("id", "").startswith(entry_id)), None)
@@ -2803,7 +2965,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         prop_had_source_files = bool((entry.get("proposed_revision") or {}).get("source_files"))
         # Read BEFORE promoting - _promote_proposal consumes the proposal. `clear_anchors`
         # (anchors.py's total-loss retirement) means this approval RETIRES the entry's anchor;
-        # the candidate-blessing branch below must not then read the freshly-emptied
+        # the confirmed-candidate branch below must not then read the freshly-emptied
         # source_files as "nothing anchors this entry" and promote a stale guess into a real
         # anchor, which would re-anchor the just-retired decision to unrelated files and drag
         # it straight back into anchor-decay participation (and Tier-1 guard pairing).
@@ -2830,7 +2992,8 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if not prop_had_source_files and entry.get("source_files"):
             _anchor_sources(repo_path, entry, entry["source_files"])
         elif (not prop_had_source_files and not has_caller_source_files
-                and not prop_clear and entry.get("anchor_candidates")):
+                and not prop_clear and entry.get("anchor_candidates")
+                and entry.get("anchor_candidates_confirmed") is True):
             # Nothing else anchors this entry - the Suggested Update's own stashed
             # source_files wins when present (above), and a caller-passed source_files
             # is about to override anyway; only then do the accrued candidates fill the gap.
@@ -2843,6 +3006,13 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         # for some later approval to bless it back into an anchor.
         if entry.get("source_files") or prop_clear:
             entry.pop("anchor_candidates", None)
+            entry.pop("anchor_candidates_confirmed", None)
+        elif action in ("approve", "edit") and entry.get("anchor_candidates"):
+            # A recent-edit guess not explicitly selected by the reviewer expires with the
+            # review. Keeping it on an approved entry would let share or a later code path
+            # mistake an unratified relationship for scope.
+            entry.pop("anchor_candidates", None)
+            entry.pop("anchor_candidates_confirmed", None)
         stored = revisions.current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2892,12 +3062,16 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     # captured with source_files while still pending) gets its anchor_commit refreshed here too.
     if entry.get("source_files"):
         _anchor_sources(repo_path, entry, entry["source_files"])
-    elif not has_caller_source_files and entry.get("anchor_candidates"):
-        # The pending->approved transition IS the human signature the candidates were waiting
-        # on: bless them into a real anchor now, via the one anchoring path (_anchor_sources),
-        # and drop the candidate field - it has served its purpose.
+    elif (not has_caller_source_files and entry.get("anchor_candidates")
+          and entry.get("anchor_candidates_confirmed") is True):
+        # Structurally confirmed evidence candidates may be blessed by the content approval.
+        # Recent-edit guesses require the reviewer to pass `source_files` explicitly.
         _anchor_sources(repo_path, entry, entry["anchor_candidates"])
         entry.pop("anchor_candidates", None)
+        entry.pop("anchor_candidates_confirmed", None)
+    elif entry.get("anchor_candidates"):
+        entry.pop("anchor_candidates", None)
+        entry.pop("anchor_candidates_confirmed", None)
     stored_content = revisions.current_content(entry)
     preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
@@ -3408,25 +3582,13 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     title = entry.get("title") or revisions.derive_title(content)
     evidence = rev.get("evidence") or None
     source_files = [f for f in (entry.get("source_files") or []) if f]
-    # Fall back to the session's edited-files candidates when nothing is anchored yet. A
-    # pending_approval decision IS shareable (_shareable_entries only excludes "ignored"), so
-    # without this every decision shared before its local approval reaches Teams with no files
-    # at all - the anchor exists, it just hasn't been blessed yet. Deliberately one-directional:
-    # this reads `anchor_candidates`, it never writes `source_files`, because that field is the
-    # commit guard's Tier-1 pairing input (_guard_pairs) and a guess must not become guard input
-    # without a human. Teams renders what it receives as claimed, unverified metadata - the same
-    # trust level a candidate actually has - so a guess is safe THERE and not safe here.
-    # Already canonicalized and capped at write (record_edited_file / MAX_SOURCE_FILES).
-    # `source_files_unconfirmed` is what keeps the LOCAL surface honest: sharing is an outward,
-    # hard-to-undo action, and every other human-facing surface labels a candidate as a guess
-    # (`would anchor:` in format_pending_review, `Would anchor` in cli._review_metadata). Rendering
-    # a guess in the confirm-preview as a plain `files:` line, identical to a blessed anchor, would
-    # be the one place the developer signs without seeing what they are signing. Extra key like
-    # `redacted`/`status`: the wire builders read named fields, so it never egresses.
-    unconfirmed = False
-    if not source_files:
+    # A structurally confirmed evidence candidate is authoritative enough to preserve as the
+    # proposed scope when a pending decision is shared for a Team lead's review. A recent-edit
+    # sidecar guess is not: Teams Check consumes `source_files` as applicability metadata and
+    # has no candidate-certainty bit on the wire, so those guesses must never egress. The marker
+    # is set only by reconcile's structural extraction path; plain capture cannot set it.
+    if not source_files and entry.get("anchor_candidates_confirmed") is True:
         source_files = [f for f in (entry.get("anchor_candidates") or []) if f]
-        unconfirmed = bool(source_files)
     # Redact at the projection so the confirm-preview and durable outbox show exactly what
     # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
     # `redacted` counts scrubbed secrets for the preview banner; extra key ignored by the
@@ -3490,7 +3652,6 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
         # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
         "source_files": source_files,
-        "source_files_unconfirmed": unconfirmed,
         # Reaches the wire subject to remote._WIRE_LIFECYCLE *and* the server having advertised
         # `decisionLifecycle.tombstones` - see that constant. `[]` for the ordinary decision
         # that has never been retired or restored, so downstream builders read it uniformly.
@@ -3499,8 +3660,7 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # _anchor_sources truncated at capture, or the wire bounds dropped an over-long path
         # just above. Extra key like `redacted`/`status`: read by the preview, never by a
         # wire builder.
-        "source_files_total": max(
-            wire_total, 0 if unconfirmed else (entry.get("source_files_total") or 0)),
+        "source_files_total": max(wire_total, entry.get("source_files_total") or 0),
     }
 
 
@@ -3707,13 +3867,13 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
     id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml.
 
-    `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files, and
+    `source_files` (issue #174 Task 5): each projection carries its scrubbed authoritative files
+    (approved anchors, or structurally confirmed scope on a pending evidence proposal), and
     the wire sends them while `remote._WIRE_SOURCE_FILES` is open (see that constant), so the
     per-decision `files:` line reads as plain fact. The note survives for the rollback case: if
     the gate is ever closed again, the line regains its honest "(not yet sent - server support
-    pending)" suffix rather than silently promising files that won't actually go out. A second,
-    independent suffix marks files that came from `anchor_candidates` rather than a blessed
-    anchor, so this surface labels a guess as a guess like every other human-facing one does."""
+    pending)" suffix rather than silently promising files that won't actually go out. Recent-edit
+    guesses are excluded from the projection entirely."""
     from contexer import remote
     from contexer.config import default_endpoint, load_profile
     prof = profile or load_profile()  # resolved ONCE - governs both endpoint and redaction
@@ -3729,8 +3889,6 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         files = p.get("source_files") or []
         if files:
             note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent - server support pending)"
-            if p.get("source_files_unconfirmed"):
-                note += " (unconfirmed - this session's edits, not yet approved)"
             total = p.get("source_files_total") or 0
             if total > len(files):
                 note += f" (sending {len(files)} of {total})"

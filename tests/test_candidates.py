@@ -578,7 +578,8 @@ def test_a_file_change_corroborates_a_directive_that_names_no_files():
     result = candidates.aggregate_candidates([directive, edit], [])
     got = _only(result)
     assert got["score"] == 50 + candidates._SCORES["files_changed"]
-    assert got["source_files"] == ["src/auth.py"]
+    assert got["source_files"] == []
+    assert got["possible_source_files"] == ["src/auth.py"]
     assert result["diagnostics"]["insufficient"] == 0
 
 
@@ -592,7 +593,8 @@ def test_a_fileless_seed_keeps_taking_edits_for_the_whole_window():
               _ev("file_changed", "session store", at="2026-08-24T10:20:00+00:00",
                   files=["src/session.py"])]
     got = _only(candidates.aggregate_candidates(events, []))
-    assert got["source_files"] == ["src/auth.py", "src/session.py"]
+    assert got["source_files"] == []
+    assert got["possible_source_files"] == ["src/auth.py", "src/session.py"]
     assert got["score"] == 60, "files_changed still counts once per group"
 
 
@@ -618,7 +620,8 @@ def test_the_nearest_preceding_fileless_seed_takes_the_edit():
                   files=["web/resolvers.ts"])]
     result = candidates.aggregate_candidates(events, [])
     by_content = {c["content"]: c for c in result["candidates"]}
-    assert by_content[_UNRELATED]["source_files"] == ["web/resolvers.ts"]
+    assert by_content[_UNRELATED]["source_files"] == []
+    assert by_content[_UNRELATED]["possible_source_files"] == ["web/resolvers.ts"]
     assert by_content[_SEED]["source_files"] == []
 
 

@@ -66,7 +66,7 @@ _BM25_K1 = 1.5
 _BM25_B = 0.75
 
 # Artifact extraction: signal-rich tokens pulled from a paste even when the prose is empty.
-_ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|md|toml|yaml|json)\b")
+_ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|sh|md|toml|yaml|json)\b")
 _ARTIFACT_DOTTED_RE = re.compile(r"\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+\b")
 _ARTIFACT_EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b")
 # Two+ path segments required: a lone slash in prose ("light/dark", "read/write",

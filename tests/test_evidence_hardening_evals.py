@@ -8,7 +8,7 @@ of what a scenario is.
 Three jobs, in order:
 
 1. **A labelled directive corpus.** Recall on explicit user directives is a hard threshold
-   (100 percent). Precision has no invented target: the measured number is reported and every
+   (100 percent) and precision must remain at least 0.80. The exact measured number and every
    false positive is FROZEN BY NAME in `_KNOWN_DIRECTIVE_FALSE_POSITIVES`, so a regression
    that adds a new one fails here and the ones that exist today are visible to a developer
    instead of buried in an aggregate.
@@ -26,6 +26,7 @@ Three jobs, in order:
 The hard thresholds themselves are asserted in the DEFAULT tier (below), never only inside the
 report: a threshold that is checked only when someone remembers to run `-m perf` is not a gate.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -62,6 +63,10 @@ ARTIFACTS = (Path(__file__).resolve().parent.parent / ".superpowers" / "sdd"
 
 _T0 = datetime(2026, 8, 1, 10, 0, 0, tzinfo=timezone.utc)
 _NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://contexer.dev/tests/evidence-hardening/evals")
+NATURAL_DIRECTIVE_HOLDOUT = (
+    Path(__file__).parent / "fixtures" / "directive_holdout" / "natural-prompts.json")
+NATURAL_DIRECTIVE_HOLDOUT_SHA256 = (
+    "9f7d14797f8f2a541a1568af5055f90c1ae985954bcd0050972377e4112e4984")
 
 
 def _armed(repo: str) -> list:
@@ -149,16 +154,7 @@ DIRECTIVE_NEGATIVES = {
 # exactly like the developer typing the rule. Reported for developer judgment rather than
 # fixed inside an evaluation task - narrowing the trigger is a behaviour change with its own
 # recall cost, and this file exists to measure, not to decide.
-_KNOWN_DIRECTIVE_FALSE_POSITIVES = frozenset({
-    "shell-log-line",
-    "python-traceback-line",
-    "tool-output-pytest",
-    "quoted-doc-blockquote",
-    "quoted-doc-attribution",
-    "changelog-entry",
-    "grep-output-line",
-    "diff-hunk-line",
-})
+_KNOWN_DIRECTIVE_FALSE_POSITIVES = frozenset()
 
 
 def _directive_scores() -> dict:
@@ -178,6 +174,45 @@ def _directive_scores() -> dict:
     }
 
 
+def _natural_directive_scores() -> dict:
+    """Separate one-shot holdout result; this corpus is never a classifier tuning input."""
+    document = json.loads(NATURAL_DIRECTIVE_HOLDOUT.read_text(encoding="utf-8"))
+    rows = document["cases"]
+    labelled_positive = {row["id"] for row in rows if row["directive"]}
+    detected = {row["id"] for row in rows
+                if store._is_prescriptive_constraint(row["text"])[0]}
+    true_positive = len(labelled_positive & detected)
+    false_positive = len(detected - labelled_positive)
+    false_negative = len(labelled_positive - detected)
+    return {
+        "cases": len(rows),
+        "positive": len(labelled_positive),
+        "negative": len(rows) - len(labelled_positive),
+        "true_positive": true_positive,
+        "false_positive": false_positive,
+        "false_negative": false_negative,
+        "recall": true_positive / len(labelled_positive),
+        "precision": true_positive / len(detected) if detected else 1.0,
+        "false_positive_ids": sorted(detected - labelled_positive),
+        "false_negative_ids": sorted(labelled_positive - detected),
+    }
+
+
+def test_natural_prompt_holdout_is_the_frozen_pre_implementation_corpus():
+    payload = NATURAL_DIRECTIVE_HOLDOUT.read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == NATURAL_DIRECTIVE_HOLDOUT_SHA256
+    document = json.loads(payload)
+    assert document["schema_version"] == 1
+    assert len({row["id"] for row in document["cases"]}) == len(document["cases"])
+    assert {type(row["directive"]) for row in document["cases"]} == {bool}
+
+
+def test_natural_prompt_holdout_is_reported_separately_without_a_tuning_gate():
+    scores = _natural_directive_scores()
+    print("natural directive holdout: " + json.dumps(scores, sort_keys=True))
+    assert scores["cases"] == scores["positive"] + scores["negative"] == 24
+
+
 def test_every_explicit_user_directive_is_captured():
     """Acceptance threshold: 100 percent recall for explicit user directives."""
     scores = _directive_scores()
@@ -185,8 +220,135 @@ def test_every_explicit_user_directive_is_captured():
     assert scores["recall"] == 1.0
 
 
+def test_frozen_directive_precision_clears_the_task04_gate():
+    assert _directive_scores()["precision"] >= 0.80
+
+
+def test_explicit_store_this_decision_command_is_captured_as_human_stated(tmp_repo):
+    prompt = "Store this decision: use uv for dependency management."
+
+    entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "sess-a")
+
+    assert entry_id and content == prompt.rstrip(".")
+    assert status == "approved"
+    (entry,) = store.load(tmp_repo)["entries"]
+    assert entry["id"] == entry_id and store.entry_status(entry) == "approved"
+
+
+@pytest.mark.parametrize(("prompt", "expected"), [
+    ('The README says "use pip".\nFrom now on, always use uv for dependencies.',
+     "From now on, always use uv for dependencies"),
+    ("2026-08-26 12:00:04 WARN retry: token must never be empty\n"
+     "Going forward, always validate token paths before writing.",
+     "Going forward, always validate token paths before writing"),
+    ("contexer/store.py:12: value must never be empty\nNever commit directly to main.",
+     "Never commit directly to main"),
+])
+def test_container_context_never_hides_a_separate_explicit_directive(
+        tmp_repo, prompt, expected):
+    entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "sess-a")
+    assert entry_id and status == "approved"
+    assert content == expected
+    assert "README says" not in content and "WARN retry" not in content
+    assert "store.py:12" not in content
+
+
+@pytest.mark.parametrize("text", [
+    "+always validate input before writing",
+    "+ Always validate input before writing",
+    "-never commit generated files",
+    "+\talways close the response body",
+    "[WARN] retry: you must always set repo_path",
+    "WARN retry: you must always set repo_path",
+    "E   AssertionError: config must never be None",
+    "FAILED test_a.py::test_x - AssertionError: config must never be None",
+    "ValueError: token must never be empty",
+    'Sam said, "always run the smoke test before deploying".',
+    "The release note says we should always include the migration hash.",
+    "The issue states that you must never cache this response.",
+    "According to Alice, never use pip in this project.",
+    "Sam said always run the smoke test before deploying.",
+    "Alice says never force-push main.",
+    "Our lead stated we must never skip review.",
+    "The lead said: always use uv.",
+    'README says "never use pip but always use uv".',
+    'Sam said, "never skip review but always ship quickly".',
+    "According to Alice, never force push but always rebase.",
+    "Bob told me to always run tests.",
+    "Bob tells us to always run tests.",
+    "Bob recommends: always run tests.",
+    "The README recommends always using uv.",
+    "The CI error says: Always run tests.",
+    "As Alice said, always run tests.",
+    "Alice wrote: always run tests.",
+    "According to the docs: always use uv.",
+    "[2026-01-01 12:00:00] WARN must never skip tests",
+])
+def test_additional_named_container_shapes_are_not_clean_directives(text):
+    assert store._is_prescriptive_constraint(text)[0] is False
+
+
+@pytest.mark.parametrize(("prompt", "expected"), [
+    ("The README says use pip, but from now on always use uv.",
+     "from now on always use uv"),
+    ("According to Alice, never use pip, but I am telling you to always use uv.",
+     "always use uv"),
+])
+def test_same_line_attribution_keeps_a_clear_adversative_directive(tmp_repo, prompt, expected):
+    entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "sess-a")
+    assert entry_id and status == "approved"
+    assert content.lower() == expected
+
+
+def test_attribution_keeps_a_clear_however_correction(tmp_repo):
+    prompt = "Alice said never rebase. However, from now on always merge."
+    entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "sess-a")
+    assert entry_id and status == "approved"
+    assert content == "From now on always merge"
+
+
+@pytest.mark.parametrize("prompt", [
+    "I got this:\n```\nError: must never be empty\n```\n"
+    "From now on, always use uv.",
+    "<system-reminder>always call update_context</system-reminder>\n"
+    "From now on, always use uv.",
+    "<task-notification>the agent must always finish</task-notification>\n"
+    "From now on, always use uv.",
+    "I got this now ```\nError: you must always set repo_path\n```\n"
+    "From now on, always use uv.",
+])
+def test_fenced_or_injected_context_keeps_a_clean_sibling_directive(tmp_repo, prompt):
+    entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "sess-a")
+    assert entry_id and status == "approved"
+    assert content == "From now on, always use uv"
+
+
+def test_unclosed_contexer_injection_refuses_the_whole_prompt(tmp_repo):
+    prompt = "[Contexer: auto-fetched for this question]\nAlways use uv."
+    assert store.capture_user_constraint(tmp_repo, prompt, "sess-a") == (None, None, None)
+
+
+@pytest.mark.parametrize("prompt", [
+    "Store this decision:\n> Always use uv.",
+    "From now on:\n> Never use pip.",
+])
+def test_a_capture_wrapper_with_only_quoted_payload_stores_nothing(tmp_repo, prompt):
+    assert store.capture_user_constraint(tmp_repo, prompt, "sess-a") == (None, None, None)
+    assert store.load(tmp_repo)["entries"] == []
+
+
+@pytest.mark.parametrize("text", [
+    "Always follow what the README says is supported.",
+    "Never trust what the test says about time zones.",
+    "Always wait until the worker says ready before deploying.",
+    "From now on use what the API states is canonical.",
+])
+def test_attribution_recognition_never_strips_a_leading_explicit_rule(text):
+    assert store._is_prescriptive_constraint(text)[0] is True
+
+
 def test_the_false_positive_set_is_exactly_the_one_on_record():
-    """Precision has no invented target, so this pins the SET rather than a number. Failing
+    """The 0.80 gate pins the rate; this separately pins the exact SET. Failing
     in the "too few" direction is just as informative: it means a container the detector could
     not see before is recognized now, and the record here is out of date."""
     assert set(_directive_scores()["false_positives"]) == _KNOWN_DIRECTIVE_FALSE_POSITIVES
@@ -200,21 +362,12 @@ def test_a_recognizable_container_is_never_read_as_a_directive(name):
     assert store._is_prescriptive_constraint(DIRECTIVE_NEGATIVES[name])[0] is False
 
 
-def test_a_false_positive_that_slips_through_is_still_only_one_reviewable_decision(tmp_repo):
-    """The blast radius of the row above, measured rather than assumed.
-
-    A log line the detector misreads becomes ONE stored constraint. It does not arm a policy,
-    it does not anchor a file, and it cannot block a commit - `arm_guard` is a separate
-    explicit gesture (runbook invariant 9). That is what keeps a precision miss a review-queue
-    cost rather than an enforcement one.
-    """
+def test_a_container_false_positive_never_becomes_authoritative(tmp_repo):
+    """A named container row remains inspectable input, but never clean human authority."""
     text = DIRECTIVE_NEGATIVES["quoted-doc-blockquote"]
     entry_id, _, _ = store.capture_user_constraint(tmp_repo, text, "sess-a")
-    assert entry_id, "the corpus row says this one is captured"
-
-    (entry,) = store.load(tmp_repo)["entries"]
-    assert entry.get("guard_check") is None
-    assert not entry.get("source_files")
+    assert entry_id is None
+    assert store.load(tmp_repo)["entries"] == []
     assert _armed(tmp_repo) == []
 
 
@@ -225,21 +378,16 @@ def _relations(candidate: dict) -> dict:
             for row in candidate["signals"]}
 
 
-def test_a_directive_naming_one_file_links_its_sibling_at_a_lower_certainty(tmp_repo):
+def test_a_forward_only_sibling_is_supporting_evidence_but_never_an_anchor(tmp_repo):
     """Brief case: a directive names one file while an unrelated NEARBY file changes.
 
     Scenario 03 covers an unrelated edit in another part of the tree, BEFORE the directive.
     This is the sharper version: the sibling sits in the same directory as the file the
     directive names, and it is edited AFTER, inside the proximity window.
 
-    What actually happens is worth stating plainly rather than wishing away. A `user_directive`
-    carries no `files` of its own, so `causal_forward` is the only link an edit after it can
-    have - and that link IS an anchor. So the sibling does reach `source_files`. That is a
-    measured wrong-file attachment, reported as such, and NOT a breach of runbook invariant 6,
-    which is about UNCERTAIN links: the sibling is `supporting`, the named file is `confirmed`
-    and structural, and a prior unrelated edit is `uncertain` and never anchors at all. This
-    test pins the ordering between those three tiers, which is the property that keeps the
-    invariant checkable at all.
+    `causal_forward` remains supporting evidence and keeps its score, but temporal order alone
+    cannot authorize a file anchor. The sibling therefore appears as possibly related while
+    the named structural file is the only approval candidate.
     """
     sibling = "src/generated/models.ts"
     events = [
@@ -260,8 +408,8 @@ def test_a_directive_naming_one_file_links_its_sibling_at_a_lower_certainty(tmp_
     assert seen[events[2]["event_id"]] == ("structural", "confirmed"), "the named path"
     assert seen[events[3]["event_id"]] == ("causal_forward", "supporting"), "the sibling"
 
-    assert candidate["source_files"] == [GENERATED, sibling]
-    assert candidate["possible_source_files"] == ["README.md"]
+    assert candidate["source_files"] == [GENERATED]
+    assert candidate["possible_source_files"] == ["README.md", sibling]
     # The backward link is non-consuming, so the prior edit's own signal row stays on the
     # leftover candidate: it is reported as evidence nothing explained, never as this
     # decision's corroboration.
@@ -271,9 +419,15 @@ def test_a_directive_naming_one_file_links_its_sibling_at_a_lower_certainty(tmp_
     _spool(tmp_repo, events)
     assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
     (entry,) = store.load(tmp_repo)["entries"]
+    assert entry.get("anchor_candidates") == [GENERATED]
+    assert sibling not in (entry.get("anchor_candidates") or [])
     assert "README.md" not in (entry.get("source_files") or [])
     assert "README.md" not in (entry.get("anchor_candidates") or [])
-    assert guard_engine.decisions_for_files(tmp_repo, ["README.md"]) == []
+    assert store.approve_decision(tmp_repo, entry["id"], "approve")[0]
+    approved = store.load(tmp_repo)["entries"][0]
+    assert approved.get("source_files") == [GENERATED]
+    for non_authoritative in ("README.md", sibling):
+        assert guard_engine.decisions_for_files(tmp_repo, [non_authoritative]) == []
 
 
 def test_two_repos_with_the_same_basename_keep_separate_spools(tmp_repo):
@@ -534,6 +688,7 @@ def _candidate_quality() -> dict:
     """Recall, precision and wrong-file attachment over the labelled golden scenarios."""
     labelled = _labelled()
     expected = produced = matched = files = wrong = uncertain_promoted = 0
+    structural_expected = structural_matched = 0
     for name in labelled:
         doc = _load(name)
         got = candidates.aggregate_candidates(doc["events"], doc["decisions"])["candidates"]
@@ -546,6 +701,10 @@ def _candidate_quality() -> dict:
                 continue
             matched += 1
             files += len(candidate["source_files"])
+            if candidate["kind"] != "insufficient":
+                structural = set(golden["source_files"])
+                structural_expected += len(structural)
+                structural_matched += len(structural & set(candidate["source_files"]))
             wrong += len([f for f in candidate["source_files"]
                           if f not in golden["source_files"]])
             uncertain_promoted += len(set(candidate.get("possible_source_files", []))
@@ -556,6 +715,10 @@ def _candidate_quality() -> dict:
         "recall": matched / expected if expected else 1.0,
         "precision": matched / produced if produced else 1.0,
         "attached_files": files,
+        "structural_expected_files": structural_expected,
+        "structural_matched_files": structural_matched,
+        "structural_anchor_recall": (
+            structural_matched / structural_expected if structural_expected else 1.0),
         "wrong_file_attachment_rate": wrong / files if files else 0.0,
         "uncertain_file_promotion_rate": (uncertain_promoted / files) if files else 0.0,
     }
@@ -564,12 +727,10 @@ def _candidate_quality() -> dict:
 def _adversarial_file_attachment() -> dict:
     """The wrong-file rate the goldens cannot show, on the input built to produce it.
 
-    The labelled scenarios carry three anchored files between them, all of them right, so
-    their wrong-file rate is 0.0 over a small denominator. That number on its own would read
-    as "wrong files never attach", which is not what the system guarantees: a `user_directive`
-    names no files, so any edit inside `_PROXIMITY_SECONDS` after it attaches by
-    `causal_forward` and IS an anchor. The sibling case is measured separately and reported
-    beside the golden rate rather than averaged into it - two corpora, two numbers.
+    The labelled scenarios mix structural anchors with leftover file-only candidates, so their
+    aggregate attachment denominator cannot answer whether a nearby sibling becomes scope.
+    The sibling case is measured separately: `causal_forward` remains supporting evidence and
+    inspectable possible scope, but only the named structural file is an anchor.
     """
     sibling = "src/generated/models.ts"
     events = [
@@ -771,6 +932,13 @@ def test_no_labelled_candidate_attaches_a_file_its_golden_does_not_name():
     assert quality["wrong_file_attachment_rate"] == 0.0
 
 
+def test_structural_anchor_recall_does_not_regress():
+    quality = _candidate_quality()
+    assert quality["structural_expected_files"] == 6
+    assert quality["structural_matched_files"] == 6
+    assert quality["structural_anchor_recall"] == 1.0
+
+
 def test_agent_only_evidence_opens_no_reconsideration():
     seen = _agent_only_reconsiderations()
     assert seen["agent_only_events"] > 0, "nothing was offered to the lane"
@@ -856,6 +1024,7 @@ def test_the_evaluation_report_is_written(tmp_repo, request):
         "candidate_quality": quality,
         "adversarial_file_attachment": _adversarial_file_attachment(),
         "directive_detection": directives,
+        "natural_directive_holdout": _natural_directive_scores(),
         "agent_only_reconsiderations": _agent_only_reconsiderations(),
         "review_items_per_realistic_session": _review_items_for_a_realistic_session(),
         "evidence_loss": loss,
@@ -885,6 +1054,9 @@ def _markdown(report: dict) -> str:
     rows = [
         ("decision-candidate recall (labelled fixtures)", f"{quality['recall']:.2f}"),
         ("proposal precision", f"{quality['precision']:.2f}"),
+        (f"structural anchor recall ({quality['structural_matched_files']}/"
+         f"{quality['structural_expected_files']} files)",
+         f"{quality['structural_anchor_recall']:.2f}"),
         ("wrong-file attachment rate (labelled goldens, "
          f"{quality['attached_files']} anchored files)",
          f"{quality['wrong_file_attachment_rate']:.2f}"),
@@ -925,13 +1097,23 @@ def _markdown(report: dict) -> str:
               for key in ("realistic_ms", "distinct_1000_ms", "boilerplate_1000_ms",
                           "empty_spool_reconcile_ms", "hook_append_ms")]
     lines += ["", "## Directive false positives", "",
-              "Precision has no invented target. Every false positive by fixture name:", ""]
+              "Precision must remain at least 0.80. Every false positive by fixture name:", ""]
     lines += [f"- `{name}`" for name in directives["false_positives"]] or ["- none"]
     lines += ["", "Each is prescriptive text lifted out of a container "
               "(a log line, a traceback, a diff hunk, a grep result, a changelog entry, "
               "a markdown blockquote) that `store._is_prescriptive_constraint` has no shape "
               "left to recognize. A capture that slips through is one reviewable decision: "
               "it arms no policy and anchors no file.", ""]
+    natural = report["natural_directive_holdout"]
+    lines += ["## Natural-prompt directive holdout", "",
+              "Frozen and labelled before the Task 04 classifier change; reported separately "
+              "and never used as a tuning threshold.", "",
+              "| Cases | Recall | Precision | False positives | False negatives |",
+              "| --- | --- | --- | --- | --- |",
+              f"| {natural['cases']} | {natural['recall']:.2f} | "
+              f"{natural['precision']:.2f} | "
+              f"{', '.join(natural['false_positive_ids']) or 'none'} | "
+              f"{', '.join(natural['false_negative_ids']) or 'none'} |", ""]
     lines += ["## Cited, not measured here", "",
               "Teams lifecycle retry and duplication are transcribed from "
               f"`{teams['source']}`, which owns the transport fakes and the contract fixture. "

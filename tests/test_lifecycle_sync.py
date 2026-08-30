@@ -355,15 +355,21 @@ def test_evidence_summary_never_reaches_the_wire(tmp_repo, monkeypatch):
     assert "CANDIDATE-9" not in _payload_text(args)
 
 
-def test_anchor_candidates_key_never_reaches_the_wire(tmp_repo, monkeypatch):
-    # The ratified exception stays exactly as it is: `_share_projection` still FALLS BACK to
-    # the candidates for `source_files` (issue #174), so the paths egress under that field.
-    # What must never egress is the candidate field itself, i.e. the claim that these are
-    # blessed anchors.
+def test_recent_edit_anchor_candidates_never_reach_the_wire(tmp_repo, monkeypatch):
+    # A recent-edit sidecar is only a possible relationship. Teams has no candidate-certainty
+    # bit and treats source_files as applicability, so neither the field nor its path may egress.
     did = _seed(tmp_repo, anchor_candidates=["src/queue.py"])
     args = _wire_for(tmp_repo, did, monkeypatch=monkeypatch)
     assert "anchor_candidates" not in args
-    assert args.get("source_files") == ["src/queue.py"]   # the ratified fallback, undisturbed
+    assert args.get("source_files") is None
+
+
+def test_structurally_confirmed_candidates_reach_the_wire_as_exact_scope(tmp_repo, monkeypatch):
+    did = _seed(tmp_repo, anchor_candidates=["src/generated/client.ts"],
+                anchor_candidates_confirmed=True)
+    args = _wire_for(tmp_repo, did, monkeypatch=monkeypatch)
+    assert "anchor_candidates" not in args
+    assert args.get("source_files") == ["src/generated/client.ts"]
 
 
 def test_raw_evidence_spool_never_reaches_the_wire(tmp_repo, monkeypatch):

@@ -187,12 +187,9 @@ Only an **approved** decision can be armed. A violated rule prints the file, the
 
 ### Approving decisions
 
-When you approve a decision (`contexer review` or the console), you may see a `would anchor: <files>` line under it. That's Contexer proposing to link the decision to the files you were just working on — approving accepts that link, making the guard's warnings for that decision precise and letting Contexer tell you later if those files changed without the decision being revisited. If the suggested files are wrong, edit or skip that part when you approve.
+When you approve a decision (`contexer review` or the console), `Would anchor: <files>` lists only structurally confirmed files—for example, a path named by the directive and observed in the session. Approving accepts that link, making Guard warnings precise and allowing staleness tracking.
 
-Read that line rather than skimming it.
-When you state a rule and then edit a file shortly afterwards, Contexer links the two on timing alone, because a rule that names no file has nothing else to go on.
-That is usually right and sometimes is not: a file you happened to touch next can end up linked to a rule that does not govern it, and once linked it drives that decision's commit-time warnings and its staleness notices.
-The review block lists such files under the weaker evidence tier, and files it is genuinely unsure about are listed separately as ones it will NOT link.
+Files connected only by timing, including a file edited shortly after a fileless directive, are shown separately as `Possible files: … NOT anchored on approval`. Plain approval does not promote them, and they do not reach Guard, staleness, sharing, or Teams Check. If one really is governed by the decision, select it explicitly through `approve_decision(source_files=[...])`.
 
 Approving is also not arming.
 It never turns a decision into something that stops a commit; only `contexer guard arm` does that.
@@ -278,7 +275,7 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 **Every tier:**
 
 - **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch. Contexer also keeps the session signals described [above](#what-contexer-notices-without-being-asked) and proposes review items from them, but that is a second net, not complete capture: it cannot see your agent's answers, test results or diffs, and what it does propose still waits for you.
-- **A directive lifted out of its context can be misread as a rule.** A prescriptive line you paste from a log, a traceback, a diff, a changelog, grep output, or a quoted document can be stored as a standing rule, because once the surrounding block is gone it looks exactly like you typing it. Fenced code, pasted blobs and tool-injected text are refused; a single bare line is not. The cost is one item to dismiss in your review queue: such a decision arms no rule, links no file, and cannot block a commit.
+- **Directive capture is shape-aware, not semantic attribution.** Recognizable log, traceback, pytest, blockquote, attribution, changelog, grep, diff, fenced-code and closed harness-container shapes are excluded from clean human directives. An unbounded Contexer or usage-limit injection is refused as a whole because it has no safe extraction boundary. A novel or stripped-down container shape can still be ambiguous, so use explicit review for anything suspicious; automatic directive capture never arms Guard by itself.
 - **Deduplication is lexical, not semantic.** Duplicates are detected by token overlap, with no understanding of meaning — the same rule phrased with different words ("commit on approval" vs "commit automatically") can accumulate as separate entries. Containment restatements (re-typing a rule with extra words, or a terse version of it) are consolidated automatically; synonym phrasings are only flagged in the capture ack and surface in review for you to merge manually.
 - **Cursor parity is partial.** Cursor's hooks can't inject per-prompt context or restore after compaction; Cursor steering rides on the session-start nudge plus an always-apply rule file. See [integrations](integrations.md).
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.

@@ -174,7 +174,9 @@ def test_attention_bounded_real_reconciliation_at_the_spool_bound(tmp_repo):
     corpus = spool.list_pending_evidence(tmp_repo)
     aggregated = candidates.aggregate_candidates(corpus, [])
     assert len(aggregated["candidates"]) == 100
-    assert sum(len(candidate["source_files"]) for candidate in aggregated["candidates"]) == 100
+    assert sum(len(candidate["source_files"]) for candidate in aggregated["candidates"]) == 0
+    assert sum(len(candidate["possible_source_files"])
+               for candidate in aggregated["candidates"]) == 100
 
     observed = {}
 

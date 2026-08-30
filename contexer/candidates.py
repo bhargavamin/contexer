@@ -490,9 +490,9 @@ def _group(events):
 
     An UNCERTAIN link does not consume its event. It is recorded on the group for display
     (`possible`/`uncertain`) and the event ALSO stays in the leftover set, because nothing
-    about it has been explained: it still belongs in the "files changed with no stated
-    decision" report, and letting a group swallow it would delete that gap from the run while
-    anchoring nothing.
+    about it has been explained. A `causal_forward` event IS consumed and remains supporting
+    evidence, but its paths also go to `possible`: temporal order corroborates the statement,
+    it does not prove which files the statement governs.
     """
     groups: list = []
     index = _new_index()
@@ -536,8 +536,13 @@ def _group(events):
         target["events"].append(event)
         target["links"][str(event.get("event_id") or "")] = relation
         for path in paths:
-            if path not in target["files"]:
+            if relation == "causal_forward":
+                if path not in target["files"] and path not in target["possible"]:
+                    target["possible"].append(path)
+            elif path not in target["files"]:
                 target["files"].append(path)
+                if path in target["possible"]:
+                    target["possible"].remove(path)
     return groups, leftovers, ignored, merged
 
 
@@ -619,7 +624,8 @@ def _uncertain_signals(group) -> list:
     """Display-only rows for the links that were made but proved nothing: the event, why it
     was linked, and a plain statement that it counts for nothing. They are NOT in `signals`
     and NOT in the candidate's event set, so nothing downstream can hold them, score them, or
-    read their files as an anchor - `possible_source_files` is the whole of what they buy."""
+    read their files as an anchor. Their paths share `possible_source_files` with supporting
+    forward-only paths, but the signal rows preserve the difference in certainty."""
     return [{"event_id": str(event.get("event_id") or ""), "weight": 0,
              "relation": relation, "certainty": _CERTAINTY[relation],
              "reason": "changed close in time with no structural link - not evidence"}
@@ -801,10 +807,9 @@ def _seeded_candidate(group, index) -> dict:
         # materialization/lifecycle work to use.
         "replacement_decision_id": None,
         "source_files": group["files"][:_MAX_SOURCE_FILES],
-        # Paths reached only through an uncertain link. Kept SEPARATE from `source_files` for
-        # the whole length of the pipeline: nothing may promote one into an anchor, a policy
-        # rule's scope, `anchor_candidates`, or Teams. See `_relation_for`'s temporal_backward
-        # note for why an uncertain anchor is worse than no anchor at all.
+        # Paths reached only through a non-authoritative temporal link: uncertain backward or
+        # supporting forward-only. Kept SEPARATE from `source_files` for the whole pipeline;
+        # neither may become an anchor, policy scope, `anchor_candidates`, or Teams input.
         "possible_source_files": group["possible"][:_MAX_SOURCE_FILES],
         "score": score,
         "first_observed_at": _first_observed(group["events"]),

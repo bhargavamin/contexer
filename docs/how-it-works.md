@@ -116,7 +116,7 @@ Most of the time this means a short warning naming the decisions related to what
 A decision's warnings get sharper once it's linked to the files it's about, and that link is what lets Contexer flag it as possibly outdated when those files change. Links come from two places:
 
 - **A one-time pass** (`contexer guard anchors`) over decisions you approved before this existed — it suggests files from the decision's own text and you confirm, edit, or skip each one.
-- **Automatically, going forward.** When you approve a new decision, Contexer proposes the files you were just working on as its link (shown as `would anchor: …` on the review screen), and approving accepts it.
+- **From confirmed evidence or explicit selection.** A file named by the decision and observed in the evidence is proposed as `would anchor: …`; approving accepts that structural link. Files that were merely edited nearby appear separately as possible and are not anchored by plain approval. To anchor one, select it explicitly with `approve_decision(source_files=[...])`.
 
 Either way, you always see the files before they're linked — nothing is linked to a decision you haven't reviewed.
 

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import candidates, evidence, lifecycle, reconcile, spool, store
+from contexer import candidates, evidence, lifecycle, reconcile, review_impact, spool, store
 from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
@@ -367,6 +367,50 @@ class TestAttentionBudget:
         assert initial_ids.isdisjoint({entry["id"] for entry in next_pending})
         assert spool.evidence_diagnostics(tmp_repo)["deferred_attention"] \
             == 20 - 2 * reconcile.MATERIALIZATION_ALLOWANCE
+
+    def test_deferred_resume_preserves_structural_authority_and_possible_sibling(
+            self, tmp_repo):
+        blockers = []
+        for i in range(reconcile.PENDING_REVIEW_CEILING):
+            ok, entry_id, _meta = store.update_decision_with_meta(
+                tmp_repo, f"Capacity blocker {i} governs subsystem omega{i} owner team{i}.",
+                f"cap-{i}", "architecture", created_by="ai", force_pending=True)
+            assert ok and entry_id
+            blockers.append(entry_id)
+
+        rule = "Always regenerate src/generated/client.ts from the API schema."
+        _emit(tmp_repo, "user_directive", rule, session_id="deferred-scope")
+        _emit(tmp_repo, "file_changed", "regenerated the client",
+              session_id="deferred-scope", files=["src/generated/client.ts"])
+        _emit(tmp_repo, "file_changed", "updated a nearby generated model",
+              session_id="deferred-scope", files=["src/generated/models.ts"])
+
+        first = reconcile.reconcile_session(tmp_repo)
+        assert first["proposed"] == 0 and first["deferred"] == 1
+        (meta,) = spool.held_candidates(tmp_repo).values()
+        assert meta["state"] == "deferred_attention"
+        assert meta["candidate"]["source_files"] == ["src/generated/client.ts"]
+        assert meta["candidate"]["possible_source_files"] == ["src/generated/models.ts"]
+
+        assert store.approve_decision(tmp_repo, blockers[0], "approve")[0]
+        second = reconcile.reconcile_session(tmp_repo)
+        assert second["proposed"] == 1
+        entry = next(e for e in store.get_pending_decisions(tmp_repo)
+                     if e["content"] == rule)
+        assert entry["anchor_candidates"] == ["src/generated/client.ts"]
+        assert entry["anchor_candidates_confirmed"] is True
+        lines = review_impact.impact_lines(review_impact.review_impact(tmp_repo, entry))
+        anchor_at = lines.index("Would anchor: src/generated/client.ts")
+        possible_at = next(i for i, line in enumerate(lines)
+                           if line.startswith("Possible files: src/generated/models.ts"))
+        assert anchor_at < possible_at
+        projection = store._share_projection(entry, redact_on=False)
+        assert projection["source_files"] == ["src/generated/client.ts"]
+
+        assert store.approve_decision(tmp_repo, entry["id"], "approve")[0]
+        approved = store.entry_by_id(store.load(tmp_repo)["entries"], entry["id"])
+        assert approved["source_files"] == ["src/generated/client.ts"]
+        assert "src/generated/models.ts" not in approved["source_files"]
 
     def test_zero_capacity_still_settles_duplicates_and_reports_insufficient(
             self, tmp_repo):

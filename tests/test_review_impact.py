@@ -141,7 +141,8 @@ def test_golden_uncertain_backward_file(tmp_repo, coverage):
         "Review priority: 50 - ranking only, not a probability that this is correct",
         "Confirmed evidence: 1x explicit (the developer said it)",
         "Possibly related: 1x temporal_backward (changed close in time, no shared file)",
-        "Possible files: README.md - NOT anchored on approval; the link is uncertain",
+        "Possible files: README.md - NOT anchored on approval; "
+        "the relationship is non-authoritative",
         f"Capture coverage: {CLAUDE_COVERAGE}",
         "Revisions: current <rev> (v1)",
         *POLICY_TAIL,
@@ -198,9 +199,8 @@ def test_golden_contradiction(tmp_repo, coverage):
         # rather than leaving a low number unexplained.
         "Review priority: 30 - ranking only, not a probability that this is correct",
         "Confirmed evidence: 1x explicit (the developer said it), "
+        "1x structural (the same files or identifiers), "
         "1x contradiction (contradicts an earlier statement)",
-        # SUPPORTING, not confirmed: the edit followed the directive, it did not witness it.
-        "Supporting evidence: 1x causal_forward (work that followed it)",
         "Would anchor: deploy/migrate.sh",
         f"Capture coverage: {CLAUDE_COVERAGE}",
         "Revisions: current <rev> (v1)",
@@ -341,7 +341,7 @@ def test_golden_clipped_evidence_list(tmp_repo, coverage):
                     if line.startswith("Possible files:"))
     assert possible == ("Possible files: docs/note0.md, docs/note1.md, docs/note2.md, "
                         "docs/note3.md, docs/note4.md (+3 more) - NOT anchored on approval; "
-                        "the link is uncertain")
+                        "the relationship is non-authoritative")
 
 
 def test_golden_armed_rule_beside_a_pending_content_update(tmp_repo, coverage):
@@ -523,26 +523,24 @@ class TestInvariants:
         """The other direction of the same rule: a path that earned the anchor must not read
         as a maybe beside it, or "confirmed" and "possible" stop meaning anything.
 
-        The shape is the aggregator's own, not a constructed one: the same file is touched
-        once BEFORE the directive (an uncertain backward link, so the path lands in
-        `possible_source_files`) and once after (a counted forward link, so it also lands in
-        `source_files`). The candidate genuinely carries it in both lists.
+        The shape is the aggregator's own: the directive explicitly names the file and it is
+        touched on both sides. Structural evidence wins over temporal ordering, so the path is
+        authoritative once and absent from the possible list.
         """
-        _append(tmp_repo, event("before", "file_changed", "tweaked the notes",
-                                              files=["docs/notes.md"]))
+        _append(tmp_repo, event("before", "file_changed", "regenerated the client",
+                                              files=[GENERATED]))
         _append(tmp_repo, event("d", "user_directive", RULE, offset=60))
-        _append(tmp_repo, event("after", "file_changed", "tweaked them again",
-                                              files=["docs/notes.md"], offset=90))
+        _append(tmp_repo, event("after", "file_changed", "regenerated it again",
+                                              files=[GENERATED], offset=90))
         reconcile.reconcile_session(tmp_repo)
         entry = only_entry(tmp_repo)
         index = review_impact.evidence_index(tmp_repo)
         (meta,) = index[entry["id"]]
-        assert meta["candidate"]["possible_source_files"] == ["docs/notes.md"], \
-            "the manifest must still carry the uncertain path - this is the case being filtered"
+        assert GENERATED not in meta["candidate"]["possible_source_files"]
 
         impact = review_impact.review_impact(tmp_repo, entry)
-        assert "docs/notes.md" in (impact["files"]["confirmed"]
-                                   or entry.get("source_files") or [])
+        assert GENERATED in (impact["files"]["confirmed"]
+                             or entry.get("source_files") or [])
         assert impact["files"]["possible_source_files"] == []
 
     def test_ordinary_approval_leaves_policy_evaluation_non_blocking(self, tmp_repo, coverage):
@@ -656,9 +654,9 @@ class TestInvariants:
                                                                      capsys):
         """The action confirmation is the last thing read before the anchor is written, so it
         names the confirmed files and nothing else."""
-        store.record_edited_file(tmp_repo, "auth/jwt.py")
-        assert store.update_decision(tmp_repo, "Never store a raw token; hash it first.",
-                                     "sess-0", "constraint")[0]
+        assert store.update_decision_with_meta(
+            tmp_repo, "Never store a raw token; hash it first.", "sess-0", "constraint",
+            anchor_candidates=["auth/jwt.py"], anchor_candidates_confirmed=True)[0]
 
         with monkeypatch.context() as m:
             m.setattr(store, "git_root", lambda _cwd: tmp_repo)

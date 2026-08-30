@@ -2126,7 +2126,8 @@ def test_baseline_aggregation_of_realistic_evidence():
     # a silently degenerate corpus is precisely how this row was wrong the first time.
     assert len(result["candidates"]) == 100
     assert result["diagnostics"]["merged_duplicates"] == 0
-    assert sum(len(c["source_files"]) for c in result["candidates"]) == 100
+    assert sum(len(c["source_files"]) for c in result["candidates"]) == 0
+    assert sum(len(c["possible_source_files"]) for c in result["candidates"]) == 100
 
     median = _median_ms(lambda: candidates.aggregate_candidates(events, []))
     _report(f"aggregate_candidates over {len(events)} realistic events", median)

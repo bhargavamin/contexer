@@ -723,11 +723,9 @@ class TestReviewTitleHeadline:
 
 
 class TestReviewAnchorCandidates:
-    def test_pending_decision_with_candidates_shows_would_anchor_line(
+    def test_pending_decision_with_recent_edit_candidates_shows_possible_line(
             self, tmp_repo, monkeypatch, capsys):
-        """A pending decision carrying anchor_candidates (issue #175 Task 3) surfaces a
-        one-line 'Would anchor: ...' hint before the approve/edit/ignore/skip prompt, so the
-        human's approval signature is informed about what it will bless."""
+        """A proximity-only candidate is visible but explicitly non-authoritative."""
         from contexer import store
 
         monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
@@ -740,7 +738,8 @@ class TestReviewAnchorCandidates:
         cli.review()
 
         out = capsys.readouterr().out
-        assert "Would anchor" in out and "auth/jwt.py" in out
+        assert "Possible files" in out and "auth/jwt.py" in out
+        assert "NOT anchored on approval" in out
 
     def test_pending_decision_without_candidates_omits_would_anchor_line(
             self, tmp_repo, monkeypatch, capsys):

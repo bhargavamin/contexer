@@ -250,7 +250,9 @@ def _confirmed_anchors(entry: dict) -> list[str]:
         return []
     if prop.get("source_files"):
         return [str(f) for f in prop["source_files"]]
-    return [str(f) for f in entry.get("anchor_candidates") or []]
+    if entry.get("anchor_candidates_confirmed") is True:
+        return [str(f) for f in entry.get("anchor_candidates") or []]
+    return []
 
 
 def _evidence_files(entry: dict) -> list[str]:
@@ -269,16 +271,17 @@ def _evidence_files(entry: dict) -> list[str]:
 
 
 def _possible_files(entry: dict, meta: dict) -> list[str]:
-    """The uncertain paths, from the candidate manifest ONLY.
+    """The non-authoritative paths, from the candidate manifest ONLY.
 
-    They are deliberately absent from every proposal (Task 04 ruling): a backward temporal link
-    is not evidence, so nothing that could become an anchor is allowed to carry it. Anything
-    already CONFIRMED is filtered out, by either label - a path that earned its way into the
-    anchor list, or into the evidence list, is not also a maybe."""
+    They are deliberately absent from every proposal: neither a backward temporal guess nor a
+    supporting forward-only edit proves scope, so nothing that could become an anchor carries
+    them. Anything already CONFIRMED is filtered out by either label."""
     confirmed = (set(_confirmed_anchors(entry)) | set(_evidence_files(entry))
                  | set(entry.get("source_files") or []))
-    return [str(f) for f in (meta.get("candidate") or {}).get("possible_source_files") or []
-            if str(f) not in confirmed]
+    possible = list((meta.get("candidate") or {}).get("possible_source_files") or [])
+    if entry.get("anchor_candidates_confirmed") is not True:
+        possible.extend(entry.get("anchor_candidates") or [])
+    return [str(f) for f in dict.fromkeys(possible) if str(f) not in confirmed]
 
 
 def _inactive_history(entry: dict) -> dict:
@@ -528,7 +531,7 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
                      "restatement; answering it does NOT anchor them")
     if files.get("possible_source_files"):
         lines.append(f"Possible files: {_listed(files['possible_source_files'])} - NOT anchored "
-                     "on approval; the link is uncertain")
+                     "on approval; the relationship is non-authoritative")
     for line in impact.get("coverage") or []:
         if seen_coverage is not None:
             if line in seen_coverage:

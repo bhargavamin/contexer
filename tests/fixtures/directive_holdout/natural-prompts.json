@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-08-30",
+  "collection": "Manually labelled paraphrases of ordinary developer prompts represented in existing Contexer tests and documentation. Labels were assigned from the prompt's conversational meaning before the Task 04 classifier change or any detector run over this file. The corpus excludes the frozen adversarial container fixtures and is reported separately; it is not a tuning set.",
+  "cases": [
+    {"id": "durable-uv", "directive": true, "text": "Always use uv when you add or update Python dependencies."},
+    {"id": "durable-main", "directive": true, "text": "Never commit directly to main in this repository."},
+    {"id": "durable-regression", "directive": true, "text": "From now on, add a regression test for every bug fix."},
+    {"id": "durable-dependency", "directive": true, "text": "Please don't add new runtime dependencies without checking with me first."},
+    {"id": "durable-exceptions", "directive": true, "text": "Avoid broad exception handlers in production code."},
+    {"id": "durable-migrations", "directive": true, "text": "As a rule, keep every database migration reversible."},
+    {"id": "durable-suite", "directive": true, "text": "Make sure you rerun the full suite after every schema change."},
+    {"id": "durable-secrets", "directive": true, "text": "Secrets must never be written to test snapshots."},
+    {"id": "durable-commits", "directive": true, "text": "Going forward, use Conventional Commits for changes here."},
+    {"id": "durable-generated", "directive": true, "text": "Rule: do not edit generated API clients by hand."},
+    {"id": "task-readme", "directive": false, "text": "Can you update the README and run the relevant tests?"},
+    {"id": "description-timeout", "directive": false, "text": "I always get a timeout when this integration test reaches teardown."},
+    {"id": "soft-reassurance", "directive": false, "text": "Don't worry about the draft changelog yet."},
+    {"id": "hedged-option", "directive": false, "text": "Could we always show the project name in that dialog?"},
+    {"id": "prediction-retry", "directive": false, "text": "The worker will always retry after that exception."},
+    {"id": "question-observation", "directive": false, "text": "Why do we never see the cached response in this test?"},
+    {"id": "one-off-ship", "directive": false, "text": "Ensure you ship the dashboard update with this release."},
+    {"id": "one-off-fix", "directive": false, "text": "Make sure you fix the failing test before you stop."},
+    {"id": "hedged-personal", "directive": false, "text": "I may never understand why that mock is necessary."},
+    {"id": "quoted-colleague", "directive": false, "text": "Sam said, \"always run the smoke test before deploying\"."},
+    {"id": "identifier-name", "directive": false, "text": "The test named never_returns_none is failing on Windows."},
+    {"id": "quoted-doc-task", "directive": false, "text": "Please document the sentence \"never cache credentials\" in the security guide."},
+    {"id": "reported-practice", "directive": false, "text": "The release note says we should always include the migration hash."},
+    {"id": "soft-uncertainty", "directive": false, "text": "I don't know why this endpoint fails only in CI."}
+  ]
+}

@@ -781,6 +781,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
         # candidate's evidence named no file, which is a truer statement than "something was
         # edited nearby". Still only a GUESS awaiting a human approval, exactly as before.
         anchor_candidates=list(candidate.get("source_files") or []),
+        anchor_candidates_confirmed=True,
     )
     if stored and entry_id:
         # Counted as proposed even in the one case where the store accepted the call but kept
