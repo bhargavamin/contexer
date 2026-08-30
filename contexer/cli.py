@@ -787,8 +787,9 @@ def _evidence_status_lines(repos) -> list[str]:
                               else diag["pending_review"])
         except (OSError, ValueError, TypeError):
             review_pending = diag["pending_review"]
-        if not any((diag["pending"], diag["held"], diag["quarantine"])) and not diag["gap"] \
-                and not review_pending and diag["readable"]:
+        if not any((diag["pending"], diag["held"], diag["quarantine"],
+                    diag["identity_receipts"], diag["identity_receipts_unreadable"])) \
+                and not diag["gap"] and not review_pending and diag["readable"]:
             continue
         if diag["readable"]:
             parts = [f"{diag['pending']} pending"]
@@ -816,6 +817,11 @@ def _evidence_status_lines(repos) -> list[str]:
                 parts.append(f"{diag['held_invalid_state']} in an unknown state")
             if diag["quarantine"]:
                 parts.append(f"{diag['quarantine']} quarantined")
+            if diag["identity_receipts"]:
+                parts.append(f"{diag['identity_receipts']} identity-routed")
+            if diag["identity_receipts_unreadable"]:
+                parts.append(
+                    f"{diag['identity_receipts_unreadable']} identity receipts unreadable")
         else:
             parts = ["spool unreadable"]
         if diag["gap"]:

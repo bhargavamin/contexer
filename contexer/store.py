@@ -170,28 +170,23 @@ def resolve_repo(repo_path: str) -> str:
     return resolve_repo_verbose(repo_path)[0]
 
 
-def _hook_repo_verbose(repo_path: str) -> tuple[str, str]:
+def _hook_repo_verbose(repo_path: str, raw: str = "") -> tuple[str, str]:
     """`resolve_repo_verbose` for a HOOK process, with honest labels for its two extra
     signals: `hook-arg` | `hook-cwd` | `session` | `pointer` | `none`.
 
-    A hook never arrives with an empty argument the way an MCP tool call does - the installed
-    shell wrapper runs `git rev-parse --show-toplevel` and passes the result, and
-    `hook_cwd_repo` substitutes the process cwd when that comes back empty. Both therefore
-    reach `resolve_repo_verbose` as a sane ARGUMENT, so a hook could only ever report
-    `argument` - the one label the audit reads as "a caller deliberately named this repo",
-    i.e. exactly the reading that would dismiss a misroute as intentional. Splitting them
-    keeps that word meaning what the audit claims it means, and names the two signals a hook
-    actually has: the shell's git root, and the process cwd."""
-    hooked = hook_cwd_repo(repo_path)
+    Hook commands pass their cwd and host payload, never a shell-computed Git root. The resolver
+    walks parent directories for a `.git` marker without spawning Git, preserving monorepo and
+    linked-worktree roots while keeping prompt/editor hooks within their latency invariant."""
+    hooked = hook_repo_from_stdin(raw, repo_path)
     repo, source = resolve_repo_verbose(hooked)
     if source == "argument":
-        source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
+        source = "hook-payload" if raw else "hook-arg" if (repo_path or "").strip() else "hook-cwd"
     return repo, source
 
 # canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
-# functools.lru_cache: failures must return uncached (a transient git timeout would
-# otherwise pin the wrong key for the life of the long-lived MCP server), and lru_cache
-# cannot express "cache only on success". A hit is honored ONLY when the path's current
+# functools.lru_cache: failures must return uncached (a partially-written worktree gitfile
+# must not pin the wrong key for the life of the long-lived MCP server). A hit is honored ONLY
+# when the path's current
 # `gitdir:` line still equals the cached one - a worktree path removed and later reused
 # by a DIFFERENT repo's worktree in the same process must not resolve to the former
 # repo's store. Bounded: cleared wholesale past _CANON_CACHE_MAX before the next insert.
@@ -209,20 +204,19 @@ def canonical_store_key(path: str) -> str:
       os.path.join("", ".git") would stat `.git` relative to CWD, collapsing the GLOBAL
       store key into the repo store whenever cwd is itself a worktree.
     - Fast path: no regular `.git` FILE at `path` → return unchanged (main repos have a
-      `.git` directory; non-git dirs have nothing). Zero subprocess.
+      `.git` directory; non-git dirs have nothing).
     - The gitfile's `gitdir:` value must contain `/worktrees/` - this excludes
       submodules (`.../.git/modules/<name>`) and `git init --separate-git-dir` repos
-      with zero subprocesses (separate-git-dir is a real false-positive: a gitdir named
+      (separate-git-dir is a real false-positive: a gitdir named
       `.git`, e.g. `--separate-git-dir=/backup/.git`, would mis-key the store to /backup).
-    - One subprocess: `git rev-parse --path-format=absolute --show-toplevel
-      --git-common-dir` (`--path-format=absolute` is required - from a main worktree
-      `--git-common-dir` returns the relative `.git`). If the common dir is `<x>/.git`
-      with an existing, sane `<x>`, the key is `<x>`; else `path` (bare-repo hosts
-      `repo.git` keep per-worktree keys - documented limitation).
-    - Cached ONLY on subprocess success, keyed to the gitfile's current `gitdir:` line:
+    - Resolve the linked worktree's own `commondir` file (normally `../..`) relative to its
+      gitdir. If that points at an existing `<x>/.git` with sane `<x>`, the key is `<x>`;
+      otherwise return `path`. This is the same fact Git reports, without running Git from
+      editor/prompt hooks.
+    - Cached ONLY on a successful file derivation, keyed to the gitfile's current `gitdir:` line:
       the stat + tiny gitfile read run on EVERY call (only actual gitfile paths pay the
       read), so a cache hit is honored only while the path still belongs to the same
-      worktree - a reused path pointing at a different repo re-resolves via subprocess.
+      worktree - a reused path pointing at a different repo re-derives from its metadata.
       A path that became a plain repo (`.git` directory) misses at the isfile check
       regardless of cache state.
     Entirely fail-soft: never raises."""
@@ -246,20 +240,20 @@ def canonical_store_key(path: str) -> str:
         cached = _CANON_CACHE.get(path)
         if cached is not None and cached[0] == gitdir:
             return cached[1]
-        out = subprocess.run(
-            ["git", "-C", path, "rev-parse", "--path-format=absolute",
-             "--show-toplevel", "--git-common-dir"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if out.returncode != 0:
+        gitdir_path = Path(gitdir)
+        if not gitdir_path.is_absolute():
+            gitdir_path = Path(path, gitdir_path)
+        try:
+            common_value = (gitdir_path / "commondir").read_text(
+                encoding="utf-8", errors="replace").splitlines()[0].strip()
+        except (OSError, IndexError):
             return path
-        lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
-        if len(lines) != 2:
+        if not common_value:
             return path
-        common_dir = lines[1]
+        common_dir = Path(os.path.realpath(gitdir_path / common_value))
         result = path
-        if os.path.basename(common_dir) == ".git":
-            parent = os.path.dirname(common_dir)
+        if common_dir.name == ".git" and common_dir.is_dir():
+            parent = str(common_dir.parent)
             if os.path.isdir(parent) and is_sane_repo(parent):
                 result = parent
         if len(_CANON_CACHE) > _CANON_CACHE_MAX:
@@ -1358,6 +1352,15 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"(?:\([^)]+\))?!?:"                         # Conventional Commit changelog row
     r"|\+(?:\s|\S)"                             # lifted added diff content line
     r"|-(?:\t|\s{2,}|\S)"                      # lifted removed line; '- rule' stays a bullet
+    r"|(?:(?:log|test|console|terminal|command|tool|shell)(?:\s+output)?|output|stdout|stderr|"
+    r"console)\s*(?::|[>|]|[\u2013\u2014-])"
+    # Speaker/role labels quote somebody else's words; the hook cannot authenticate the label.
+    # Explicit developer-owned wrappers remain eligible (`Rule:`, `Constraint:`, `Decision:`...).
+    r"|(?:(?:our|the)\s+)?(?:assistant|system|user|tool|claude|copilot|lead|manager|developer|"
+    r"maintainer|reviewer|owner|architect|speaker\s+\d+)\s*"
+    r"(?::|[>|]|[\u2013\u2014]|\s+-\s+)\s*"
+    r"(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|from\s+now\s+on\b|"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))"
     r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
     r"|(?:the\s+)?(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
     r"\s+(?:says?|said|states?|reads)\b"
@@ -1373,6 +1376,132 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"recommends?|recommended|tells?|told)\s*,?\s*[\"“]"
     r")",
     re.IGNORECASE | re.MULTILINE,
+)
+
+_CONTAINER_HEADER = re.compile(
+    r"^(?P<header>.{1,120}?)(?P<delimiter>:|[>|]|[\u2013\u2014-])\s*$")
+_OUTPUT_HEADER_MARKER = re.compile(
+    r"\b(?:output|results?|response|transcript)\b", re.IGNORECASE)
+_STANDALONE_OUTPUT_HEADER = re.compile(
+    r"(?:[a-z0-9_.\u2019'/-]+\s+){0,5}(?:output|results?|response|transcript)"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|"
+    r"(?:from|/)\s*[a-z0-9_. -]{1,40}))?",
+    re.IGNORECASE,
+)
+_BARE_OUTPUT_HEADER = re.compile(
+    r"(?:log|test|console|terminal|command|tool|shell|stdout|stderr)"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. -]{1,40}))?",
+    re.IGNORECASE,
+)
+_SPEAKER_HEADER = re.compile(
+    r"(?:(?:our|the)\s+)?(?:assistant|system|user|tool|claude|copilot|lead|manager|developer|"
+    r"maintainer|reviewer|owner|architect|speaker\s+\d+)"
+    r"(?:\s+message)?"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. -]{1,40}))?",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_SPEAKER_HEADER = re.compile(
+    r"[a-z][a-z0-9_.\u2019'-]*(?:\s+[a-z0-9_.\u2019'-]+){0,2}"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. '-]{1,40}))?",
+    re.IGNORECASE,
+)
+_STANDALONE_ATTRIBUTION_HEADER = re.compile(
+    r"[a-z][a-z0-9_.\u2019'-]*(?:\s+[a-z][a-z0-9_.\u2019'-]*){0,3}"
+    r"(?:\s*\([^()\n]{1,40}\))?\s+"
+    r"(?:\d{1,2}:\d{2}(?:\s*[ap]m)?|\u00b7\s*today\s+at\s+\d{1,2}:\d{2}|"
+    r"(?:wrote|commented)(?:\s+\d+\s+hours?\s+ago)?|app\s+\d{1,2}:\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _container_header_text(label: str) -> str:
+    """Bounded text before a terminal transcript-label delimiter, or ``""``."""
+    match = _CONTAINER_HEADER.fullmatch(label.strip())
+    return match.group("header").strip() if match else ""
+
+
+def _normalized_container_label(label: str) -> str:
+    """Drop bounded Markdown/YAML wrapper syntax without touching the label's words."""
+    value = label.strip()
+    value = re.sub(r"^#{1,6}\s+", "", value)
+    value = re.sub(r"^[-*]\s+", "", value)
+    return value
+
+
+def _is_output_container_label(label: str) -> bool:
+    label = _normalized_container_label(label)
+    header = _container_header_text(label)
+    if header:
+        return bool(_OUTPUT_HEADER_MARKER.search(header)
+                    or _BARE_OUTPUT_HEADER.fullmatch(header))
+    standalone = label.strip()
+    return bool(len(standalone) <= 120 and (
+        _STANDALONE_OUTPUT_HEADER.fullmatch(standalone)
+        or _BARE_OUTPUT_HEADER.fullmatch(standalone)))
+
+
+def _is_speaker_container_label(label: str) -> bool:
+    label = _normalized_container_label(label)
+    header = _container_header_text(label)
+    if header and _SPEAKER_HEADER.fullmatch(header):
+        return True
+    standalone = label.strip()
+    if _SPEAKER_HEADER.fullmatch(standalone):
+        return True
+    wrapped = re.fullmatch(
+        r"(?:<\s*([^>]{1,60})\s*>|\[\s*([^\]]{1,60})\s*\])", standalone)
+    if wrapped and _SPEAKER_HEADER.fullmatch(wrapped.group(1) or wrapped.group(2)):
+        return True
+    chatml = re.fullmatch(r"<\|\s*([^|]{1,60})\s*\|>", standalone)
+    if chatml and _SPEAKER_HEADER.fullmatch(chatml.group(1).strip()):
+        return True
+    assigned = re.fullmatch(
+        r"role\s*[:=]\s*(['\"]?)(.{1,60}?)\1", standalone, re.IGNORECASE)
+    return bool(assigned and _SPEAKER_HEADER.fullmatch(assigned.group(2).strip()))
+
+
+def _is_ambiguous_speaker_container_label(label: str) -> bool:
+    """An unknown attributed voice: buffer for review unless clear user authority resumes."""
+    normalized = _normalized_container_label(label)
+    if len(normalized) <= 120 and _STANDALONE_ATTRIBUTION_HEADER.fullmatch(normalized):
+        return True
+    header = _container_header_text(normalized)
+    if not header or not _AMBIGUOUS_SPEAKER_HEADER.fullmatch(header) \
+            or _CLEAR_SCOPE_LABEL.search(header) \
+            or _EXPLICIT_AUTHORITY_LABEL.search(header) \
+            or _EXPLICIT_AUTHORITY_RESET.match(header):
+        return False
+    base = re.split(r"\s*(?:\(|\[|/)\s*", header, maxsplit=1)[0].strip()
+    words = base.split()
+    # Unknown one-token labels (`Alice`/`alice`) and conventional proper names are
+    # attribution-shaped. Ordinary prose wrappers such as `I got this:` are not.
+    return len(words) == 1 or all(word[:1].isupper() for word in words)
+_EXPLICIT_AUTHORITY_RESET = re.compile(
+    r"(?:from\s+now\s+on|going\s+forward|I(?:'m|\s+am)\s+(?:telling|asking)\s+you\s+to)\b",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_LABELLED_DIRECTIVE = re.compile(
+    r"^[a-z][a-z0-9_.\u2019'-]*(?:\s+[a-z0-9_.\u2019'-]+){0,2}\s*"
+    r"(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. '-]{1,40})?\s*"
+    r"(?::|[>|]|[\u2013\u2014]|\s+-\s+)\s*"
+    r"(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|from\s+now\s+on\b|"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_STANDALONE_ATTRIBUTION = re.compile(
+    _STANDALONE_ATTRIBUTION_HEADER.pattern
+    + r"\s*\n\s*(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|"
+      r"from\s+now\s+on\b|going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CLEAR_SCOPE_LABEL = re.compile(
+    r"^(?:(?:for|in|when)\b|dependencies\b|testing\b|ci\b|database\b|frontend\b)",
+    re.IGNORECASE,
+)
+_EXPLICIT_AUTHORITY_LABEL = re.compile(
+    r"^(?:rule|constraint|convention|decision|policy|important|reminder|requirement|"
+    r"store\s+this\s+decision)\b",
+    re.IGNORECASE,
 )
 
 
@@ -1414,6 +1543,9 @@ def _directive_candidate_text(text: str) -> str:
         return ""
     kept = []
     after_container = False
+    in_output_container = False
+    ambiguous_container: list[str] | None = None
+    ambiguous_separated = False
     in_fence = ""
     in_injected_tag = ""
     for line in raw.splitlines():
@@ -1450,6 +1582,31 @@ def _directive_candidate_text(text: str) -> str:
         if in_fence:
             continue
         lower = stripped.lower()
+        if ambiguous_container is not None:
+            if not stripped:
+                ambiguous_container.append("")
+                ambiguous_separated = True
+                continue
+            if ambiguous_separated and _EXPLICIT_AUTHORITY_RESET.match(stripped):
+                ambiguous_container = None
+                ambiguous_separated = False
+                after_container = False
+                kept.append(line)
+            else:
+                ambiguous_container.append(line)
+            continue
+        if in_output_container:
+            if not stripped:
+                in_output_container = False
+                after_container = True
+                continue
+            # A labelled output block has no reliable indentation contract. Only an explicit
+            # developer-authority reset can end it without a blank separator.
+            if _EXPLICIT_AUTHORITY_RESET.match(stripped):
+                in_output_container = False
+                after_container = False
+                kept.append(line)
+            continue
         if in_injected_tag:
             if f"</{in_injected_tag}>" in lower:
                 in_injected_tag = ""
@@ -1465,6 +1622,14 @@ def _directive_candidate_text(text: str) -> str:
         if lower.startswith(_SYSTEM_TEXT_PREFIXES):
             after_container = True
             continue
+        if _is_output_container_label(stripped) or _is_speaker_container_label(stripped):
+            in_output_container = True
+            after_container = True
+            continue
+        if _is_ambiguous_speaker_container_label(stripped):
+            ambiguous_container = [line]
+            ambiguous_separated = False
+            continue
         if _NON_DIRECTIVE_CONTAINER.search(line):
             # A quoted statement and the developer's own correction can share one line:
             # `README says X, but from now on Y`. Keep only the clear adversative clause.
@@ -1477,6 +1642,8 @@ def _directive_candidate_text(text: str) -> str:
             continue
         after_container = False
         kept.append(line)
+    if ambiguous_container is not None:
+        kept.extend(ambiguous_container)
     return "\n".join(kept)
 
 
@@ -1630,6 +1797,7 @@ def capture_user_constraint(
 def capture_user_constraint_with_meta(
     repo_path: str, prompt: str, session_id: str,
     near_misses: list | None = None, repo_source: str = "", *, source: str = "",
+    blocking: bool = True,
 ) -> tuple:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
@@ -1675,8 +1843,12 @@ def capture_user_constraint_with_meta(
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content)
-    status = "pending_approval" if deictic else "approved"
-    with store_lock(repo_slug(repo_path)):
+    ambiguous_label = bool(_AMBIGUOUS_STANDALONE_ATTRIBUTION.search(content)) or (
+        bool(_AMBIGUOUS_LABELLED_DIRECTIVE.search(content))
+        and not _CLEAR_SCOPE_LABEL.search(content)
+        and not _EXPLICIT_AUTHORITY_LABEL.search(content))
+    status = "pending_approval" if deictic or ambiguous_label else "approved"
+    with store_lock(repo_slug(repo_path), blocking=blocking):
         data = load(repo_path)
         # 'ignored' entries never block a re-typed rule from landing fresh (Fix 3).
         decisions_only = [e for e in data["entries"]
@@ -4151,6 +4323,24 @@ def _cached_insight(repo_path: str) -> tuple[str, bool]:
     return level, decisive
 
 
+def _cached_insight_read_only(repo_path: str) -> tuple[str, bool]:
+    """Return a fresh-enough cached insight without invoking Git or writing bookkeeping.
+
+    Prompt/editor hooks use this lane. Session-start and explicit setup paths may populate the
+    normal cache, but a cache miss at prompt time deliberately degrades to the neutral choice
+    rather than violating the no-subprocess latency invariant.
+    """
+    try:
+        cached = json.loads(_insight_cache_path(repo_path).read_text(encoding="utf-8"))
+        level, decisive, ts = cached["level"], cached["decisive"], cached["ts"]
+        if level in _INSIGHT_ORDER and isinstance(decisive, bool) \
+                and time.time() - ts < _INSIGHT_CACHE_TTL:
+            return level, decisive
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return "low", False
+
+
 def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
     """Instructions for a repo question asked as the first prompt: ANSWER it, then store
     findings - never a blocking menu. Insight-tailored using the commit signal Contexer
@@ -4229,8 +4419,9 @@ GAP_ASK_GUIDE = (
 )
 
 
-def _build_bootstrap_context(repo_path: str) -> list[str]:
-    level, decisive = _cached_insight(repo_path)
+def _build_bootstrap_context(repo_path: str, *, allow_git: bool = True) -> list[str]:
+    level, decisive = (_cached_insight(repo_path) if allow_git
+                       else _cached_insight_read_only(repo_path))
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
 
@@ -4431,6 +4622,61 @@ def _join_context_sections(*parts: str) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _filesystem_repo_root(path: str) -> str:
+    """Nearest `.git`-marked ancestor, or the sane starting directory for non-Git projects."""
+    if not path:
+        return ""
+    try:
+        # Keep the host's lexical absolute path. Resolving `/tmp` to `/private/tmp` on macOS
+        # would key hooks differently from an explicit MCP call carrying the same `/tmp` path.
+        start = Path(os.path.abspath(os.path.expanduser(path)))
+    except (OSError, RuntimeError):
+        return ""
+    if start.is_file():
+        start = start.parent
+    if not is_sane_repo(str(start)):
+        return ""
+    for candidate in (start, *start.parents):
+        if not is_sane_repo(str(candidate)):
+            break
+        if (candidate / ".git").is_file() or (candidate / ".git").is_dir():
+            return str(candidate)
+    return str(start)
+
+
+def hook_repo_from_stdin(raw: str, fallback: str = "") -> str:
+    """Resolve a hook workspace without Git: host payload first, then the wrapper's cwd.
+
+    Claude/Codex/Gemini provide `cwd`; Cursor provides `workspace_roots`. Unknown hosts still
+    receive the explicit fallback. Only a bounded parent walk for `.git` occurs; no spool scan,
+    store lock, subprocess, or network call is reachable from this resolver.
+    """
+    candidates = []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        for key in ("cwd", "workspace_root", "project_dir"):
+            if isinstance(data.get(key), str):
+                candidates.append(data[key])
+        roots = data.get("workspace_roots")
+        if isinstance(roots, list):
+            candidates.extend(root for root in roots if isinstance(root, str))
+    if fallback:
+        candidates.append(fallback)
+    if not candidates:
+        try:
+            candidates.append(os.getcwd())
+        except OSError:
+            pass
+    for candidate in candidates:
+        repo = _filesystem_repo_root(candidate)
+        if repo:
+            return repo
+    return ""
+
+
 def hook_cwd_repo(repo_path: str) -> str:
     """Fallback repo identity for hook-invoked payload builders: the hook's own cwd.
 
@@ -4444,13 +4690,7 @@ def hook_cwd_repo(repo_path: str) -> str:
     resolution chain instead of selecting a junk store. This is NOT the retired
     `|| pwd` shell fallback: nothing here writes the shared .current_repo pointer
     unguarded - callers that anchor the pointer still sanity-check first."""
-    if repo_path:
-        return repo_path
-    try:
-        cwd = os.getcwd()
-    except OSError:  # cwd unlinked since the process started - hooks must never crash
-        return repo_path
-    return cwd if is_sane_repo(cwd) else repo_path
+    return hook_repo_from_stdin("", repo_path)
 
 
 def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> dict:
@@ -5029,7 +5269,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
             except OSError:
                 pass
             return {"status": "", "context": ""}
-    level, decisive = _cached_insight(repo_path)
+    level, decisive = _cached_insight_read_only(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
     if _is_newcomer_question(prompt):
@@ -5046,7 +5286,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
             # would re-open the picker the developer just dismissed, one modal per prompt.
             return {"status": "", "context": ""}
         _arm_offer(repo_path)
-        lines = _build_bootstrap_context(repo_path)
+        lines = _build_bootstrap_context(repo_path, allow_git=False)
     return {"status": "", "context": "\n".join(lines)}
 
 
@@ -5706,8 +5946,6 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         global_data = load_global()
         by_id.update({e.get("id"): e for e in global_data.get("entries", [])
                      if e.get("type") == "decision" and e.get("id") in missing})
-    stale = _staleness_notes(repo_path, [by_id[d] for d in ids
-                                         if d in by_id and entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
     conflicted = False
     for did in ids:
@@ -5721,7 +5959,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         id_tag = f" (id={entry_id})" if entry_id else ""
         title, body, extras = conflicts._conflict_view(e)
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
-                     f"{title}{id_tag}{stale.get(did, '')}")
+                     f"{title}{id_tag}")
         if body is not None:
             lines.append(f"    {body}")
         for extra in extras:
@@ -5761,7 +5999,7 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
     data = load(repo_path)
     if data.get("entries"):
         for kw in ordered_kws:
-            result = get_context(repo_path, query=kw)
+            result = get_context(repo_path, query=kw, _include_staleness=False)
             if "No matching decisions" not in result and "No context stored" not in result:
                 text = f"[Contexer: auto-fetched for this question]\n{result}"
                 return text, _rendered_meta("strong", text)
@@ -5775,7 +6013,7 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
                 if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
             ]
             if not non_project_kws:
-                result = get_context(repo_path)
+                result = get_context(repo_path, _include_staleness=False)
                 if "No context stored" not in result:
                     text = f"[Contexer: project context]\n{result}"
                     return text, _rendered_meta("overview", text)
@@ -6064,7 +6302,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
             if not non_project_kws:
                 data = load(repo_path)
                 if data.get("entries"):
-                    result = get_context(repo_path)
+                    result = get_context(repo_path, _include_staleness=False)
                     if "No context stored" not in result:
                         text = f"[Contexer: project context]\n{result}"
                         return text, _rendered_meta("overview", text)
@@ -6129,7 +6367,8 @@ def _team_display_cap() -> int:
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
-                files: list[str] | None = None, _active_only: bool = False) -> str:
+                files: list[str] | None = None, _active_only: bool = False,
+                _include_staleness: bool = True) -> str:
     """Returns stored context for the given repo.
 
     files: optional repo-relative or absolute files the caller is about to work on - when
@@ -6144,6 +6383,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
 
     _active_only: internal flag - when True, exclude pending_approval and ignored entries
     (used by auto-injection paths so only trusted decisions reach the AI automatically).
+
+    _include_staleness: internal flag - prompt hooks set False because staleness probes run Git;
+    explicit MCP/UI reads keep the default and continue to render those notes.
 
     Team context (pulled by C5 and cached separately) is appended as its own section so
     the agent reads local (personal) and team decisions together, scope-tagged.
@@ -6223,7 +6465,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         if total > display_limit:
             filter_note += f" - showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
-        stale = _staleness_notes(repo_path, shown)
+        stale = _staleness_notes(repo_path, shown) if _include_staleness else {}
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             st = entry_status(d)

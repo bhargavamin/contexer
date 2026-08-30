@@ -115,22 +115,23 @@ class TestCanonicalStoreKey:
         assert store.canonical_store_key(str(plain)) == str(plain)  # no .git at all
         assert calls == []
 
-    def test_failure_is_transparent_and_not_cached(self, wt_repo, monkeypatch):
+    def test_failure_is_transparent_and_not_cached(self, wt_repo):
         main, wt = wt_repo
-        real_run = subprocess.run
-        state = {"fail": True}
-
-        def fake_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if state["fail"] and "rev-parse" in cmd:
-                raise subprocess.TimeoutExpired(cmd, 2)
-            return real_run(*args, **kwargs)
-
-        monkeypatch.setattr(store.subprocess, "run", fake_run)
-        # Transient git failure → uncollapsed, pre-fix behavior.
+        gitfile = Path(wt) / ".git"
+        gitdir = Path(gitfile.read_text().split(":", 1)[1].strip())
+        commondir = gitdir / "commondir"
+        original = commondir.read_text()
+        # Transient/corrupt worktree metadata → uncollapsed, fail-soft behavior.
+        commondir.write_text("")
         assert store.canonical_store_key(wt) == wt
         # Failure must not be cached: same call now succeeds and collapses.
-        state["fail"] = False
+        commondir.write_text(original)
+        assert store.canonical_store_key(wt) == main
+
+    def test_worktree_derivation_never_spawns_subprocess(self, wt_repo, monkeypatch):
+        main, wt = wt_repo
+        monkeypatch.setattr(store.subprocess, "run",
+                            lambda *a, **k: pytest.fail("canonicalization spawned subprocess"))
         assert store.canonical_store_key(wt) == main
 
     def test_insane_root_never_selected(self, wt_repo, monkeypatch):

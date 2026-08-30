@@ -428,8 +428,11 @@ def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
     """`store.capture_user_constraint` plus the `user_directive` event for it - the one
     definition every host's per-prompt constraint hook shares.
 
-    Returns and raises EXACTLY what the store's 3-tuple contract does, so no hook's existing
-    behaviour changes. Three gates, each honest about what is actually known:
+    The store acquire is deliberately NON-BLOCKING because every caller is a prompt hook. Lock
+    contention records the raw directive as unverified evidence and returns no entry/ack; a later
+    reconciliation can materialize it without stalling the prompt. Other store errors retain the
+    original raise contract for the adapter's existing fail-soft boundary. Three gates, each honest
+    about what is actually known:
 
     * the store stored or updated an entry - the event is emitted for it;
     * the store recorded a RECURRENCE (`meta["recurrence"]`, the developer restating a rule the
@@ -451,7 +454,15 @@ def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
     """
     try:
         entry_id, content, status, meta = store.capture_user_constraint_with_meta(
-            repo_path, prompt, session_id, near, repo_source=repo_source, source=source)
+            repo_path, prompt, session_id, near, repo_source=repo_source, source=source,
+            blocking=False)
+    except BlockingIOError:
+        with contextlib.suppress(Exception):
+            if store.is_prescriptive_directive(prompt)[0]:
+                emit_hook_event(repo_path, "user_directive", session_id=session_id,
+                                source=source, summary=prompt,
+                                attributes={"unverified": True, "store_busy": True})
+        return None, None, None
     except Exception:
         # Suppressed, not merged into the outer handler: a failure while RECORDING the loss
         # must not replace the exception the caller's own error path is about to see.

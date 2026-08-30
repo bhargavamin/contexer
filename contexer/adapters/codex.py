@@ -143,13 +143,13 @@ def install(home: Path) -> list[str]:
 
     def _py(code: str) -> str:
         return (
-            f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+            'REPO="$PWD" && '
             f'"{python}" -P -c "{code}" "$REPO"'
         )
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; raw=sys.stdin.read(); "
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
         # Sanity-checked AND fail-soft (#152): under Codex's managed sandbox the workspace
         # is writable but ~/.contexer may not be, and the old unguarded write raised
         # PermissionError — aborting SessionStart over a pointer file it did not need.
@@ -168,20 +168,17 @@ def install(home: Path) -> list[str]:
     )
     boot_code = (
         "from contexer import store; import json,sys; "
-        "result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); "
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
+        "result=store.get_bootstrap_context_prompt(repo, store.prompt_from_hook_stdin(raw)); "
         "print(json.dumps(result))"
     )
     post_code = (
         "from contexer import store; import json,sys; "
-        "raw=sys.stdin.read(); "
-        "print(json.dumps(store.get_post_compact_context(sys.argv[1], store.session_from_hook_stdin(raw))))"
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
+        "print(json.dumps(store.get_post_compact_context(repo, store.session_from_hook_stdin(raw))))"
     )
-    # Every ~/.contexer write here is best-effort (#152) — see claude.py's anchor_cmd for
-    # why the redirect is wrapped in braces rather than trailing a bare `2>/dev/null`.
+    # Repository identity is owned by Python hooks, resolved from stdin/PWD without Git.
     anchor_cmd = (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
-        "if [ -n \"$REPO\" ]; then { printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } "
-        "2>/dev/null || true; fi; "
         "FLAG=\"$HOME/.contexer/.pending_capture\"; "
         "if [ -f \"$FLAG\" ]; then "
         "rm -f \"$FLAG\" 2>/dev/null || true; "
@@ -200,13 +197,13 @@ def install(home: Path) -> list[str]:
     )
     # Nudge to review decisions pending the developer. Reuses claude.review_nudge (codex-parity):
     # a Python entrypoint so it is per-repo and verifies the store — no false / cross-repo nudge.
-    review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+    review_cmd = ('REPO="$PWD" && '
                   f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                   'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO"')
-    cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+    cap_con = ('REPO="$PWD" && '
                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO"')
-    cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+    cap_rat = ('REPO="$PWD" && '
                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
     # Team delta poll (T2): Codex shares Claude's UserPromptSubmit output schema, so
@@ -214,17 +211,16 @@ def install(home: Path) -> list[str]:
     # decisions on the next prompt. The third arg tags this consumer "codex" so a Codex and a
     # Claude session on the same repo each get every synced batch once (independent high-water
     # markers) instead of racing for a single per-repo delivery.
-    cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || pwd) && '
+    cap_poll = ('REPO="$PWD" && '
                 f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                 'print(claude.team_poll(sys.argv[1], sys.stdin.read(), \'codex\'))" "$REPO"')
     # PostToolUse (issue #175 Task 2): reuse claude.post_write VERBATIM — Codex shares
     # Claude's PostToolUse hookSpecificOutput schema, so the same Python entrypoint records
     # edited files into the per-session sidecar and arms .pending_capture. The $REPO prefix
-    # is copied character-for-character from claude.py's own post_write_cmd (`|| true`, not
-    # this file's usual `|| pwd` fallback) — verbatim reuse, established by the shelved
-    # feat/doc-drift branch. See claude.post_write's docstring for the hazard this guards
+    # is copied character-for-character from claude.py's own post_write_cmd. See
+    # claude.post_write's docstring for the hazard this guards
     # against: a cwd-vs-toplevel mismatch would silently key a different sidecar.
-    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+    post_write_cmd = ('REPO="$PWD" && '
                       f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                       'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       '# .pending_capture')
@@ -278,11 +274,6 @@ def install(home: Path) -> list[str]:
     # claude.post_write. Detected by the `.pending_capture` marker without `claude.post_write`.
     if base._in_groups(put, ".pending_capture") and not base._in_groups(put, "claude.post_write"):
         put = base._filter_groups(put, [".pending_capture"])
-        hooks["PostToolUse"] = put
-    # Migrate: an installed post_write hook resolving the repo from raw cwd (no $REPO
-    # threading) — mirrors claude.py's migration gate for the same doc-drift hazard.
-    if base._in_groups(put, "claude.post_write") and not base._in_groups(put, "show-toplevel"):
-        put = base._filter_groups(put, ["claude.post_write"])
         hooks["PostToolUse"] = put
     # Converge on the exact current command (see the SessionStart note above).
     put = base._strip_stale(put, ["claude.post_write"], post_write_cmd)

@@ -105,7 +105,7 @@ def session_start(repo_path: str, raw: str) -> str:
     rationale; this mirrors it so SessionStart keys the same store `before_agent` and
     `after_write` do."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
             return _output("SessionStart", [])
         _anchor(repo)
@@ -143,7 +143,7 @@ def before_agent(repo_path: str, raw: str) -> str:
     so a hook firing in the home/config dir still resolves to nothing rather than a junk
     store."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
             return _output("BeforeAgent", [])
         _anchor(repo)
@@ -190,7 +190,8 @@ def before_agent(repo_path: str, raw: str) -> str:
         # used rather than by re-resolving: this host deliberately does NOT run the
         # `resolve_repo` chain here (see the docstring above), and a stamp must never change
         # what it is describing.
-        repo_source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
+        repo_source = "hook-payload" if raw else "hook-arg" if (repo_path or "").strip() \
+            else "hook-cwd"
         # Same store call plus the shadow-mode user_directive event (see
         # evidence.capture_directive): identical return, identical exceptions, so this
         # hook's existing outer handler still owns what happens on failure.
@@ -219,9 +220,9 @@ def after_write(repo_path: str, raw: str) -> str:
     Repo resolution is `hook_cwd_repo`, NOT `resolve_repo` (Greptile P1, PR #181): this
     is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
     and `resolve_repo` would fall through to the shared `.current_repo` pointer - which can
-    name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
-    var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
-    are first-class stores keyed by absolute path, so silently recording under whatever repo
+    name a DIFFERENT repo entirely. Hook wrappers pass PWD and the Python resolver combines
+    it with the host payload without spawning Git; non-git projects are first-class stores
+    keyed by absolute path, so silently recording under whatever repo
     the pointer happens to hold (or discarding the edit if it holds nothing sane) starves the
     real project's pending captures of anchor candidates. `hook_cwd_repo` falls back to this
     process's own cwd instead — which IS the project directory for a hook — guarded by
@@ -229,7 +230,7 @@ def after_write(repo_path: str, raw: str) -> str:
     claude.post_write's identical fallback for the sibling PostToolUse recording path."""
     _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if repo:
             data = json.loads(raw)
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
@@ -299,7 +300,7 @@ def session_end(repo_path: str, raw: str) -> str:
 def _cmd(entry: str) -> str:
     python = sys.executable
     return (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "
+        'REPO="$PWD" && '
         f'"{python}" -P -c "from contexer.adapters import gemini; import sys; '
         f'print(gemini.{entry}(sys.argv[1], sys.stdin.read()))" "$REPO"'
     )

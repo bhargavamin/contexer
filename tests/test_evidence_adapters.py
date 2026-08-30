@@ -11,6 +11,7 @@ own session id, and Cursor - whose hooks cannot observe an edit - must emit no `
 at all, so an absent event there means "Cursor could not see it" rather than "nothing happened".
 """
 import json as _json
+import threading
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,131 @@ class TestStoreFailureIsRecordedNotSwallowed:
                             lambda *_a, **_k: 1 / 0)
         with pytest.raises(RuntimeError, match="boom"):
             evidence.capture_directive(tmp_repo, "always squash", "s1", "claude_prompt")
+
+
+class TestPromptHooksNeverWaitForTheDecisionStore:
+    @pytest.mark.parametrize("host", ["claude", "codex", "cursor", "gemini"])
+    def test_busy_store_spools_unverified_directive_without_ack_or_prompt_stall(
+            self, tmp_repo, host):
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_store():
+            with store.store_lock(store.repo_slug(tmp_repo)):
+                acquired.set()
+                release.wait(timeout=5)
+
+        holder = threading.Thread(target=hold_store)
+        holder.start()
+        assert acquired.wait(timeout=1)
+
+        raw = _json.dumps({
+            "prompt": "always use conventional commits",
+            "session_id": f"busy-{host}",
+            "workspace_roots": [tmp_repo],
+        })
+        result: dict[str, str] = {}
+        failed: list[BaseException] = []
+
+        def invoke():
+            try:
+                if host in {"claude", "codex"}:  # Codex installs this exact shared entrypoint.
+                    result["output"] = claude.capture_constraint(tmp_repo, raw)
+                elif host == "cursor":
+                    result["output"] = cursor.capture_constraint("", raw)
+                else:
+                    result["output"] = gemini.before_agent(tmp_repo, raw)
+            except BaseException as exc:  # the assertion reports an escaping hook failure
+                failed.append(exc)
+
+        prompt = threading.Thread(target=invoke)
+        prompt.start()
+        prompt.join(timeout=0.5)
+        completed_while_locked = not prompt.is_alive()
+        release.set()
+        holder.join(timeout=1)
+        prompt.join(timeout=1)
+
+        assert completed_while_locked, "prompt hook waited for the decision-store lock"
+        assert failed == []
+        assert store.load(tmp_repo)["entries"] == []
+        (event,) = spool.list_pending_evidence(tmp_repo, f"busy-{host}")
+        assert event["kind"] == "user_directive"
+        assert event["attributes"] == {"unverified": True, "store_busy": True}
+        assert "Auto-stored as constraint" not in result["output"]
+
+
+class TestPromptHooksNeverRunGit:
+    @pytest.mark.parametrize("host", ["claude", "codex", "cursor", "gemini"])
+    def test_cache_cold_linked_worktree_uses_one_shared_identity_without_subprocess(
+            self, tmp_path, monkeypatch, host):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        main = tmp_path / "main"
+        gitdir = main / ".git" / "worktrees" / "wt"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        worktree = tmp_path / "wt"
+        nested = worktree / "src" / "deep"
+        nested.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+        calls = []
+
+        def forbidden(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("prompt hook spawned a subprocess")
+
+        monkeypatch.setattr(store.subprocess, "run", forbidden)
+        raw = _json.dumps({
+            "prompt": "always use conventional commits",
+            "session_id": f"nogit-{host}",
+            "cwd": str(nested),
+            "workspace_roots": [str(nested)],
+        })
+        if host in {"claude", "codex"}:  # Codex installs this exact shared entrypoint.
+            claude.capture_constraint(str(nested), raw)
+        elif host == "cursor":
+            cursor.capture_constraint("", raw)
+        else:
+            gemini.before_agent(str(nested), raw)
+
+        assert calls == []
+        assert store.current_repo_path() == str(worktree)
+        assert store.repo_slug(str(worktree)) == store.repo_slug(str(main))
+        assert len(store.load(str(main))["entries"]) == 1
+        (event,) = spool.list_pending_evidence(str(main), f"nogit-{host}")
+        assert event["repo_key"] == str(worktree)
+
+    @pytest.mark.parametrize("host", ["claude", "gemini"])
+    @pytest.mark.parametrize("prompt", [
+        "Why did we choose SQLite for durable storage?",
+        "What is the purpose?",
+    ])
+    def test_anchored_retrieval_and_overview_skip_staleness_git(
+            self, tmp_repo, monkeypatch, host, prompt):
+        ok, _ = store.update_decision(
+            tmp_repo, "Use SQLite for durable storage because local writes must be atomic.",
+            "setup", created_by="user")
+        assert ok
+        data = store.load(tmp_repo)
+        data["entries"][0]["source_files"] = ["contexer/store.py"]
+        data["entries"][0]["anchor_commit"] = "a" * 40
+        store.save(tmp_repo, data)
+
+        calls = []
+
+        def forbidden(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("prompt retrieval ran Git")
+
+        monkeypatch.setattr(store, "run_git", forbidden)
+        raw = _json.dumps({"prompt": prompt, "session_id": f"retrieve-{host}",
+                           "cwd": tmp_repo, "workspace_roots": [tmp_repo]})
+        output = (claude.rationale(tmp_repo, raw) if host == "claude"
+                  else gemini.before_agent(tmp_repo, raw))
+
+        assert "SQLite" in output
+        assert calls == []
 
 
 class TestSpoolFailureNeverReachesTheHost:

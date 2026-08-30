@@ -157,9 +157,12 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         # always supplies a path (its shell's git root, or cwd), which the plain resolver
         # would label `argument` — the one label the audit reads as a DELIBERATE cross-repo
         # write, dismissing the very misroute this is meant to surface.
-        repo, repo_source = store._hook_repo_verbose(repo_path)
+        repo, repo_source = store._hook_repo_verbose(repo_path, raw)
         if not repo:
             return "{}"
+        # Refresh the last-resort pointer on every prompt without putting Git on the
+        # hook path. This preserves repo-implicit MCP writes after missed SessionStart.
+        store.anchor_repo(repo)
         near: list = []
         # evidence.capture_directive is store.capture_user_constraint plus the shadow-mode
         # user_directive event: same return, same exceptions (this hook's existing
@@ -195,7 +198,7 @@ def rationale(repo_path: str, raw: str) -> str:
     Passes the host's session id (Retrieval V1 Part B) so the BM25 router's working set
     can dedup repeat injections within a session; Codex reuses this verbatim."""
     try:
-        repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
+        repo = store.resolve_repo(store.hook_repo_from_stdin(raw, repo_path))
         if not repo:
             return "{}"
         session_id = store.session_from_hook_stdin(raw)
@@ -245,24 +248,18 @@ def post_write(repo_path: str, raw: str) -> str:
     entrypoint does both jobs so the file-edit signal and the capture-reminder flag stay
     in one hook, exactly as the shelved feat/doc-drift branch shipped it.
 
-    THE HAZARD THIS MUST NOT REPEAT: doc-drift's post_write shell wrapper resolved the repo
-    via raw cwd while its sibling UserPromptSubmit hooks resolved it via `git rev-parse
-    --show-toplevel` — a mismatch that silently keyed a DIFFERENT sidecar slug (record_
-    edited_file wrote under one repo identity, the reader looked under another) and killed
-    the feature for any project not opened at its git root. The installed wrapper for THIS
-    hook (see install()'s post_write_cmd) copies the exact `REPO=$(git rev-parse
-    --show-toplevel 2>/dev/null || true) &&` prefix every other UserPromptSubmit hook here
-    uses (cap_con/cap_rat/cap_poll/review_cmd), so record_edited_file's write and Task 3's
-    capture-time read key the identical sidecar. store.hook_cwd_repo is still the fallback
-    for a non-git project (first-class stores keyed by absolute path), matching every other
-    hook-invoked entrypoint in this module.
+    THE HAZARD THIS MUST NOT REPEAT: doc-drift's post_write wrapper and its sibling prompt
+    hooks resolved different repository identities, silently keying different sidecar slugs.
+    All current wrappers pass PWD and every Python entrypoint resolves the same host payload
+    through store.hook_repo_from_stdin. That keeps subdirectory, linked-worktree, and non-Git
+    projects aligned without putting Git on an editor/prompt hook path.
 
     Touching ~/.contexer/.pending_capture (via store.STORE_DIR, not a hardcoded home path,
     so tests that redirect STORE_DIR never touch the real store — #152's best-effort
     invariant) preserves the capture-reminder signal the shell hook this replaces used to
     set (consumed by the next UserPromptSubmit anchor)."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         try:
             data = json.loads(raw)
         except Exception:
@@ -302,7 +299,7 @@ def review_nudge(repo_path: str, raw: str) -> str:
     has pending ones, inject a one-time nudge. store.pending_review_nudge is per-repo and verifies
     the store, so an already-approved or cross-repo flag yields nothing. Codex reuses this verbatim."""
     try:
-        nudge = store.pending_review_nudge(store.hook_cwd_repo(repo_path))
+        nudge = store.pending_review_nudge(store.hook_repo_from_stdin(raw, repo_path))
         if not nudge:
             return "{}"
         return json.dumps({"hookSpecificOutput": {
@@ -371,7 +368,8 @@ def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
     (or vice versa)."""
     try:
         from contexer import team_context
-        new = team_context.poll_for_injection(store.hook_cwd_repo(repo_path), consumer)
+        new = team_context.poll_for_injection(
+            store.hook_repo_from_stdin(raw, repo_path), consumer)
         if not new:
             return "{}"
         # A lifecycle-divergence change is always visible, even on architecture rows: hiding the
@@ -528,17 +526,14 @@ def install(home: Path) -> list[str]:
     python = sys.executable
 
     def _py(code: str) -> str:
-        # `|| true` (not `|| pwd`): outside a git work tree REPO is empty, and the
-        # entrypoints treat "" as "no repo" (resolve via session binding / pointer).
-        # A `pwd` fallback could write a non-repo dir into the shared .current_repo.
         return (
-            f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+            'REPO="$PWD" && '
             f'"{python}" -P -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
         )
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; raw=sys.stdin.read(); "
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
         # Only record a sane repo — never poison the pointer with a config/home dir —
         # and never let an unwritable ~/.contexer abort the hook (store.anchor_repo is
         # sanity-checked AND fail-soft; see #152).
@@ -560,7 +555,8 @@ def install(home: Path) -> list[str]:
     )
     boot_code = (
         "from contexer import store; import json,sys; "
-        "result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); "
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
+        "result=store.get_bootstrap_context_prompt(repo, store.prompt_from_hook_stdin(raw)); "
         "print(json.dumps(result))"
     )
 
@@ -569,9 +565,10 @@ def install(home: Path) -> list[str]:
     # reaches stdout, so the hook output stays valid.
     def _sync(tail: str) -> str:
         return (
-            'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-            f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
-            'claude.sync_memory(sys.argv[1])" "$REPO"; '
+            'REPO="$PWD" && '
+            f'"{python}" -P -c "from contexer import store; from contexer.adapters import claude; '
+            'import sys; raw=sys.stdin.read(); '
+            'claude.sync_memory(store.hook_repo_from_stdin(raw, sys.argv[1]))" "$REPO"; '
             f"echo '{tail}' # {_HOOK_SENTINEL}"
         )
 
@@ -582,17 +579,9 @@ def install(home: Path) -> list[str]:
         'ToolSearch(query=\'select:mcp__contexer__update_context\')"}')
     sessionend_cmd = _sync("{}")
 
-    # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
-    # a git work tree — the old `|| pwd` fallback could write a non-repo dir (e.g. ~/.claude),
-    # poisoning the shared pointer so decisions landed in the wrong store file.
-    # Every ~/.contexer write here is best-effort (#152): on a host where the store dir is
-    # not writable the redirect/rm would otherwise fail mid-hook and swallow the reminder
-    # echo. The braces matter — `cmd > f 2>/dev/null` opens the redirect BEFORE stderr is
-    # silenced, so a failed open still leaks its error; `{ cmd > f; } 2>/dev/null` doesn't.
+    # The Python hooks resolve and anchor their workspace from stdin/PWD without spawning Git.
+    # This shell-only reminder owns no repository identity and therefore cannot mis-key it.
     anchor_cmd = (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
-        "if [ -n \"$REPO\" ]; then { printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } "
-        "2>/dev/null || true; fi; "
         "FLAG=\"$HOME/.contexer/.pending_capture\"; "
         "if [ -f \"$FLAG\" ]; then "
         "rm -f \"$FLAG\" 2>/dev/null || true; "
@@ -627,29 +616,28 @@ def install(home: Path) -> list[str]:
         f" # {_HOOK_SENTINEL}"
     )
 
-    cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+    cap_con = ('REPO="$PWD" && '
                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                f'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
-    cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+    cap_rat = ('REPO="$PWD" && '
                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                f'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
-    cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+    cap_poll = ('REPO="$PWD" && '
                 f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # Nudge to review decisions pending the developer (dropped by store.update_decision). A Python
     # entrypoint (not pure shell) so it is per-repo and can verify the store still has something
     # pending — no false nudge for an already-approved or cross-repo flag.
-    review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+    review_cmd = ('REPO="$PWD" && '
                   f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                   f'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # PostToolUse (Write|Edit): records edited files into the per-session sidecar (issue
     # #175 Task 2) AND still arms .pending_capture — replaces the old pure-shell touch.
-    # $REPO resolution is copied VERBATIM from the sibling UserPromptSubmit hooks above
-    # (cap_con/cap_rat/cap_poll/review_cmd) — see post_write's docstring for why a
-    # cwd-vs-toplevel mismatch here would silently kill the feature.
-    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
+    # $REPO resolution is copied VERBATIM from the sibling UserPromptSubmit hooks above.
+    # Python then resolves the host payload/PWD to the same filesystem repository root.
+    post_write_cmd = ('REPO="$PWD" && '
                       f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                       f'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       f'# {_HOOK_SENTINEL} .pending_capture')
@@ -716,14 +704,6 @@ def install(home: Path) -> list[str]:
     # one-time swap and idempotent thereafter.
     if _in_groups(put, ".pending_capture") and not _in_groups(put, "claude.post_write"):
         put = _filter_groups(put, [".pending_capture"])
-        hooks["PostToolUse"] = put
-    # Migrate: an installed post_write hook that resolves the repo from raw process cwd (no
-    # $REPO threading via `git rev-parse --show-toplevel`) diverges from record_edited_file's
-    # reader whenever cwd is a monorepo subdirectory — see post_write's docstring for the
-    # doc-drift hazard this guards against. Detected by the absence of "show-toplevel"
-    # alongside "claude.post_write".
-    if _in_groups(put, "claude.post_write") and not _in_groups(put, "show-toplevel"):
-        put = _filter_groups(put, ["claude.post_write"])
         hooks["PostToolUse"] = put
     # Converge on the exact current command (see the SessionStart note above).
     put = _strip_stale(put, ["claude.post_write"], post_write_cmd)

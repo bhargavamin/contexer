@@ -3,7 +3,11 @@ import types
 
 import pytest
 
-from contexer.repo_key import canonical_repo_key, compare_evidence_repo_identity
+from contexer.repo_key import (
+    canonical_repo_key,
+    compare_evidence_repo_identities,
+    compare_evidence_repo_identity,
+)
 
 # Each vector is SHARED with the TypeScript implementation; output must be identical.
 VECTORS = [
@@ -61,6 +65,44 @@ class TestEvidenceRepoIdentity:
     def test_missing_key_is_never_accepted(self, tmp_repo):
         result = compare_evidence_repo_identity(tmp_repo, None)
         assert result["matches"] is False and result["reason"] == "missing"
+
+    def test_batch_comparison_reads_origin_once_for_distinct_foreign_keys(
+            self, tmp_repo, monkeypatch):
+        from contexer import store
+        calls = []
+
+        def origin(*args):
+            calls.append(args)
+            return "git@github.com:acme/widgets.git"
+
+        monkeypatch.setattr(store, "run_git", origin)
+        results = compare_evidence_repo_identities(
+            tmp_repo, ["github.com/foreign/one", "github.com/foreign/two"])
+
+        assert calls == [(tmp_repo, "remote", "get-url", "origin")]
+        assert all(not row["matches"] and row["reason"] == "mismatch_remote"
+                   for row in results.values())
+
+    def test_untrusted_observed_remote_never_resolves_ssh_aliases(
+            self, tmp_repo, monkeypatch):
+        from contexer import repo_key, store
+        monkeypatch.setattr(store, "run_git",
+                            lambda *_a: "https://github.com/acme/widgets.git")
+        monkeypatch.setattr(
+            repo_key, "_resolve_ssh_host",
+            lambda _host: pytest.fail("observed evidence invoked ssh alias resolution"))
+
+        result = compare_evidence_repo_identity(
+            tmp_repo, "attacker-controlled.invalid:acme/widgets.git")
+
+        assert result["matches"] is False and result["reason"] == "mismatch_remote"
+
+    def test_empty_batch_keeps_the_empty_spool_fast_path_git_free(
+            self, tmp_repo, monkeypatch):
+        from contexer import store
+        monkeypatch.setattr(
+            store, "run_git", lambda *_a: pytest.fail("empty identity batch read git"))
+        assert compare_evidence_repo_identities(tmp_repo, []) == {}
 
 
 # ── SSH host-alias resolution (multi-account remotes must not shard team context) ──

@@ -303,8 +303,8 @@ class TestClaudePostWriteRepoResolutionParity:
             f"post_write's $REPO resolution {post_write_cmd!r} must match the sibling "
             f"UserPromptSubmit hooks' prefix {sibling_prefix!r}"
         )
-        assert "show-toplevel" in sibling_prefix  # guard: the prefix we compared against
-                                                     # actually uses git-toplevel resolution
+        assert sibling_prefix == 'REPO="$PWD" &&'
+        assert "git" not in sibling_prefix
 
 
 class TestCursorFormatters:

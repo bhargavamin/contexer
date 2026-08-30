@@ -117,17 +117,15 @@ def _repo_from_verbose(raw: str, repo_path: str) -> tuple[str, str]:
     wrong-store audit reads (`scope_audit.py`). Cursor has one signal the other hosts do not
     (`workspace_roots`), so it gets its own label rather than being flattened into
     `argument`, which the audit reads as a deliberate cross-repo write."""
-    if repo_path:
-        repo, source = store.resolve_repo_verbose(repo_path)
-        return repo, ("hook-arg" if source == "argument" else source)
-    try:
-        roots = json.loads(raw).get("workspace_roots") or []
-        if roots:
-            repo, source = store.resolve_repo_verbose(roots[0])
-            return repo, ("workspace-root" if source == "argument" else source)
-    except Exception:
-        pass
-    return store.resolve_repo_verbose("")
+    hooked = store.hook_repo_from_stdin(raw, repo_path)
+    repo, source = store.resolve_repo_verbose(hooked)
+    if source == "argument":
+        try:
+            roots = json.loads(raw).get("workspace_roots") or []
+        except (AttributeError, TypeError, ValueError):
+            roots = []
+        source = "workspace-root" if not repo_path and roots else "hook-arg"
+    return repo, source
 
 
 def _ensure_rule_file(repo_dir: str) -> None:

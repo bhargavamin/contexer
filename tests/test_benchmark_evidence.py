@@ -219,6 +219,48 @@ def test_attention_bounded_real_reconciliation_at_the_spool_bound(tmp_repo):
 
 
 @pytest.mark.perf
+def test_foreign_identity_routing_at_the_spool_bound_is_linear_and_durable(tmp_repo):
+    """A hostile 1,000-key session must not turn session start into an O(N²) scan.
+
+    This is also the production-bound durability composition gate: after every raw quarantine
+    file ages out, every exact event id still has its fixed-size terminal routing receipt.
+    """
+    event_ids = set()
+    for i in range(spool._MAX_PENDING_EVENTS):
+        # Distinct scp-shaped hosts are the hostile case: observed spool data must not spawn
+        # 1,000 `ssh -G` alias-resolution subprocesses during session start.
+        event = _event(kind="policy_evaluation",
+                       repo_key=f"foreign-{i}.invalid:owner/repository")
+        event_ids.add(event["event_id"])
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+
+    observed = {}
+    elapsed = _timed(lambda: observed.setdefault(
+        "receipt", reconcile.reconcile_session(tmp_repo)))
+    print(f"\n  route {spool._MAX_PENDING_EVENTS} distinct foreign events: {elapsed:.1f}ms")
+
+    assert observed["receipt"]["proposed"] == 0
+    assert observed["receipt"]["incomplete"] is False
+    assert store.load(tmp_repo)["entries"] == []
+    assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
+    assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == spool._MAX_PENDING_EVENTS
+    assert elapsed < 3000.0, f"foreign routing is too slow for session start: {elapsed:.1f}ms"
+
+    old = time.time() - (spool._MAX_PENDING_AGE_DAYS + 1) * 86400
+    for path in spool._event_files(spool._quarantine_dir(tmp_repo)):
+        os.utime(path, (old, old))
+    retention = spool.run_retention(tmp_repo)
+    assert retention["expired_identity_quarantine"] == spool._MAX_PENDING_EVENTS
+    assert retention["dropped_quarantine"] == 0
+    receipts = spool._read_identity_receipts(tmp_repo)["receipts"]
+    assert {row["event_id"] for row in receipts} == event_ids
+    assert len(spool._event_files(spool._identity_receipts_dir(tmp_repo))) \
+        == spool._MAX_PENDING_EVENTS
+    assert all(path.stat().st_size <= spool.MAX_IDENTITY_RECEIPT_BYTES
+               for path in spool._event_files(spool._identity_receipts_dir(tmp_repo)))
+
+
+@pytest.mark.perf
 def test_aggregation_cost_when_every_event_is_a_distinct_statement(tmp_repo):
     """The measured CEILING of a pass, recorded rather than avoided.
 

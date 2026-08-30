@@ -295,7 +295,9 @@ def test_missing_spool_reads_as_empty_and_readable(tmp_repo):
                            "pending_review": 0, "deferred_attention": 0,
                            "oldest_attention_age_seconds": None, "incomplete": 0,
                            "held_unattributed": 0, "held_invalid_state": 0,
-                           "quarantine": 0, "bytes": 0, "gap": None, "readable": True}
+                           "quarantine": 0, "identity_receipts": 0,
+                           "identity_receipts_unreadable": 0,
+                           "bytes": 0, "gap": None, "readable": True}
 
 
 def test_naive_attention_timestamp_is_incomplete_instead_of_breaking_status(tmp_repo):
@@ -887,14 +889,16 @@ def test_an_unreadable_store_defers_the_orphan_sweep_rather_than_failing(tmp_rep
     monkeypatch.setattr(store, "load", unreadable)
 
     assert spool.run_retention(tmp_repo) == {
-        "dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
+        "dropped_pending": 0, "dropped_quarantine": 0,
+        "expired_identity_quarantine": 0, "temp_removed": 0,
         "finalized_orphans": [], "orphans_unreceipted": [], "errors": []}
     assert list(spool.held_candidates(tmp_repo)) == [candidate]
 
 
 def test_retention_on_an_absent_spool_is_a_clean_no_op(tmp_repo):
     assert spool.run_retention(tmp_repo) == {
-        "dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
+        "dropped_pending": 0, "dropped_quarantine": 0,
+        "expired_identity_quarantine": 0, "temp_removed": 0,
         "finalized_orphans": [], "orphans_unreceipted": [], "errors": []}
 
 

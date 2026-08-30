@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from contexer import guard_engine  # noqa: E402
+from contexer import guard_engine, retrieval  # noqa: E402
 from contexer.guard_engine import _parse_iso  # noqa: E402  # offset-aware, shared with fix 1
 
 HERE = Path(__file__).resolve().parent
@@ -165,10 +165,10 @@ def main() -> int:
             # EXPERIMENTAL, and REJECTED by this benchmark's own first run
             # (see docstring / report): >=2 title-token overlap with the diff.
             # Kept here so the rejection stays reproducible, never in production.
-            change_tokens = set(guard_engine.store._index_tokens(
+            change_tokens = set(retrieval.index_tokens(
                 diff_text(repo, pr["base_sha"], pr["head_sha"])))
             for h in hits:
-                title_tokens = set(guard_engine.store._index_tokens(h["title"]))
+                title_tokens = set(retrieval.index_tokens(h["title"]))
                 h["tier"] = ("governs" if len(title_tokens & change_tokens) >= 2
                              else "candidate")
         kept = [h for h in hits

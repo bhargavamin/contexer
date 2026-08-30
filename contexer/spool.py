@@ -6,6 +6,7 @@ Storage for the evidence ledger, laid out as a spool rather than a sidecar docum
     ├── pending/<utc-stamp>-<event-id>.json          raw events awaiting reconciliation
     ├── held/<candidate-id>/<utc-stamp>-<event-id>.json   events behind an unsettled candidate
     ├── quarantine/                                  malformed events, isolated not fatal
+    ├── .identity_receipts/<event-id>-<route-hash>.json  terminal foreign-route receipts
     ├── .orphan_receipts.json                        terminal receipts for evidence whose
     │                                                decision no longer exists
     └── .gap                                         at least one event was lost
@@ -38,6 +39,7 @@ aggregated and held against a decision, and only then did that decision cease to
 that a spool loss would claim capture failed when it plainly did not (see
 `record_orphan_receipt`).
 """
+import hashlib
 import json
 import os
 import re
@@ -86,9 +88,16 @@ _ORPHAN_RECEIPTS_NAME = ".orphan_receipts.json"
 MAX_ORPHAN_RECEIPTS = 200
 
 # Terminal routing receipts for valid events that reached the wrong repository spool. The raw
-# event moves to quarantine, while this bounded ledger preserves why it can never be consumed.
+# event moves to quarantine, while one fixed-size receipt file per logical event preserves why
+# it can never be consumed. Receipts deliberately outlive quarantine retention: bounding their
+# TOTAL count made it possible for ledger churn plus raw retention to erase both records of an
+# event. The bounded unit required by the plan is therefore each receipt, not the collection.
 _IDENTITY_RECEIPTS_NAME = ".identity_receipts.json"
-MAX_IDENTITY_RECEIPTS = 200
+_IDENTITY_RECEIPTS_DIR_NAME = ".identity_receipts"
+# Two 300-character repo keys, one 64-character reason and JSON/time overhead all fit even
+# when every character uses UTF-8's four-byte maximum. This is a byte bound derived from the
+# schema's character bounds, so every valid event is routable rather than silently wedged.
+MAX_IDENTITY_RECEIPT_BYTES = 4096
 
 # The one reason this ledger is ever written, stated once. Both callers file the same fact -
 # the sweep and reconciliation's own finalize reach it from different directions - so it is a
@@ -167,7 +176,12 @@ def _orphan_receipts_path(repo_path: str, slug: str = "") -> Path:
 
 
 def _identity_receipts_path(repo_path: str, slug: str = "") -> Path:
+    """Legacy aggregate ledger path, retained read-only for upgrade compatibility."""
     return _repo_dir(repo_path, slug) / _IDENTITY_RECEIPTS_NAME
+
+
+def _identity_receipts_dir(repo_path: str, slug: str = "") -> Path:
+    return _repo_dir(repo_path, slug) / _IDENTITY_RECEIPTS_DIR_NAME
 
 
 def spool_slugs() -> list[str]:
@@ -455,97 +469,215 @@ def list_pending_evidence(repo_path: str, session_id: str = "", *,
     return events
 
 
-def _read_identity_receipts(repo_path: str, slug: str = "") -> dict:
-    """Identity-routing ledger, with unreadable kept distinct from absent."""
+def _identity_route(event_id: str, observed_key: object, expected_key: object,
+                    reason: object) -> dict:
+    """Canonical, bounded terminal receipt payload for one identity route."""
+    return {
+        "event_id": _checked_id(event_id, "event_id"),
+        "observed_key": str(observed_key)[:300],
+        "expected_key": str(expected_key)[:300],
+        "reason": str(reason)[:64],
+    }
+
+
+def _identity_receipt_name(route: Mapping) -> str:
+    """A stable filename for the full route, not just its caller-controlled event id."""
+    keys = ["event_id", "observed_key", "expected_key", "reason"]
+    if "spool_slug" in route:
+        keys.append("spool_slug")
+    basis = json.dumps({key: route[key] for key in keys},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+    return f"{route['event_id'].lower()}-{digest}.json"
+
+
+def _read_json_dict(path: Path) -> dict:
     try:
-        raw = _identity_receipts_path(repo_path, slug).read_text(encoding="utf-8")
+        value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
+    except (OSError, ValueError):
+        return {"unreadable": True}
+    return value if isinstance(value, dict) else {"unreadable": True}
+
+
+def _valid_identity_receipt(row: Mapping, path: Path | None = None) -> bool:
+    """Validate a terminal receipt's full route binding and fixed-size representation."""
+    keys = {"event_id", "observed_key", "expected_key", "reason", "occurred_at"}
+    if path is not None:
+        keys.add("spool_slug")
+    if set(row) != keys or not all(isinstance(row.get(key), str) for key in keys):
+        return False
+    try:
+        route = _identity_route(
+            row["event_id"], row["observed_key"], row["expected_key"], row["reason"])
+        moment = datetime.fromisoformat(row["occurred_at"])
+    except (TypeError, ValueError):
+        return False
+    if any(route[key] != row[key] for key in route) or not row["expected_key"] \
+            or not row["reason"] or moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
+        return False
+    if len(json.dumps(dict(row), ensure_ascii=False).encode("utf-8")) \
+            > MAX_IDENTITY_RECEIPT_BYTES:
+        return False
+    if path is not None:
+        try:
+            expected_slug = path.parent.parent.name
+            if row["spool_slug"] != expected_slug \
+                    or path.name != _identity_receipt_name({
+                        **route, "spool_slug": row["spool_slug"]}) \
+                    or path.stat().st_size > MAX_IDENTITY_RECEIPT_BYTES:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _read_direct_identity_receipt(path: Path) -> dict:
+    row = _read_json_dict(path)
+    if not row or row.get("unreadable"):
+        return row
+    return row if _valid_identity_receipt(row, path) else {"unreadable": True}
+
+
+def _legacy_identity_receipts(repo_path: str, slug: str = "") -> dict:
+    """The Task-02 aggregate ledger, read-only so upgrades remain idempotent."""
+    ledger = _read_json_dict(_identity_receipts_path(repo_path, slug))
+    if not ledger or ledger.get("unreadable"):
+        return ledger
+    rows = ledger.get("receipts")
+    if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not _valid_identity_receipt(row) for row in rows):
+        return {"unreadable": True}
+    return ledger
+
+
+def _read_identity_receipts(repo_path: str, slug: str = "") -> dict:
+    """All terminal identity receipts, including the read-only legacy ledger.
+
+    This inspection helper may scan: it is used by status/tests, never by the routing hot path.
+    A damaged receipt is distinct from an absent collection because accepting a route over an
+    unreadable terminal record would make crash recovery destructive.
+    """
+    legacy = _legacy_identity_receipts(repo_path, slug)
+    if legacy.get("unreadable"):
+        return {"unreadable": True}
+    rows = [row for row in legacy.get("receipts") or [] if isinstance(row, dict)]
+    try:
+        files = _event_files(_identity_receipts_dir(repo_path, slug))
     except OSError:
         return {"unreadable": True}
+    for path in files:
+        row = _read_direct_identity_receipt(path)
+        if row.get("unreadable"):
+            return {"unreadable": True}
+        rows.append(row)
+    return {"receipts": rows} if rows else {}
+
+
+def _route_is_recorded(repo_path: str, route: Mapping, legacy_rows: list[dict]) -> bool | None:
+    """True/False for a terminal route, or None when its direct receipt is damaged."""
+    expected = {key: route[key] for key in (
+        "event_id", "observed_key", "expected_key", "reason")}
+    for row in legacy_rows:
+        actual = {key: str(row.get(key) or "") for key in expected}
+        if actual == expected:
+            return True
+    direct = _read_direct_identity_receipt(
+        _identity_receipts_dir(repo_path) / _identity_receipt_name({
+            **route, "spool_slug": store.repo_slug(repo_path)}))
+    if direct.get("unreadable"):
+        return None
+    if not direct:
+        return False
+    actual = {key: str(direct.get(key) or "") for key in expected}
+    return actual == expected if actual == expected else None
+
+
+def quarantine_identity_events(repo_path: str, routes) -> list[bool]:
+    """Durably route many foreign/unverifiable pending events in linear time.
+
+    Pending files are listed and parsed once. Each fixed-size terminal receipt is atomically
+    written BEFORE its raw event moves, then retained after quarantine expiry. A failed or
+    unreadable receipt leaves every corresponding raw file pending. Results align with the
+    caller's routes; duplicate deliveries of one event id share its one logical receipt but
+    every raw file is moved.
+    """
+    normalized = [_identity_route(
+        str(route.get("event_id") or ""), route.get("observed_key", ""),
+        route.get("expected_key", ""), route.get("reason", "")) for route in routes]
+    if not normalized:
+        return []
+
+    legacy = _legacy_identity_receipts(repo_path)
+    if legacy.get("unreadable"):
+        return [False] * len(normalized)
+    legacy_rows = [row for row in legacy.get("receipts") or [] if isinstance(row, dict)]
+
+    # Exact raw binding remains event-id AND observed-key. The one listing removes the old
+    # O(N^2) behavior while preserving the same-ID collision defense from Task 02.
+    buckets: dict[tuple[str, str], list[Path]] = {}
     try:
-        ledger = json.loads(raw)
-    except ValueError:
-        return {"unreadable": True}
-    return ledger if isinstance(ledger, dict) else {"unreadable": True}
+        for path in _event_files(_pending_dir(repo_path)):
+            match = _EVENT_ID_IN_NAME.search(path.name)
+            if not match:
+                continue
+            event, raw, _errors = _read_event_detail(path)
+            source = event if event is not None else raw if isinstance(raw, Mapping) else {}
+            raw_id = source.get("event_id")
+            raw_key = source.get("repo_key")
+            if isinstance(raw_id, str):
+                key = (raw_id.lower(), raw_key.strip() if isinstance(raw_key, str) else "")
+                buckets.setdefault(key, []).append(path)
+    except OSError:
+        return [False] * len(normalized)
+
+    results = [False] * len(normalized)
+    try:
+        receipt_dir = _ensure_dir(_identity_receipts_dir(repo_path))
+        quarantine_dir = _ensure_dir(_quarantine_dir(repo_path))
+    except OSError:
+        return [False] * len(normalized)
+    for index, route in enumerate(normalized):
+        key = (route["event_id"].lower(), route["observed_key"])
+        pending = buckets.get(key, [])
+        recorded = _route_is_recorded(repo_path, route, legacy_rows)
+        if recorded is None:
+            continue
+        if not recorded:
+            if not pending:
+                continue
+            receipt = {**route, "spool_slug": store.repo_slug(repo_path),
+                       "occurred_at": _now().isoformat()}
+            encoded = json.dumps(receipt, ensure_ascii=False).encode("utf-8")
+            if len(encoded) > MAX_IDENTITY_RECEIPT_BYTES:
+                continue
+            try:
+                _write_json(receipt_dir, _identity_receipt_name(receipt), receipt)
+            except (OSError, TypeError, ValueError):
+                continue
+        if not pending:
+            # A durable receipt plus no pending source is the completed crash-recovery state.
+            results[index] = True
+            continue
+        path = pending.pop(0)
+        try:
+            os.replace(path, quarantine_dir / path.name)
+        except OSError:
+            continue
+        results[index] = True
+    return results
 
 
 def quarantine_identity_event(repo_path: str, event_id: str, *, observed_key: str,
                               expected_key: str, reason: str) -> bool:
-    """Durably route one foreign/unverifiable event out of ``pending``.
-
-    The receipt is written first. That keeps a receipt failure non-destructive and makes the
-    only crash window idempotently recoverable: if the process dies before the atomic move,
-    the next pass finds the existing receipt and completes the move without a second row.
-    ``False`` means the raw event remains pending and reconciliation must report incomplete.
-    """
-    event_id = _checked_id(event_id, "event_id")
-    ledger = _read_identity_receipts(repo_path)
-    if ledger.get("unreadable"):
-        return False
-    observed_key = str(observed_key)
-    expected_key = str(expected_key)
-    reason = str(reason)
-    rows = [row for row in ledger.get("receipts") or [] if isinstance(row, dict)]
-    recorded = any(
-        str(row.get("event_id") or "").lower() == event_id.lower()
-        and str(row.get("observed_key") or "") == observed_key[:300]
-        and str(row.get("expected_key") or "") == expected_key[:300]
-        and str(row.get("reason") or "") == reason[:64]
-        for row in rows
-    )
-
-    pending = None
-    try:
-        for path in _event_files(_pending_dir(repo_path)):
-            match = _EVENT_ID_IN_NAME.search(path.name)
-            if not match or match.group(1).lower() != event_id.lower():
-                continue
-            normalized, raw, _errors = _read_event_detail(path)
-            raw_id = ((normalized or {}).get("event_id")
-                      if normalized is not None else
-                      raw.get("event_id") if isinstance(raw, Mapping) else None)
-            raw_key = ((normalized or {}).get("repo_key")
-                       if normalized is not None else
-                       raw.get("repo_key") if isinstance(raw, Mapping) else None)
-            # event_id is caller-controlled data despite also appearing in the filename. Bind
-            # the route to BOTH normalized fields, not merely the suffix: two valid files may
-            # legally share a UUID, and moving the first one let a same-ID foreign event reach
-            # aggregation behind a receipt for the matching event.
-            if (isinstance(raw_id, str) and raw_id.lower() == event_id.lower()
-                    and (raw_key.strip() if isinstance(raw_key, str) else "") == observed_key):
-                pending = path
-                break
-    except OSError:
-        return False
-
-    if not recorded:
-        if pending is None:
-            return False
-        rows.append({
-            "event_id": event_id,
-            "observed_key": observed_key[:300],
-            "expected_key": expected_key[:300],
-            "reason": reason[:64],
-            "occurred_at": _now().isoformat(),
-        })
-        try:
-            _write_json(_ensure_dir(_repo_dir(repo_path)), _IDENTITY_RECEIPTS_NAME,
-                        {"receipts": rows[-MAX_IDENTITY_RECEIPTS:],
-                         "dropped": _count(ledger.get("dropped"))
-                         + max(0, len(rows) - MAX_IDENTITY_RECEIPTS)})
-        except (OSError, TypeError, ValueError):
-            return False
-
-    if pending is None:
-        # Receipt plus no pending source means the prior move already completed (or retention
-        # later expired the quarantined raw event). Either way routing is terminal.
-        return True
-    try:
-        os.replace(pending, _ensure_dir(_quarantine_dir(repo_path)) / pending.name)
-    except OSError:
-        return False
-    return True
+    """Single-event compatibility wrapper around the linear batch router."""
+    return quarantine_identity_events(repo_path, [{
+        "event_id": event_id,
+        "observed_key": observed_key,
+        "expected_key": expected_key,
+        "reason": reason,
+    }])[0]
 
 
 # ── hold / finalize (the candidate lifecycle) ────────────────────────────────────
@@ -875,9 +1007,13 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     flag exists to prevent, one level down - a reader that only glances at `pending` would be
     told a number that describes part of the spool as though it described all of it.
 
-    `bytes` counts every file the spool holds, `candidate.json` included: it is real disk the
-    spool is responsible for, and a size report that quietly omitted its own bookkeeping would
-    understate a repo with many held candidates.
+    `bytes` counts every file the spool holds, including candidate manifests, terminal identity
+    receipts and root bookkeeping: it is real disk the spool is responsible for, and a size
+    report that quietly omitted its own bookkeeping would understate retained evidence.
+
+    `identity_receipts` remains visible after the corresponding raw quarantine expires; it is
+    the terminal diagnostic Task 02 requires. A corrupt receipt is counted separately rather
+    than accepted as proof or collapsed into an apparently clean zero.
 
     `held_unattributed` is the same honesty applied to the sweep's blind spot: a held candidate
     whose `candidate.json` is missing or unreadable records no `entry_id`, so
@@ -895,7 +1031,9 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     counts = {"pending": 0, "held": 0, "held_events": 0, "pending_review": 0,
               "deferred_attention": 0, "oldest_attention_age_seconds": None,
               "incomplete": 0, "held_unattributed": 0,
-              "held_invalid_state": 0, "quarantine": 0, "bytes": 0}
+              "held_invalid_state": 0, "quarantine": 0,
+              "identity_receipts": 0, "identity_receipts_unreadable": 0,
+              "bytes": 0}
     readable = True
     oldest_attention = None
     try:
@@ -906,6 +1044,28 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
             files = _event_files(directory)
             counts[key] = len(files)
             counts["bytes"] += _total_bytes(files)
+        identity_files = _event_files(_identity_receipts_dir(repo_path, slug))
+        counts["bytes"] += _total_bytes(identity_files)
+        for path in identity_files:
+            row = _read_direct_identity_receipt(path)
+            if row.get("unreadable"):
+                counts["identity_receipts_unreadable"] += 1
+            else:
+                counts["identity_receipts"] += 1
+        legacy = _legacy_identity_receipts(repo_path, slug)
+        legacy_path = _identity_receipts_path(repo_path, slug)
+        if legacy_path.is_file():
+            counts["bytes"] += _total_bytes([legacy_path])
+        if legacy.get("unreadable"):
+            counts["identity_receipts_unreadable"] += 1
+        else:
+            counts["identity_receipts"] += sum(
+                1 for row in legacy.get("receipts") or [] if isinstance(row, dict))
+        # Root bookkeeping is part of the spool's disk footprint too. The prior diagnostic
+        # counted candidate manifests but silently omitted these peer files.
+        for path in (_orphan_receipts_path(repo_path, slug), _gap_path(repo_path, slug)):
+            if path.is_file():
+                counts["bytes"] += _total_bytes([path])
         root = _held_root(repo_path, slug)
         if root.is_dir():
             for directory in sorted(root.iterdir()):
@@ -1011,6 +1171,78 @@ def _sweep_events(directory: Path) -> int:
     return dropped
 
 
+def _identity_receipt_index(repo_path: str) -> tuple[set[tuple[str, str]], bool]:
+    """Exact `(event_id, observed_key)` routes and whether every receipt was readable."""
+    ledger = _read_identity_receipts(repo_path)
+    if ledger.get("unreadable"):
+        return set(), False
+    routes = set()
+    for row in ledger.get("receipts") or []:
+        if not isinstance(row, dict):
+            continue
+        event_id = str(row.get("event_id") or "").lower()
+        observed = str(row.get("observed_key") or "")
+        if event_id:
+            routes.add((event_id, observed))
+    return routes, True
+
+
+def _quarantine_route_state(path: Path, routes: set[tuple[str, str]],
+                            receipts_readable: bool) -> bool | None:
+    """True=terminal identity raw, False=generic/lost raw, None=valid but unprovable."""
+    event, _raw, _errors = _read_event_detail(path)
+    if event is None:
+        return False
+    if not receipts_readable:
+        return None
+    return (str(event.get("event_id") or "").lower(),
+            str(event.get("repo_key") or "")) in routes
+
+
+def _sweep_quarantine(repo_path: str) -> tuple[int, int]:
+    """Expire quarantine raws as `(unreceipted_loss, terminal_identity_raw)`.
+
+    Identity-routed raws are expendable only because their exact receipt is durable outside
+    quarantine. Generic malformed raws still become a gap when removed. If receipts are
+    unreadable, a valid raw is retained even beyond the cap: stop instead of guessing that its
+    terminal proof exists.
+    """
+    directory = _quarantine_dir(repo_path)
+    if not directory.is_dir():
+        return 0, 0
+    routes, receipts_readable = _identity_receipt_index(repo_path)
+    cutoff = time.time() - _MAX_PENDING_AGE_DAYS * 86400
+    lost = terminal = 0
+    survivors: list[tuple[float, Path, bool | None]] = []
+    unmeasurable = 0
+    for path in _event_files(directory):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            unmeasurable += 1
+            continue
+        state = _quarantine_route_state(path, routes, receipts_readable)
+        if mtime < cutoff and state is not None:
+            removed = _unlink(path)
+            terminal += removed if state else 0
+            lost += removed if not state else 0
+        else:
+            survivors.append((mtime, path, state))
+
+    excess = max(0, unmeasurable + len(survivors) - _MAX_PENDING_EVENTS)
+    for _mtime, path, state in sorted(survivors, key=lambda item: item[0]):
+        if excess <= 0:
+            break
+        if state is None:
+            continue
+        removed = _unlink(path)
+        if removed:
+            excess -= 1
+            terminal += removed if state else 0
+            lost += removed if not state else 0
+    return lost, terminal
+
+
 def _sweep_temp(root: Path) -> int:
     """Remove temp files left behind by an interrupted write. Anything younger than the age
     bound may be a rename still in flight, so it is left alone.
@@ -1080,7 +1312,8 @@ def _sweep_orphan_holds(repo_path: str) -> tuple:
 
 
 def run_retention(repo_path: str) -> dict:
-    """Bound the spool. `{"dropped_pending", "dropped_quarantine", "temp_removed",
+    """Bound the spool. `{"dropped_pending", "dropped_quarantine",
+    "expired_identity_quarantine", "temp_removed",
     "finalized_orphans", "orphans_unreceipted", "errors"}`.
 
     `orphans_unreceipted` names every orphaned hold left standing because its terminal receipt
@@ -1091,18 +1324,18 @@ def run_retention(repo_path: str) -> dict:
     reconciliation or maintenance and never from an editor hook. Held events are exempt while
     their candidate is unsettled.
 
-    The two drops it makes are recorded as DIFFERENT facts (see `_bump_gap`), decided by which
-    directory was swept rather than by anything inside the events: an aged-out PENDING event was
-    never consumed, while an aged-out QUARANTINED one is evidence that could not be read at all.
-    Only the second is this module failing at its job, which is why reporting both as "lost" is
-    what made `contexer status` accuse a healthy repo of losing evidence.
+    The drops it makes are recorded as DIFFERENT facts (see `_bump_gap`). An aged-out PENDING
+    event was never consumed; an unreceipted QUARANTINED one could not be read and is lost. A
+    valid identity-routed quarantine raw is neither: its fixed-size terminal receipt survives,
+    so raw expiry is reported separately and never increments `.gap`.
 
     An aged-out PENDING event is still not GOOD news. The queue's designed path is reconciliation
     at the next session start, which every host now reaches, so an event that survived to its
     retention age outlived every session start in that window - an anomaly to look into rather
     than the queue working as intended. See `_bump_gap` for the full note.
     """
-    report = {"dropped_pending": 0, "dropped_quarantine": 0, "temp_removed": 0,
+    report = {"dropped_pending": 0, "dropped_quarantine": 0,
+              "expired_identity_quarantine": 0, "temp_removed": 0,
               "finalized_orphans": [], "orphans_unreceipted": [], "errors": []}
     try:
         root = _repo_dir(repo_path)
@@ -1110,7 +1343,8 @@ def run_retention(repo_path: str) -> dict:
             return report
         report["temp_removed"] = _sweep_temp(root)
         report["dropped_pending"] = _sweep_events(_pending_dir(repo_path))
-        report["dropped_quarantine"] = _sweep_events(_quarantine_dir(repo_path))
+        (report["dropped_quarantine"],
+         report["expired_identity_quarantine"]) = _sweep_quarantine(repo_path)
         report["finalized_orphans"], report["orphans_unreceipted"] = \
             _sweep_orphan_holds(repo_path)
     except Exception as exc:            # broad on purpose: a report, not a traceback

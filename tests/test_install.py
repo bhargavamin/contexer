@@ -89,7 +89,7 @@ class TestInstall:
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         ups = settings["hooks"]["UserPromptSubmit"]
         cmds = [h["command"] for grp in ups for h in grp["hooks"] if "command" in h]
-        assert any(".current_repo" in c for c in cmds)
+        assert any("claude.capture_constraint" in c for c in cmds)
 
     def test_user_prompt_submit_bootstrap_registered(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
@@ -464,13 +464,11 @@ class TestRepoPointerNotPoisoned:
         offenders = [c for c in cmds if "|| pwd" in c]
         assert not offenders, f"hooks must not fall back to pwd: {offenders}"
 
-    def test_git_hooks_use_true_fallback(self, installed_home):
+    def test_hooks_never_run_git(self, installed_home):
         settings = json.loads((installed_home / ".claude" / "settings.json").read_text())
         cmds = [h.get("command", "") for event in settings["hooks"].values()
                 for grp in event for h in grp.get("hooks", [])]
-        git_cmds = [c for c in cmds if "git rev-parse" in c]
-        assert git_cmds
-        assert all("|| true" in c for c in git_cmds)
+        assert not [c for c in cmds if "git rev-parse" in c or "show-toplevel" in c]
 
 
 class TestBookkeepingWritesAreFailSoft:
@@ -500,13 +498,13 @@ class TestBookkeepingWritesAreFailSoft:
         assert "touch" not in post_write
         assert ".pending_capture" in post_write  # marker kept for migration/uninstall detection
 
-    def test_anchor_hook_guards_the_pointer_write_and_the_flag_removal(self, installed_home):
-        anchor = next(c for c in self._cmds(installed_home, "UserPromptSubmit")
-                      if ".current_repo" in c)
-        # Braces, not a trailing `2>/dev/null`: the redirect is opened before stderr
-        # would be silenced, so a bare suffix still leaks the "Permission denied" error.
-        assert "{ printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } 2>/dev/null || true" in anchor
-        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchor
+    def test_prompt_anchor_is_python_fail_soft_and_reminder_removal_is_guarded(self, installed_home):
+        commands = self._cmds(installed_home, "UserPromptSubmit")
+        capture = next(c for c in commands if "claude.capture_constraint" in c)
+        reminder = next(c for c in commands if "last turn settled" in c)
+        assert 'REPO="$PWD"' in capture
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in reminder
+        assert ".current_repo" not in reminder
 
     def test_reinstall_replaces_an_unguarded_session_start_hook(self, clean_home):
         settings_path = clean_home / ".claude" / "settings.json"
@@ -538,10 +536,7 @@ class TestBookkeepingWritesAreFailSoft:
             "the old shell touch must not survive a reinstall"
         assert sum("claude.post_write" in c for c in cmds) == 1, "must replace, not duplicate"
 
-    def test_reinstall_replaces_a_post_write_hook_missing_git_toplevel_resolution(self, clean_home):
-        # The doc-drift hazard: an installed post_write hook that resolves the repo from raw
-        # process cwd (no `git rev-parse --show-toplevel`) diverges from record_edited_file's
-        # reader in a monorepo subdirectory. Must be replaced, not left in place.
+    def test_reinstall_replaces_a_stale_post_write_hook(self, clean_home):
         settings_path = clean_home / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True)
         old = ('"python3" -c "from contexer.adapters import claude; import sys; '
@@ -553,7 +548,8 @@ class TestBookkeepingWritesAreFailSoft:
         cmds = self._cmds(clean_home, "PostToolUse")
         post_write_cmds = [c for c in cmds if "claude.post_write" in c]
         assert len(post_write_cmds) == 1, "must replace, not duplicate"
-        assert "show-toplevel" in post_write_cmds[0]
+        assert post_write_cmds[0].startswith('REPO="$PWD" &&')
+        assert "git rev-parse" not in post_write_cmds[0]
 
     def test_reinstall_replaces_an_unguarded_anchor_hook(self, clean_home):
         settings_path = clean_home / ".claude" / "settings.json"
@@ -565,9 +561,11 @@ class TestBookkeepingWritesAreFailSoft:
         settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
             {"hooks": [{"type": "command", "command": old}]}]}}))
         install()
-        anchors = [c for c in self._cmds(clean_home, "UserPromptSubmit") if ".current_repo" in c]
-        assert len(anchors) == 1, "must replace, not duplicate"
-        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchors[0]
+        reminders = [c for c in self._cmds(clean_home, "UserPromptSubmit")
+                     if "last turn settled" in c]
+        assert len(reminders) == 1, "must replace, not duplicate"
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in reminders[0]
+        assert "git rev-parse" not in reminders[0]
 
     def test_reinstall_is_idempotent_for_the_guarded_hooks(self, installed_home):
         before = json.loads((installed_home / ".claude" / "settings.json").read_text())

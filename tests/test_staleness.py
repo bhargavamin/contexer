@@ -52,7 +52,7 @@ def test_unchanged_file_renders_no_note(repo):
     assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
 
 
-def test_changed_file_renders_note_in_both_sites(repo):
+def test_changed_file_renders_note_only_on_explicit_retrieval(repo):
     _, eid = store.update_decision(repo, SUMMARY, "s1", "architecture",
                                    source_files=["auth.py"])
     _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
@@ -60,8 +60,10 @@ def test_changed_file_renders_note_in_both_sites(repo):
     out = store.get_context(repo, query="auth")
     assert "[may be stale: auth.py changed since capture]" in out
 
+    # Prompt/editor hooks are deliberately Git-free. Explicit get_context remains
+    # the authoritative path for source-file staleness evaluation.
     rendered = store._render_prompt_decisions(repo, [eid])
-    assert "[may be stale: auth.py changed since capture]" in rendered
+    assert "[may be stale" not in rendered
 
 
 def test_files_hit_renders_staleness_note(repo):
@@ -81,7 +83,7 @@ def test_uncommitted_edit_renders_note(repo):
     Path(repo, "auth.py").write_text("def login(): return 'edited, uncommitted'\n",
                                      encoding="utf-8")
     assert "[may be stale: auth.py changed since capture]" in store.get_context(repo, query="auth")
-    assert "[may be stale: auth.py changed since capture]" in store._render_prompt_decisions(repo, [eid])
+    assert "[may be stale" not in store._render_prompt_decisions(repo, [eid])
 
 
 def test_note_counts_extra_changed_files(repo):

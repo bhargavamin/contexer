@@ -359,11 +359,14 @@ class TestCodexBookkeepingWritesAreFailSoft:
         assert "touch" not in post_write
         assert ".pending_capture" in post_write
 
-    def test_anchor_hook_guards_the_pointer_write_and_the_flag_removal(self, home):
+    def test_prompt_anchor_is_python_fail_soft_and_reminder_removal_is_guarded(self, home):
         codex.install(home)
-        anchor = next(c for c in self._cmds(home, "UserPromptSubmit") if ".current_repo" in c)
-        assert "{ printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } 2>/dev/null || true" in anchor
-        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchor
+        commands = self._cmds(home, "UserPromptSubmit")
+        capture = next(c for c in commands if "claude.capture_constraint" in c)
+        reminder = next(c for c in commands if "last turn settled" in c)
+        assert 'REPO="$PWD"' in capture
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in reminder
+        assert ".current_repo" not in reminder
 
     def test_reinstall_replaces_the_unguarded_session_start_hook(self, home):
         # Verbatim shape of the hook that failed in the report.
@@ -394,7 +397,7 @@ class TestCodexBookkeepingWritesAreFailSoft:
             "the old shell touch must not survive a reinstall"
         assert sum("claude.post_write" in c for c in cmds) == 1, "must replace, not duplicate"
 
-    def test_reinstall_replaces_a_post_write_hook_missing_git_toplevel_resolution(self, home):
+    def test_reinstall_replaces_a_stale_post_write_hook(self, home):
         hooks_path = home / ".codex" / "hooks.json"
         hooks_path.parent.mkdir(parents=True)
         old = ('"python3" -c "from contexer.adapters import claude; import sys; '
@@ -406,7 +409,8 @@ class TestCodexBookkeepingWritesAreFailSoft:
         cmds = self._cmds(home, "PostToolUse")
         post_write_cmds = [c for c in cmds if "claude.post_write" in c]
         assert len(post_write_cmds) == 1, "must replace, not duplicate"
-        assert "show-toplevel" in post_write_cmds[0]
+        assert post_write_cmds[0].startswith('REPO="$PWD" &&')
+        assert "git rev-parse" not in post_write_cmds[0]
 
     def test_reinstall_replaces_the_unguarded_anchor_hook(self, home):
         hooks_path = home / ".codex" / "hooks.json"
@@ -418,9 +422,11 @@ class TestCodexBookkeepingWritesAreFailSoft:
         hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
             {"hooks": [{"type": "command", "command": old}]}]}}))
         codex.install(home)
-        anchors = [c for c in self._cmds(home, "UserPromptSubmit") if ".current_repo" in c]
-        assert len(anchors) == 1, "must replace, not duplicate"
-        assert 'rm -f "$FLAG" 2>/dev/null || true' in anchors[0]
+        reminders = [c for c in self._cmds(home, "UserPromptSubmit")
+                     if "last turn settled" in c]
+        assert len(reminders) == 1, "must replace, not duplicate"
+        assert 'rm -f "$FLAG" 2>/dev/null || true' in reminders[0]
+        assert "git rev-parse" not in reminders[0]
 
     def test_reinstall_is_idempotent(self, home):
         # Every migration gate must recognize its own output — otherwise install strips
@@ -583,7 +589,7 @@ class TestCodexPostWriteRepoResolutionParity:
         claude_prefix = claude_post_write.split("&&")[0] + "&&"
 
         assert codex_prefix == claude_prefix
-        assert "show-toplevel" in codex_prefix
+        assert codex_prefix == 'REPO="$PWD" &&'
 
 
 class TestCodexStatus:

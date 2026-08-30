@@ -21,13 +21,14 @@ the disposition assertions below read.
 import json
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from contexer import candidates, evidence, lifecycle, reconcile, review_impact, spool, store
+from contexer import candidates, cli, evidence, lifecycle, reconcile, review_impact, spool, store
 from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
@@ -197,6 +198,23 @@ class TestEvidenceRepoIdentity:
         assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 0
         assert len(spool._read_identity_receipts(tmp_repo)["receipts"]) == 1
 
+    def test_max_multibyte_route_fields_still_fit_the_fixed_receipt_bound(self, tmp_repo):
+        observed = "😀" * 300
+        event = _identity_event(observed, "multibyte-observed")
+        assert evidence.validate_event(event)[1] == []
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is False
+
+        second = _identity_event("/another/foreign", "multibyte-expected")
+        assert spool.append_evidence(tmp_repo, second)["status"] == "stored"
+        assert spool.quarantine_identity_event(
+            tmp_repo, second["event_id"], observed_key=second["repo_key"],
+            expected_key="界" * 300, reason="unverifiable") is True
+
+        files = spool._event_files(spool._identity_receipts_dir(tmp_repo))
+        assert len(files) == 2
+        assert all(path.stat().st_size <= spool.MAX_IDENTITY_RECEIPT_BYTES for path in files)
+
     def test_malformed_missing_key_and_invalid_id_uses_generic_quarantine(self, tmp_repo):
         raw = _identity_event(tmp_repo, "bad-id")
         raw.pop("repo_key")
@@ -260,7 +278,7 @@ class TestEvidenceRepoIdentity:
         real_write = spool._write_json
 
         def fail_receipt(directory, name, payload):
-            if name == spool._IDENTITY_RECEIPTS_NAME:
+            if Path(directory).name == spool._IDENTITY_RECEIPTS_DIR_NAME:
                 raise OSError("receipt unavailable")
             return real_write(directory, name, payload)
 
@@ -297,15 +315,118 @@ class TestEvidenceRepoIdentity:
         assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
         assert len(spool._read_identity_receipts(tmp_repo)["receipts"]) == 1
 
-    def test_identity_receipts_are_bounded_and_record_truncation(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(spool, "MAX_IDENTITY_RECEIPTS", 2)
+    def test_fixed_size_identity_receipts_outlive_raw_quarantine_retention(
+            self, tmp_repo, monkeypatch):
+        monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1)
+        event_ids = []
         for i in range(3):
             event = _identity_event(f"/foreign/repo-{i}", f"bounded-{i}")
+            event_ids.append(event["event_id"])
             assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
-            assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 0
+
+        # The raw quarantine is deliberately capped below the number of routes. Every exact
+        # terminal receipt must nevertheless survive; a count-only truncation marker cannot
+        # recover an event id or prove where it was routed.
+        retention = spool.run_retention(tmp_repo)
         ledger = spool._read_identity_receipts(tmp_repo)
-        assert len(ledger["receipts"]) == 2
-        assert ledger["dropped"] == 1
+        assert {row["event_id"] for row in ledger["receipts"]} == set(event_ids)
+        assert retention["expired_identity_quarantine"] == 2
+        assert retention["dropped_quarantine"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["quarantine"] == 1
+        assert spool.evidence_diagnostics(tmp_repo)["identity_receipts"] == 3
+        assert spool.evidence_diagnostics(tmp_repo)["gap"] is None
+        status = " ".join(cli._evidence_status_lines([tmp_repo]))
+        assert "3 identity-routed" in status and "lost" not in status
+        assert not spool._identity_receipts_path(tmp_repo).exists()
+        assert all(path.stat().st_size <= spool.MAX_IDENTITY_RECEIPT_BYTES
+                   for path in spool._event_files(spool._identity_receipts_dir(tmp_repo)))
+
+    def test_unreadable_identity_receipt_is_visible_and_preserves_its_raw(self, tmp_repo):
+        event = _identity_event("/foreign/repo", "damaged-terminal-receipt")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        assert reconcile.reconcile_session(tmp_repo)["incomplete"] is False
+        (receipt_path,) = spool._event_files(spool._identity_receipts_dir(tmp_repo))
+        receipt_path.write_text("{broken", encoding="utf-8")
+        raw = next(iter(spool._quarantine_dir(tmp_repo).iterdir()))
+        old = time.time() - (spool._MAX_PENDING_AGE_DAYS + 1) * 86400
+        os.utime(raw, (old, old))
+
+        retention = spool.run_retention(tmp_repo)
+        diagnostics = spool.evidence_diagnostics(tmp_repo)
+
+        assert retention["dropped_quarantine"] == 0
+        assert retention["expired_identity_quarantine"] == 0
+        assert raw.exists()
+        assert diagnostics["identity_receipts"] == 0
+        assert diagnostics["identity_receipts_unreadable"] == 1
+        assert diagnostics["bytes"] >= raw.stat().st_size + receipt_path.stat().st_size
+        status = " ".join(cli._evidence_status_lines([tmp_repo]))
+        assert "1 identity receipts unreadable" in status and "lost" not in status
+
+    @pytest.mark.parametrize("field", ["expected_key", "reason"])
+    def test_tampered_identity_receipt_never_authorizes_raw_expiry(
+            self, tmp_repo, field):
+        event = _identity_event("/foreign/repo", f"tampered-{field}")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        reconcile.reconcile_session(tmp_repo)
+        (receipt_path,) = spool._event_files(spool._identity_receipts_dir(tmp_repo))
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt[field] = f"wrong-{field}"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        raw = next(iter(spool._quarantine_dir(tmp_repo).iterdir()))
+        old = time.time() - (spool._MAX_PENDING_AGE_DAYS + 1) * 86400
+        os.utime(raw, (old, old))
+
+        retention = spool.run_retention(tmp_repo)
+
+        assert retention["expired_identity_quarantine"] == 0
+        assert retention["dropped_quarantine"] == 0
+        assert raw.exists()
+        assert spool.evidence_diagnostics(tmp_repo)["identity_receipts_unreadable"] == 1
+
+    def test_misnamed_identity_receipt_never_authorizes_raw_expiry(self, tmp_repo):
+        event = _identity_event("/foreign/repo", "misnamed-receipt")
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+        reconcile.reconcile_session(tmp_repo)
+        (receipt_path,) = spool._event_files(spool._identity_receipts_dir(tmp_repo))
+        receipt_path.rename(receipt_path.with_name(f"{event['event_id']}-wrong.json"))
+        raw = next(iter(spool._quarantine_dir(tmp_repo).iterdir()))
+        old = time.time() - (spool._MAX_PENDING_AGE_DAYS + 1) * 86400
+        os.utime(raw, (old, old))
+
+        assert spool.run_retention(tmp_repo)["expired_identity_quarantine"] == 0
+        assert raw.exists()
+        assert spool.evidence_diagnostics(tmp_repo)["identity_receipts_unreadable"] == 1
+
+    def test_receipt_copied_from_another_spool_never_authorizes_raw_expiry(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        repo_a = str(tmp_path / "repo-a")
+        repo_c = str(tmp_path / "repo-c")
+        event = _identity_event("/foreign/source-repo", "cross-spool-receipt")
+        assert spool.append_evidence(repo_a, event)["status"] == "stored"
+        assert spool.append_evidence(repo_c, event)["status"] == "stored"
+        assert reconcile.reconcile_session(repo_a)["incomplete"] is False
+
+        (receipt_a,) = spool._event_files(spool._identity_receipts_dir(repo_a))
+        (raw_c,) = spool._event_files(spool._pending_dir(repo_c))
+        quarantine_c = spool._ensure_dir(spool._quarantine_dir(repo_c))
+        raw_c = Path(os.replace(raw_c, quarantine_c / raw_c.name) or quarantine_c / raw_c.name)
+        receipt_dir_c = spool._ensure_dir(spool._identity_receipts_dir(repo_c))
+        copied = receipt_dir_c / receipt_a.name
+        copied.write_bytes(receipt_a.read_bytes())
+        old = time.time() - (spool._MAX_PENDING_AGE_DAYS + 1) * 86400
+        os.utime(raw_c, (old, old))
+
+        retention = spool.run_retention(repo_c)
+        diagnostics = spool.evidence_diagnostics(repo_c)
+
+        assert retention["expired_identity_quarantine"] == 0
+        assert retention["dropped_quarantine"] == 0
+        assert raw_c.exists()
+        assert diagnostics["identity_receipts"] == 0
+        assert diagnostics["identity_receipts_unreadable"] == 1
 
 
 class TestAttentionBudget:

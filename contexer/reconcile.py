@@ -1266,8 +1266,9 @@ def _has_work(repo_path: str, session_id: str) -> bool:
     pending = spool.list_pending_evidence(
         repo_path, session_id, route_invalid=False, issues=routing_issues)
     observed_keys = {str(event.get("repo_key") or "") for event in pending}
+    comparisons = repo_key.compare_evidence_repo_identities(repo_path, observed_keys)
     identity_work = any(
-        not repo_key.compare_evidence_repo_identity(repo_path, observed)["matches"]
+        not comparisons[observed]["matches"]
         for observed in observed_keys
     )
     return bool(spool.held_candidates(repo_path) or routing_issues or identity_work
@@ -1326,24 +1327,28 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
     identity_incomplete = bool(routing_issues) and not dry_run
     if identity_incomplete:
         receipt["incomplete"] = True
-    comparisons = {}
+    observed_keys = {str(event.get("repo_key") or "") for event in pending}
+    comparisons = repo_key.compare_evidence_repo_identities(repo_path, observed_keys)
+    foreign_routes = []
     # Identity is the consumer chokepoint for EVERY valid event. Candidate eligibility is a
     # later concern: filtering bookkeeping kinds first let foreign policy/session records sit
     # in pending forever without either materializing or receiving a terminal quarantine.
     for event in pending:
         observed = str(event.get("repo_key") or "")
-        if observed not in comparisons:
-            comparisons[observed] = repo_key.compare_evidence_repo_identity(repo_path, observed)
         comparison = comparisons[observed]
         if comparison["matches"]:
             accepted.append(event)
             continue
         if dry_run:
             continue
-        routed = spool.quarantine_identity_event(
-            repo_path, str(event.get("event_id") or ""),
-            observed_key=comparison["observed_key"],
-            expected_key=comparison["expected_key"], reason=comparison["reason"])
+        foreign_routes.append({
+            "event_id": str(event.get("event_id") or ""),
+            "observed_key": comparison["observed_key"],
+            "expected_key": comparison["expected_key"],
+            "reason": comparison["reason"],
+        })
+    routed_events = spool.quarantine_identity_events(repo_path, foreign_routes)
+    for routed in routed_events:
         if not routed:
             identity_incomplete = True
             receipt["incomplete"] = True
