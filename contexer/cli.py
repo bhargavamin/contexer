@@ -1074,11 +1074,31 @@ def share_cmd(rest: list | None = None) -> None:
     Must be run inside a git repository, EXCEPT for `--global`: global rules
     (`~/.contexer/_global.json`) belong to no repo and push unbound (issue #239), so requiring
     one there would be a check with nothing behind it."""
+    rest = rest or []
+    if "--help" in rest or "-h" in rest:
+        print(
+            "Usage: contexer share [id | --all | --global] [--yes]\n\n"
+            "Push local decisions to your personal cloud context.\n\n"
+            "  id          Push one matching local decision.\n"
+            "  --all       Push every shareable decision in the current repo.\n"
+            "  --global    Push global rules without requiring a repo.\n"
+            "  -y, --yes   Skip the confirmation prompt.\n"
+            "  -h, --help  Show this help without contacting the cloud or replaying queued shares."
+        )
+        return
+
+    unknown_options = [a for a in rest if a.startswith("-") and a not in (
+        "--all", "--global", "--yes", "-y",
+    )]
+    if unknown_options:
+        print(f"Unknown option: {unknown_options[0]}", file=sys.stderr)
+        print("Usage: contexer share [id | --all | --global] [--yes]", file=sys.stderr)
+        sys.exit(1)
+
     import os
 
     from contexer import config, share, share_status, store
 
-    rest = rest or []
     yes = "--yes" in rest or "-y" in rest
     share_all = "--all" in rest
     globals_ = "--global" in rest
