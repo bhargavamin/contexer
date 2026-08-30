@@ -109,6 +109,29 @@ def test_candidate_id_is_uuid5_over_the_kind_target_and_sorted_event_ids():
     assert got["candidate_id"] == str(expected)
 
 
+def test_attention_priority_orders_significance_certainty_score_time_and_id():
+    def candidate(cid, *, kind="new", security=False, certainty="supporting", score=50,
+                  observed="2026-08-24T10:00:00+00:00"):
+        return {"candidate_id": cid, "kind": kind, "security_significant": security,
+                "score": score, "first_observed_at": observed,
+                "signals": [{"certainty": certainty}]}
+
+    rows = [
+        candidate("ordinary-confirmed", certainty="confirmed", score=100),
+        candidate("security", security=True, score=25),
+        candidate("lifecycle", kind="retire", score=25),
+        candidate("support-high", score=80),
+        candidate("support-early", score=50, observed="2026-08-24T09:00:00+00:00"),
+        candidate("support-late-a", score=50, observed="2026-08-24T11:00:00+00:00"),
+        candidate("support-late-b", score=50, observed="2026-08-24T11:00:00+00:00"),
+    ]
+
+    ordered = [row["candidate_id"] for row in sorted(rows, key=candidates.attention_priority)]
+
+    assert ordered == ["lifecycle", "security", "ordinary-confirmed", "support-high",
+                       "support-early", "support-late-a", "support-late-b"]
+
+
 def test_the_same_events_read_as_a_different_proposal_get_a_different_id():
     """The id names what is PROPOSED, not just what was observed. `held/<candidate-id>/` is the
     storage layer's "already pending" record, and an update and a retirement built from one

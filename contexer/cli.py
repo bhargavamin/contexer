@@ -778,13 +778,34 @@ def _evidence_status_lines(repos) -> list[str]:
     lines = []
     for label, slug in targets:
         diag = spool.evidence_diagnostics("", slug=slug)
+        repo_path = known.get(slug)
+        try:
+            # The store is authoritative for attention debt: one review item may have several
+            # evidence holds, and manual pending entries have no hold at all. A spool-only slug
+            # has no reversible path, so its held-state count is the honest fallback.
+            review_pending = (len(store.get_pending_decisions(repo_path)) if repo_path
+                              else diag["pending_review"])
+        except (OSError, ValueError, TypeError):
+            review_pending = diag["pending_review"]
         if not any((diag["pending"], diag["held"], diag["quarantine"])) and not diag["gap"] \
-                and diag["readable"]:
+                and not review_pending and diag["readable"]:
             continue
         if diag["readable"]:
             parts = [f"{diag['pending']} pending"]
             if diag["held"]:
                 parts.append(f"{diag['held']} held ({diag['held_events']} events)")
+            if review_pending:
+                parts.append(f"{review_pending} review pending")
+            if diag["deferred_attention"]:
+                parts.append(f"{diag['deferred_attention']} deferred")
+            age = diag.get("oldest_attention_age_seconds")
+            if isinstance(age, int):
+                # This age spans ALL attention debt, not merely deferred holds. Keeping it a
+                # separate phrase avoids attributing an old pending review's age to a fresh
+                # deferred candidate, and keeps pending-only debt honest too.
+                parts.append(f"oldest attention {age}s")
+            if diag["incomplete"]:
+                parts.append(f"{diag['incomplete']} incomplete")
             if diag["held_unattributed"]:
                 # Held with no recorded decision: nothing will ever settle it (see
                 # spool._sweep_orphan_holds), so it is named rather than folded into the count.

@@ -4449,21 +4449,25 @@ def _pending_review_notice(total: int) -> str:
 
 
 def _reconcile_note(receipt: dict) -> str:
-    """The one sentence a reconciliation pass may add to the session-start status line, and
-    only when the pass could not account for everything it was handed.
+    """Concise count-only reconciliation news for the session-start status line.
 
     COVERAGE, never content. What a candidate says reaches the developer through the ordinary
     pending-review queue, which the count pointer below already renders from the post-reconcile
-    store; a startup line must never carry raw candidate text. A `complete` pass therefore says
-    nothing at all (silent operation), and a `skipped` one says nothing either, because another
-    pass holding the lock is the design working rather than news. `partial` and `error` are the
-    two states where evidence was acknowledged and has NOT been accounted for, which is exactly
-    the loss runbook invariant 3 requires to stay visible.
+    store; a startup line must never carry raw candidate text. A complete pass is silent unless
+    attention admission deferred work, in which case the developer gets ONE retained-count
+    diagnostic rather than one line per candidate. A `skipped` pass says nothing because
+    another pass holding the lock is the design working rather than news. `partial` and `error`
+    remain visible because acknowledged evidence has not been fully accounted for.
     """
-    if (receipt.get("coverage") or {}).get("reconciliation") not in ("partial", "error"):
-        return ""
-    return (" Evidence reconciliation was incomplete: some recorded evidence is still "
-            "unconsumed, run `contexer reconcile-session` to retry.")
+    notes = []
+    if (receipt.get("coverage") or {}).get("reconciliation") in ("partial", "error"):
+        notes.append("Evidence reconciliation was incomplete: some recorded evidence is still "
+                     "unconsumed, run `contexer reconcile-session` to retry.")
+    deferred = receipt.get("deferred")
+    if isinstance(deferred, int) and not isinstance(deferred, bool) and deferred > 0:
+        notes.append(f"{deferred} evidence candidate{'' if deferred == 1 else 's'} deferred "
+                     "for review capacity; all recorded evidence was retained.")
+    return "" if not notes else " " + " ".join(notes)
 
 
 def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "",

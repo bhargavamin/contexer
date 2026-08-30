@@ -67,9 +67,11 @@ window nothing on disk covered: a crash after the store write and before the hol
 decision whose evidence was still in `pending/`, connected to it by nothing. Now a crash
 anywhere leaves the evidence either wholly pending - so the next pass simply aggregates it
 again, under the same deterministic id - or wholly held behind a manifest that names both what
-it claims and how far it got. `_resume_holds` carries each of those forward, re-classifying a
-held candidate's own events against the CURRENT store so a replay recognizes the decision the
-interrupted pass already created instead of writing it twice.
+it claims and how far it got. `_recoverable_holds` carries each interrupted hold forward,
+re-classifying its own events against the CURRENT store so a replay recognizes the decision
+the interrupted pass already created instead of writing it twice. A deliberate attention
+deferral instead resumes the exact proposal and lifecycle basis frozen before earlier admitted
+batches changed the store.
 
 The window is closed, but its recovery stays: a store that dedups a restatement onto an entry
 still awaiting review, and legacy holds from the shipped order, both still produce a candidate
@@ -94,6 +96,15 @@ from contexer import candidates, evidence, lifecycle, repo_key, sidecars, spool,
 # ABOUT candidates (`policy_evaluation`, `session_reconcile`), which never groups into one, so
 # a spooled one must never make the next pass look like it has work to do.
 _EVIDENCE_KINDS = candidates.SEED_KINDS | candidates.SUPPORT_KINDS
+
+# Measured attention bounds, not storage bounds. Before admission control, 20 distinct
+# directives produced 20 review rows in ~69ms and the realistic 1,000-event corpus produced
+# 100 rows in ~1.32s. Five writes keep one checkpoint's materialization work small; ten total
+# pending items matches the review surface's existing overview scale without dropping a byte.
+# Excess candidates are held durably in `deferred_attention`, so these constants can be tuned
+# from the benchmark without changing capture or retention limits.
+PENDING_REVIEW_CEILING = 10
+MATERIALIZATION_ALLOWANCE = 5
 
 # Tail cap on the reconciliation log, matching `store._RETRIEVAL_LOG_CAP` - the same kind of
 # record, kept for the same reason, so it is bounded the same way.
@@ -128,7 +139,8 @@ _FALLBACK_SESSION = "reconcile"
 
 def _receipt(dry_run: bool, host: str = "") -> dict:
     return {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0, "reconsidered": 0,
-            "already_pending": 0, "duplicates": 0, "insufficient": 0, "incomplete": False,
+            "already_pending": 0, "duplicates": 0, "insufficient": 0, "deferred": 0,
+            "incomplete": False, "lock_unavailable": False,
             "skipped": False, "dry_run": bool(dry_run),
             "coverage": evidence.host_coverage(host)}
 
@@ -167,9 +179,10 @@ def _reconcile_lock(repo_path: str):
     the next checkpoint picks the work up. Do not "fix" this back out.
 
     `flock` and not a lock FILE's existence: a crashed pass releases it with its fd, where a
-    stale marker would wedge reconciliation on this repo for good. Failing to open the lock at
-    all fails OPEN (yield True) - an unwritable STORE_DIR must not silently disable the
-    pipeline, and it is the contention case, not the I/O case, this exists to answer.
+    stale marker would wedge reconciliation on this repo for good. Failing to open or acquire
+    a trustworthy lock fails CLOSED for this pass (`None`): the evidence stays untouched and
+    the receipt is incomplete. The attention ceiling is a hard invariant, so running unlocked
+    is worse than deferring work to a checkpoint whose filesystem can serialize it.
     """
     path = store.STORE_DIR / sidecars.filename("reconcile_lock", slug=store.repo_slug(repo_path))
     try:
@@ -179,7 +192,7 @@ def _reconcile_lock(repo_path: str):
         # pin-your-encoding invariant does not apply: there is no text here.)
         handle = open(path, "ab")       # noqa: SIM115 - closed on every path below
     except OSError:
-        yield True
+        yield None
         return
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -187,9 +200,9 @@ def _reconcile_lock(repo_path: str):
         handle.close()
         yield False
         return
-    except OSError:                     # no flock on this filesystem: fail open, as above
+    except OSError:                     # no trustworthy flock: retain work for a later pass
         handle.close()
-        yield True
+        yield None
         return
     try:
         yield True
@@ -271,7 +284,7 @@ def _dispositions(held: dict, entries: list, retired_ids: set, tombstones: list 
     The INPUT is the held directories and their `candidate.json` bookkeeping. This judges only
     the candidates that have REACHED review (`pending_review`, and `settled` for one whose
     finalize was interrupted): a candidate still `held` or `materializing` has no review to
-    have earned anything yet and belongs to `_resume_holds`, a `reviewed` one has already
+    have earned anything yet and belongs to `_recoverable_holds`, a `reviewed` one has already
     earned its disposition, and an unknown state is never guessed at at all.
 
     The rules are lazy on purpose: nothing hooks `approve_decision` or `retire_decision`, so a
@@ -332,7 +345,7 @@ def _dispositions(held: dict, entries: list, retired_ids: set, tombstones: list 
                 flips[candidate_id] = settled
             continue
         if state != "pending_review":
-            # `held`/`materializing` belong to `_resume_holds`, `reviewed` has already earned
+            # `held`/`materializing` belong to `_recoverable_holds`, `reviewed` has earned
             # its disposition, and a missing, unreadable or unknown state is never guessed at.
             continue
         entry_id = str(meta.get("entry_id") or "")
@@ -528,7 +541,7 @@ def _link_rows(signals) -> list[dict]:
 
 
 def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
-              created_at: str = "") -> dict:
+              created_at: str = "", state: str = "held") -> dict:
     """The complete `candidate.json` for one candidate, in `held` state.
 
     Written before a single event moves and before the store is touched at all, so it carries
@@ -546,11 +559,13 @@ def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
     return {
         "schema_version": spool.MANIFEST_VERSION,
         "candidate_id": candidate_id,
-        "state": "held",
+        "state": state,
         "status": "pending",
         "kind": candidate.get("kind") or "",
         "target_decision_id": target,
+        "replacement_decision_id": candidate.get("replacement_decision_id") or None,
         "basis_revision_id": (basis.get(target or "") or {}).get("revision_id") or None,
+        "basis_target_state": (basis.get(target or "") or {}).get("state") or None,
         "event_ids": list(event_ids),
         "entry_id": "",
         "candidate": {
@@ -560,6 +575,8 @@ def _manifest(candidate_id: str, candidate: dict, event_ids: list, basis: dict,
             "source_files": list(candidate.get("source_files") or []),
             "possible_source_files": list(candidate.get("possible_source_files") or []),
             "score": candidate.get("score") or 0,
+            "first_observed_at": candidate.get("first_observed_at") or "",
+            "security_significant": bool(candidate.get("security_significant")),
             # The typed link rows, TRIMMED to what a review surface renders (Task 03's
             # relation/certainty plus the reason). The relationship type exists only in the
             # aggregator's output, so a manifest that dropped it left the human review unable
@@ -594,7 +611,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
     `entry_id` it belongs to, and the lane/revision the disposition rules read. `_commit_writes`
     persists it onto the manifest as transition 6.
 
-    `candidate_id`/`prior` are the resume path (`_resume_holds`): the identity of a hold is the
+    `candidate_id`/`prior` are the resume path (`_recoverable_holds`): a hold's identity is the
     directory it already occupies, never the id a re-classification would mint, and `prior`
     keeps the moment the candidate was first claimed.
     """
@@ -696,7 +713,7 @@ def _materialize(repo_path: str, candidate: dict, sessions: dict, dry_run: bool,
                 # The record moved between this pass's snapshot and the attach, so this
                 # candidate was formed against something that is no longer there. Nothing is
                 # settled, nothing is deleted and no `writes` record is made: the manifest
-                # stays `materializing`, which is the phase `_resume_holds` re-classifies
+                # stays `materializing`, which is the phase `_recoverable_holds` re-classifies
                 # against the CURRENT store under this same candidate id. So the question is
                 # asked once, at the new basis, on a later pass - never bound to a revision or
                 # a state its own evidence was never judged against.
@@ -890,22 +907,65 @@ def _finish_interrupted_holds(repo_path: str, events: list, held: dict, dry_run:
     return kept
 
 
-def _resume_holds(repo_path: str, held: dict, projection: list, sessions: dict,
-                  receipt: dict, writes: dict, basis: dict) -> dict:
-    """Carry every interrupted candidate to its next durable phase. Returns the holds that
-    still stand, so the aggregation loop never counts a directory this pass just discarded.
+def _deferred_candidate(candidate_id: str, meta: dict, events: list[dict]) -> dict | None:
+    """Rebuild the exact atomic proposal frozen in a deferred manifest.
+
+    Deferral is an admission decision, not a crash. Reclassifying its evidence against a
+    store that now contains earlier admitted batches can silently turn unrelated `new`
+    proposals into `update` holds on those batches. The manifest deliberately preserves the
+    proposal as it was classified; the held event bodies supply only the event ids/session
+    data that the bounded manifest does not duplicate.
+    """
+    payload = meta.get("candidate")
+    event_ids = meta.get("event_ids")
+    if not isinstance(payload, dict) or not isinstance(event_ids, list):
+        return None
+    by_id = {str(event.get("event_id") or ""): event for event in events}
+    links = payload.get("signals")
+    if (not isinstance(links, list) or len(links) != len(event_ids)
+            or set(by_id) != {str(event_id) for event_id in event_ids}):
+        return None
+    signals = []
+    for event_id, link in zip(event_ids, links, strict=True):
+        if not isinstance(link, dict):
+            return None
+        signals.append({**by_id[str(event_id)], **link})
+    return {
+        "candidate_id": candidate_id,
+        "kind": str(meta.get("kind") or ""),
+        "target_decision_id": meta.get("target_decision_id"),
+        "replacement_decision_id": meta.get("replacement_decision_id"),
+        "title": payload.get("title") or "",
+        "content": payload.get("content") or "",
+        "subtype": payload.get("subtype") or "",
+        "source_files": list(payload.get("source_files") or []),
+        "possible_source_files": list(payload.get("possible_source_files") or []),
+        "score": payload.get("score") or 0,
+        "first_observed_at": payload.get("first_observed_at") or "",
+        "security_significant": bool(payload.get("security_significant")),
+        "signals": signals,
+        "uncertain_signals": list(payload.get("uncertain_signals") or []),
+    }
+
+
+def _recoverable_holds(repo_path: str, held: dict, projection: list, sessions: dict,
+                       receipt: dict, *, include_deferred: bool) -> tuple[dict, list[dict]]:
+    """Return interrupted/deferred candidates for the shared admission queue.
+
+    Nothing materializes here. Recovery used to run before new aggregation and could therefore
+    exceed a newly introduced ceiling before admission had a chance to count it. Returning one
+    queue lets interrupted, deferred and new candidates share the same deterministic priority
+    and the same capacity reservation.
 
     One rule per phase, and each one is the recovery for a crash at a numbered transition:
 
     * `reviewed` (crash at 9) - the disposition and its summary are both durable, so only the
       raw cleanup is left. It is finished WITHOUT re-recording anything.
-    * `held` / `materializing` (crash at 2-5) - the events are held and no review exists yet.
-      The HELD events are re-classified against the CURRENT store and materialized through the
-      ordinary path, which is what makes the replay idempotent rather than merely retried: a
-      decision the interrupted pass already created comes back as a `duplicate` of itself and
-      is held against its own review, and one that never landed comes back as `new`. Asking the
-      aggregator is also the only inspection that stays honest as the store moves underneath a
-      stuck candidate.
+    * `held` / `materializing` (crash at 2-5) are re-classified against the CURRENT store and
+      queued under the existing directory id. A decision the earlier pass already created
+      comes back as a duplicate; one that never landed comes back as new.
+    * `deferred_attention`, when capacity exists, resumes the exact atomic candidate and
+      lifecycle basis frozen in its manifest; deferral is admission state, not a crash retry.
     * a hold holding no events at all is DISCARDED - it can never be materialized and it would
       otherwise occupy its candidate id for good (`spool.discard_empty_hold`).
     * anything else - a manifest that is missing, unreadable or carries an unknown state, and
@@ -916,14 +976,16 @@ def _resume_holds(repo_path: str, held: dict, projection: list, sessions: dict,
     re-classification would mint: kind and target are part of that id, and both can legitimately
     change between the crash and the replay.
     """
-    standing = {}
+    standing, queued = {}, []
     for candidate_id, meta in sorted(held.items()):
         state = meta.get("state")
         if state == "reviewed":
             spool.finalize_candidate_evidence(repo_path, candidate_id,
                                               str(meta.get("status") or "dismissed"))
             continue
-        if state not in ("held", "materializing"):
+        recoverable = state in ("held", "materializing") \
+            or (include_deferred and state == "deferred_attention")
+        if not recoverable:
             if not meta and spool.discard_empty_hold(repo_path, candidate_id):
                 # A directory whose manifest write never landed (transition 1) and which holds
                 # no events either: nothing can ever attribute it, and leaving it would occupy
@@ -936,8 +998,12 @@ def _resume_holds(repo_path: str, held: dict, projection: list, sessions: dict,
         events = spool.held_events(repo_path, candidate_id)
         if not events and spool.discard_empty_hold(repo_path, candidate_id):
             continue
-        resumed = (candidates.aggregate_candidates(events, projection)["candidates"]
-                   if events else [])
+        if state == "deferred_attention":
+            frozen = _deferred_candidate(candidate_id, meta, events)
+            resumed = [frozen] if frozen is not None else []
+        else:
+            resumed = (candidates.aggregate_candidates(events, projection)["candidates"]
+                       if events else [])
         if len(resumed) == 1:
             # The events a hold claims were ONE candidate when it was written. Anything else
             # is a corpus this pass cannot attribute to this directory, so it is reported
@@ -950,12 +1016,49 @@ def _resume_holds(repo_path: str, held: dict, projection: list, sessions: dict,
             # and retention deliberately never touches a held directory.
             sessions.update({str(e.get("event_id") or ""): str(e.get("session_id") or "")
                              for e in events})
-            _materialize(repo_path, resumed[0], sessions, False, receipt, writes, basis,
-                         candidate_id=candidate_id, prior=meta)
+            candidate = dict(resumed[0])
+            candidate["candidate_id"] = candidate_id
+            row = {"candidate": candidate, "prior": meta, "existing": True}
+            if state == "deferred_attention":
+                target = str(meta.get("target_decision_id") or "")
+                row["basis"] = ({target: {
+                    "revision_id": str(meta.get("basis_revision_id") or ""),
+                    "state": str(meta.get("basis_target_state") or ""),
+                }} if target else {})
+            queued.append(row)
         else:
             receipt["incomplete"] = True
         standing[candidate_id] = meta
-    return standing
+    return standing, queued
+
+
+def _requires_attention(candidate: dict) -> bool:
+    """Whether materializing this candidate can open a developer review item.
+
+    `duplicate` is terminal bookkeeping and `insufficient` writes nothing, so both continue at
+    zero capacity. Every other candidate is conservatively budgeted: a target may already hold
+    a proposal and turn the write into `already_pending`, but deferring that evidence is safer
+    than guessing and admitting one row past the ceiling.
+    """
+    return candidate.get("kind") not in ("duplicate", "insufficient")
+
+
+def _candidate_event_key(candidate: dict) -> tuple[str, ...]:
+    """Stable identity of the raw evidence group, independent of re-classification."""
+    return tuple(sorted(str(row.get("event_id") or "")
+                        for row in (candidate.get("signals") or [])
+                        if isinstance(row, dict)))
+
+
+def _defer_candidate(repo_path: str, candidate: dict, basis: dict, receipt: dict) -> None:
+    """Durably hold one not-yet-admitted candidate without touching the decision store."""
+    candidate_id = str(candidate.get("candidate_id") or "")
+    event_ids = [str(row.get("event_id") or "")
+                 for row in (candidate.get("signals") or []) if isinstance(row, dict)]
+    manifest = _manifest(candidate_id, candidate, event_ids, basis,
+                         state="deferred_attention")
+    if not _hold(repo_path, candidate_id, event_ids, meta=manifest):
+        receipt["incomplete"] = True
 
 
 def _recorded_summaries(entries: list) -> set:
@@ -1136,7 +1239,11 @@ def _reconcile(repo_path: str, session_id: str, dry_run: bool, receipt: dict) ->
         # spool that moved underneath it, which is what a preview is.
         return _run_pass(repo_path, session_id, True, receipt)
     with _reconcile_lock(repo_path) as acquired:
-        if not acquired:
+        if acquired is None:
+            receipt["incomplete"] = True
+            receipt["lock_unavailable"] = True
+            return receipt
+        if acquired is False:
             receipt["skipped"] = True
             return receipt
         return _run_pass(repo_path, session_id, False, receipt)
@@ -1244,8 +1351,6 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
     if not events and not held:
         # The work the fast path saw is gone: another pass took it while this one waited for
         # the lock. Nothing to do, and nothing to report about it.
-        if identity_incomplete:
-            _recoverage(receipt, "partial")
         return receipt
     events = _finish_interrupted_holds(repo_path, events, held, dry_run, receipt)
     # ponytail: counted AFTER the recovery strips events an existing candidate already claims,
@@ -1261,29 +1366,69 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
 
     writes: dict = {}
     flips: dict = {}
+    existing_deferred = sum(1 for meta in held.values()
+                            if meta.get("state") == "deferred_attention")
+    receipt["deferred"] = existing_deferred
+    pending_reviews = len(store.get_pending_decisions(repo_path))
+    available = min(MATERIALIZATION_ALLOWANCE,
+                    max(0, PENDING_REVIEW_CEILING - pending_reviews))
+    queued: list[dict] = []
     if not dry_run:
-        # Interrupted candidates first, and their dispositions off what SURVIVES that: a resume
-        # can discard a hold or carry it to a new phase, and both the flips below and the loop's
-        # own "already pending" test read `held`.
-        held = _resume_holds(repo_path, held, snap["projection"], sessions, receipt, writes,
-                             snap["basis"])
-        if writes:
-            # A resume WROTE the store, so everything below must classify and file against what
-            # the store says NOW. Reading a stale projection here cost an acknowledged event:
-            # matching evidence arriving in the same pass read as `new` instead of as a
-            # duplicate of the decision the resume had just created, the store's own novelty
-            # filter then rejected the capture, and the record landed with no `entry_id` to
-            # file a receipt against. One re-read closes it; `_finalize` refusing to delete an
-            # unattributed hold is the backstop for every other route to the same shape.
-            snap = _snapshot(repo_path)
+        # Recovery no longer materializes ahead of admission. At zero capacity intentionally
+        # do not even read deferred raw events: a full review queue must make repeated session
+        # starts cheap. Interrupted `held`/`materializing` rows are still classified because
+        # they may already have written the store and now be terminal duplicates.
+        held, queued = _recoverable_holds(
+            repo_path, held, snap["projection"], sessions, receipt,
+            include_deferred=available > 0)
         flips = _dispositions(held, snap["entries"], _retired_ids(snap["tombstones"]),
                               snap["tombstones"])
-    for candidate in candidates.aggregate_candidates(events, snap["projection"])["candidates"]:
+    new_candidates = (candidates.aggregate_candidates(events, snap["projection"])["candidates"]
+                      if events else [])
+    for candidate in new_candidates:
         if candidate["candidate_id"] in held:
             # Already awaiting review under its deterministic id. Belt to the held-events
             # braces: it also covers a candidate whose directory exists but whose bookkeeping
             # never recorded the event ids `_finish_interrupted_holds` matches on.
             receipt["already_pending"] += 1
+            continue
+        queued.append({"candidate": candidate, "prior": None, "existing": False})
+
+    queued.sort(key=lambda row: candidates.attention_priority(row["candidate"]))
+    admitted_event_keys = set()
+    for row in queued:
+        candidate = row["candidate"]
+        row["admitted"] = not _requires_attention(candidate) or available > 0
+        if _requires_attention(candidate) and row["admitted"]:
+            available -= 1
+        if row["admitted"] and not row["existing"]:
+            admitted_event_keys.add(_candidate_event_key(candidate))
+
+    # Execute admitted RECOVERY first. The choice of what earned attention was global above,
+    # but an interrupted candidate may already have written the store. New pending evidence
+    # must therefore be re-classified after these writes, exactly as it was before admission
+    # existed, or a restatement beside a resume can remain `new` against a stale snapshot and
+    # strand an unattributed hold.
+    for row in (item for item in queued if item["existing"] and item["admitted"]):
+        candidate = row["candidate"]
+        if row["prior"].get("state") == "deferred_attention":
+            receipt["deferred"] -= 1
+        _materialize(
+            repo_path, candidate, sessions, dry_run, receipt, writes,
+            row["basis"] if "basis" in row else snap["basis"],
+            candidate_id=str(candidate.get("candidate_id") or ""), prior=row["prior"])
+
+    if writes:
+        snap = _snapshot(repo_path)
+        new_candidates = (candidates.aggregate_candidates(events, snap["projection"])["candidates"]
+                          if events else [])
+
+    for candidate in new_candidates:
+        admitted = _candidate_event_key(candidate) in admitted_event_keys
+        if _requires_attention(candidate) and not admitted:
+            if not dry_run:
+                _defer_candidate(repo_path, candidate, snap["basis"], receipt)
+            receipt["deferred"] += 1
             continue
         _materialize(repo_path, candidate, sessions, dry_run, receipt, writes, snap["basis"])
 
@@ -1295,10 +1440,13 @@ def _run_pass(repo_path: str, session_id: str, dry_run: bool, receipt: dict) -> 
         meta = held[candidate_id]
         _finalize(repo_path, candidate_id, disposition, str(meta.get("entry_id") or ""),
                   snap["filable"], meta.get("event_ids") or [], snap["recorded"], receipt)
-    if identity_incomplete:
-        # A failed receipt/move must leave its raw source exactly where it was. Retention could
-        # otherwise evict that same pending file in this pass, contradicting the failure result.
-        _recoverage(receipt, "partial")
+    unsafe_pending = (receipt["incomplete"]
+                      and bool(spool.list_pending_evidence(repo_path)))
+    if identity_incomplete or unsafe_pending:
+        # A failed receipt/hold/move must leave its raw source exactly where it was. Retention
+        # could otherwise evict that same pending file in this pass, contradicting the failure
+        # result. Session-start maintenance remains an independent TTL-gated sweep; this guard
+        # is only for the pass that just failed to make its own source durable elsewhere.
         return receipt
     retention = spool.run_retention(repo_path)
     if retention.get("orphans_unreceipted"):
@@ -1328,7 +1476,8 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
     worktree-shared spool needs). Returns the receipt:
 
         {"events_observed", "proposed", "lifecycle_proposed", "reconsidered",
-         "already_pending", "duplicates", "insufficient", "incomplete", "skipped", "dry_run",
+         "already_pending", "duplicates", "insufficient", "deferred", "incomplete",
+         "lock_unavailable", "skipped", "dry_run",
          "coverage"}
 
     `host` names the adapter whose checkpoint called this, for the receipt's `coverage` block
@@ -1347,16 +1496,13 @@ def reconcile_session(repo_path: str, session_id: str = "", dry_run: bool = Fals
     NEVER raises: every caller is a host hook or a report surface, and a reconciliation that
     could not finish is a receipt marked `incomplete`, never a broken session start.
 
-    COST AT THE CEILING, measured rather than estimated, because this now runs at every host's
-    session start: a spool holding `spool._MAX_PENDING_EVENTS` = 1000 events in the realistic
-    shape (100 distinct statements plus 900 corroborating edits) takes **751ms** end to end and
-    produces 100 review items. Only ~106ms of that is aggregation, which is the half Task 06
-    gates at `_AGGREGATION_GATE_MS`; the remaining ~645ms is 100 holds plus 100 `store.save`
-    calls, each rebuilding the BM25 retrieval sidecar at its tail. It is a ONE-TIME drain (the
-    next start over the same, now-held, spool measured under 42ms) and it needs a spool that
-    genuinely accumulated 1000 events, which is why ruling P4's refusal of a numeric has-work
-    budget stands: the number is disclosed here and in OUTSTANDING-ISSUES item 10 rather than
-    enforced, so a maintainer meets it before a developer does.
+    COST AT THE CEILING is measured rather than estimated because this runs at every host's
+    session start. Before attention admission, a realistic 1,000-event spool (100 statements,
+    900 corroborating edits) took 1,317ms and opened 100 review items. With the measured bounds
+    above it takes ~881ms to hold all 1,000 events while opening five items, ~129ms to fill the
+    remaining five slots on the next checkpoint, and ~25ms at the full ten-item ceiling; no
+    deferred raw event is dropped. The executable row lives beside the constants in
+    `tests/test_benchmark_evidence.py`.
     """
     receipt = _receipt(dry_run, host)
     try:
@@ -1378,6 +1524,9 @@ def format_receipt(receipt: dict) -> str:
     if receipt.get("skipped"):
         return ("Reconciled evidence: skipped - another reconciliation pass is already "
                 "running on this repo. The next checkpoint picks this up.")
+    if receipt.get("lock_unavailable"):
+        return ("Reconciled evidence: incomplete - the per-repository lock was unavailable. "
+                "No evidence was consumed; retry from a writable local store.")
     coverage = receipt.get("coverage")
     head = "Reconciled evidence" + (" (dry run - nothing was written)" if receipt["dry_run"]
                                     else "")
@@ -1391,6 +1540,8 @@ def format_receipt(receipt: dict) -> str:
         f"  duplicates:               {receipt['duplicates']}",
         f"  insufficient evidence:    {receipt['insufficient']}",
     ]
+    if receipt.get("deferred"):
+        lines.append(f"  deferred for attention:   {receipt['deferred']} (evidence retained)")
     if coverage:
         # What could be seen at all, beside what was found: "0 proposed" on a host that
         # cannot observe edits means something different from "0 proposed" on one that can.

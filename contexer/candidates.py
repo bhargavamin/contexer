@@ -15,7 +15,8 @@ Idempotency is the load-bearing property. `candidate_id` is a uuid5 over the can
 its target decision when it names one, the sorted contributing event ids, and - for a
 `reconsider` candidate only - the basis revision the question is asked against; events are
 ordered by (occurred_at, event_id) before anything reads them, and candidates come back sorted
-by (-score, candidate_id). The same event set in ANY input order therefore produces
+by the public attention-priority key (significance, certainty, score, first observation, id).
+The same event set in ANY input order therefore produces
 byte-identical output. A `uuid4` in this module is a defect.
 """
 
@@ -99,6 +100,10 @@ _NEGATION_RE = re.compile(r"\b(?:not|never|don't|stop|instead of|no longer)\b")
 _PRESCRIPTIVE_RE = re.compile(r"\b(?:always|never|don't|do not|must)\b")
 # Prefix match on purpose: "commits", "testing", "deploys", "formatting" are the same word.
 _TOOLING_RE = re.compile(r"\b(?:commit|test|lint|deploy|format)")
+_SECURITY_RE = re.compile(
+    r"\b(?:security|auth(?:entication|orization)?|credential|secret|vulnerabilit\w*|"
+    r"encrypt\w*|access[ -]control)\b", re.I)
+_LIFECYCLE_ATTENTION_KINDS = frozenset({"retire", "replace", "reconsider"})
 
 
 # ── text primitives ──────────────────────────────────────────────────────────────
@@ -171,6 +176,36 @@ def _attributes(event) -> dict:
     and every read below would then be an AttributeError on a pure function."""
     attributes = event.get("attributes")
     return attributes if isinstance(attributes, dict) else {}
+
+
+def _first_observed(events) -> str:
+    ordered = _ordered(events)
+    return str(ordered[0].get("occurred_at") or "") if ordered else ""
+
+
+def attention_priority(candidate: dict) -> tuple:
+    """Deterministic review-admission order for one candidate.
+
+    Lifecycle changes come first because they change whether a standing decision exists;
+    security-sensitive content follows. Evidence certainty is a tier, not a probability:
+    any confirmed observation outranks supporting-only evidence, which outranks uncertain-only
+    evidence. Within a tier the aggregation score decides, then the amount of confirmed and
+    supporting evidence, first observation time, and the deterministic candidate id.
+
+    Pure and public because reconciliation ranks newly aggregated and durably deferred
+    candidates together. Keeping this key here prevents the persistence coordinator from
+    inventing a second interpretation of candidate evidence.
+    """
+    kind = str(candidate.get("kind") or "")
+    significance = (0 if kind in _LIFECYCLE_ATTENTION_KINDS
+                    else 1 if candidate.get("security_significant") else 2)
+    signals = [row for row in (candidate.get("signals") or []) if isinstance(row, dict)]
+    confirmed = sum(1 for row in signals if row.get("certainty") == "confirmed")
+    supporting = sum(1 for row in signals if row.get("certainty") == "supporting")
+    certainty = 0 if confirmed else 1 if supporting else 2
+    return (significance, certainty, -float(candidate.get("score") or 0),
+            -confirmed, -supporting, str(candidate.get("first_observed_at") or ""),
+            str(candidate.get("candidate_id") or ""))
 
 
 def _new_index() -> dict:
@@ -772,6 +807,8 @@ def _seeded_candidate(group, index) -> dict:
         # note for why an uncertain anchor is worse than no anchor at all.
         "possible_source_files": group["possible"][:_MAX_SOURCE_FILES],
         "score": score,
+        "first_observed_at": _first_observed(group["events"]),
+        "security_significant": bool(_SECURITY_RE.search(content)),
         "signals": signals,
         "uncertain_signals": _uncertain_signals(group),
         "uncertainties": uncertainties,
@@ -800,6 +837,8 @@ def _leftover_candidate(session_id, events) -> dict:
         "source_files": files[:_MAX_SOURCE_FILES],
         "possible_source_files": [],
         "score": score,
+        "first_observed_at": _first_observed(events),
+        "security_significant": False,
         "signals": signals,
         "uncertain_signals": [],
         "uncertainties": uncertainties,
@@ -818,7 +857,7 @@ def aggregate_candidates(events: list, decisions: list) -> dict:
 
     candidates = [_seeded_candidate(g, index) for g in groups]
     candidates += [_leftover_candidate(sid, evs) for sid, evs in sorted(leftovers.items())]
-    candidates.sort(key=lambda c: (-c["score"], c["candidate_id"]))
+    candidates.sort(key=attention_priority)
 
     kinds = [e.get("kind") for e in (events or []) if isinstance(e, dict)]
     return {

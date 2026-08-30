@@ -117,7 +117,8 @@ DISPOSITIONS = frozenset({"approved", "dismissed"})
 #
 # An UNRECOGNIZED state is never guessed at: the candidate reads as incomplete, is counted in
 # `evidence_diagnostics`, and is neither swept nor resumed nor deleted.
-CANDIDATE_STATES = ("held", "materializing", "pending_review", "settled", "reviewed")
+CANDIDATE_STATES = ("held", "deferred_attention", "materializing", "pending_review",
+                    "settled", "reviewed")
 MANIFEST_VERSION = 1
 
 # Mitigation 6: every id that becomes a path component is shape-checked BEFORE the join, so
@@ -883,16 +884,20 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
     `_sweep_orphan_holds` can never judge it and it is held for good. A caller that forgets to
     pass `meta` therefore accrues held directories nothing will ever clean up - this counter is
     what makes that show up in `contexer status` instead of accumulating silently. A candidate
-    still short of review counts here too, and correctly: until it materializes there is no
-    decision to attribute it to.
+    still short of review because a write was interrupted counts here too. A deliberate
+    `deferred_attention` hold does not: its missing entry id is the state machine's expected
+    representation, not damage.
 
     `held_invalid_state` is the other unjudgeable shape: a manifest carrying a state this
     version does not recognize. Nothing resumes, sweeps or deletes it, so like the count above
     it exists to make a stuck candidate visible rather than silent.
     """
-    counts = {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
+    counts = {"pending": 0, "held": 0, "held_events": 0, "pending_review": 0,
+              "deferred_attention": 0, "oldest_attention_age_seconds": None,
+              "incomplete": 0, "held_unattributed": 0,
               "held_invalid_state": 0, "quarantine": 0, "bytes": 0}
     readable = True
+    oldest_attention = None
     try:
         for key, directory in (("pending", _pending_dir(repo_path, slug)),
                                ("quarantine", _quarantine_dir(repo_path, slug))):
@@ -913,13 +918,42 @@ def evidence_diagnostics(repo_path: str, slug: str = "") -> dict:
                 counts["held_events"] += sum(1 for p in files if p.name != _META_NAME)
                 counts["bytes"] += _total_bytes(files)
                 meta = _read_meta(directory)
-                if not str(meta.get("entry_id") or ""):
+                state = meta.get("state")
+                candidate_incomplete = bool(
+                    not meta or meta.get("unreadable") or meta.get("invalid_state")
+                    or state in ("held", "materializing"))
+                if state == "pending_review":
+                    counts["pending_review"] += 1
+                elif state == "deferred_attention":
+                    counts["deferred_attention"] += 1
+                if state in ("pending_review", "deferred_attention"):
+                    created_at = str(meta.get("created_at") or "")
+                    if created_at:  # legacy manifests predate the stamp; valid, age unknown
+                        try:
+                            created = datetime.fromisoformat(created_at)
+                            if created.tzinfo is None or created.tzinfo.utcoffset(created) is None:
+                                raise ValueError("attention timestamp has no timezone")
+                            oldest_attention = created if oldest_attention is None else min(
+                                oldest_attention, created)
+                        except (TypeError, ValueError):
+                            candidate_incomplete = True
+                if (state != "deferred_attention"
+                        and not str(meta.get("entry_id") or "")):
                     counts["held_unattributed"] += 1
                 if meta.get("invalid_state"):
                     counts["held_invalid_state"] += 1
+                expected_ids = meta.get("event_ids")
+                if isinstance(expected_ids, list) and len(expected_ids) != sum(
+                        1 for path in files if path.name != _META_NAME):
+                    candidate_incomplete = True
+                if candidate_incomplete:
+                    counts["incomplete"] += 1
     except OSError:
         counts = dict.fromkeys(counts, 0)
         readable = False
+    if readable and oldest_attention is not None:
+        counts["oldest_attention_age_seconds"] = max(
+            0, int((_now() - oldest_attention).total_seconds()))
     return {**counts, "gap": _read_gap(repo_path, slug), "readable": readable}
 
 

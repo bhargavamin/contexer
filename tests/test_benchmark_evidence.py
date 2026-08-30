@@ -20,7 +20,8 @@ Four things are measured, one per section:
 2. **Reconciliation at the spool's bound** (`_MAX_PENDING_EVENTS` = 1000): the directory
    listing alone, a full `dry_run` pass over a realistically shaped corpus, and - separately,
    because it is an order of magnitude dearer - the O(N^2) ceiling a corpus of entirely
-   unrelated statements reaches.
+   unrelated statements reaches. A real pass also gates the measured attention bounds: five
+   materializations per pass, ten pending review items per repo, with every excess event held.
 3. **The prompt path never loads evidence.** This is the plan's exit gate, and it is asserted
    as BEHAVIOUR rather than timed - a timing test would pass just as well if the spool were
    read and simply happened to be small. Unmarked, therefore, and in the default gate.
@@ -134,12 +135,13 @@ def _fill_to_the_bound(repo: str, seeds: int = 100) -> None:
     """`_MAX_PENDING_EVENTS` events in the shape a real session leaves: a few statements and
     many corroborating file changes, not 1000 unrelated directives."""
     for i in range(seeds):
-        spool.append_evidence(repo, _event(f"Decision number {i} about subsystem {i}.",
-                                           session=f"sess-{i}"))
+        spool.append_evidence(repo, _event(
+            f"Decision number {i} concerns subsystem alpha{i} and its owner team{i}.",
+                                           session=f"sess-{i}", repo_key=repo))
     for i in range(spool._MAX_PENDING_EVENTS - seeds):
         spool.append_evidence(repo, _event(kind="file_changed", session=f"sess-{i % seeds}",
                                            summary=f"module {i} changed",
-                                           files=[f"src/module_{i % seeds}.py"]))
+                                           files=[f"src/module_{i % seeds}.py"], repo_key=repo))
 
 
 @pytest.mark.perf
@@ -163,6 +165,55 @@ def test_listing_and_reconciliation_at_the_spool_bound(tmp_repo):
 
     assert listing["p50"] < 500.0, f"listing too slow: {listing['p50']:.1f}ms"
     assert passes["p50"] < 1000.0, f"reconciliation too slow: {passes['p50']:.1f}ms"
+
+
+@pytest.mark.perf
+def test_attention_bounded_real_reconciliation_at_the_spool_bound(tmp_repo):
+    """The constants and their workload live together: bounded rows, never bounded evidence."""
+    _fill_to_the_bound(tmp_repo)
+    corpus = spool.list_pending_evidence(tmp_repo)
+    aggregated = candidates.aggregate_candidates(corpus, [])
+    assert len(aggregated["candidates"]) == 100
+    assert sum(len(candidate["source_files"]) for candidate in aggregated["candidates"]) == 100
+
+    observed = {}
+
+    def first_pass():
+        observed["first"] = reconcile.reconcile_session(tmp_repo)
+
+    first_ms = _timed(first_pass)
+    first = observed["first"]
+    assert first["proposed"] == reconcile.MATERIALIZATION_ALLOWANCE
+    assert first["deferred"] == 100 - reconcile.MATERIALIZATION_ALLOWANCE
+    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == spool._MAX_PENDING_EVENTS
+
+    def second_pass():
+        observed["second"] = reconcile.reconcile_session(tmp_repo)
+
+    second_ms = _timed(second_pass)
+    second = observed["second"]
+    assert second["proposed"] == reconcile.MATERIALIZATION_ALLOWANCE
+    pending = store.get_pending_decisions(tmp_repo)
+    assert len(pending) == reconcile.PENDING_REVIEW_CEILING
+    assert len({entry["id"] for entry in pending}) == reconcile.PENDING_REVIEW_CEILING
+    held = spool.held_candidates(tmp_repo)
+    pending_holds = [meta for meta in held.values() if meta["state"] == "pending_review"]
+    assert len(pending_holds) == reconcile.PENDING_REVIEW_CEILING
+    assert len({meta["entry_id"] for meta in pending_holds}) == reconcile.PENDING_REVIEW_CEILING
+    assert all(meta["kind"] == "new" for meta in pending_holds)
+
+    repeated = []
+    for _ in range(5):
+        repeated.append(_timed(lambda: reconcile.reconcile_session(tmp_repo)))
+    stats = _pstats(repeated)
+    print(f"\n  bounded real reconcile first={first_ms:.1f}ms second={second_ms:.1f}ms")
+    _report("repeated reconciliation at full attention capacity (5)", stats)
+
+    diagnostics = spool.evidence_diagnostics(tmp_repo)
+    assert diagnostics["deferred_attention"] == 100 - reconcile.PENDING_REVIEW_CEILING
+    assert diagnostics["held_events"] == spool._MAX_PENDING_EVENTS
+    assert first_ms < 3000.0
+    assert stats["p50"] < 250.0
 
 
 @pytest.mark.perf

@@ -291,9 +291,27 @@ def test_a_stray_candidate_json_in_pending_is_quarantined_not_invisible(tmp_repo
 def test_missing_spool_reads_as_empty_and_readable(tmp_repo):
     assert spool.list_pending_evidence(tmp_repo) == []
     diagnostics = spool.evidence_diagnostics(tmp_repo)
-    assert diagnostics == {"pending": 0, "held": 0, "held_events": 0, "held_unattributed": 0,
-                           "held_invalid_state": 0, "quarantine": 0, "bytes": 0, "gap": None,
-                           "readable": True}
+    assert diagnostics == {"pending": 0, "held": 0, "held_events": 0,
+                           "pending_review": 0, "deferred_attention": 0,
+                           "oldest_attention_age_seconds": None, "incomplete": 0,
+                           "held_unattributed": 0, "held_invalid_state": 0,
+                           "quarantine": 0, "bytes": 0, "gap": None, "readable": True}
+
+
+def test_naive_attention_timestamp_is_incomplete_instead_of_breaking_status(tmp_repo):
+    event_ids = _spool_two(tmp_repo)
+    candidate_id = str(uuid.uuid4())
+    result = spool.hold_candidate_evidence(
+        tmp_repo, candidate_id, event_ids,
+        meta={"state": "deferred_attention", "entry_id": "", "event_ids": event_ids,
+              "created_at": "2026-01-01T00:00:00"})
+    assert result["status"] == "ok"
+
+    diagnostics = spool.evidence_diagnostics(tmp_repo)
+
+    assert diagnostics["deferred_attention"] == 1
+    assert diagnostics["oldest_attention_age_seconds"] is None
+    assert diagnostics["incomplete"] == 1
 
 
 # ── hold / finalize ──────────────────────────────────────────────────────────────
@@ -946,6 +964,35 @@ def test_status_counts_what_the_spool_holds(tmp_repo):
     spool.hold_candidate_evidence(tmp_repo, str(uuid.uuid4()), _spool_two(tmp_repo),
                                   meta={"entry_id": "e1"})
     assert _status_line(tmp_repo) == f"  evidence:     {tmp_repo}: 1 pending, 1 held (2 events)"
+
+
+def test_status_review_count_comes_from_the_authoritative_store(tmp_repo):
+    for i in range(3):
+        ok, _entry_id, _meta = store.update_decision_with_meta(
+            tmp_repo, f"Alpha{i} beta{i} gamma{i} delta{i} epsilon{i} must remain zeta{i}.",
+            "session", "architecture", created_by="ai", force_pending=True)
+        assert ok
+
+    assert _status_line(tmp_repo) == f"  evidence:     {tmp_repo}: 0 pending, 3 review pending"
+
+
+def test_status_renders_oldest_attention_independently_of_deferred_count(tmp_repo):
+    ok, entry_id, _meta = store.update_decision_with_meta(
+        tmp_repo, "Alpha beta gamma delta epsilon must remain zeta.",
+        "session", "architecture", created_by="ai", force_pending=True)
+    assert ok and entry_id
+    event_ids = _spool_two(tmp_repo)
+    candidate_id = str(uuid.uuid4())
+    result = spool.hold_candidate_evidence(
+        tmp_repo, candidate_id, event_ids,
+        meta={"state": "pending_review", "entry_id": entry_id, "event_ids": event_ids,
+              "created_at": _ago(120)})
+    assert result["status"] == "ok"
+
+    rendered = _status_line(tmp_repo)
+    assert "1 review pending" in rendered
+    assert "oldest attention" in rendered
+    assert "deferred" not in rendered
 
 
 def test_status_reads_the_gap_as_a_cumulative_loss_ledger_not_an_alarm(tmp_repo):

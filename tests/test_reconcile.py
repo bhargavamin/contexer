@@ -20,7 +20,9 @@ the disposition assertions below read.
 """
 import json
 import os
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -304,6 +306,195 @@ class TestEvidenceRepoIdentity:
         ledger = spool._read_identity_receipts(tmp_repo)
         assert len(ledger["receipts"]) == 2
         assert ledger["dropped"] == 1
+
+
+class TestAttentionBudget:
+    @staticmethod
+    def _distinct(repo, count):
+        for i in range(count):
+            ok, receipt = evidence.record_agent_conclusion(
+                repo, f"Alpha{i} beta{i} gamma{i} delta{i} epsilon{i} remains zeta{i}.",
+                rationale=f"Because eta{i} theta{i} iota{i} validate kappa{i}.",
+                session_id=f"attention-{i}")
+            assert ok, receipt
+
+    def test_twenty_distinct_conclusions_materialize_only_one_allowance(self, tmp_repo):
+        self._distinct(tmp_repo, 20)
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+        diagnostics = spool.evidence_diagnostics(tmp_repo)
+
+        assert receipt["proposed"] == reconcile.MATERIALIZATION_ALLOWANCE
+        assert receipt["deferred"] == 20 - reconcile.MATERIALIZATION_ALLOWANCE
+        assert len(store.get_pending_decisions(tmp_repo)) == reconcile.MATERIALIZATION_ALLOWANCE
+        assert diagnostics["pending_review"] == reconcile.MATERIALIZATION_ALLOWANCE
+        assert diagnostics["deferred_attention"] == 20 - reconcile.MATERIALIZATION_ALLOWANCE
+        assert diagnostics["held_events"] == 20
+        assert diagnostics["pending"] == 0
+
+    def test_no_capacity_restarts_do_not_reaggregate_deferred_candidates(
+            self, tmp_repo, monkeypatch):
+        for i in range(reconcile.PENDING_REVIEW_CEILING):
+            ok, _entry_id, _meta = store.update_decision_with_meta(
+                tmp_repo, f"Omega{i} theta{i} iota{i} kappa{i} lambda{i} must remain mu{i}.",
+                SESSION, "architecture", created_by="ai", force_pending=True)
+            assert ok
+        self._distinct(tmp_repo, 20)
+        first = reconcile.reconcile_session(tmp_repo)
+        assert first["proposed"] == 0 and first["deferred"] == 20
+
+        monkeypatch.setattr(
+            candidates, "aggregate_candidates",
+            lambda *_a, **_k: pytest.fail("no-capacity restart re-aggregated deferred evidence"))
+        second = reconcile.reconcile_session(tmp_repo)
+
+        assert second["proposed"] == 0
+        assert second["deferred"] == 20
+
+    def test_clearing_capacity_resumes_deferred_in_deterministic_batches(self, tmp_repo):
+        self._distinct(tmp_repo, 20)
+        reconcile.reconcile_session(tmp_repo)
+        initial = sorted(store.get_pending_decisions(tmp_repo), key=lambda e: e["content"])
+        initial_ids = {entry["id"] for entry in initial}
+        for entry in initial:
+            assert store.approve_decision(tmp_repo, entry["id"], "approve")[0]
+
+        second = reconcile.reconcile_session(tmp_repo)
+        next_pending = store.get_pending_decisions(tmp_repo)
+
+        assert second["proposed"] == reconcile.MATERIALIZATION_ALLOWANCE
+        assert len(next_pending) == reconcile.MATERIALIZATION_ALLOWANCE
+        assert initial_ids.isdisjoint({entry["id"] for entry in next_pending})
+        assert spool.evidence_diagnostics(tmp_repo)["deferred_attention"] \
+            == 20 - 2 * reconcile.MATERIALIZATION_ALLOWANCE
+
+    def test_zero_capacity_still_settles_duplicates_and_reports_insufficient(
+            self, tmp_repo):
+        target = _stored_decision(tmp_repo)
+        for i in range(reconcile.PENDING_REVIEW_CEILING):
+            ok, _entry_id, _meta = store.update_decision_with_meta(
+                tmp_repo, f"Omega{i} theta{i} iota{i} kappa{i} lambda{i} must remain mu{i}.",
+                SESSION, "architecture", created_by="ai", force_pending=True)
+            assert ok
+        _emit(tmp_repo, "user_directive", DUPLICATES)
+        _emit(tmp_repo, "agent_conclusion", "A bare low-score observation.",
+              attributes={"reported_by": "agent", "has_rationale": False},
+              session_id="insufficient-at-cap")
+
+        receipt = reconcile.reconcile_session(tmp_repo)
+
+        assert receipt["duplicates"] == 1
+        assert receipt["insufficient"] == 1
+        assert receipt["deferred"] == 0
+        assert _summaries(tmp_repo, target)[0]["disposition"] == "dismissed"
+
+    def test_interrupted_defer_is_visible_and_recovers_without_a_review_row(
+            self, tmp_repo, monkeypatch):
+        pending_ids = []
+        for i in range(reconcile.PENDING_REVIEW_CEILING):
+            ok, entry_id, _meta = store.update_decision_with_meta(
+                tmp_repo, f"Omega{i} theta{i} iota{i} kappa{i} lambda{i} must remain mu{i}.",
+                SESSION, "architecture", created_by="ai", force_pending=True)
+            assert ok
+            pending_ids.append(entry_id)
+        self._distinct(tmp_repo, 1)
+        real_replace = spool.os.replace
+
+        def fail_event_move(src, dst):
+            target = Path(dst)
+            if target.name != spool._META_NAME and target.parent.parent.name == "held":
+                raise OSError("crash while moving deferred evidence")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(spool.os, "replace", fail_event_move)
+        monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 0)
+        first = reconcile.reconcile_session(tmp_repo)
+        diagnostics = spool.evidence_diagnostics(tmp_repo)
+        assert first["incomplete"] is True
+        assert len(store.get_pending_decisions(tmp_repo)) == reconcile.PENDING_REVIEW_CEILING
+        assert diagnostics["deferred_attention"] == 1
+        assert diagnostics["pending"] == 1
+        assert diagnostics["incomplete"] == 1
+        assert diagnostics["gap"] is None, "the failed hold must suppress same-pass retention"
+
+        monkeypatch.setattr(spool.os, "replace", real_replace)
+        monkeypatch.setattr(spool, "_MAX_PENDING_EVENTS", 1000)
+        second = reconcile.reconcile_session(tmp_repo)
+        assert second["proposed"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["pending"] == 0
+        assert spool.evidence_diagnostics(tmp_repo)["deferred_attention"] == 1
+        assert spool.evidence_diagnostics(tmp_repo)["incomplete"] == 0
+
+        assert store.approve_decision(tmp_repo, pending_ids[0], "approve")[0]
+        third = reconcile.reconcile_session(tmp_repo)
+        assert third["proposed"] == 1
+        assert len(store.get_pending_decisions(tmp_repo)) == reconcile.PENDING_REVIEW_CEILING
+        assert spool.evidence_diagnostics(tmp_repo)["deferred_attention"] == 0
+
+    def test_concurrent_reconciliation_cannot_admit_past_the_ceiling(
+            self, tmp_repo, monkeypatch):
+        self._distinct(tmp_repo, 20)
+        expected_ids = {event["event_id"] for event in spool.list_pending_evidence(tmp_repo)}
+        entered, release = threading.Event(), threading.Event()
+        real_snapshot = reconcile._snapshot
+        first = True
+        guard = threading.Lock()
+
+        def blocked_snapshot(repo):
+            nonlocal first
+            with guard:
+                block = first
+                first = False
+            if block:
+                entered.set()
+                assert release.wait(5), "timed out releasing the winning reconciliation"
+            return real_snapshot(repo)
+
+        monkeypatch.setattr(reconcile, "_snapshot", blocked_snapshot)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winner = pool.submit(reconcile.reconcile_session, tmp_repo)
+            assert entered.wait(5), "winning reconciliation never reached its locked snapshot"
+            loser = pool.submit(reconcile.reconcile_session, tmp_repo)
+            skipped = loser.result(timeout=5)
+            release.set()
+            completed = winner.result(timeout=5)
+
+        assert skipped["skipped"] is True
+        assert completed["proposed"] == reconcile.MATERIALIZATION_ALLOWANCE
+        assert len(store.get_pending_decisions(tmp_repo)) <= reconcile.PENDING_REVIEW_CEILING
+        held = spool.held_candidates(tmp_repo)
+        assert {event_id for meta in held.values() for event_id in meta.get("event_ids") or []} \
+            == expected_ids
+        assert sum(len(meta.get("event_ids") or []) for meta in held.values()) == 20
+
+    def test_concurrent_passes_fail_closed_when_the_ceiling_lock_is_unavailable(
+            self, tmp_repo, monkeypatch):
+        for i in range(5):
+            ok, _entry_id, _meta = store.update_decision_with_meta(
+                tmp_repo, f"Existing review {i} governs omega{i} owner team{i}.",
+                SESSION, "architecture", created_by="ai", force_pending=True)
+            assert ok
+        for session in ("attention-a", "attention-b"):
+            for i in range(10):
+                ok, result = evidence.record_agent_conclusion(
+                    tmp_repo,
+                    f"{session} alpha{i} beta{i} gamma{i} delta{i} remains epsilon{i}.",
+                    rationale=f"Because zeta{i} eta{i} theta{i} validate iota{i}.",
+                    session_id=session)
+                assert ok, result
+
+        monkeypatch.setattr(reconcile, "open", _boom_oserror, raising=False)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(
+                lambda session: reconcile.reconcile_session(tmp_repo, session_id=session),
+                ("attention-a", "attention-b")))
+
+        assert all(receipt["lock_unavailable"] and receipt["incomplete"]
+                   for receipt in receipts)
+        assert all(receipt["proposed"] == 0 for receipt in receipts)
+        assert len(store.get_pending_decisions(tmp_repo)) == 5
+        assert len(spool.list_pending_evidence(tmp_repo)) == 20
+        assert spool.held_candidates(tmp_repo) == {}
 
 
 def test_the_fixture_texts_sit_in_the_bands_that_classify_them():
@@ -943,14 +1134,20 @@ class TestOnePassAtATime:
         assert reconcile.reconcile_session(tmp_repo)["skipped"] is False
         assert _names() == before      # not even the store dir was created
 
-    def test_an_unusable_lock_file_fails_open(self, tmp_repo, monkeypatch):
-        # An unwritable STORE_DIR must not silently disable the pipeline: it is the contention
-        # case, not the I/O case, that this lock exists to answer.
+    def test_an_unusable_lock_file_fails_closed_with_evidence_retained(
+            self, tmp_repo, monkeypatch):
+        # The attention ceiling is a hard invariant. An unwritable lock cannot authorize an
+        # unlocked pass merely to keep the pipeline moving; a later healthy checkpoint owns
+        # the still-pending evidence.
         _emit(tmp_repo, "user_directive", UNRELATED)
         # Shadows the builtin inside `reconcile` only - a module global wins over builtins,
         # and this module opens nothing else.
         monkeypatch.setattr(reconcile, "open", _boom_oserror, raising=False)
-        assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+        receipt = reconcile.reconcile_session(tmp_repo)
+        assert receipt["proposed"] == 0
+        assert receipt["incomplete"] is True and receipt["lock_unavailable"] is True
+        assert _pending(tmp_repo) and store.get_pending_decisions(tmp_repo) == []
+        assert "No evidence was consumed" in reconcile.format_receipt(receipt)
 
 
 class TestIdempotency:
@@ -1239,7 +1436,9 @@ class TestFastPath:
         receipt = reconcile.reconcile_session(tmp_repo)
         assert receipt == {"events_observed": 0, "proposed": 0, "lifecycle_proposed": 0,
                            "reconsidered": 0, "already_pending": 0, "duplicates": 0,
-                           "insufficient": 0, "incomplete": False, "skipped": False,
+                           "insufficient": 0, "deferred": 0, "incomplete": False,
+                           "lock_unavailable": False,
+                           "skipped": False,
                            "dry_run": False,
                            # No host named, so the block reports `manual` rather than
                            # guessing which client called - and reading it costs no adapter

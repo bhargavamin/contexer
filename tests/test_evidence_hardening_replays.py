@@ -312,6 +312,27 @@ def test_foreign_repo_key_is_quarantined_before_aggregation(tmp_repo):
     assert receipt["event_id"] == foreign["event_id"]
 
 
+def test_realistic_thousand_event_session_bounds_review_debt_without_losing_ids(tmp_repo):
+    """Task 03's end-to-end ceiling: attention is bounded, acknowledged evidence is not."""
+    events = [{**event, "repo_key": tmp_repo} for event in _realistic_corpus()]
+    for event in events:
+        assert spool.append_evidence(tmp_repo, event)["status"] == "stored"
+
+    receipt = reconcile.reconcile_session(tmp_repo)
+    diagnostics = spool.evidence_diagnostics(tmp_repo)
+    held = spool.held_candidates(tmp_repo)
+
+    assert receipt["proposed"] == reconcile.MATERIALIZATION_ALLOWANCE
+    assert receipt["deferred"] == 100 - reconcile.MATERIALIZATION_ALLOWANCE
+    assert len(store.get_pending_decisions(tmp_repo)) == reconcile.MATERIALIZATION_ALLOWANCE
+    assert diagnostics["pending_review"] == reconcile.MATERIALIZATION_ALLOWANCE
+    assert diagnostics["deferred_attention"] == 100 - reconcile.MATERIALIZATION_ALLOWANCE
+    assert diagnostics["held_events"] == 1000
+    assert diagnostics["pending"] == 0
+    assert {event_id for meta in held.values() for event_id in meta.get("event_ids") or []} \
+        == {event["event_id"] for event in events}
+
+
 # ── the reproduced gaps ──────────────────────────────────────────────────────────
 
 def test_an_edit_before_its_directive_corroborates_it():
@@ -683,6 +704,24 @@ def test_an_incomplete_pass_does_not_break_session_start_and_stays_visible(tmp_r
     assert "Always run migrations before deploying." in payload["context"]
 
 
+def test_session_start_reports_one_deferred_count_without_candidate_content(tmp_repo):
+    summaries = []
+    for i in range(20):
+        summary = f"Alpha{i} beta{i} gamma{i} delta{i} epsilon{i} remains zeta{i}."
+        summaries.append(summary)
+        ok, _receipt = evidence.record_agent_conclusion(
+            tmp_repo, summary, rationale=f"Because eta{i} theta{i} validates iota{i}.",
+            session_id=f"attention-{i}")
+        assert ok
+
+    payload = store.session_start_payload(tmp_repo, "startup", "sess-b", "codex")
+
+    deferred = 20 - reconcile.MATERIALIZATION_ALLOWANCE
+    assert payload["status"].count(f"{deferred} evidence candidates deferred") == 1
+    assert "all recorded evidence was retained" in payload["status"]
+    assert not any(summary in payload["status"] for summary in summaries)
+
+
 def test_the_incomplete_note_survives_the_deliberately_silent_compact_path(tmp_repo,
                                                                           monkeypatch):
     """The fifth return path of `_local_session_start_payload`, and the only one that returns
@@ -970,7 +1009,7 @@ def test_a_decision_stored_before_its_hold_is_held_against_its_own_review(tmp_re
 
 
 def test_a_hold_written_under_the_old_scoring_resumes_under_the_new_one(tmp_repo):
-    """Task 03 changes what the aggregator makes of a given event set, and `_resume_holds`
+    """Task 03 changes what the aggregator makes of a given event set, and `_recoverable_holds`
     re-scores every interrupted candidate with the CURRENT scorer - so a hold written before
     this change is re-read by rules it was never scored under.
 
@@ -1005,7 +1044,7 @@ def test_a_hold_whose_events_now_classify_as_a_different_kind_resumes_down_the_n
     """The THIRD resume direction, and the one the other two miss: not a different candidate
     COUNT but a different candidate KIND.
 
-    `_resume_holds` gates on `len(resumed) == 1` and never compares the fresh classification's
+    `_recoverable_holds` gates on `len(resumed) == 1` and never compares the classification's
     kind against the manifest's, which is deliberate - Task 02's `_candidate_id` docstring says
     kind and target can legitimately change between the crash and the replay. So a hold created
     when the store held nothing, resumed after a decision the same evidence now revises has
@@ -1473,6 +1512,52 @@ def test_a_revision_advance_in_the_attach_window_proposes_nothing(tmp_repo, monk
     assert meta["state"] == "materializing"          # replayable, not settled
     assert len(_held_event_files(tmp_repo, candidate_id)) == 1
     assert _summaries(tmp_repo, entry_id) == []
+
+
+def test_a_deferred_reconsideration_refuses_a_changed_basis_before_reclassifying(tmp_repo):
+    """Attention deferral freezes the proposal; it must also freeze its lifecycle fence.
+
+    Earlier admitted work may keep a reconsideration deferred long enough for its inactive
+    target to advance. Replaying that frozen question with the current basis would attach old
+    evidence to a revision it was never judged against. The first replay is therefore refused
+    stale and left `materializing`; only the next crash-style recovery reclassifies it.
+    """
+    entry_id = _inactive_twin(tmp_repo, retire=False)
+    old_basis = _inactive_entry(tmp_repo, entry_id)["current_revision_id"]
+    blockers = []
+    for i in range(reconcile.PENDING_REVIEW_CEILING):
+        ok, blocker, _meta = store.update_decision_with_meta(
+            tmp_repo, f"Capacity blocker {i} governs subsystem omega{i} owner team{i}.",
+            f"cap-{i}", "architecture", created_by="ai", force_pending=True)
+        assert ok and blocker
+        blockers.append(blocker)
+
+    evidence.emit_hook_event(tmp_repo, "user_directive", session_id="sess-a", source="replay",
+                             summary=RULE)
+    deferred = reconcile.reconcile_session(tmp_repo)
+    candidate_id, meta = _one_hold(tmp_repo)
+    assert deferred["deferred"] == 1 and meta["state"] == "deferred_attention"
+    assert meta["basis_revision_id"] == old_basis
+    assert meta["basis_target_state"] == "ignored"
+
+    data = store.load(tmp_repo)
+    target = next(entry for entry in data["entries"] if entry["id"] == entry_id)
+    revisions.append_revision(target, RULE + " Regenerate through the release job.", "ai")
+    store.save(tmp_repo, data)
+    new_basis = _inactive_entry(tmp_repo, entry_id)["current_revision_id"]
+    assert new_basis != old_basis
+    assert store.approve_decision(tmp_repo, blockers[0], "approve")[0]
+
+    refused = reconcile.reconcile_session(tmp_repo)
+    meta = spool.held_candidates(tmp_repo)[candidate_id]
+    assert refused["reconsidered"] == 0 and refused["incomplete"] is True
+    assert meta["state"] == "materializing"
+    assert not _inactive_entry(tmp_repo, entry_id).get("proposed_reconsideration")
+
+    replayed = reconcile.reconcile_session(tmp_repo)
+    proposal = _inactive_entry(tmp_repo, entry_id)["proposed_reconsideration"]
+    assert replayed["reconsidered"] == 1
+    assert proposal["basis_revision_id"] == new_basis
 
 
 @pytest.mark.parametrize("retire,mutation", [
