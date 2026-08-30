@@ -40,16 +40,24 @@ One of the assistant JSON config files named in the warning is corrupt — usual
 
 ```bash
 contexer version            # what's actually installed
-uv tool upgrade contexer    # or, if a release is minutes old:
-uv tool install --reinstall --refresh contexer
-contexer reinstall          # re-sync hooks if they changed
+contexer upgrade            # upgrade, then re-sync hooks, in one step
+uv tool install --reinstall --refresh contexer   # if a release is minutes old
 ```
 
 Then restart your AI assistant — a running session keeps the old server process.
 
-`contexer status` checks PyPI (2-second timeout, silent when offline) and prints an
-`update:` line when a newer version exists. Set `CONTEXER_NO_UPDATE_CHECK=1` to skip
-the check entirely (airgapped machines).
+### "Contexer X is below the minimum supported version Y"
+
+Rare. It means the maintainers marked every release below Y as no longer supported, usually
+because of a bug bad enough that running an older build is a risk. Nothing stops working: the
+message is a strong recommendation, not a block. Run `contexer upgrade`, then restart your AI
+assistant. If you cannot upgrade right now, `CONTEXER_NO_UPDATE_CHECK=1` silences it.
+
+`contexer status` checks PyPI (3-second timeout, silent when offline) and prints an
+`update:` line when a newer version exists. You should not need to run it: Contexer
+tells you at most once a day, in your assistant, or on the next `contexer` command for
+assistants with no way to show a notice. Set `CONTEXER_NO_UPDATE_CHECK=1` to skip all
+of it (airgapped machines).
 
 ## Decisions aren't being stored
 

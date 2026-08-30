@@ -62,7 +62,8 @@ not.
 |---|---|
 | `contexer/store.py` | The store: all decision read/write, dedup/novelty filtering, revisions, tombstones, session-start and bootstrap payloads. Every logic change belongs here |
 | `contexer/server.py` | MCP server entry point - maps MCP tool calls to store functions and nothing else |
-| `contexer/cli.py` | The `contexer` console script - `install` / `uninstall [--purge]` / `reinstall` / `review` / `ui` / `share` / `login` / `logout` / `status` / `version`, and the bare MCP server with no args |
+| `contexer/cli.py` | The `contexer` console script - `install` / `uninstall [--purge]` / `reinstall` / `upgrade` / `review` / `ui` / `share` / `login` / `logout` / `status` / `version`, and the bare MCP server with no args |
+| `contexer/updates.py` | Update delivery: what the latest release is, whether a minimum supported version is declared, and whether to tell the developer right now. Owns the fact and the policy, never the rendering - that is each adapter's `notify()` |
 | `contexer/config.py` | Loader and writer for `~/.contexer/config.toml` (`Profile` + the `[ui]` table). At the bottom of the import graph - it imports nothing of ours |
 | `contexer/adapters/` | One module per host (`claude`, `cursor`, `codex`, `gemini`) behind the duck-typed contract in `base.py`: install/uninstall wiring plus the hook entrypoints. Host-specific JSON shapes stop here |
 | `contexer/ui/` | The local console: `daemon.py` (processes and sockets only), `server.py` (HTTP only), `api.py` (the one module that knows both HTTP and the store), `assets/` (hand-written HTML/CSS/JS, no build step) |

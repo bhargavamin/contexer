@@ -153,7 +153,7 @@ The point isn't token compression. It's **eliminated rework across sessions**. T
 
 ## Privacy
 
-Everything lives as plain JSON in `~/.contexer/` on your own machine. Nothing about your code or decisions leaves your machine. The only network call Contexer makes is an optional version check against PyPI (`CONTEXER_NO_UPDATE_CHECK=1` disables it). Team sync is strictly opt-in and every outward push previews what would leave your machine first.
+Everything lives as plain JSON in `~/.contexer/` on your own machine. Nothing about your code or decisions leaves your machine. The only network call Contexer makes is an optional version check against PyPI, at most once a day, in a background process so it never delays a prompt (`CONTEXER_NO_UPDATE_CHECK=1` disables it). It sends nothing about you or your code, only a plain request for the package's public release info. Team sync is strictly opt-in and every outward push previews what would leave your machine first.
 
 ## Why it stays lightweight
 

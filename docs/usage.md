@@ -123,6 +123,7 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer guard [path…] [--explain]` | Check staged files against approved decisions at commit time — see [commit-time guard](#commit-time-guard) |
 | `contexer guard anchors [--list]` | One-time setup linking existing decisions to the files they're about — see [commit-time guard](#commit-time-guard) |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
+| `contexer upgrade [--dry-run]` | Upgrade Contexer itself, then re-sync config. Prints the command instead of running it when it cannot upgrade you safely (a from-source or pip install). Restart your assistant afterwards |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
 | `contexer uninstall --purge` | Remove everything including `~/.contexer/` |
@@ -262,7 +263,7 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 
 - **Per-user, per-machine.** Your decisions live only in `~/.contexer/` on that machine. They don't follow you to your laptop and don't reach teammates.
 - **Soft storage cap.** Up to 500 entries per repo; beyond that, the least-reinforced decisions are evicted. There's no automatic staleness pruning — outdated decisions stay until you remove them.
-- **One network call.** `contexer status` checks PyPI for a newer version. Disable with `CONTEXER_NO_UPDATE_CHECK=1`. Nothing else leaves your machine.
+- **One network call, and it is anonymous.** Contexer checks PyPI for a newer version: on `contexer status` and `contexer upgrade`, and at most once a day in a background process started from a prompt hook, so the check never delays a prompt. It sends nothing about you or your code, only a plain request for the package's public release info. Disable it with `CONTEXER_NO_UPDATE_CHECK=1`. Nothing else leaves your machine.
 
 **Personal Cloud (available):**
 
