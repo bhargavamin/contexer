@@ -1,0 +1,655 @@
+{
+  "schemaVersion": 1,
+  "baseContract": {
+    "version": 1,
+    "sha256": "716eb561a4c45e97bc3d9fc693dfa413894cffac93a2a63184142cab4f70c2cf"
+  },
+  "bindingPolicy": {
+    "phaseA2Purpose": "executable_preimplementation_oracle",
+    "futureProductionTestsMustLoadThisFixture": true,
+    "fixtureOnlyDoesNotSatisfyRuntimeVerification": true
+  },
+  "invariants": {
+    "pendingCandidateCheckInvariance": {
+      "authoritativeDecisionId": "decision-d1",
+      "pendingCandidateId": "candidate-d2",
+      "pendingCandidateState": "shared_candidate",
+      "checkInputBefore": {
+        "applicableDecisionIds": ["decision-d1"],
+        "blockingDecisionIds": ["decision-d1"]
+      },
+      "checkInputAfter": {
+        "applicableDecisionIds": ["decision-d1"],
+        "blockingDecisionIds": ["decision-d1"]
+      },
+      "checkBefore": {
+        "findingDecisionIds": ["decision-d1"],
+        "findingVerdict": "drifts",
+        "score": 42,
+        "githubConclusion": "failure",
+        "guardBlockingDecisionIds": ["decision-d1"]
+      },
+      "checkAfter": {
+        "findingDecisionIds": ["decision-d1"],
+        "findingVerdict": "drifts",
+        "score": 42,
+        "githubConclusion": "failure",
+        "guardBlockingDecisionIds": ["decision-d1"]
+      },
+      "expected": {
+        "candidateInCheckContext": false,
+        "candidateInBlockingIds": false,
+        "findingVerdictUnchanged": true,
+        "scoreUnchanged": true,
+        "githubConclusionUnchanged": true
+      }
+    },
+    "stalePredecessorApproval": {
+      "candidate": {
+        "id": "candidate-d2",
+        "teamId": "40000000-0000-4000-8000-000000000001",
+        "repoKey": "github.com/org/repo",
+        "state": "shared_candidate",
+        "supersedesDecisionId": "decision-d1"
+      },
+      "predecessor": {
+        "id": "decision-d1",
+        "teamId": "40000000-0000-4000-8000-000000000001",
+        "repoKey": "github.com/org/repo",
+        "stateObservedByReview": "team_approved",
+        "stateAtApproval": "superseded"
+      },
+      "outcome": {
+        "result": "conflict",
+        "reasonCode": "stale_predecessor",
+        "candidateState": "shared_candidate",
+        "predecessorState": "superseded",
+        "replacementApproved": false,
+        "resolutionInserted": false,
+        "auditInserted": false
+      }
+    },
+    "exactTransitionMatching": {
+      "publicRefusal": "transition not found or not available",
+      "cases": [
+        {
+          "name": "candidate_team_mismatch",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000002",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "team_mismatch"
+        },
+        {
+          "name": "predecessor_team_mismatch",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000002",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "team_mismatch"
+        },
+        {
+          "name": "finding_team_mismatch",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000002",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "team_mismatch"
+        },
+        {
+          "name": "candidate_finding_repo_mismatch",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": "github.com/org/other-repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "repo_mismatch"
+        },
+        {
+          "name": "candidate_predecessor_repo_mismatch",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/other-repo",
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "repo_mismatch"
+        },
+        {
+          "name": "supersedes_finding_mismatch",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d0",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "origin_finding_mismatch"
+        },
+        {
+          "name": "global_candidate",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": null,
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "repo_mismatch"
+        },
+        {
+          "name": "global_predecessor",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": null,
+          "findingRepoKey": "github.com/org/repo",
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "repo_mismatch"
+        },
+        {
+          "name": "global_finding",
+          "candidateDecisionId": "candidate-d2",
+          "candidateSupersedesDecisionId": "decision-d1",
+          "predecessorDecisionId": "decision-d1",
+          "findingDecisionId": "decision-d1",
+          "candidateTeamId": "40000000-0000-4000-8000-000000000001",
+          "predecessorTeamId": "40000000-0000-4000-8000-000000000001",
+          "findingTeamId": "40000000-0000-4000-8000-000000000001",
+          "candidateRepoKey": "github.com/org/repo",
+          "predecessorRepoKey": "github.com/org/repo",
+          "findingRepoKey": null,
+          "latestMatchingFindingId": null,
+          "publicRefusal": "transition not found or not available",
+          "result": "refused",
+          "reasonCode": "repo_mismatch"
+        }
+      ]
+    },
+    "approvalRollback": {
+      "injectedFailurePoints": [
+        "approve_replacement",
+        "tombstone_predecessor",
+        "apply_enforcement_choice",
+        "insert_decision_updated_resolution",
+        "insert_transition_audit"
+      ],
+      "stateBefore": {
+        "predecessorState": "team_approved",
+        "predecessorEnforcement": "blocking",
+        "predecessorEnforcementEpoch": 7,
+        "candidateState": "shared_candidate",
+        "candidateEnforcement": null,
+        "candidateEnforcementEpoch": null,
+        "resolutionCount": 0,
+        "auditCount": 0
+      },
+      "stateAfterEachFailure": {
+        "predecessorState": "team_approved",
+        "predecessorEnforcement": "blocking",
+        "predecessorEnforcementEpoch": 7,
+        "candidateState": "shared_candidate",
+        "candidateEnforcement": null,
+        "candidateEnforcementEpoch": null,
+        "resolutionCount": 0,
+        "auditCount": 0
+      },
+      "outcome": {
+        "result": "failure",
+        "reasonCode": "rollback",
+        "committed": false
+      }
+    },
+    "busyProposalLock": {
+      "cases": [
+        {
+          "name": "capture_busy",
+          "operation": "capture",
+          "lockCondition": "busy",
+          "functionalMutationCommitted": true,
+          "returned": true,
+          "blockingWaitMs": 0,
+          "networkCallsWhileLocked": 0,
+          "telemetryFlushesWhileLocked": 0,
+          "sidecarResult": "no_op",
+          "sidecarReasonCode": "lock_busy"
+        },
+        {
+          "name": "capture_unavailable",
+          "operation": "capture",
+          "lockCondition": "unavailable",
+          "functionalMutationCommitted": true,
+          "returned": true,
+          "blockingWaitMs": 0,
+          "networkCallsWhileLocked": 0,
+          "telemetryFlushesWhileLocked": 0,
+          "sidecarResult": "no_op",
+          "sidecarReasonCode": "lock_busy"
+        },
+        {
+          "name": "approval_busy",
+          "operation": "approval",
+          "lockCondition": "busy",
+          "functionalMutationCommitted": true,
+          "returned": true,
+          "blockingWaitMs": 0,
+          "networkCallsWhileLocked": 0,
+          "telemetryFlushesWhileLocked": 0,
+          "sidecarResult": "no_op",
+          "sidecarReasonCode": "lock_busy"
+        },
+        {
+          "name": "approval_unavailable",
+          "operation": "approval",
+          "lockCondition": "unavailable",
+          "functionalMutationCommitted": true,
+          "returned": true,
+          "blockingWaitMs": 0,
+          "networkCallsWhileLocked": 0,
+          "telemetryFlushesWhileLocked": 0,
+          "sidecarResult": "no_op",
+          "sidecarReasonCode": "lock_busy"
+        }
+      ]
+    },
+    "legacyServerRefusal": {
+      "cases": [
+        {
+          "name": "missing_automatic_capability",
+          "automaticDecisionProposalPresent": false,
+          "accountFingerprintPresent": true,
+          "atomicReconciliationPresent": true,
+          "manualReconciliationAllowed": true,
+          "automaticOutcome": {"operation": "drain", "result": "refused", "reasonCode": "unsupported_protocol", "automaticSubmitWireCalls": 0}
+        },
+        {
+          "name": "missing_account_binding",
+          "automaticDecisionProposalPresent": true,
+          "accountFingerprintPresent": false,
+          "atomicReconciliationPresent": true,
+          "manualReconciliationAllowed": true,
+          "automaticOutcome": {"operation": "drain", "result": "attention", "reasonCode": "account_mismatch", "automaticSubmitWireCalls": 0}
+        },
+        {
+          "name": "missing_atomic_reconciliation",
+          "automaticDecisionProposalPresent": true,
+          "accountFingerprintPresent": true,
+          "atomicReconciliationPresent": false,
+          "manualReconciliationAllowed": true,
+          "automaticOutcome": {"operation": "drain", "result": "refused", "reasonCode": "unsupported_protocol", "automaticSubmitWireCalls": 0}
+        }
+      ]
+    }
+  },
+  "observability": {
+    "fixedMessage": "decision operation completed",
+    "sensitiveInputs": {
+      "credential_or_token": "SENTINEL_CREDENTIAL_A2",
+      "account_identity": "SENTINEL_ACCOUNT_A2",
+      "raw_endpoint": "https://SENTINEL_ENDPOINT_A2.invalid/mcp?token=secret",
+      "repository_identity_or_path": "/private/SENTINEL_REPOSITORY_A2",
+      "decision_or_evidence_prose": "SENTINEL_DECISION_EVIDENCE_A2",
+      "finding_or_resolution_prose": "SENTINEL_FINDING_RESOLUTION_A2",
+      "raw_exception_message_or_stack": "SENTINEL_EXCEPTION_A2 at /private/source.py:42",
+      "person_or_team_display_data": "SENTINEL_PERSON_TEAM_A2"
+    },
+    "sensitiveInjectionCases": [
+      {"valueClass": "credential_or_token", "source": "capabilityRead.bearerToken", "sentinel": "SENTINEL_CREDENTIAL_A2"},
+      {"valueClass": "account_identity", "source": "policyChange.accountFingerprint", "sentinel": "SENTINEL_ACCOUNT_A2"},
+      {"valueClass": "raw_endpoint", "source": "policyChange.endpoint", "sentinel": "https://SENTINEL_ENDPOINT_A2.invalid/mcp?token=secret"},
+      {"valueClass": "repository_identity_or_path", "source": "scan.repoPath", "sentinel": "/private/SENTINEL_REPOSITORY_A2"},
+      {"valueClass": "repository_identity_or_path", "source": "transitionRead.candidateRepoKey", "sentinel": "github.com/SENTINEL_REPOSITORY_A2/private"},
+      {"valueClass": "decision_or_evidence_prose", "source": "enqueue.decisionContent", "sentinel": "SENTINEL_DECISION_EVIDENCE_A2"},
+      {"valueClass": "decision_or_evidence_prose", "source": "transitionRead.candidateContent", "sentinel": "SENTINEL_CANDIDATE_CONTENT_A2"},
+      {"valueClass": "decision_or_evidence_prose", "source": "transitionApprove.candidateRationale", "sentinel": "SENTINEL_CANDIDATE_RATIONALE_A2"},
+      {"valueClass": "decision_or_evidence_prose", "source": "transitionApprove.candidateSourceFile", "sentinel": "/private/SENTINEL_CANDIDATE_SOURCE_A2.ts"},
+      {"valueClass": "finding_or_resolution_prose", "source": "transitionRead.findingExplanation", "sentinel": "SENTINEL_FINDING_RESOLUTION_A2"},
+      {"valueClass": "finding_or_resolution_prose", "source": "transitionApprove.resolutionNote", "sentinel": "SENTINEL_RESOLUTION_NOTE_A2"},
+      {"valueClass": "raw_exception_message_or_stack", "source": "drain.thrownException", "sentinel": "SENTINEL_EXCEPTION_A2 at /private/source.py:42"},
+      {"valueClass": "person_or_team_display_data", "source": "transitionApprove.teamDisplayName", "sentinel": "SENTINEL_PERSON_TEAM_A2"}
+    ],
+    "spanEventPolicy": {"recordRawExceptions": false, "allowedEvents": []},
+    "traceContext": {
+      "traceId": "0123456789abcdef0123456789abcdef",
+      "spanId": "0123456789abcdef"
+    },
+    "runtimeOwnership": {
+      "capabilityRead": "contexer_client",
+      "policyChange": "contexer_client",
+      "scan": "contexer_client",
+      "enqueue": "contexer_client",
+      "drain": "contexer_client",
+      "transitionRead": "teams",
+      "transitionApprove": "teams",
+      "transitionRecheck": "teams"
+    },
+    "outputBindings": {
+      "spanAttributesAndEvents": ["capabilityRead", "policyChange", "scan", "enqueue", "drain", "transitionRead", "transitionApprove", "transitionRecheck"],
+      "contexerJsonStderr": ["capabilityRead", "policyChange", "scan", "enqueue", "drain"],
+      "teamsJsonStdout": ["transitionRead", "transitionApprove", "transitionRecheck"],
+      "teamsOtlpEnabled": true,
+      "teamsOtlpLogRecords": ["transitionRead", "transitionApprove", "transitionRecheck"]
+    },
+    "operationRecords": [
+      {
+        "operation": "capabilityRead",
+        "injectedSources": ["capabilityRead.bearerToken"],
+        "span": {
+          "name": "decision_proposal.capability_read",
+          "attributes": {
+            "contexer.result": "failure",
+            "contexer.reason_code": "transport_error",
+            "contexer.error_class": "transport",
+            "contexer.diagnostic_id": "diag_A2B3C4D5E6F7G8H9"
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionProposalCapabilityRead",
+            "result": "failure",
+            "reasonCode": "transport_error",
+            "errorClass": "transport",
+            "diagnosticId": "diag_A2B3C4D5E6F7G8H9"
+          }
+        }
+      },
+      {
+        "operation": "policyChange",
+        "injectedSources": ["policyChange.accountFingerprint", "policyChange.endpoint"],
+        "span": {
+          "name": "decision_proposal.policy_change",
+          "attributes": {
+            "contexer.result": "refused",
+            "contexer.reason_code": "account_mismatch",
+            "contexer.team_id": "40000000-0000-4000-8000-000000000001",
+            "contexer.policy_generation": "policy-generation-1",
+            "contexer.error_class": "capability"
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionProposalPolicyChange",
+            "result": "refused",
+            "reasonCode": "account_mismatch",
+            "teamId": "40000000-0000-4000-8000-000000000001",
+            "policyGeneration": "policy-generation-1",
+            "errorClass": "capability"
+          }
+        }
+      },
+      {
+        "operation": "scan",
+        "injectedSources": ["scan.repoPath"],
+        "span": {
+          "name": "decision_proposal.scan",
+          "attributes": {
+            "contexer.result": "skipped",
+            "contexer.reason_code": "global_decision",
+            "contexer.decision_id": "decision-global-1",
+            "contexer.error_class": "none"
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionProposalScan",
+            "result": "skipped",
+            "reasonCode": "global_decision",
+            "decisionId": "decision-global-1",
+            "errorClass": "none"
+          }
+        }
+      },
+      {
+        "operation": "enqueue",
+        "injectedSources": ["enqueue.decisionContent"],
+        "span": {
+          "name": "decision_proposal.enqueue",
+          "attributes": {
+            "contexer.result": "no_op",
+            "contexer.reason_code": "lock_busy",
+            "contexer.decision_id": "decision-d1",
+            "contexer.idempotency_key": "idempotency-1",
+            "contexer.error_class": "lock",
+            "contexer.attempt": 1,
+            "contexer.queue_depth": 3
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionProposalEnqueue",
+            "result": "no_op",
+            "reasonCode": "lock_busy",
+            "decisionId": "decision-d1",
+            "idempotencyKey": "idempotency-1",
+            "errorClass": "lock",
+            "attempt": 1,
+            "queueDepth": 3
+          }
+        }
+      },
+      {
+        "operation": "drain",
+        "injectedSources": ["drain.thrownException"],
+        "span": {
+          "name": "decision_proposal.drain",
+          "attributes": {
+            "contexer.result": "attention",
+            "contexer.reason_code": "not_member",
+            "contexer.team_id": "40000000-0000-4000-8000-000000000001",
+            "contexer.decision_id": "decision-d1",
+            "contexer.idempotency_key": "idempotency-1",
+            "contexer.error_class": "authorization",
+            "contexer.replayed": false
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionProposalDrain",
+            "result": "attention",
+            "reasonCode": "not_member",
+            "teamId": "40000000-0000-4000-8000-000000000001",
+            "decisionId": "decision-d1",
+            "idempotencyKey": "idempotency-1",
+            "errorClass": "authorization",
+            "replayed": false
+          }
+        }
+      },
+      {
+        "operation": "transitionRead",
+        "injectedSources": ["transitionRead.candidateRepoKey", "transitionRead.candidateContent", "transitionRead.findingExplanation"],
+        "span": {
+          "name": "decision_transition.read",
+          "attributes": {
+            "contexer.result": "refused",
+            "contexer.reason_code": "repo_mismatch",
+            "contexer.team_id": "40000000-0000-4000-8000-000000000001",
+            "contexer.candidate_id": "candidate-d2",
+            "contexer.error_class": "authorization"
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionTransitionRead",
+            "result": "refused",
+            "reasonCode": "repo_mismatch",
+            "teamId": "40000000-0000-4000-8000-000000000001",
+            "candidateId": "candidate-d2",
+            "errorClass": "authorization"
+          }
+        }
+      },
+      {
+        "operation": "transitionApprove",
+        "injectedSources": ["transitionApprove.candidateRationale", "transitionApprove.candidateSourceFile", "transitionApprove.resolutionNote", "transitionApprove.teamDisplayName"],
+        "span": {
+          "name": "decision_transition.approve",
+          "attributes": {
+            "contexer.result": "conflict",
+            "contexer.reason_code": "stale_predecessor",
+            "contexer.team_id": "40000000-0000-4000-8000-000000000001",
+            "contexer.decision_id": "decision-d1",
+            "contexer.candidate_id": "candidate-d2",
+            "contexer.error_class": "conflict",
+            "contexer.enforcement_choice": "blocking"
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionTransitionApprove",
+            "result": "conflict",
+            "reasonCode": "stale_predecessor",
+            "teamId": "40000000-0000-4000-8000-000000000001",
+            "decisionId": "decision-d1",
+            "candidateId": "candidate-d2",
+            "errorClass": "conflict",
+            "enforcementChoice": "blocking"
+          }
+        }
+      },
+      {
+        "operation": "transitionRecheck",
+        "injectedSources": [],
+        "span": {
+          "name": "decision_transition.recheck",
+          "attributes": {
+            "contexer.result": "partial_success",
+            "contexer.reason_code": "runner_launch_failed",
+            "contexer.team_id": "40000000-0000-4000-8000-000000000001",
+            "contexer.candidate_id": "candidate-d2",
+            "contexer.error_class": "runner",
+            "contexer.recheck_outcome": "runner_launch_failed"
+          }
+        },
+        "log": {
+          "message": "decision operation completed",
+          "fields": {
+            "action": "decisionTransitionRecheck",
+            "result": "partial_success",
+            "reasonCode": "runner_launch_failed",
+            "teamId": "40000000-0000-4000-8000-000000000001",
+            "candidateId": "candidate-d2",
+            "errorClass": "runner",
+            "recheckOutcome": "runner_launch_failed"
+          }
+        }
+      }
+    ],
+    "sinkFailureScenarios": [
+      {
+        "runtime": "contexer",
+        "operation": "enqueue",
+        "healthySinkOutcome": {"result": "queued", "reasonCode": "none"},
+        "failingSinkOutcome": {"result": "queued", "reasonCode": "none"},
+        "healthySinkState": {"decisionApproved": true, "intentQueued": true},
+        "failingSinkState": {"decisionApproved": true, "intentQueued": true},
+        "sinkErrorSwallowed": true,
+        "rawExceptionRecorded": false
+      },
+      {
+        "runtime": "teams",
+        "operation": "transitionApprove",
+        "healthySinkOutcome": {"result": "success", "reasonCode": "none"},
+        "failingSinkOutcome": {"result": "success", "reasonCode": "none"},
+        "healthySinkState": {"predecessorState": "superseded", "candidateState": "team_approved"},
+        "failingSinkState": {"predecessorState": "superseded", "candidateState": "team_approved"},
+        "sinkErrorSwallowed": true,
+        "rawExceptionRecorded": false
+      }
+    ],
+    "transportSafety": {
+      "contexer": {
+        "exportMode": "stderr_jsonl_only",
+        "networkExporter": false,
+        "nonBlocking": true,
+        "deliveryMode": "enqueue_and_return"
+      },
+      "dispatches": [
+        {"operation": "capabilityRead", "locksHeld": []},
+        {"operation": "policyChange", "locksHeld": []},
+        {"operation": "scan", "locksHeld": []},
+        {"operation": "enqueue", "locksHeld": []},
+        {"operation": "drain", "locksHeld": []},
+        {"operation": "transitionRead", "locksHeld": []},
+        {"operation": "transitionApprove", "locksHeld": []},
+        {"operation": "transitionRecheck", "locksHeld": []}
+      ],
+      "forbiddenHeldLocks": [
+        "decision_store",
+        "policy_sidecar",
+        "outbox_sidecar",
+        "receipts_sidecar",
+        "attention_sidecar",
+        "drainer"
+      ]
+    }
+  }
+}

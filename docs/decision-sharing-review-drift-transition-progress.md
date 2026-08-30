@@ -2,7 +2,7 @@
 
 Canonical plan: `docs/decision-sharing-review-drift-transition-plan.md`
 Created: 2026-08-30
-Overall status: `phase_a_a1_complete`
+Overall status: `phase_a_a2_complete`
 
 This is the single durable cross-repository progress ledger. Contexer Teams carries only an
 immutable pointer to the plan and this ledger; it must not grow a second ledger.
@@ -11,8 +11,8 @@ immutable pointer to the plan and this ledger; it must not grow a second ledger.
 
 Phase A remained paused throughout Phase 0. Phase 0 preserved/checkpointed prior work and created
 documentation-only commits/PRs; it added no production behavior, schema changes, or Phase B work.
-With every Phase 0 gate complete and this status set to `phase_0_complete`, Phase A may now resume
-at A1.
+Phase A then completed the A1 contract and A2 executable invariant gates without changing
+production behavior or adding migrations. Phase B may now begin with identity and transition reads.
 
 ## 2. Fetched baselines
 
@@ -178,9 +178,10 @@ Unresolved items:
 - None requiring a maintainer ruling in Phase 0.
 - None. The Teams pointer landed in `dc1a20f` and resolves to the merged immutable Contexer record.
 
-## 9. First Phase A task permitted after the gate
+## 9. Phase A resume gate - completed
 
-Resume **A1 - Freeze behavior with cross-repository contract fixtures**. Re-review any helper or
+The first permitted task was **A1 - Freeze behavior with cross-repository contract fixtures**.
+Re-review any helper or
 fixture from checkpoint `9093e53` against the refreshed contract and current main before reuse.
 Create/pin the duplicated Python/TypeScript capability, policy, intent, receipt, transition, and
 resolution fixtures first; then execute A2's invariant tests. Do not begin Phase B or production
@@ -234,5 +235,70 @@ Verification:
   incomplete string taxonomies, misleading result/reason combinations, and database error classes.
 - No production module, migration, A2 invariant, or Phase B behavior changed.
 
-Next permitted task: **A2 - Write invariant tests before implementation**.
-Phase B remains blocked.
+The next permitted task was **A2 - Write invariant tests before implementation**. It is now
+complete; the Phase B production gate is open.
+
+### 2026-08-30 - A2 executable transition invariants - complete
+
+A2 ran in fresh worktrees from the then-current merged A1 refs:
+
+| Repository | Branch | Worktree | A2 start SHA |
+| --- | --- | --- | --- |
+| Contexer | `codex/decision-sharing-invariants` | `/Users/bhargavamin/repos/personal/contexer-decision-sharing-invariants` | `2be2c60d152ea98ed2efd2f7f36b42dba81d4ebf` |
+| Contexer Teams | `codex/decision-sharing-invariants` | `/Users/bhargavamin/repos/personal/contexer-teams-decision-sharing-invariants` | `0c6a4bd17a05bd144889f179ab96977dc1833241` |
+
+Teams was then fast-forwarded, before A2 commits, to `6baf293d4475bc77c093cbd92c03c80aa3a24ef0`
+after Bhargav Amin merged pointer-cleanup PR #197. This task did not merge that PR. Its only change
+was to replace the provisional A1 pointer with the merged immutable Contexer A1 record and preserve
+the no-automatic-merge boundary.
+
+Both repositories now own byte-identical copies of
+`decision-sharing-transition-invariants.v1.json`, pinned at SHA-256
+`3c5ee30d6385ee48d15b1b111b784a86e4d296efe2f7b600b56326444a1fe761`. The fixture is an
+executable preimplementation oracle bound to the merged A1 contract digest. Future production
+tests in Phases B-D must load it; passing the fixture-only reference adapters is not runtime proof.
+The executable scenarios prove:
+
+- a pending candidate cannot enter Check/Guard inputs or change verdict, score, conclusion, or
+  blocking authority;
+- stale-predecessor approval and every injected approval-write failure leave the authoritative
+  predecessor and pending replacement unchanged;
+- candidate, predecessor, and finding team/repository/lineage mismatches, including every global
+  variant, fail closed behind one tenant-safe refusal;
+- capture and approval return without blocking, network work, or telemetry flush when each
+  dedicated proposal lock is busy or unavailable;
+- each independently missing legacy prerequisite preserves manual reconciliation but performs no
+  automatic submit; and
+- every A1 operation/result/reason and closed telemetry value is exercised through concrete spans,
+  Contexer JSON stderr, and the repository's actual Teams Pino JSON-to-OTLP mapping.
+
+Security and observability coverage injects source-bound sentinels for credentials, account
+fingerprints, endpoints, repository paths/keys, decision and candidate content/rationale/source
+files, finding and resolution prose, thrown exceptions, and person/team display data. It proves
+none reach spans, events, stderr/stdout JSON, or OTLP records. Teams stdout uses representative
+Pino infrastructure and trace fields; the test derives OTLP body, attributes, severity, timestamp,
+and first-class trace correlation with the same mapping as `@contexer/observability`. Preparation
+only enqueues payloads and returns; sink delivery is separate, forbidden while any listed store or
+sidecar lock is held, and a throwing sink cannot change functional state or outcomes.
+
+Verification:
+
+- Contexer: 10 focused invariant tests pass; Ruff 0.15.4 and `git diff --check` pass.
+- Contexer full suite: 5,123 passed, 22 skipped, 94.02% coverage.
+- Contexer Teams: 10 focused invariant tests, the full monorepo typecheck, and all 833 non-Postgres
+  tests pass; `git diff --check` passes.
+- A local `pnpm test` attempt could not authenticate to PostgreSQL because this clean worktree had
+  no usable `DATABASE_URL` password (`SCRAM-SERVER-FIRST-MESSAGE`). It reported 845 passing tests
+  before 438 PostgreSQL-dependent failures; CI remains the authoritative database-backed gate.
+- Fixture copies compare byte-for-byte and pin the same digest.
+- Independent security re-review found no remaining Critical, Important, or Minor findings after
+  corrections for source-bound candidate/repository sentinel coverage, concrete Pino-to-OTLP
+  mapping and trace correlation, and enqueue preparation that performs no synchronous delivery.
+- No production module, migration, generated metadata, or Phase B behavior changed.
+
+Checkpoint `9093e5329a43877c036b241d756fe41803a4177e` remains intact and was not replayed: it is a broad
+mechanical share-persistence split from an older base and contains none of A1/A2's feature
+contracts. The normal dirty/untracked checkouts remained outside both A2 worktrees.
+
+Next permitted task: **B1 - Add account-bound proposal capability**, followed by B2 transition
+read-model work. No automatic team approval or production merge authority is implied.

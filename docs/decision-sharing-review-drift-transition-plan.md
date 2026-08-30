@@ -1,6 +1,6 @@
 # Decision sharing, review, and drift-transition implementation plan
 
-Status: Phase A1 complete; Phase A2 invariant tests are next
+Status: Phase A complete through A2; Phase B identity and transition reads are next
 Originally drafted: 2026-08-28
 Refreshed: 2026-08-30
 Canonical progress ledger: `docs/decision-sharing-review-drift-transition-progress.md`
@@ -12,8 +12,8 @@ Repositories:
 ## 0. Phase 0 reconciliation and authoritative baselines
 
 The Phase 0 gate in the progress ledger is complete. Phase A resumed in fresh contract worktrees
-after both Phase 0 documentation changes landed. A1 completed its contract, verification, and
-independent security gates on 2026-08-30; A2 is next. All implementation
+after both Phase 0 documentation changes landed. A1 and A2 completed their contract, executable
+invariant, verification, and independent security gates on 2026-08-30. Phase B is next. All implementation
 work must use clean worktrees created from the latest fetched `origin/main`; the normal checkouts
 contain user-owned dirty and untracked files and are not implementation surfaces.
 
@@ -522,7 +522,7 @@ Every new runtime path must add structured logging and tracing in the same chang
   network request or telemetry flush may run while a store or sidecar lock is held.
 - A2 must inject secret sentinels through thrown exceptions and candidate/decision inputs, then
   exercise every permitted string-valued telemetry slot, and prove the sentinels appear in neither
-  span attributes/events nor JSON stdout/OTLP log records. It must also
+  span attributes/events, Contexer JSON stderr, nor Teams JSON stdout/OTLP log records. It must also
   prove Contexer's telemetry is stderr-only, has no network exporter or in-lock flush, is
   non-blocking, and cannot change state or return values when its sink fails.
 
@@ -574,7 +574,7 @@ Create shared JSON fixtures, duplicated intentionally in each repository's tests
 Each repository owns and validates its copy. Add a comment naming the other copy and a test that
 pins required fields. Do not introduce a package dependency between the Python and TypeScript repos.
 
-#### A2. Write invariant tests before implementation
+#### A2. Write invariant tests before implementation - complete 2026-08-30
 
 At minimum, prove:
 
@@ -585,6 +585,10 @@ At minimum, prove:
 - capture/approval returns even when the proposal queue lock is busy or unavailable
 - automatic sending refuses an old server without atomic reconciliation and account binding
 - every new runtime path emits the required result/reason trace and no forbidden telemetry field
+
+The byte-identical Python and TypeScript scenario fixture is an executable preimplementation
+oracle. Production tests in Phases B-D must load these scenarios rather than restate weaker
+expectations; fixture-only execution does not count as verification of future runtime behavior.
 
 ### Phase B - Contexer Teams: identity and transition reads
 
@@ -966,7 +970,7 @@ Before implementation begins:
 - [x] Ratify the sidecar schema, capability shape, repository compatibility rule, and enforcement
       choice UX before writing migrations.
 - [x] Complete the Phase 0 ledger, immutable Teams pointer, diff checks, and independent review.
-- [ ] Add invariant tests before implementation.
+- [x] Add invariant tests before implementation.
 
 Before declaring complete:
 
