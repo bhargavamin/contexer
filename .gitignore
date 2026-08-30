@@ -48,3 +48,6 @@ docs/internal/
 graphify-out/
 e2e_commit_promotion.py
 CLAUDE.local.md
+
+# Wayfinder maps and scratch planning artifacts
+.scratch/

@@ -134,13 +134,16 @@ You should see a `.json` file named after your repo. Each file holds the decisio
 ## Update
 
 ```bash
-uv tool upgrade contexer
-contexer reinstall
+contexer upgrade
 ```
 
-Run `contexer reinstall` after upgrading — it re-syncs the MCP registration and hooks in case they changed. Then restart your AI assistant: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
+That upgrades the binary and then re-syncs the MCP registration and hooks in case they changed. Then restart your AI assistant: the MCP server is spawned once at session start, so a running session keeps the old version until restarted.
 
-> If `uv tool upgrade` doesn't pick up a release published minutes ago, force past the cache: `uv tool install --reinstall --refresh contexer`.
+Contexer tells you when a release is out, so you should not need to check. You see the notice at most once a day, in your assistant, or on the next `contexer` command for assistants that have no way to show one.
+
+`contexer upgrade` will not upgrade an install it cannot upgrade safely — a clone installed from source, or a pip install — because that would replace your own build or pick an environment that is yours to choose. In those cases it prints the right command instead. Use `contexer upgrade --dry-run` to see what it would do.
+
+> If the upgrade doesn't pick up a release published minutes ago, force past the cache: `uv tool install --reinstall --refresh contexer`.
 
 ---
 

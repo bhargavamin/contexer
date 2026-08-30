@@ -42,6 +42,15 @@ def is_present(home: Path) -> bool:
     return (home / ".codex").exists()
 
 
+def notify(text: str) -> dict | None:
+    """This host's user-facing notice channel, or None when it has none.
+
+    Codex uses Claude's output schema verbatim, `systemMessage` included, so it delegates
+    rather than restating the shape. Every other Codex runtime entrypoint already reuses
+    Claude's the same way, and a second literal here would be a copy that drifts."""
+    return claude.notify(text)
+
+
 # ── TOML config.toml helpers (surgical: touch only our [mcp_servers.contexer] stanza) ──────
 
 def _stanza_bounds(lines: list[str]) -> tuple[int, int] | None:
@@ -372,6 +381,13 @@ def install(home: Path) -> list[str]:
     if not base._in_groups(ups, "claude.team_poll"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for new team decisions...", "command": cap_poll}]})
+    # Retire the standalone update-notice hook, mirroring claude.install(): the notice rides
+    # claude.rationale now, so a build that installed both would emit two systemMessages on one
+    # prompt. Codex wires the very same command string, so it needs the very same retirement.
+    if base._in_groups(ups, "claude.update_notice"):
+        ups = base._filter_groups(ups, ["claude.update_notice"])
+        hooks["UserPromptSubmit"] = ups
+
     if not base._in_groups(ups, "claude.review_nudge"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
@@ -389,7 +405,7 @@ _EVENT_MARKERS = {
     "PreCompact":       ["compaction starting"],
     "PostCompact":      ["get_post_compact_context"],
     "UserPromptSubmit": [".current_repo", ".pending_capture", "claude.review_nudge",
-                         "get_bootstrap_context_prompt",
+                         "get_bootstrap_context_prompt", "claude.update_notice",
                          "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                          "claude.team_poll"],
 }

@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import evidence, memory_sync, sidecars, store
+from contexer import evidence, memory_sync, sidecars, store, updates
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -194,19 +194,51 @@ _SAVED_MULTIPLIER = 4
 
 
 def rationale(repo_path: str, raw: str) -> str:
-    """UserPromptSubmit (every prompt): inject matching decisions for rationale questions.
+    """UserPromptSubmit (every prompt): inject matching decisions for rationale questions, and
+    deliver a due update notice when nothing better is competing for the line.
 
     Passes the host's session id (Retrieval V1 Part B) so the BM25 router's working set
-    can dedup repeat injections within a session; Codex reuses this verbatim."""
+    can dedup repeat injections within a session; Codex reuses this verbatim.
+
+    The update notice rides HERE rather than in a hook of its own, for two reasons. This event
+    already runs on every prompt, so carrying it costs no extra process on a path where six
+    hooks already fire. And `systemMessage` is one slot: two Contexer lines in one turn is the
+    noise the silent-operation constraint exists to prevent, so a recall notice and an update
+    notice cannot both be emitted. Recall wins, because it explains something the developer
+    just asked about, while a release is never urgent. The update notice is not CONSUMED when
+    it yields, so it is still owed on the next quiet prompt.
+    """
+    try:
+        payload = _recall_payload(repo_path, raw)
+        # Its own try, and it must stay that way. The recall payload is already built by this
+        # point, and the update notice is bookkeeping on top of it: an exception here must not
+        # cost the developer their context injection, which is the invariant CLAUDE.md states
+        # for every optional write on a hook path. cursor.capture_constraint and
+        # gemini.session_start guard their refresh the same way and for the same reason.
+        try:
+            # Kept warm even on a prompt that yields to recall, or the state would never
+            # refresh for a developer who asks rationale questions constantly.
+            updates.spawn_refresh()
+            if not payload:
+                payload = updates.deliver(notify) or {}
+        except Exception:
+            pass
+        return json.dumps(payload) if payload else "{}"
+    except Exception:
+        return "{}"
+
+
+def _recall_payload(repo_path: str, raw: str) -> dict:
+    """The retrieval half of `rationale`: injected context plus its user-facing note, or {}."""
     try:
         repo = store.resolve_repo(store.hook_repo_from_stdin(raw, repo_path))
         if not repo:
-            return "{}"
+            return {}
         session_id = store.session_from_hook_stdin(raw)
         ctx, meta = store.get_context_for_prompt_with_meta(
             repo, store.prompt_from_hook_stdin(raw), session_id)
         if not ctx:
-            return "{}"
+            return {}
         # systemMessage is user-facing only (the model never sees it): name WHAT was
         # recalled so retrieval is observable, not spooky. Savings are flagged on
         # exception — the benchmark-derived estimate appears only when the injection
@@ -227,12 +259,12 @@ def rationale(repo_path: str, raw: str) -> str:
         if est > _COST_NOTE_TOKENS:
             saved = int(round(est * (_SAVED_MULTIPLIER - 1), -1))
             msg += f" · ~{saved} tokens saved"
-        return json.dumps({
+        return {
             "systemMessage": msg,
             "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+                "hookEventName": "UserPromptSubmit", "additionalContext": ctx}}
     except Exception:
-        return "{}"
+        return {}
 
 
 def post_write(repo_path: str, raw: str) -> str:
@@ -307,6 +339,23 @@ def review_nudge(repo_path: str, raw: str) -> str:
             "hookEventName": "UserPromptSubmit", "additionalContext": nudge}})
     except Exception:
         return "{}"
+
+
+def notify(text: str) -> dict | None:
+    """This host's user-facing notice channel as hook-output fields, or None when it has none.
+
+    The one seam every user-facing Contexer notice goes through. Claude has `systemMessage`,
+    which the model never sees, so a notice here costs zero tokens and is delivered
+    deterministically rather than depending on the model choosing to mention it.
+
+    Fields rather than a finished JSON string, so one hook can carry a notice ALONGSIDE its
+    own output instead of needing a hook of its own. An adapter whose host offers no such
+    channel returns None, and the caller falls back to the host-independent terminal backstop
+    in `cli`. That is the whole reason this is a function on every adapter rather than a
+    `systemMessage` literal at each call site: a new host implements this one function and
+    inherits every notice Contexer will ever emit.
+    """
+    return {"systemMessage": text} if text else None
 
 
 def _retire_capture_task_hook() -> None:
@@ -847,6 +896,12 @@ def install(home: Path) -> list[str]:
         ups = _strip_stale(ups, [marker], current_cmd)
     hooks["UserPromptSubmit"] = ups
 
+    # Retire the standalone update-notice hook: the notice now rides claude.rationale, so a
+    # build that installed both would emit two systemMessages on one prompt.
+    if _in_groups(ups, "claude.update_notice"):
+        ups = _filter_groups(ups, ["claude.update_notice"])
+        hooks["UserPromptSubmit"] = ups
+
     if not _in_groups(ups, "claude.capture_constraint"):
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for constraint directives...", "command": cap_con}]})
@@ -976,6 +1031,9 @@ def uninstall(home: Path) -> list[str]:
                                  "decision(s) available", "uv run --directory", _HOOK_SENTINEL],
             "UserPromptSubmit": [".current_repo", ".pending_capture", "claude.review_nudge",
                                  "get_bootstrap_context_prompt",
+                                 # Retired: the update notice rides claude.rationale now.
+                                 # Kept so an install that shipped the separate hook is cleaned.
+                                 "claude.update_notice",
                                  "claude.capture_task", "claude.capture_constraint", "claude.rationale",
                                  "Reminder: if you make a significant decision",
                                  _HOOK_SENTINEL],

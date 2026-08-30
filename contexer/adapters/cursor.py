@@ -4,7 +4,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import evidence, store
+from contexer import evidence, store, updates
 from contexer.adapters import base
 
 NAME = "cursor"
@@ -107,6 +107,27 @@ def format_prompt_passthrough() -> dict:
     return {"continue": True}
 
 
+def notify(text: str) -> dict | None:
+    """This host's user-facing notice channel, or None when it has none. None here.
+
+    Checked against Cursor's hooks documentation rather than assumed. Cursor has no
+    `systemMessage` and no notification, toast, or status API. Its user-facing field is
+    `user_message`, and on every event that carries one, including `beforeSubmitPrompt`, the
+    docs define it as the message shown when the action is BLOCKED. Reaching the developer
+    would therefore cost them their prompt, which is not a price a release announcement may
+    charge. The one unconditional exception is `preCompact.user_message`, which fires only at
+    context compaction and so is not a general channel.
+
+    Returning None is the honest answer rather than a defect. The caller falls back to the
+    host-independent terminal backstop. Routing the notice through Cursor's sessionStart
+    prescriptive block was rejected deliberately: that is model relay, which makes an
+    operational notice probabilistic, and a notice the model may or may not repeat is worse
+    than a silent host. The day Cursor ships a real channel, this function is the only thing
+    that changes.
+    """
+    return None
+
+
 def _repo_from(raw: str, repo_path: str) -> str:
     """Cursor sessionStart provides workspace_roots[]; fall back to .current_repo."""
     return _repo_from_verbose(raw, repo_path)[0]
@@ -193,7 +214,20 @@ def capture_constraint(repo_path: str, raw: str) -> str:
 
     Cursor's evidence is prompt-only: its hooks cannot observe an edit, so this host emits
     `user_directive` and never `file_changed` - an absent event here means Cursor could not
-    see the edit, which is what the spool should say."""
+    see the edit, which is what the spool should say.
+
+    This hook also keeps the update state warm. Cursor has no channel that can SHOW a notice,
+    so it never renders one, but without a refresh somewhere the state on a Cursor-only machine
+    is never fetched at all: the terminal backstop would then only START the fetch on the
+    developer's first `contexer` command and have nothing to say until their second. One stat
+    on a hook that already runs, and a fork only on the day the state expires.
+    """
+    try:
+        # Its own try, before the capture: a refresh failure must not cost the directive
+        # capture, which is this hook's actual job.
+        updates.spawn_refresh()
+    except Exception:
+        pass
     try:
         repo, repo_source = _repo_from_verbose(raw, repo_path)
         if repo:

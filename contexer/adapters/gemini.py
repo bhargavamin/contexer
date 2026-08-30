@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import evidence, sidecars, store
+from contexer import evidence, sidecars, store, updates
 from contexer.adapters import base
 
 NAME = "gemini"
@@ -34,17 +34,39 @@ def is_present(home: Path) -> bool:
     return (home / ".gemini").exists()
 
 
-def _output(event: str, contexts: list[str]) -> str:
+def notify(text: str) -> dict | None:
+    """This host's user-facing notice channel: Gemini's `systemMessage`.
+
+    An earlier version returned None, reasoning that Gemini emits only `additionalContext`.
+    That described what THIS ADAPTER sent, not what the host offers, and it was wrong.
+    Gemini's hook reference lists `systemMessage` among its common output fields as
+    "Displayed immediately to the user in the terminal", and `suppressOutput` does not
+    suppress it. Gemini has a real user-facing channel and does not need the backstop.
+
+    Delivered from `SessionStart`, the event whose documentation names `systemMessage`
+    explicitly ("Shown at the start of the session"). The common-fields table and the host's
+    own source say every event carries it, but the per-event section for `BeforeAgent` does
+    not name it, and a notice is marked as said the moment it is handed over: choosing the
+    documented event means a wrong guess cannot silently swallow it.
+    """
+    return {"systemMessage": text} if text else None
+
+
+def _output(event: str, contexts: list[str], notice: dict | None = None) -> str:
+    """Hook output: model-facing context, plus optional user-facing fields from `notify`.
+
+    `suppressOutput` does NOT suppress `systemMessage`. Gemini's own best-practices doc is
+    explicit that it "only affects background logging" and that a `systemMessage` is still
+    displayed to the user in the terminal, so both can be sent together: the context goes to
+    the model, the notice goes to the developer.
+    """
     context = "\n\n".join(part for part in contexts if part)
-    if not context:
-        return json.dumps({"suppressOutput": True})
-    return json.dumps({
-        "suppressOutput": True,
-        "hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": context,
-        },
-    })
+    out: dict = {"suppressOutput": True}
+    if notice:
+        out.update(notice)
+    if context:
+        out["hookSpecificOutput"] = {"hookEventName": event, "additionalContext": context}
+    return json.dumps(out)
 
 
 def _session_marker(raw: str) -> Path | None:
@@ -104,10 +126,19 @@ def session_start(repo_path: str, raw: str) -> str:
     DIFFERENT repo between hook events. See `after_write`'s docstring for the full
     rationale; this mirrors it so SessionStart keys the same store `before_agent` and
     `after_write` do."""
+    notice = None
+    try:
+        # Outside the main try, and before the repo check: update state is machine-global, so
+        # a Gemini session started outside a git repo must still be told, and a failure here
+        # must never cost the context injection below.
+        updates.spawn_refresh()
+        notice = updates.deliver(notify)
+    except Exception:
+        notice = None
     try:
         repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
-            return _output("SessionStart", [])
+            return _output("SessionStart", [], notice)
         _anchor(repo)
         # Fix 7: only reset the first-prompt marker on a genuinely new session.
         # Resume and /clear continue an existing session — preserve the marker so
@@ -123,9 +154,9 @@ def session_start(repo_path: str, raw: str) -> str:
         # a session that compresses or ends without ever starting again, and this one is the
         # recovery net for a session that ended without either.
         payload = store.session_start_payload(repo, source, "", NAME)
-        return _output("SessionStart", [payload.get("context", "")])
+        return _output("SessionStart", [payload.get("context", "")], notice)
     except Exception:
-        return _output("SessionStart", [])
+        return _output("SessionStart", [], notice)
 
 
 def before_agent(repo_path: str, raw: str) -> str:

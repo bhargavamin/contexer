@@ -10,7 +10,7 @@ import webbrowser
 
 import pytest
 
-from contexer import cli
+from contexer import cli, updates
 from contexer.ui import daemon
 
 
@@ -24,7 +24,7 @@ def ui_home(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / ".contexer" / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ".contexer" / "ui.log")
     monkeypatch.setattr(daemon, "_configured_port", lambda: daemon.DEFAULT_PORT)
-    monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
+    monkeypatch.setattr(updates, "refresh", lambda force=False: {})
     return tmp_path
 
 
