@@ -2,7 +2,7 @@
 
 Canonical plan: `docs/decision-evidence-readiness-plan.md`
 Created: 2026-08-30
-Overall status: `closeout_pending`
+Overall status: `complete`
 
 This ledger is the durable handoff between Codex sessions. Update it before and after every task.
 Do not rely on chat history for status.
@@ -56,7 +56,7 @@ Allowed states: `not_started`, `in_progress`, `blocked`, `complete`.
 | 07 | Final handoff and future-work boundary | complete | `4e47cd5` | Green |
 | Post | Install completed branches locally for user testing | complete | `071204c` | Green |
 | Acceptance | Installed/live/browser whole-feature acceptance and navigation repair | complete | Teams `fde3408` | Green |
-| Closeout | Durable handoff, ratification, evaluation correction and cross-repo pointers | in_progress | Contexer `bb6ad9b`; Teams pending | Pending |
+| Closeout | Durable handoff, ratification, evaluation correction and cross-repo pointers | complete | Contexer `bb6ad9b`, `61ed51a`, merge `d278102`; Teams `4fd0687`, merge `07b458e` | Green |
 
 ## 4. Baseline test evidence
 
@@ -848,6 +848,59 @@ directive-classifier change; the current corpus must not be used to claim genera
 Next task: merge the canonical Contexer documentation follow-up, publish the durable Teams pointer,
 create the C05 follow-up issue, and finalize this correction with their URLs and merge SHAs.
 
+#### 2026-08-30 - Review closeout correction - complete
+
+Agent/session: Codex review-closeout session
+Starting SHA(s): Contexer canonical-record main
+`d278102d2e2beaa1d01560b134408dca824f4661`; Teams pointer branch
+`4fd0687c773928267923508f8a3b7732cf9a6f45`; Teams main
+`48b02110610901f9ef06e66ec07b6657805e7fb5`.
+Ending SHA(s): Contexer canonical-record merge
+`d278102d2e2beaa1d01560b134408dca824f4661`; Teams pointer squash merge
+`07b458e0f772dd912ca9efdfb409cc7dcbe97a19`; this final documentation update begins from
+Contexer `d278102`.
+Scope performed: merged Contexer documentation/evaluation-metadata PR #270; published and merged
+the durable Teams pointer in PR #190; created Teams issue #191 for the ratified C05 Option A
+promotion-time backfill; fetched both repositories and executed every post-merge discovery,
+reviewed-tree, provenance, ruling and link gate before marking the closeout complete.
+Failure reproduced or baseline measured: no product failure was reproduced in this final round.
+The pre-merge Teams pointer gate was pending until its Build & test job completed; the job passed
+without a fix. Post-merge checks found all canonical files and reviewed product trees present.
+Files changed: this progress ledger, the canonical plan status, and the review-closeout completion
+record. Teams PR #190 added only `docs/decision-evidence-readiness-plan.md` as a pointer; issue #191
+records future product work without changing code.
+Commits/PRs: Contexer closeout reviewed tree `bb6ad9b`, PR head `61ed51a`, PR #270 merge
+`d278102`; Teams pointer `4fd0687`, PR #190 merge `07b458e`; Teams issue #191.
+Tests/commands and results: Contexer PR #270 passed Python 3.12/3.13/3.14, benchmark, Ruff and
+Contexer Guard. Teams PR #190 passed Build & test, Detect changes and Contexer Guard; Docker jobs
+were correctly skipped for the documentation-only change. Post-merge `git ls-tree` found all three
+canonical Contexer documents and the Teams pointer. `git merge-base --is-ancestor` confirmed
+Contexer product head `a696201` is in current main; its tree equals product merge `97c479c`.
+Teams reviewed tree `fde3408` equals squash merge `48b0211`. All three immutable pointer links are
+absolute and pinned to `d278102`; GitHub resolves their content. The C05 issue is open at
+<https://github.com/contexer-ai/contexer-teams/issues/191>.
+Performance/evaluation measurements: no production benchmark was rerun because this final update
+changes documentation only. The authoritative product and evaluation measurements remain those
+recorded above; the current corpus remains a labeled natural-prompt regression corpus.
+Independent review findings: the Contexer closeout follow-up and Teams pointer each passed
+adversarial review. Final completion-record review found one Important documentation defect: C02's
+required evidence block still contained template placeholders even though the evidence existed in
+the additive ledger. The block was populated, C05's analogous record was completed explicitly, and
+independent re-review passed with no unresolved Critical or Important finding.
+Fix disposition: no product fix was required. The closeout evidence summaries now name their exact
+session, SHAs, PRs, issue and verification results. The first `gh issue create` invocation used an
+unsupported display-only `--json` flag and created nothing; it was retried without that flag and
+issue #191 was then read back to verify its complete contract and acceptance tests.
+Deviations from plan and why: C01 required two Contexer documentation PRs rather than one because
+the canonical ledger could only record the Teams pointer merge and C05 issue after those external
+artifacts existed. This is an additive documentation-only finalization; it does not alter product
+behavior or rewrite the reviewed evidence source branch.
+Residual limitations: Teams issue #191 tracks the accepted promotion-time backfill gap. A genuinely
+held-out natural-prompt corpus must still be created and frozen independently before the next
+directive-classifier change. All other limitations in Section 11 remain deliberately out of scope.
+Next task: independent final documentation review, green CI, authorized merge and final remote-tree
+verification; no product implementation task remains in this plan.
+
 ## 6. Decision and ruling log
 
 Record implementation choices whose alternatives affect correctness or future plans.
@@ -866,7 +919,7 @@ Record implementation choices whose alternatives affect correctness or future pl
 | R10 | 2026-08-30 | Use an author-only `sourceRetired` context marker plus content-free durable notifications to current team leads; do not notify ordinary members | Notify all members or disclose decision content | Task 05 tenant/privacy tests, live actor-isolation smoke and notification payload review | Bhargav Amin, 2026-08-30 |
 | R11 | 2026-08-30 | Resolve divergence automatically when the personal source is restored while retaining divergence and notification audit history | Require lead acknowledgement; erase history | Task 05 open/resolve/reopen deltas, audit rows and installed-client marker clear | Bhargav Amin, 2026-08-30 |
 | R12 | 2026-08-30 | Retain `tests/fixtures/directive_holdout/natural-prompts.json` as a labeled natural-prompt regression corpus, not an independently frozen holdout | Delete the corpus; claim independent holdout provenance | 24 labeled cases; recall 1.00, precision 0.9091; current SHA-256 `d845566f015c9c361614a0f0a845bf5733c84fa2be22870fb39c2006729933f3`; labeled by the Codex implementation session on 2026-08-30; historical pre-correction hash retained in the Task 04/correction entries | Bhargav Amin, 2026-08-30; approved storage location is the recorded fixture path |
-| R13 | 2026-08-30 | Accept the current newly promoted lead limitation and track promotion-time backfill as focused Teams follow-up work (C05 Option A) | Reopen merged product work immediately to guarantee backfill (Option B); leave the limitation undocumented | Current contract covers leads present when divergence opens/reconciles; follow-up must backfill every open same-team divergence with content-free, tenant-fenced, deduplicated notifications and exclude resolved/foreign state | Bhargav Amin, 2026-08-30; issue URL pending closeout creation |
+| R13 | 2026-08-30 | Accept the current newly promoted lead limitation and track promotion-time backfill as focused Teams follow-up work (C05 Option A) | Reopen merged product work immediately to guarantee backfill (Option B); leave the limitation undocumented | Current contract covers leads present when divergence opens/reconciles; [Teams issue #191](https://github.com/contexer-ai/contexer-teams/issues/191) requires every open same-team divergence to receive a content-free, tenant-fenced, deduplicated notification while excluding resolved/foreign state | Bhargav Amin, 2026-08-30 |
 
 ## 7. Evaluation ledger
 
@@ -907,6 +960,8 @@ Record implementation choices whose alternatives affect correctness or future pl
 | 2026-08-30 | PR closeout | Added test-only Python 3.14 compatibility commit `a696201` after PR creation | Clean CI exposed a `pathlib` monkeypatch implementation-detail dependency | No product behavior changed; both Python 3.14 reruns and the full CI matrix passed after adversarial re-review | Bhargav Amin through merge of Contexer PR #268 |
 | 2026-08-30 | PR closeout | Teams PR #189 squash-merged as `48b0211` | Maintainer selected GitHub squash merge | Reviewed feature tree is preserved in the merged tree; feature and main SHAs are both recorded | Bhargav Amin |
 | 2026-08-30 | Review closeout | Contexer PR #268 merged as `97c479c` before C01's untracked canonical documents were added | The closeout review was supplied after the product PR merged | Requires a documentation/evaluation-metadata-only Contexer follow-up; product tree remains unchanged | Bhargav Amin; documentation follow-ups explicitly approved |
+| 2026-08-30 | Review closeout | Published the canonical record in Contexer PR #270 and the immutable cross-repository pointer in Teams PR #190 | C01 required a fresh-clone-discoverable record in both repositories after the product PRs had merged | Product trees remained unchanged; both documentation PRs passed CI and independent review | Bhargav Amin; documentation follow-ups explicitly approved |
+| 2026-08-30 | Review closeout | Used a second Contexer documentation-only update to record Teams merge `07b458e` and issue #191 | Those external identifiers did not exist when Contexer PR #270 was reviewed and merged | Closes the ledger additively without changing product behavior or the reviewed evidence source | Bhargav Amin; required by the closeout execution order |
 
 ## 10. Blockers
 
@@ -928,7 +983,8 @@ At planning time:
   authority, or inferred conflict model.
 - C05 Option A accepts that a user promoted to lead after a divergence opens is not guaranteed the
   existing notification until another reconciliation touches that source. Promotion-time,
-  content-free, tenant-fenced and deduplicated backfill is tracked as separate Teams follow-up work.
+  content-free, tenant-fenced and deduplicated backfill is tracked in
+  [Teams issue #191](https://github.com/contexer-ai/contexer-teams/issues/191).
 - Before the next directive-classifier change, create or obtain a genuinely held-out natural-prompt
   corpus in a separate commit or immutable external artifact, label and hash it before the
   implementer sees expected classifications, run it only after the classifier work, and never tune
@@ -938,7 +994,8 @@ Update this section as work changes the facts.
 
 ## 12. Completion record
 
-- Product implementation completed at: 2026-08-30; durable closeout remains pending.
+- Completed at: 2026-08-30.
+- Completed by: Codex review-closeout session; documentation merges authorized by Bhargav Amin.
 - Final Contexer reviewed feature SHA: `a696201f2e38b2f70353404fe4620abe4e3dd372`;
   PR #268 merged on `main` as `97c479c86aeaf36ab1311298fd4837b8f37bc18e`.
 - Final Teams reviewed feature SHA: `fde3408cf9a78982233ed7cedc0ebbc666c806ff`;
@@ -958,9 +1015,18 @@ Update this section as work changes the facts.
   extraction, handoff, code, installed-package and live-convergence reviews found no unresolved
   Critical or Important issue. The Python 3.14 regression repair also passed adversarial re-review.
 - User review/ratification: Bhargav Amin ratified R08-R12 and selected C05 Option A on 2026-08-30.
-- Push/PR/merge status: Contexer PR #268 merged as `97c479c`; Teams PR #189 merged as `48b0211`;
-  Contexer closeout PR #270 is open from `bb6ad9b`; the Teams pointer follow-up and C05 issue remain
-  pending. No tag was created.
+- Durable closeout: Contexer PR #270, reviewed tree `bb6ad9b`, head `61ed51a`, merged as
+  `d278102d2e2beaa1d01560b134408dca824f4661`; Teams pointer PR #190, head `4fd0687`,
+  squash-merged as `07b458e0f772dd912ca9efdfb409cc7dcbe97a19`.
+- C05 disposition: Option A, tracked by
+  [Teams issue #191](https://github.com/contexer-ai/contexer-teams/issues/191). Bhargav Amin accepts
+  the documented limitation while that issue remains open.
+- Final post-merge verification: canonical files are discoverable from both `origin/main` refs;
+  Contexer `a696201` is an ancestor of main and equals product merge `97c479c` by tree; Teams
+  `fde3408` equals squash merge `48b0211` by tree; pointer links are immutable and absolute;
+  R08-R12 carry maintainer/date evidence; the current natural-prompt corpus is labeled regression
+  evidence; issue #191 contains the ratified privacy, tenancy, idempotency and safe-navigation
+  contract. No tag was created.
 - Next implementation plan: the existing decision-sharing/review/drift-transition plan remains
   separate. Cross-artifact relationships and semantic conflict inference remain unplanned future
   work, not an extension of this branch.

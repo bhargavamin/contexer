@@ -1,6 +1,6 @@
 # Decision evidence readiness implementation plan
 
-Status: implemented; durable closeout pending
+Status: complete
 Date: 2026-08-30
 Canonical progress ledger: `docs/decision-evidence-readiness-progress.md`
 
