@@ -56,7 +56,7 @@ Allowed states: `not_started`, `in_progress`, `blocked`, `complete`.
 | 07 | Final handoff and future-work boundary | complete | `4e47cd5` | Green |
 | Post | Install completed branches locally for user testing | complete | `071204c` | Green |
 | Acceptance | Installed/live/browser whole-feature acceptance and navigation repair | complete | Teams `fde3408` | Green |
-| Closeout | Durable handoff, ratification, evaluation correction and cross-repo pointers | complete | Contexer `bb6ad9b`, `61ed51a`, merge `d278102`; Teams `4fd0687`, merge `07b458e` | Green |
+| Closeout | Durable handoff, ratification, evaluation correction and cross-repo pointers | complete | Contexer `bb6ad9b`, `61ed51a`, `fe5e872`, merges `d278102`/`71c0f0c`; Teams `4fd0687`/`c055f74`, merges `07b458e`/`7191f12` | Green |
 
 ## 4. Baseline test evidence
 
@@ -901,6 +901,51 @@ directive-classifier change. All other limitations in Section 11 remain delibera
 Next task: independent final documentation review, green CI, authorized merge and final remote-tree
 verification; no product implementation task remains in this plan.
 
+#### 2026-08-30 - Post-completion C01 pointer correction - complete
+
+Agent/session: Codex review-closeout session
+Starting SHA(s): Contexer completion-record main
+`71c0f0cea227a726f03156a47b45acfdc4e8316f`; Teams initial pointer main
+`07b458e0f772dd912ca9efdfb409cc7dcbe97a19`.
+Ending SHA(s): Contexer product and completion-record main unchanged at `71c0f0c`; Teams corrected
+pointer head `c055f740ae89f8d7d1f2aaa2d3fb8621d68d0dab`, squash-merged as
+`7191f12b7ebdf540ea6c12835cfa19ce81ac39a6`.
+Scope performed: reran C01's fresh-clone gate after Contexer PR #272 merged, found that the Teams
+pointer still exposed only the pre-completion `d278102` snapshot, corrected the pointer to completed
+status and immutable `71c0f0c` plan/ledger/closeout links, recorded Contexer PR #272 and Teams PR
+#190, linked issue #191, independently reviewed the exact diff, and merged Teams PR #192.
+Failure reproduced or baseline measured: `git show origin/main:docs/decision-evidence-readiness-plan.md`
+in Teams reported `durable closeout in progress` and linked only to Contexer `d278102`, whose ledger
+and closeout remained `closeout_pending`. A fresh Teams clone therefore could not discover the final
+outcome, violating C01 even though the initial pointer PR itself had merged successfully.
+Files changed: Teams `docs/decision-evidence-readiness-plan.md`; this additive Contexer ledger and
+the closeout evidence/completion record. No product, fixture, schema or reviewed-source file changed.
+Commits/PRs: Teams correction `c055f74`; PR #192 squash merge `7191f12`.
+Tests/commands and results: `git diff --check` passed. All three GitHub content API reads resolved
+the immutable `71c0f0c` documents and those documents report `complete`. Teams PR #192 passed
+typecheck, migrations, the full PostgreSQL test step, production web build, Detect changes and
+Contexer Guard in Build & test `4m46s`; documentation-only Docker jobs were correctly skipped.
+Performance/evaluation measurements: no product benchmark was rerun because the correction is one
+documentation pointer. The full Teams CI gate executed unchanged and passed.
+Independent review findings: post-merge adversarial review classified the stale immutable pointer
+as Important because it failed C01's fresh-clone final-outcome gate. Review of the correction passed
+with no new product finding. Final additive-ledger review found one Important wording inconsistency:
+the first residual summary implied only two limitations remained despite Section 11's wider preserved
+boundary. It was scoped to closeout-specific items, and re-review passed with no unresolved Critical
+or Important finding.
+Fix disposition: Teams now reports `Status: complete`, pins all canonical links to Contexer
+completion merge `71c0f0c`, records the already-existing completion evidence and issue #191, and
+remains a pointer rather than a second ledger. It intentionally does not attempt to embed its own
+future merge SHA; PR/Git history supplies `7191f12` without creating an infinite self-reference.
+Deviations from plan and why: a second Teams documentation follow-up was necessary because PR #190
+was correctly pinned to the then-current `d278102` record, but the later required Contexer completion
+update made that immutable snapshot stale for C01's final-outcome gate.
+Residual limitations: the closeout-specific remaining items are the already-ratified C05 issue
+#191 and independently frozen future natural-prompt corpus work. Every additional limitation and
+separate plan in Section 11 remains unchanged. No product limitation or invariant was weakened.
+Next task: merge this additive canonical correction and perform one final remote-tree readback; no
+product implementation task remains.
+
 ## 6. Decision and ruling log
 
 Record implementation choices whose alternatives affect correctness or future plans.
@@ -948,6 +993,7 @@ Record implementation choices whose alternatives affect correctness or future pl
 | Cursor retained retired Teams MCP server | Important | Post | exact legacy server returned 401 beside supported local server | Fixed | Strip only exact `contexer-teams` on install/uninstall | Exact-key preservation tests and final live config green |
 | Lead lifecycle notification opened a scoped 404 from Personal | Important | Acceptance | signed-in bell click from Personal landed on `/dashboard/decisions/<id>` with `404 · not found` | Fixed | POST-only recipient-fenced handoff switches to the owning current membership and verifies a live target before redirect | Browser E2E, executable PostgreSQL action cases, full suite and independent re-review green |
 | Initial notification repair mutated on GET and mishandled stale/malformed/terminal targets | Important | Acceptance | adversarial review reproduced prefetch side effects, stale-membership 404, invalid-UUID 500 risk and deleted-target 404 | Fixed | Remove GET route; validate UUID; refuse stale membership before mutation; tenant-fence target; dashboard fallback for dead targets | Focused `61/61`, independent `53/53`, typecheck/build/full suite and final PASS |
+| Teams pointer exposed only the pre-completion immutable snapshot | Important | Closeout | fresh Teams `origin/main` said closeout in progress and linked only to `d278102` | Fixed | Point to immutable completion merge `71c0f0c`, record final evidence and issue #191 | PR #192 full CI, link resolution and independent re-review green |
 
 ## 9. Deviations from the plan
 
@@ -962,6 +1008,7 @@ Record implementation choices whose alternatives affect correctness or future pl
 | 2026-08-30 | Review closeout | Contexer PR #268 merged as `97c479c` before C01's untracked canonical documents were added | The closeout review was supplied after the product PR merged | Requires a documentation/evaluation-metadata-only Contexer follow-up; product tree remains unchanged | Bhargav Amin; documentation follow-ups explicitly approved |
 | 2026-08-30 | Review closeout | Published the canonical record in Contexer PR #270 and the immutable cross-repository pointer in Teams PR #190 | C01 required a fresh-clone-discoverable record in both repositories after the product PRs had merged | Product trees remained unchanged; both documentation PRs passed CI and independent review | Bhargav Amin; documentation follow-ups explicitly approved |
 | 2026-08-30 | Review closeout | Used a second Contexer documentation-only update to record Teams merge `07b458e` and issue #191 | Those external identifiers did not exist when Contexer PR #270 was reviewed and merged | Closes the ledger additively without changing product behavior or the reviewed evidence source | Bhargav Amin; required by the closeout execution order |
+| 2026-08-30 | Review closeout | Corrected the Teams pointer through PR #192 after final fresh-clone verification | The immutable `d278102` snapshot was accurate when PR #190 opened but could not expose the later completion record | Restores C01 final-outcome discovery without a second ledger, product change or recursive self-SHA requirement | Bhargav Amin; documentation follow-ups explicitly approved |
 
 ## 10. Blockers
 
@@ -1015,18 +1062,20 @@ Update this section as work changes the facts.
   extraction, handoff, code, installed-package and live-convergence reviews found no unresolved
   Critical or Important issue. The Python 3.14 regression repair also passed adversarial re-review.
 - User review/ratification: Bhargav Amin ratified R08-R12 and selected C05 Option A on 2026-08-30.
-- Durable closeout: Contexer PR #270, reviewed tree `bb6ad9b`, head `61ed51a`, merged as
-  `d278102d2e2beaa1d01560b134408dca824f4661`; Teams pointer PR #190, head `4fd0687`,
-  squash-merged as `07b458e0f772dd912ca9efdfb409cc7dcbe97a19`.
+- Durable closeout: Contexer canonical-record PR #270, reviewed tree `bb6ad9b`, head `61ed51a`,
+  merged as `d278102`; Contexer completion-record PR #272, head `fe5e872`, merged as `71c0f0c`;
+  initial Teams pointer PR #190, head `4fd0687`, merged as `07b458e`; final pointer correction PR
+  #192, head `c055f74`, squash-merged as `7191f12b7ebdf540ea6c12835cfa19ce81ac39a6`.
 - C05 disposition: Option A, tracked by
   [Teams issue #191](https://github.com/contexer-ai/contexer-teams/issues/191). Bhargav Amin accepts
   the documented limitation while that issue remains open.
 - Final post-merge verification: canonical files are discoverable from both `origin/main` refs;
   Contexer `a696201` is an ancestor of main and equals product merge `97c479c` by tree; Teams
-  `fde3408` equals squash merge `48b0211` by tree; pointer links are immutable and absolute;
-  R08-R12 carry maintainer/date evidence; the current natural-prompt corpus is labeled regression
-  evidence; issue #191 contains the ratified privacy, tenancy, idempotency and safe-navigation
-  contract. No tag was created.
+  `fde3408` equals squash merge `48b0211` by tree; Teams pointer merge `7191f12` reports complete
+  and its three absolute immutable links resolve to completed Contexer merge `71c0f0c`; R08-R12
+  carry maintainer/date evidence; the current natural-prompt corpus is labeled regression evidence;
+  issue #191 contains the ratified privacy, tenancy, idempotency and safe-navigation contract. No
+  tag was created.
 - Next implementation plan: the existing decision-sharing/review/drift-transition plan remains
   separate. Cross-artifact relationships and semantic conflict inference remain unplanned future
   work, not an extension of this branch.
