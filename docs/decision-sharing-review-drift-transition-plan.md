@@ -1,6 +1,6 @@
 # Decision sharing, review, and drift-transition implementation plan
 
-Status: Phase 0 complete; Phase A may resume at A1
+Status: Phase A1 complete; Phase A2 invariant tests are next
 Originally drafted: 2026-08-28
 Refreshed: 2026-08-30
 Canonical progress ledger: `docs/decision-sharing-review-drift-transition-progress.md`
@@ -11,8 +11,9 @@ Repositories:
 
 ## 0. Phase 0 reconciliation and authoritative baselines
 
-The Phase 0 gate in the progress ledger is complete. Phase A may resume at A1, but has not started
-on these documentation branches. All implementation
+The Phase 0 gate in the progress ledger is complete. Phase A resumed in fresh contract worktrees
+after both Phase 0 documentation changes landed. A1 completed its contract, verification, and
+independent security gates on 2026-08-30; A2 is next. All implementation
 work must use clean worktrees created from the latest fetched `origin/main`; the normal checkouts
 contain user-owned dirty and untracked files and are not implementation surfaces.
 
@@ -342,9 +343,15 @@ Add a separate durable proposal-intent queue. An entry contains only stable loca
   "team_id": "...",
   "queued_at": "...",
   "attempts": 0,
-  "last_error": null
+  "last_error_code": null,
+  "last_error_class": null,
+  "diagnostic_id": null
 }
 ```
+
+Never persist a raw transport/SDK error. Queue and attention records carry only a closed, bounded
+error code/class plus an opaque safe diagnostic id; status rendering must not recover exception
+messages, stack traces, endpoint query data, or local paths from another source.
 
 At drain time:
 
@@ -477,6 +484,48 @@ The UI should distinguish these states:
 - `Transition approved; no managed check is available`
 - `Transition approved; re-check is queued but runner launch needs retry`
 
+### 5.9 Security review and observability
+
+Security review is a phase gate, not a final polish pass. Before each phase is marked complete, an
+independent reviewer must inspect the changed trust boundaries for tenant fencing, approval bypass,
+unintended egress, replay/idempotency abuse, stale-head handling, lock ordering, rollback, and
+telemetry leakage. No Critical or Important finding may remain unresolved.
+
+Every new runtime path must add structured logging and tracing in the same change:
+
+- Teams code uses `@contexer/observability`'s `getLogger` and `withSpan`; do not add `console.*` or a
+  second telemetry stack. The current `withSpan` records raw exception messages/stacks, so before
+  these paths use it, extend it with a tested `recordRawExceptions: false` mode (or an equivalently
+  cohesive safe helper) and require that mode for every operation in this plan.
+- Contexer adds one cohesive, fail-soft proposal-observability seam when the first runtime path
+  lands. It emits redacted structured local diagnostics and timed spans to stderr; hooks must not
+  gain a network telemetry exporter or wait on observability delivery.
+- The cross-repository contract maps capability read, policy change, scan, enqueue, drain,
+  transition read, approval, and re-check to both a required span and a required terminal log event.
+  Logs emitted inside a Teams span inherit its trace correlation.
+- Telemetry uses a closed attribute/field allowlist and closed, length-bounded result, reason-code,
+  error-class, enforcement-choice, re-check-outcome, and log-action vocabularies. Each operation
+  has an exhaustive allowed result/reason pair space, and log actions must be exactly the terminal
+  events declared by the operation map. Log messages are fixed event text, never runtime-derived
+  strings. Teams spans use `contexer.*` snake-case attributes; structured logs use the repository's
+  camelCase fields. Correlation may use opaque team/decision/candidate ids, policy generation, and
+  idempotency key. Repository identity is not logged or hashed: canonical repo names are enumerable,
+  so an unkeyed hash is reversible by dictionary lookup.
+- Never record bearer tokens, full account fingerprints, endpoint data, raw repository keys or
+  local paths, decision title/content/rationale, source files, evidence, finding prose, resolution
+  notes, raw exception messages/stacks, email/display names, or team names under any alias. Log a
+  bounded error class, typed reason, and optional safe diagnostic id instead.
+- Persisted error codes/classes are also closed and length-bounded. Diagnostic ids are independently
+  random opaque values with a pinned format and maximum length; they must not be derived from or
+  embed account fingerprints, team ids, repository identities, credentials, or error text.
+- Telemetry is fail-soft and must never change a policy, queue, approval, or re-check outcome. No
+  network request or telemetry flush may run while a store or sidecar lock is held.
+- A2 must inject secret sentinels through thrown exceptions and candidate/decision inputs, then
+  exercise every permitted string-valued telemetry slot, and prove the sentinels appear in neither
+  span attributes/events nor JSON stdout/OTLP log records. It must also
+  prove Contexer's telemetry is stderr-only, has no network exporter or in-lock flush, is
+  non-blocking, and cannot change state or return values when its sink fails.
+
 ## 6. Repository implementation tasks
 
 ### Phase 0 - Baseline reconciliation and durable handoff
@@ -511,15 +560,16 @@ Maintainer-ratified V1 contract:
 
 ### Phase A - Cross-repository contracts and tests first
 
-#### A1. Freeze behavior with contract fixtures
+#### A1. Freeze behavior with contract fixtures - complete 2026-08-30
 
 Create shared JSON fixtures, duplicated intentionally in each repository's tests, for:
 
 - capability response with `automaticDecisionProposal.version = 1` and account fingerprint
 - initial, update, already-pending, unchanged, stale-head, and unauthorized reconciliation outcomes
-- policy/intent/receipt schema version 1
+- policy/intent/receipt/attention schema version 1
 - transition candidate enrichment shape
 - `decision_updated` resolution shape
+- required logging/tracing spans, safe correlation fields, and forbidden sensitive attributes
 
 Each repository owns and validates its copy. Add a comment naming the other copy and a test that
 pins required fields. Do not introduce a package dependency between the Python and TypeScript repos.
@@ -534,6 +584,7 @@ At minimum, prove:
 - approval rollback preserves D1 and leaves D2 pending
 - capture/approval returns even when the proposal queue lock is busy or unavailable
 - automatic sending refuses an old server without atomic reconciliation and account binding
+- every new runtime path emits the required result/reason trace and no forbidden telemetry field
 
 ### Phase B - Contexer Teams: identity and transition reads
 
@@ -805,6 +856,8 @@ Run against local Teams with two users, one member and one lead:
 - transient retry, terminal attention, CAS refresh-once, idempotent replay
 - old server/manual compatibility
 - no Stop hook and no network in UserPromptSubmit/PostToolUse paths
+- proposal logs/spans use the pinned safe field set, redact forbidden values, correlate retries, and
+  remain fail-soft when the telemetry sink fails
 
 Run focused tests with `--no-cov`, then the full suite and lint per the repository guide.
 
@@ -835,6 +888,8 @@ Run focused tests with `--no-cov`, then the full suite and lint per the reposito
 - advisory replacement reconcludes; blocking preservation does not prematurely green
 - notification/audit/revalidation behavior
 - public GitHub output does not leak pending candidate text
+- transition read/approval/re-check logs and spans use `getLogger`/`withSpan`, carry bounded outcomes,
+  and contain none of the contract's forbidden attributes
 
 Run the package tests, typecheck, lint, generated migration checks, then the full monorepo suite using
 the commands documented in `contexer-teams/CLAUDE.md`.
