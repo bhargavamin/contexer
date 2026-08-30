@@ -56,7 +56,7 @@ Allowed states: `not_started`, `in_progress`, `blocked`, `complete`.
 | 07 | Final handoff and future-work boundary | complete | `4e47cd5` | Green |
 | Post | Install completed branches locally for user testing | complete | `071204c` | Green |
 | Acceptance | Installed/live/browser whole-feature acceptance and navigation repair | complete | Teams `fde3408` | Green |
-| Closeout | Durable handoff, ratification, evaluation correction and cross-repo pointers | in_progress | pending documentation follow-ups | Pending |
+| Closeout | Durable handoff, ratification, evaluation correction and cross-repo pointers | in_progress | Contexer `bb6ad9b`; Teams pending | Pending |
 
 ## 4. Baseline test evidence
 
@@ -792,7 +792,8 @@ Starting SHA(s): Contexer reviewed feature head
 `97c479c86aeaf36ab1311298fd4837b8f37bc18e`; Teams reviewed feature head
 `fde3408cf9a78982233ed7cedc0ebbc666c806ff`, Teams main
 `48b02110610901f9ef06e66ec07b6657805e7fb5`.
-Ending SHA(s): pending documentation closeout merges.
+Ending SHA(s): Contexer closeout PR #270 opened from `bb6ad9b`; documentation closeout merges remain
+pending.
 Scope performed: corrected the durable record after product review and merge. Contexer PR #268
 was created at feature head `071204c`, exposed a Python 3.14-only regression-test dependency on a
 `pathlib` implementation detail, and advanced to reviewed head `a696201` with a deterministic
@@ -958,7 +959,8 @@ Update this section as work changes the facts.
   Critical or Important issue. The Python 3.14 regression repair also passed adversarial re-review.
 - User review/ratification: Bhargav Amin ratified R08-R12 and selected C05 Option A on 2026-08-30.
 - Push/PR/merge status: Contexer PR #268 merged as `97c479c`; Teams PR #189 merged as `48b0211`;
-  canonical documentation follow-ups and the C05 issue remain pending. No tag was created.
+  Contexer closeout PR #270 is open from `bb6ad9b`; the Teams pointer follow-up and C05 issue remain
+  pending. No tag was created.
 - Next implementation plan: the existing decision-sharing/review/drift-transition plan remains
   separate. Cross-artifact relationships and semantic conflict inference remain unplanned future
   work, not an extension of this branch.

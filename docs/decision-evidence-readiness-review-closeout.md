@@ -92,10 +92,10 @@ Required actions:
 Evidence required:
 
 ```text
-Contexer documentation follow-up PR: <URL>
-Contexer plan present in reviewed follow-up tree: <yes + SHA>
-Contexer ledger present in reviewed follow-up tree: <yes + SHA>
-Closeout file present in reviewed follow-up tree: <yes + SHA>
+Contexer documentation follow-up PR: <https://github.com/bhargavamin/contexer/pull/270>
+Contexer plan present in reviewed follow-up tree: yes, `bb6ad9b`
+Contexer ledger present in reviewed follow-up tree: yes, `bb6ad9b`
+Closeout file present in reviewed follow-up tree: yes, `bb6ad9b`
 Teams pointer follow-up PR: <URL>
 Teams pointer merged SHA: <SHA>
 ```
@@ -316,7 +316,7 @@ Then verify:
 
 ## 6. Final acceptance checklist
 
-- [ ] C01 canonical Contexer documents are tracked and reviewable.
+- [x] C01 canonical Contexer documents are tracked and reviewable.
 - [ ] C01 Teams pointer is tracked through a follow-up PR and uses a durable link.
 - [x] C02 progress ledger matches actual SHAs, PRs, merges, fixes, and deviations.
 - [x] C03 R08-R12 are explicitly ratified or their alternatives are implemented and tested.
