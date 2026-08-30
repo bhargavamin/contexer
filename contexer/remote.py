@@ -15,11 +15,12 @@ import asyncio
 import inspect
 import re
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from contexer import redact
+from contexer import decision_observability, redact
 from contexer.config import Profile
 
 T = TypeVar("T")
@@ -39,6 +40,7 @@ def _redaction_enabled() -> bool:
 
 # push_decision returns a text message "Saved decision <id> to your personal context."
 _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
+_ACCOUNT_FINGERPRINT_RE = re.compile(r"acctfp_v1_[A-Za-z0-9_-]{12,64}\Z")
 _DEFAULT_TIMEOUT = 10.0
 
 # GATE (issue #174 Task 5, developer-ruled): the contexer-teams `push_decision`/`push_decisions`
@@ -410,6 +412,21 @@ def _caps_version(raw: dict) -> int:
         return 0
 
 
+def _strict_caps_version(raw: dict) -> int | None:
+    """A positive integer capability version, rejecting bools and string coercion."""
+    version = raw.get("version")
+    if type(version) is not int or not 1 <= version <= 2_147_483_647:
+        return None
+    return version
+
+
+def _account_fingerprint(raw: object) -> str | None:
+    """Return a recognized V1 pseudonymous account binding, otherwise fail closed."""
+    if not isinstance(raw, str) or _ACCOUNT_FINGERPRINT_RE.fullmatch(raw) is None:
+        return None
+    return raw
+
+
 class RemoteStoreError(Exception):
     """Base for any RemoteStore failure. Callers catch this to degrade to local-only."""
 
@@ -525,11 +542,20 @@ class DecisionLifecycleCapabilities:
 
 
 @dataclass(frozen=True)
+class AutomaticDecisionProposalCapabilities:
+    """Versioned server support for account-bound automatic proposal submission."""
+
+    version: int
+
+
+@dataclass(frozen=True)
 class ServerCapabilities:
     decision_reconciliation: DecisionReconciliationCapabilities | None
     # Defaulted so every existing construction site (tests, share.py's fallbacks) keeps working
     # and lands on "not advertised" - which is the same place discovery failure lands.
     decision_lifecycle: DecisionLifecycleCapabilities | None = None
+    automatic_decision_proposal: AutomaticDecisionProposalCapabilities | None = None
+    account_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -837,9 +863,39 @@ class RemoteStore:
         Each block is parsed independently: a server advertising one and not the other must not
         lose the one it does advertise. An absent or non-dict block is None - never a
         default-True shape, since an unknown server is an old server."""
-        result = await self._ainvoke("get_capabilities", {})
+        started_ns = time.monotonic_ns()
+        try:
+            result = await self._ainvoke("get_capabilities", {})
+        except RemoteAuthError:
+            decision_observability.emit_decision_operation(
+                "capabilityRead", result="refused", reason_code="not_authorized",
+                error_class="authorization", started_ns=started_ns)
+            raise
+        except RemoteRateLimitError:
+            decision_observability.emit_decision_operation(
+                "capabilityRead", result="failure", reason_code="rate_limited",
+                error_class="rate_limit", started_ns=started_ns)
+            raise
+        except RemoteUnavailableError:
+            decision_observability.emit_decision_operation(
+                "capabilityRead", result="failure", reason_code="transport_error",
+                error_class="transport", started_ns=started_ns)
+            raise
+        except RemoteStoreError:
+            decision_observability.emit_decision_operation(
+                "capabilityRead", result="failure", reason_code="validation_error",
+                error_class="validation", started_ns=started_ns)
+            raise
+
+        malformed = False
         structured = getattr(result, "structuredContent", None) or {}
+        if not isinstance(structured, dict):
+            structured = {}
+            malformed = True
         advertised = structured.get("capabilities") or {}
+        if not isinstance(advertised, dict):
+            advertised = {}
+            malformed = True
         raw = advertised.get("decisionReconciliation")
         reconciliation = None
         if isinstance(raw, dict):
@@ -858,8 +914,37 @@ class RemoteStore:
                 tombstones=raw.get("tombstones") is True,
                 retirement_reasons=raw.get("retirementReasons") is True,
             )
-        return ServerCapabilities(decision_reconciliation=reconciliation,
-                                  decision_lifecycle=lifecycle)
+        raw = advertised.get("automaticDecisionProposal")
+        automatic = None
+        if raw is not None:
+            if isinstance(raw, dict):
+                version = _strict_caps_version(raw)
+                if version is not None:
+                    automatic = AutomaticDecisionProposalCapabilities(version=version)
+                else:
+                    malformed = True
+            else:
+                malformed = True
+
+        raw_fingerprint = structured.get("accountFingerprint")
+        fingerprint = None
+        if raw_fingerprint is not None:
+            fingerprint = _account_fingerprint(raw_fingerprint)
+            malformed = malformed or fingerprint is None
+
+        decision_observability.emit_decision_operation(
+            "capabilityRead",
+            result="failure" if malformed else "success",
+            reason_code="validation_error" if malformed else "none",
+            error_class="validation" if malformed else "none",
+            started_ns=started_ns,
+        )
+        return ServerCapabilities(
+            decision_reconciliation=reconciliation,
+            decision_lifecycle=lifecycle,
+            automatic_decision_proposal=automatic,
+            account_fingerprint=fingerprint,
+        )
 
     async def _alifecycle_caps(self, rows: list[dict]) -> DecisionLifecycleCapabilities | None:
         """The lifecycle capability governing THIS push, discovered lazily and memoized.

@@ -49,6 +49,14 @@ def _aseam(body):
     return _acall
 
 
+def _capture_telemetry(target):
+    """Capture stable fields while asserting the production call carries span timing."""
+    def capture(operation, **fields):
+        assert type(fields.pop("started_ns")) is int
+        target.append((operation, fields))
+    return capture
+
+
 # ── from_profile ────────────────────────────────────────────────────────────────
 
 def test_from_profile_team_builds_store():
@@ -754,13 +762,21 @@ def test_team_discovery_and_submission_use_structured_mcp_results(monkeypatch):
 
 def test_reconciliation_capabilities_preview_and_atomic_submit(monkeypatch):
     calls = []
+    telemetry = []
 
     async def fake(endpoint, token, name, arguments, timeout):
         calls.append((name, arguments))
         if name == "get_capabilities":
-            return _result(structured={"capabilities": {"decisionReconciliation": {
-                "version": 1, "atomicSubmit": True, "preview": True,
-                "threeWayMerge": False}}})
+            return _result(structured={
+                "accountFingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+                "capabilities": {
+                    "decisionReconciliation": {
+                        "version": 1, "atomicSubmit": True, "preview": True,
+                        "threeWayMerge": False,
+                    },
+                    "automaticDecisionProposal": {"version": 1},
+                },
+            })
         if name == "preview_decision_reconciliation":
             return _result(structured={
                 "personalHead": "ph", "teamHead": "th", "pendingCandidateId": None,
@@ -774,8 +790,14 @@ def test_reconciliation_capabilities_preview_and_atomic_submit(monkeypatch):
             "replayed": False, "team": {"id": "t1", "name": "Platform"}})
 
     monkeypatch.setattr(remote, "_acall_tool", fake)
+    monkeypatch.setattr(
+        remote.decision_observability,
+        "emit_decision_operation",
+        _capture_telemetry(telemetry),
+    )
     rs = RemoteStore("https://t/mcp", "tok")
-    caps = rs.get_capabilities().decision_reconciliation
+    discovered = rs.get_capabilities()
+    caps = discovered.decision_reconciliation
     preview = rs.preview_decision_reconciliation(
         "d1", "t1", type="constraint", content="new", repo="github.com/a/b")
     result = rs.submit_team_decision(
@@ -783,6 +805,12 @@ def test_reconciliation_capabilities_preview_and_atomic_submit(monkeypatch):
         idempotency_key="idem-1", type="constraint", content="new", repo="github.com/a/b")
 
     assert caps and caps.atomic_submit and caps.preview and not caps.three_way_merge
+    assert discovered.automatic_decision_proposal
+    assert discovered.automatic_decision_proposal.version == 1
+    assert discovered.account_fingerprint == "acctfp_v1_7M4Q2PX9C6N8"
+    assert telemetry == [("capabilityRead", {
+        "result": "success", "reason_code": "none", "error_class": "none",
+    })]
     assert preview.fields[0].before == "old" and preview.team.name == "Platform"
     assert result.status == "submitted" and result.candidate_id == "c1"
     assert calls[1] == ("preview_decision_reconciliation", {
@@ -792,6 +820,115 @@ def test_reconciliation_capabilities_preview_and_atomic_submit(monkeypatch):
     assert calls[2][1]["idempotencyKey"] == "idem-1"
     assert calls[2][1]["expectedPersonalHead"] == "ph"
     assert calls[2][1]["expectedTeamHead"] == "th"
+
+
+def test_legacy_capabilities_remain_additive_and_fail_closed(monkeypatch):
+    telemetry = []
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured={
+        "capabilities": {"decisionReconciliation": {
+            "version": 1, "atomicSubmit": True, "preview": True,
+            "threeWayMerge": False,
+        }},
+    })))
+    monkeypatch.setattr(
+        remote.decision_observability,
+        "emit_decision_operation",
+        _capture_telemetry(telemetry),
+    )
+
+    discovered = RemoteStore("https://t/mcp", "rotated-secret-token").get_capabilities()
+
+    assert discovered.decision_reconciliation
+    assert discovered.automatic_decision_proposal is None
+    assert discovered.account_fingerprint is None
+    assert telemetry == [("capabilityRead", {
+        "result": "success", "reason_code": "none", "error_class": "none",
+    })]
+    assert "rotated-secret-token" not in repr(telemetry)
+
+
+@pytest.mark.parametrize(
+    ("automatic", "fingerprint"),
+    [
+        ({"version": True}, "acctfp_v1_7M4Q2PX9C6N8"),
+        ({"version": "1"}, "acctfp_v1_7M4Q2PX9C6N8"),
+        ({"version": 0}, "acctfp_v1_7M4Q2PX9C6N8"),
+        ({"version": 1}, "acctfp_v1_too-short"),
+        ({"version": 1}, "acctfp_v2_7M4Q2PX9C6N8"),
+        ([], "acctfp_v1_7M4Q2PX9C6N8"),
+    ],
+)
+def test_automatic_capability_and_account_fingerprint_parse_strictly(
+        monkeypatch, automatic, fingerprint):
+    telemetry = []
+    monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured={
+        "accountFingerprint": fingerprint,
+        "capabilities": {"automaticDecisionProposal": automatic},
+    })))
+    monkeypatch.setattr(
+        remote.decision_observability,
+        "emit_decision_operation",
+        _capture_telemetry(telemetry),
+    )
+
+    discovered = RemoteStore("https://t/mcp", "secret-token").get_capabilities()
+
+    if (isinstance(automatic, dict)
+            and type(automatic.get("version")) is int
+            and automatic["version"] == 1):
+        assert discovered.automatic_decision_proposal is not None
+    else:
+        assert discovered.automatic_decision_proposal is None
+    if fingerprint == "acctfp_v1_7M4Q2PX9C6N8":
+        assert discovered.account_fingerprint == fingerprint
+    else:
+        assert discovered.account_fingerprint is None
+    assert telemetry == [("capabilityRead", {
+        "result": "failure", "reason_code": "validation_error",
+        "error_class": "validation",
+    })]
+    assert "secret-token" not in repr(telemetry)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RemoteAuthError("private authorization detail"),
+         {"result": "refused", "reason_code": "not_authorized",
+          "error_class": "authorization"}),
+        (RemoteRateLimitError("private capacity detail"),
+         {"result": "failure", "reason_code": "rate_limited",
+          "error_class": "rate_limit"}),
+        (RemoteUnavailableError("private transport detail"),
+         {"result": "failure", "reason_code": "transport_error",
+          "error_class": "transport"}),
+        (RemoteStoreError("private validation detail"),
+         {"result": "failure", "reason_code": "validation_error",
+          "error_class": "validation"}),
+    ],
+)
+def test_capability_read_failure_telemetry_is_typed_and_payload_free(
+        monkeypatch, error, expected):
+    telemetry = []
+
+    async def fail(*args):
+        raise error
+
+    monkeypatch.setattr(remote, "_acall_tool", fail)
+    monkeypatch.setattr(
+        remote.decision_observability,
+        "emit_decision_operation",
+        _capture_telemetry(telemetry),
+    )
+
+    with pytest.raises(type(error)):
+        RemoteStore("https://private.invalid/mcp", "secret-token").get_capabilities()
+
+    assert telemetry == [("capabilityRead", expected)]
+    serialized = repr(telemetry)
+    assert "secret-token" not in serialized
+    assert "private.invalid" not in serialized
+    assert "private" not in serialized
 
 
 def test_submit_decision_to_team_can_strip_evidence(monkeypatch):
