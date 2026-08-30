@@ -2,7 +2,7 @@
 
 Canonical plan: `docs/decision-sharing-review-drift-transition-plan.md`
 Created: 2026-08-30
-Overall status: `phase_0_complete`
+Overall status: `phase_a_a1_complete`
 
 This is the single durable cross-repository progress ledger. Contexer Teams carries only an
 immutable pointer to the plan and this ledger; it must not grow a second ledger.
@@ -130,8 +130,9 @@ Deviations:
 
 Refreshed the plan against current main, recorded this ledger, published Contexer commit
 `c620d1e1437d9f777708447beb56e30937101390`, and added the Teams immutable pointer in commit
-`b237bff7f9de6b7621175b82ac79133ffeed9e84`. Opened Contexer PR #275 and Teams PR #195 for review;
-both remain unmerged under R06.
+`b237bff7f9de6b7621175b82ac79133ffeed9e84`. Opened Contexer PR #275 and Teams PR #195 for review.
+Both later appeared on `origin/main` before A1 began: Contexer merge `70f6f44c5ad8adbcea902371e0d053153cc177bb`
+and Teams merge `dc1a20f3c7cf567824d995962b123ef34080a365`. This task did not perform either merge.
 
 The independent reviewer reported no Critical or Important findings. Its only Minor finding was
 that the phrase `outbox/drainer` could imply one shared lock; the plan now lists independent
@@ -175,8 +176,7 @@ or implementation changes production code, the owning focused and full gates are
 Unresolved items:
 
 - None requiring a maintainer ruling in Phase 0.
-- The Teams pointer must later be repointed from the reviewed immutable Contexer branch commit to
-  the merged canonical Contexer record after explicit approval/merge.
+- None. The Teams pointer landed in `dc1a20f` and resolves to the merged immutable Contexer record.
 
 ## 9. First Phase A task permitted after the gate
 
@@ -185,3 +185,54 @@ fixture from checkpoint `9093e53` against the refreshed contract and current mai
 Create/pin the duplicated Python/TypeScript capability, policy, intent, receipt, transition, and
 resolution fixtures first; then execute A2's invariant tests. Do not begin Phase B or production
 behavior until A1 and A2 are complete.
+
+## 10. Phase A execution log
+
+### 2026-08-30 - A1 cross-repository contract fixtures - complete
+
+After the Phase 0 documentation PRs landed, A1 started in new clean worktrees from the then-current
+fetched `origin/main` refs:
+
+| Repository | Branch | Worktree | A1 start SHA |
+| --- | --- | --- | --- |
+| Contexer | `codex/decision-sharing-contracts` | `/Users/bhargavamin/repos/personal/contexer-decision-sharing-contracts` | `70f6f44c5ad8adbcea902371e0d053153cc177bb` |
+| Contexer Teams | `codex/decision-sharing-contracts` | `/Users/bhargavamin/repos/personal/contexer-teams-decision-sharing-contracts` | `dc1a20f3c7cf567824d995962b123ef34080a365` |
+
+The repositories now own byte-identical copies of
+`decision-sharing-transition-contract.v1.json`, pinned at SHA-256
+`716eb561a4c45e97bc3d9fc693dfa413894cffac93a2a63184142cab4f70c2cf`. The contract freezes:
+
+- the additive account-bound `automaticDecisionProposal.version = 1` capability and legacy absence;
+- current MCP initial/update/already-pending/unchanged/heads-changed results, including team metadata,
+  plus the tenant-safe unauthorized MCP error boundary;
+- schema-v1 policy, proposal-intent, receipt, and attention records with full account/repo/team/policy
+  generation binding and a valid current Contexer repository slug;
+- exact non-null canonical repository matching, global automatic exclusion, one scalar team target,
+  future-only activation, and typed terminal attention;
+- transition enrichment both with and without matching drift, with exact team/repository/predecessor
+  lineage and an explicit blocking/advisory choice with no default; and
+- the append-only `decision_updated` resolution's predecessor, replacement, and origin provenance.
+- a required span and terminal structured-log event for every capability/proposal/transition
+  operation; separate Teams span/log naming conventions; exact permitted result/reason pairs;
+  closed and bounded action/result/reason/error/enforcement/re-check vocabularies; opaque operational
+  correlation ids but no repository correlation; raw-exception recording disabled; local-only
+  nonblocking Contexer telemetry with no exporter/in-lock flush; and value-class exclusions for
+  credentials, identity/path data, decision/finding prose, raw errors, and personal/team display
+  data; and
+- typed bounded persisted error code/class plus an independently random, format-pinned opaque
+  diagnostic id; no raw `last_error` field.
+
+Verification:
+
+- Contexer: 10 focused contract tests pass; Ruff 0.15.4 passes.
+- Contexer Teams: 10 focused contract tests pass; the full monorepo typecheck passes.
+- Fixture copies compare byte-for-byte and both pin the same digest.
+- `git diff --check` passes in both A1 worktrees.
+- Independent review found no remaining Critical, Important, or Minor findings after corrections
+  for MCP team metadata, unauthorized error semantics, the attention schema, repo-slug validity,
+  null-drift coverage, TypeScript type safety, telemetry leakage, diagnostic-id derivation,
+  incomplete string taxonomies, misleading result/reason combinations, and database error classes.
+- No production module, migration, A2 invariant, or Phase B behavior changed.
+
+Next permitted task: **A2 - Write invariant tests before implementation**.
+Phase B remains blocked.

@@ -1,0 +1,706 @@
+{
+  "$comment": "Canonical decision-sharing/review/drift-transition V1 contract. Keep this file BYTE-FOR-BYTE identical to contexer-teams/packages/db/test/fixtures/decision-sharing-transition-contract.v1.json. Contexer owns its copy at tests/fixtures/decision-sharing-transition-contract.v1.json; each repository validates its own copy and pins the same digest.",
+  "contractVersion": 1,
+  "repositoryMatching": {
+    "mode": "exact_non_null_canonical",
+    "automaticGlobalDecisions": false
+  },
+  "capabilityResponse": {
+    "accountFingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+    "capabilities": {
+      "decisionReconciliation": {
+        "version": 1,
+        "atomicSubmit": true,
+        "preview": true,
+        "threeWayMerge": false,
+        "legacyShareDecision": true
+      },
+      "decisionLifecycle": {
+        "version": 1,
+        "revisions": true,
+        "tombstones": true,
+        "retirementReasons": true
+      },
+      "automaticDecisionProposal": {
+        "version": 1
+      }
+    }
+  },
+  "legacyCapabilityResponse": {
+    "capabilities": {
+      "decisionReconciliation": {
+        "version": 1,
+        "atomicSubmit": true,
+        "preview": true,
+        "threeWayMerge": false,
+        "legacyShareDecision": true
+      },
+      "decisionLifecycle": {
+        "version": 1,
+        "revisions": true,
+        "tombstones": true,
+        "retirementReasons": true
+      }
+    }
+  },
+  "reconciliationOutcomes": {
+    "initial": {
+      "status": "submitted",
+      "kind": "initial",
+      "personalHead": "personal-1:2026-08-30T12:00:00.000Z",
+      "teamHead": null,
+      "candidateId": "10000000-0000-4000-8000-000000000001",
+      "revisionId": "revision-2",
+      "replayed": false,
+      "team": {
+        "id": "40000000-0000-4000-8000-000000000001",
+        "name": "Platform"
+      }
+    },
+    "update": {
+      "status": "submitted",
+      "kind": "update",
+      "personalHead": "personal-1:2026-08-30T12:00:00.000Z",
+      "teamHead": "20000000-0000-4000-8000-000000000001",
+      "candidateId": "10000000-0000-4000-8000-000000000002",
+      "revisionId": "revision-2",
+      "replayed": false,
+      "team": {
+        "id": "40000000-0000-4000-8000-000000000001",
+        "name": "Platform"
+      }
+    },
+    "alreadyPending": {
+      "status": "already_pending",
+      "kind": "update",
+      "personalHead": "personal-1:2026-08-30T12:00:00.000Z",
+      "teamHead": "20000000-0000-4000-8000-000000000001",
+      "candidateId": "10000000-0000-4000-8000-000000000002",
+      "revisionId": "revision-2",
+      "replayed": false,
+      "team": {
+        "id": "40000000-0000-4000-8000-000000000001",
+        "name": "Platform"
+      }
+    },
+    "unchanged": {
+      "status": "unchanged",
+      "kind": "unchanged",
+      "personalHead": "personal-1:2026-08-30T12:00:00.000Z",
+      "teamHead": "20000000-0000-4000-8000-000000000001",
+      "candidateId": null,
+      "revisionId": "revision-2",
+      "replayed": false,
+      "team": {
+        "id": "40000000-0000-4000-8000-000000000001",
+        "name": "Platform"
+      }
+    },
+    "staleHead": {
+      "status": "heads_changed",
+      "kind": "conflict",
+      "personalHead": "personal-1:2026-08-30T12:00:01.000Z",
+      "teamHead": "20000000-0000-4000-8000-000000000001",
+      "candidateId": null,
+      "revisionId": "revision-2",
+      "replayed": false,
+      "team": {
+        "id": "40000000-0000-4000-8000-000000000001",
+        "name": "Platform"
+      }
+    },
+    "unauthorizedMcpError": {
+      "isError": true,
+      "content": [
+        {
+          "type": "text",
+          "text": "team not found or caller is not a member"
+        }
+      ]
+    }
+  },
+  "sidecars": {
+    "policy": {
+      "schema_version": 1,
+      "mode": "propose_approved",
+      "policy_generation": "30000000-0000-4000-8000-000000000001",
+      "repo_key": "github.com/org/repo",
+      "repo_slug": "workspace_repo-37f121a3",
+      "endpoint": "https://mcp.contexer.ai/mcp",
+      "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+      "team_id": "40000000-0000-4000-8000-000000000001",
+      "team_name_at_confirmation": "Platform",
+      "enabled_at": "2026-08-30T12:00:00Z",
+      "include_existing": false,
+      "baseline_revision_ids": [
+        "revision-1"
+      ],
+      "paused_reason": null
+    },
+    "intent": {
+      "schema_version": 1,
+      "idempotency_key": "50000000-0000-4000-8000-000000000001",
+      "policy_generation": "30000000-0000-4000-8000-000000000001",
+      "decision_id": "60000000-0000-4000-8000-000000000001",
+      "revision_id": "revision-2",
+      "repo_path": "/workspace/repo",
+      "repo_key": "github.com/org/repo",
+      "endpoint": "https://mcp.contexer.ai/mcp",
+      "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+      "team_id": "40000000-0000-4000-8000-000000000001",
+      "queued_at": "2026-08-30T12:01:00Z",
+      "attempts": 0,
+      "last_error_code": null,
+      "last_error_class": null,
+      "diagnostic_id": null
+    },
+    "attention": {
+      "schema_version": 1,
+      "idempotency_key": "50000000-0000-4000-8000-000000000001",
+      "policy_generation": "30000000-0000-4000-8000-000000000001",
+      "decision_id": "60000000-0000-4000-8000-000000000001",
+      "revision_id": "revision-2",
+      "repo_path": "/workspace/repo",
+      "repo_key": "github.com/org/repo",
+      "endpoint": "https://mcp.contexer.ai/mcp",
+      "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+      "team_id": "40000000-0000-4000-8000-000000000001",
+      "reason": "not_member",
+      "moved_at": "2026-08-30T12:02:00Z",
+      "last_error_code": "not_member",
+      "last_error_class": "authorization",
+      "diagnostic_id": "diag_4Z7K2N8Q5W1C9M6P"
+    },
+    "receipts": [
+      {
+        "schema_version": 1,
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "endpoint": "https://mcp.contexer.ai/mcp",
+        "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+        "repo_key": "github.com/org/repo",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "decision_id": "60000000-0000-4000-8000-000000000001",
+        "revision_id": "revision-2",
+        "state": "queued",
+        "candidate_id": null,
+        "reason": null,
+        "recorded_at": "2026-08-30T12:01:00Z"
+      },
+      {
+        "schema_version": 1,
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "endpoint": "https://mcp.contexer.ai/mcp",
+        "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+        "repo_key": "github.com/org/repo",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "decision_id": "60000000-0000-4000-8000-000000000001",
+        "revision_id": "revision-2",
+        "state": "submitted",
+        "candidate_id": "10000000-0000-4000-8000-000000000002",
+        "reason": null,
+        "recorded_at": "2026-08-30T12:02:00Z"
+      },
+      {
+        "schema_version": 1,
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "endpoint": "https://mcp.contexer.ai/mcp",
+        "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+        "repo_key": "github.com/org/repo",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "decision_id": "60000000-0000-4000-8000-000000000001",
+        "revision_id": "revision-2",
+        "state": "already_pending",
+        "candidate_id": "10000000-0000-4000-8000-000000000002",
+        "reason": null,
+        "recorded_at": "2026-08-30T12:02:00Z"
+      },
+      {
+        "schema_version": 1,
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "endpoint": "https://mcp.contexer.ai/mcp",
+        "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+        "repo_key": "github.com/org/repo",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "decision_id": "60000000-0000-4000-8000-000000000001",
+        "revision_id": "revision-2",
+        "state": "unchanged",
+        "candidate_id": null,
+        "reason": null,
+        "recorded_at": "2026-08-30T12:02:00Z"
+      },
+      {
+        "schema_version": 1,
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "endpoint": "https://mcp.contexer.ai/mcp",
+        "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+        "repo_key": "github.com/org/repo",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "decision_id": "60000000-0000-4000-8000-000000000001",
+        "revision_id": "revision-2",
+        "state": "attention",
+        "candidate_id": null,
+        "reason": "not_member",
+        "recorded_at": "2026-08-30T12:02:00Z"
+      },
+      {
+        "schema_version": 1,
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "endpoint": "https://mcp.contexer.ai/mcp",
+        "account_fingerprint": "acctfp_v1_7M4Q2PX9C6N8",
+        "repo_key": "github.com/org/repo",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "decision_id": "60000000-0000-4000-8000-000000000001",
+        "revision_id": "revision-1",
+        "state": "baseline",
+        "candidate_id": null,
+        "reason": null,
+        "recorded_at": "2026-08-30T12:00:00Z"
+      }
+    ]
+  },
+  "persistedErrorPolicy": {
+    "codeValues": [
+      "unsupported_protocol",
+      "account_mismatch",
+      "policy_mismatch",
+      "repo_mismatch",
+      "team_mismatch",
+      "not_member",
+      "not_authorized",
+      "ineligible_revision",
+      "global_decision",
+      "baseline_revision",
+      "duplicate_receipt",
+      "corrupt_queue",
+      "stale_head",
+      "stale_intent",
+      "lock_busy",
+      "rate_limited",
+      "quota_exceeded",
+      "trial_expired",
+      "transient_error",
+      "transport_error",
+      "validation_error"
+    ],
+    "classValues": [
+      "authorization",
+      "capability",
+      "conflict",
+      "lock",
+      "rate_limit",
+      "transport",
+      "validation"
+    ],
+    "maxCodeLength": 64,
+    "maxClassLength": 32,
+    "diagnosticIdPattern": "^diag_[A-Z0-9]{16}$",
+    "diagnosticIdMaxLength": 21,
+    "diagnosticIdIndependentRandom": true
+  },
+  "transitionCandidate": {
+    "candidate": {
+      "id": "10000000-0000-4000-8000-000000000002",
+      "teamId": "40000000-0000-4000-8000-000000000001",
+      "state": "shared_candidate",
+      "sourceDecisionId": "70000000-0000-4000-8000-000000000001",
+      "supersedesDecisionId": "20000000-0000-4000-8000-000000000001",
+      "repoKey": "github.com/org/repo",
+      "title": "Use the bounded proposal queue",
+      "content": "Queue automatic proposals in an independent sidecar.",
+      "rationale": "Capture must remain offline-first.",
+      "sourceFiles": [
+        "src/proposals.ts"
+      ]
+    },
+    "predecessor": {
+      "id": "20000000-0000-4000-8000-000000000001",
+      "teamId": "40000000-0000-4000-8000-000000000001",
+      "repoKey": "github.com/org/repo",
+      "title": "Upload approved decisions synchronously",
+      "content": "Send an approved decision before capture returns.",
+      "rationale": "The original workflow prioritized immediate visibility.",
+      "sourceFiles": [
+        "src/proposals.ts"
+      ],
+      "enforcement": "blocking",
+      "enforcementReason": "The sharing path handles sensitive policy data."
+    },
+    "latestMatchingDriftFinding": {
+      "findingId": "80000000-0000-4000-8000-000000000001",
+      "checkId": "90000000-0000-4000-8000-000000000001",
+      "repoKey": "github.com/org/repo",
+      "pullRequestNumber": 42,
+      "commitSha": "0123456789abcdef0123456789abcdef01234567",
+      "severity": "high",
+      "explanation": "The implementation moved upload work off the capture path.",
+      "remediation": "Review the proposed replacement decision."
+    },
+    "otherRecentAffectedFindingCount": 2,
+    "requiresExplicitEnforcementChoice": true,
+    "allowedEnforcementChoices": [
+      "blocking",
+      "advisory"
+    ]
+  },
+  "transitionCandidateWithoutMatchingDrift": {
+    "candidate": {
+      "id": "10000000-0000-4000-8000-000000000003",
+      "teamId": "40000000-0000-4000-8000-000000000001",
+      "state": "shared_candidate",
+      "sourceDecisionId": "70000000-0000-4000-8000-000000000001",
+      "supersedesDecisionId": "20000000-0000-4000-8000-000000000001",
+      "repoKey": "github.com/org/repo",
+      "title": "Use the bounded proposal queue",
+      "content": "Queue automatic proposals in an independent sidecar.",
+      "rationale": "Capture must remain offline-first.",
+      "sourceFiles": [
+        "src/proposals.ts"
+      ]
+    },
+    "predecessor": {
+      "id": "20000000-0000-4000-8000-000000000001",
+      "teamId": "40000000-0000-4000-8000-000000000001",
+      "repoKey": "github.com/org/repo",
+      "title": "Upload approved decisions synchronously",
+      "content": "Send an approved decision before capture returns.",
+      "rationale": "The original workflow prioritized immediate visibility.",
+      "sourceFiles": [
+        "src/proposals.ts"
+      ],
+      "enforcement": "blocking",
+      "enforcementReason": "The sharing path handles sensitive policy data."
+    },
+    "latestMatchingDriftFinding": null,
+    "otherRecentAffectedFindingCount": 0,
+    "requiresExplicitEnforcementChoice": true,
+    "allowedEnforcementChoices": [
+      "blocking",
+      "advisory"
+    ]
+  },
+  "observability": {
+    "operations": {
+      "capabilityRead": {
+        "span": "decision_proposal.capability_read",
+        "terminalLogEvent": "decisionProposalCapabilityRead"
+      },
+      "policyChange": {
+        "span": "decision_proposal.policy_change",
+        "terminalLogEvent": "decisionProposalPolicyChange"
+      },
+      "scan": {
+        "span": "decision_proposal.scan",
+        "terminalLogEvent": "decisionProposalScan"
+      },
+      "enqueue": {
+        "span": "decision_proposal.enqueue",
+        "terminalLogEvent": "decisionProposalEnqueue"
+      },
+      "drain": {
+        "span": "decision_proposal.drain",
+        "terminalLogEvent": "decisionProposalDrain"
+      },
+      "transitionRead": {
+        "span": "decision_transition.read",
+        "terminalLogEvent": "decisionTransitionRead"
+      },
+      "transitionApprove": {
+        "span": "decision_transition.approve",
+        "terminalLogEvent": "decisionTransitionApprove"
+      },
+      "transitionRecheck": {
+        "span": "decision_transition.recheck",
+        "terminalLogEvent": "decisionTransitionRecheck"
+      }
+    },
+    "operationOutcomes": {
+      "capabilityRead": {
+        "allowedResultsByReasonCode": {
+          "none": ["success"],
+          "unsupported_protocol": ["refused"],
+          "not_authorized": ["refused"],
+          "rate_limited": ["failure"],
+          "transport_error": ["failure"],
+          "validation_error": ["failure"]
+        }
+      },
+      "policyChange": {
+        "allowedResultsByReasonCode": {
+          "none": ["success"],
+          "unsupported_protocol": ["refused"],
+          "account_mismatch": ["refused"],
+          "repo_mismatch": ["refused"],
+          "team_mismatch": ["refused"],
+          "not_member": ["refused"],
+          "not_authorized": ["refused"],
+          "validation_error": ["refused"],
+          "cancelled": ["no_op"]
+        }
+      },
+      "scan": {
+        "allowedResultsByReasonCode": {
+          "none": ["success", "queued"],
+          "policy_disabled": ["skipped"],
+          "ineligible_revision": ["skipped"],
+          "global_decision": ["skipped"],
+          "baseline_revision": ["skipped"],
+          "duplicate_receipt": ["no_op"],
+          "corrupt_queue": ["failure"],
+          "lock_busy": ["no_op"],
+          "validation_error": ["failure"]
+        }
+      },
+      "enqueue": {
+        "allowedResultsByReasonCode": {
+          "none": ["queued"],
+          "policy_disabled": ["refused"],
+          "policy_mismatch": ["refused"],
+          "duplicate_receipt": ["no_op"],
+          "corrupt_queue": ["failure"],
+          "lock_busy": ["no_op"],
+          "validation_error": ["failure"]
+        }
+      },
+      "drain": {
+        "allowedResultsByReasonCode": {
+          "none": ["submitted", "already_pending", "unchanged"],
+          "unsupported_protocol": ["refused"],
+          "account_mismatch": ["attention"],
+          "policy_mismatch": ["attention"],
+          "repo_mismatch": ["attention"],
+          "team_mismatch": ["attention"],
+          "not_member": ["attention"],
+          "not_authorized": ["attention"],
+          "stale_head": ["conflict"],
+          "stale_intent": ["attention"],
+          "duplicate_receipt": ["no_op"],
+          "corrupt_queue": ["failure"],
+          "lock_busy": ["no_op"],
+          "rate_limited": ["retry"],
+          "quota_exceeded": ["attention"],
+          "trial_expired": ["attention"],
+          "transient_error": ["retry"],
+          "transport_error": ["retry"],
+          "validation_error": ["failure"]
+        }
+      },
+      "transitionRead": {
+        "allowedResultsByReasonCode": {
+          "none": ["success"],
+          "repo_mismatch": ["refused"],
+          "team_mismatch": ["refused"],
+          "not_member": ["refused"],
+          "not_authorized": ["refused"],
+          "stale_candidate": ["no_op"],
+          "origin_finding_mismatch": ["refused"],
+          "database_error": ["failure"],
+          "validation_error": ["failure"]
+        }
+      },
+      "transitionApprove": {
+        "allowedResultsByReasonCode": {
+          "none": ["success"],
+          "not_authorized": ["refused"],
+          "team_mismatch": ["refused"],
+          "repo_mismatch": ["refused"],
+          "stale_predecessor": ["conflict"],
+          "stale_candidate": ["conflict"],
+          "candidate_rejected": ["conflict"],
+          "candidate_withdrawn": ["conflict"],
+          "missing_enforcement_choice": ["refused"],
+          "origin_finding_mismatch": ["refused"],
+          "database_error": ["failure"],
+          "rollback": ["failure"],
+          "validation_error": ["failure"]
+        }
+      },
+      "transitionRecheck": {
+        "allowedResultsByReasonCode": {
+          "none": ["queued"],
+          "stale_head": ["failure"],
+          "runner_launch_failed": ["partial_success"],
+          "no_managed_check": ["no_op"],
+          "already_running": ["already_running"],
+          "database_error": ["failure"],
+          "rate_limited": ["failure"],
+          "transport_error": ["failure"],
+          "validation_error": ["failure"]
+        }
+      }
+    },
+    "spanContract": {
+      "requiredAttributes": [
+        "contexer.result",
+        "contexer.reason_code"
+      ],
+      "allowedCorrelationAttributes": [
+        "contexer.team_id",
+        "contexer.decision_id",
+        "contexer.candidate_id",
+        "contexer.policy_generation",
+        "contexer.idempotency_key"
+      ],
+      "allowedDiagnosticAttributes": [
+        "contexer.error_class",
+        "contexer.diagnostic_id",
+        "contexer.attempt",
+        "contexer.queue_depth",
+        "contexer.replayed",
+        "contexer.enforcement_choice",
+        "contexer.recheck_outcome"
+      ],
+      "recordRawExceptions": false
+    },
+    "logContract": {
+      "requiredFields": [
+        "action",
+        "result",
+        "reasonCode"
+      ],
+      "allowedCorrelationFields": [
+        "teamId",
+        "decisionId",
+        "candidateId",
+        "policyGeneration",
+        "idempotencyKey"
+      ],
+      "allowedDiagnosticFields": [
+        "errorClass",
+        "diagnosticId",
+        "attempt",
+        "queueDepth",
+        "replayed",
+        "enforcementChoice",
+        "recheckOutcome"
+      ],
+      "allowedActionValues": [
+        "decisionProposalCapabilityRead",
+        "decisionProposalPolicyChange",
+        "decisionProposalScan",
+        "decisionProposalEnqueue",
+        "decisionProposalDrain",
+        "decisionTransitionRead",
+        "decisionTransitionApprove",
+        "decisionTransitionRecheck"
+      ],
+      "messagePolicy": "fixed_event_message_only",
+      "correlateWithActiveTrace": true
+    },
+    "valuePolicy": {
+      "mode": "closed_allowlist",
+      "maxStringLength": 128,
+      "results": [
+        "success",
+        "queued",
+        "submitted",
+        "already_pending",
+        "unchanged",
+        "attention",
+        "conflict",
+        "refused",
+        "retry",
+        "partial_success",
+        "failure",
+        "no_op",
+        "skipped",
+        "already_running"
+      ],
+      "reasonCodes": [
+        "none",
+        "unsupported_protocol",
+        "account_mismatch",
+        "policy_mismatch",
+        "policy_disabled",
+        "repo_mismatch",
+        "team_mismatch",
+        "not_member",
+        "not_authorized",
+        "ineligible_revision",
+        "global_decision",
+        "baseline_revision",
+        "duplicate_receipt",
+        "corrupt_queue",
+        "stale_head",
+        "stale_intent",
+        "stale_predecessor",
+        "stale_candidate",
+        "candidate_rejected",
+        "candidate_withdrawn",
+        "missing_enforcement_choice",
+        "origin_finding_mismatch",
+        "lock_busy",
+        "rate_limited",
+        "quota_exceeded",
+        "trial_expired",
+        "transient_error",
+        "transport_error",
+        "validation_error",
+        "database_error",
+        "rollback",
+        "runner_launch_failed",
+        "no_managed_check",
+        "already_running",
+        "cancelled",
+        "telemetry_sink_failure"
+      ],
+      "errorClasses": [
+        "none",
+        "authorization",
+        "capability",
+        "conflict",
+        "lock",
+        "rate_limit",
+        "transport",
+        "validation",
+        "database",
+        "runner",
+        "telemetry"
+      ],
+      "enforcementChoices": [
+        "none",
+        "blocking",
+        "advisory"
+      ],
+      "recheckOutcomes": [
+        "none",
+        "queued",
+        "already_running",
+        "no_managed_check",
+        "runner_launch_failed"
+      ]
+    },
+    "forbiddenValueClasses": [
+      "credential_or_token",
+      "account_identity",
+      "raw_endpoint",
+      "repository_identity_or_path",
+      "decision_or_evidence_prose",
+      "finding_or_resolution_prose",
+      "raw_exception_message_or_stack",
+      "person_or_team_display_data"
+    ],
+    "contexerLocalTelemetry": {
+      "exportMode": "stderr_jsonl_only",
+      "networkExporter": false,
+      "flushWhileStoreOrSidecarLockHeld": false,
+      "nonBlocking": true
+    },
+    "teamsTelemetry": {
+      "logger": "@contexer/observability.getLogger",
+      "tracer": "@contexer/observability.withSpan",
+      "recordRawExceptions": false
+    },
+    "telemetryFailureMustNotChangeOutcome": true
+  },
+  "decisionUpdatedResolution": {
+    "teamId": "40000000-0000-4000-8000-000000000001",
+    "decisionId": "20000000-0000-4000-8000-000000000001",
+    "repo": "github.com/org/repo",
+    "resolution": "decision_updated",
+    "replacementDecisionId": "10000000-0000-4000-8000-000000000002",
+    "originCheckId": "90000000-0000-4000-8000-000000000001",
+    "originFindingId": "80000000-0000-4000-8000-000000000001",
+    "note": "Approved the explicit replacement after reviewing the drift context.",
+    "resolvedByUserId": "a0000000-0000-4000-8000-000000000001"
+  }
+}
