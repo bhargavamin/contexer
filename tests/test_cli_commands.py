@@ -6,21 +6,22 @@ import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
 
-from contexer import cli
+from contexer import cli, updates
 from contexer.cli import install, reinstall, status, uninstall, version
 
 
 @pytest.fixture(autouse=True)
 def _no_network_update_check(monkeypatch):
-    """status() checks PyPI for updates — tests must never hit the network.
-    Yields the real function so opt-out tests can exercise it directly."""
-    original = cli._latest_pypi_version
-    monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
-    yield original
+    """status() asks PyPI for the latest release - tests must never hit the network.
+
+    The fetch itself, its opt-out and its failure modes are covered in test_updates.py, which
+    owns that function. What is pinned here is only how `status` RENDERS the answer."""
+    monkeypatch.setattr(updates, "refresh", lambda force=False: {})
 
 
 @pytest.fixture
@@ -526,27 +527,28 @@ class TestPermissionDeniedGuidance:
 class TestUpdateCheck:
     def test_update_line_when_newer_available(self, installed_home, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
         status()
         out = capsys.readouterr().out
         assert "update:       0.5.4 available" in out
-        assert "uv tool upgrade contexer" in out
+        # The line names the one-command remedy, not the three-step chore it replaced.
+        assert "contexer upgrade" in out
 
     def test_no_line_when_current(self, installed_home, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.4")
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
         status()
         assert "update:" not in capsys.readouterr().out
 
     def test_no_line_when_installed_is_newer(self, installed_home, monkeypatch, capsys):
         # local dev build ahead of PyPI must not suggest a "downgrade"
         monkeypatch.setattr(cli, "_dist_version", lambda _: "0.6.0")
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
         status()
         assert "update:" not in capsys.readouterr().out
 
     def test_no_line_when_pypi_unreachable(self, installed_home, monkeypatch, capsys):
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {})
         status()
         assert "update:" not in capsys.readouterr().out
 
@@ -555,24 +557,211 @@ class TestUpdateCheck:
             raise cli.PackageNotFoundError
         monkeypatch.setattr(cli, "_dist_version", _raise)
         called = []
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: called.append(1) or "9.9.9")
+        monkeypatch.setattr(updates, "refresh",
+                            lambda force=False: called.append(1) or {"latest": "9.9.9"})
         status()
         assert called == []  # no point asking PyPI if we can't compare
         assert "update:" not in capsys.readouterr().out
 
-    def test_env_var_opts_out_of_network_call(self, _no_network_update_check, monkeypatch):
-        real_fetch = _no_network_update_check  # the un-stubbed function
+
+# ── upgrade ───────────────────────────────────────────────────────────────────
+
+class TestUpgrade:
+    """`contexer upgrade`: the one command the update notice is allowed to name.
+
+    The safety-critical case is `uv-tool-source`. Everything else is presentation."""
+
+    @pytest.fixture(autouse=True)
+    def _known_versions(self, monkeypatch):
+        monkeypatch.setattr(updates, "installed_version", lambda: "1.0.0")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "2.0.0"})
+
+    @pytest.fixture
+    def _never_runs(self, monkeypatch):
+        """Fails the test if anything is executed. Most branches must only PRINT."""
+        def _boom(*a, **k):
+            raise AssertionError("a subprocess was run")
+        monkeypatch.setattr(cli.subprocess, "run", _boom)
+
+    def test_source_install_is_never_replaced(self, monkeypatch, capsys, _never_runs):
+        """`uv tool install --from <clone>` looks like a PyPI install from the outside.
+        Upgrading it would silently swap a developer's own build for a release."""
+        monkeypatch.setattr(updates, "install_method",
+                            lambda: (updates.UV_TOOL_SOURCE, "/home/me/src/contexer"))
+        cli.upgrade()
+        out = capsys.readouterr().out
+        assert "installed from source at /home/me/src/contexer" in out
+        assert "scripts/install.sh" in out
+
+    def test_pip_install_is_told_not_run(self, monkeypatch, capsys, _never_runs):
+        """The target environment is the developer's to choose, so pip is never invoked."""
+        monkeypatch.setattr(updates, "install_method",
+                            lambda: (updates.PIP, "/usr/lib/python3.12/site-packages"))
+        cli.upgrade()
+        out = capsys.readouterr().out
+        assert "pip install --upgrade contexer" in out
+        assert "contexer reinstall" in out
+
+    def test_unknown_install_is_told_not_run(self, monkeypatch, capsys, _never_runs):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UNKNOWN, ""))
+        cli.upgrade()
+        assert "not upgraded for you" in capsys.readouterr().out
+
+    def test_dry_run_shows_both_steps_and_runs_neither(self, monkeypatch, capsys, _never_runs):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        cli.upgrade(["--dry-run"])
+        out = capsys.readouterr().out
+        assert "Would run:  uv tool upgrade contexer" in out
+        assert "Would then: contexer reinstall" in out
+
+    def test_missing_uv_is_reported_not_attempted(self, monkeypatch, capsys, _never_runs):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+        cli.upgrade()
+        assert "uv is not on PATH" in capsys.readouterr().out
+
+    def test_uv_tool_upgrades_then_resyncs_then_says_restart(self, clean_home, monkeypatch,
+                                                             capsys):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        monkeypatch.setattr(cli.shutil, "which", lambda _: "/usr/bin/uv")
+        ran = []
+
+        def _run(cmd, **kw):
+            ran.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(cli.subprocess, "run", _run)
+        cli.upgrade()
+        out = capsys.readouterr().out
+        # First, and only then the re-sync (which shells out to git on its own account).
+        assert ran[0] == ["uv", "tool", "upgrade", "contexer"]
+        assert "-> contexer reinstall" in out
+        assert "Restart your AI assistant" in out
+
+    def test_failed_upgrade_exits_nonzero_and_does_not_resync(self, monkeypatch, capsys):
+        """A failed upgrade must leave the config alone rather than re-syncing hooks for a
+        version that was never installed."""
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        monkeypatch.setattr(cli.shutil, "which", lambda _: "/usr/bin/uv")
+        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: types.SimpleNamespace(
+            returncode=1, stdout="", stderr="no matching distribution"))
+        monkeypatch.setattr(cli, "reinstall", lambda: pytest.fail("re-synced after a failure"))
+        with pytest.raises(SystemExit) as exc:
+            cli.upgrade()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "no matching distribution" in err   # uv's own words, not a paraphrase
+        assert "still 1.0.0" in err
+
+    def test_already_current_stops_before_touching_anything(self, monkeypatch, capsys,
+                                                            _never_runs):
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "1.0.0"})
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        cli.upgrade()
+        assert "already up to date" in capsys.readouterr().out
+
+    def test_offline_still_offers_the_upgrade(self, monkeypatch, capsys, _never_runs):
+        """PyPI being unreachable is not a reason to refuse; uv can still resolve.
+
+        The opt-out is cleared deliberately: an empty state means "offline" only when the
+        check is ON. With the opt-out set it means "we never looked", which is a different
+        message and has its own test."""
+        monkeypatch.delenv("CONTEXER_NO_UPDATE_CHECK", raising=False)
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {})
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        cli.upgrade(["--dry-run"])
+        out = capsys.readouterr().out
+        assert "could not reach PyPI" in out
+        assert "Would run:" in out
+
+
+class TestStatusDoesNotDoubleNotify:
+    """Regression: `status` printed its own update line AND the backstop's, in one run, from
+    two different sources - so it reported two DIFFERENT versions."""
+
+    def test_status_prints_one_update_line_only(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
+        monkeypatch.setattr(sys, "argv", ["contexer", "status"])
+        cli.main()
+        captured = capsys.readouterr()
+        assert captured.out.count("0.5.4") == 1
+        assert "is available" not in captured.err   # the backstop stayed out of it
+
+
+class TestStatusReportsTheFloor:
+    def test_unsupported_line_when_below_the_floor(self, installed_home, monkeypatch, capsys):
+        """The `update:` line fires only when a NEWER release exists and says nothing about
+        support, so a breach needs its own line or `status` stays silent about it."""
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
+        monkeypatch.setattr(updates, "refresh",
+                            lambda force=False: {"latest": "0.5.2", "floor": "0.5.4"})
+        status()
+        out = capsys.readouterr().out
+        assert "unsupported:  below the minimum supported version 0.5.4" in out
+
+    def test_no_line_when_at_or_above_the_floor(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.4")
+        monkeypatch.setattr(updates, "refresh",
+                            lambda force=False: {"latest": "0.5.4", "floor": "0.5.4"})
+        status()
+        assert "unsupported:" not in capsys.readouterr().out
+
+
+class TestUpgradeOptOut:
+    def test_opt_out_is_not_reported_as_a_network_failure(self, monkeypatch, capsys):
+        """Blaming the network would send a developer to debug their proxy over a setting
+        they chose themselves."""
         monkeypatch.setenv("CONTEXER_NO_UPDATE_CHECK", "1")
+        monkeypatch.setattr(updates, "installed_version", lambda: "1.0.0")
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.PIP, "/x"))
+        cli.upgrade()
+        out = capsys.readouterr().out
+        assert "CONTEXER_NO_UPDATE_CHECK is set" in out
+        assert "could not reach PyPI" not in out
 
-        def _no_io(*a, **k):
-            raise AssertionError("network I/O attempted despite opt-out")
-        monkeypatch.setattr(cli.urllib.request, "urlopen", _no_io)
-        assert real_fetch() is None  # env guard returns before any I/O
 
-    def test_version_tuple_parsing(self):
-        assert cli._version_tuple("0.5.4") == (0, 5, 4)
-        assert cli._version_tuple("0.5.x") is None
-        assert cli._version_tuple("unknown (not installed as a package)") is None
+class TestUpdateBackstop:
+    """The host-independent half of the notification contract: Cursor and Gemini expose no
+    user-facing channel, so their users are told here, in their own shell."""
+
+    def test_prints_a_due_notice_on_stderr(self, monkeypatch, capsys):
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(updates, "deliver",
+                            lambda render: render("Contexer 2.0.0 is available"))
+        cli._print_update_backstop()
+        captured = capsys.readouterr()
+        assert "Contexer 2.0.0 is available" in captured.err
+        assert captured.out == ""   # stdout may be piped or parsed; asides never go there
+
+    def test_goes_through_deliver_so_a_failed_print_does_not_consume(self, monkeypatch):
+        """The backstop is the one surface `deliver`'s consume-after-render rule exists for:
+        it renders to a stream that can fail."""
+        seen = []
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(updates, "deliver", lambda render: seen.append(render) or None)
+        cli._print_update_backstop()
+        assert len(seen) == 1 and callable(seen[0])
+
+    def test_silent_when_nothing_is_due(self, monkeypatch, capsys):
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(updates, "deliver", lambda _render: None)
+        cli._print_update_backstop()
+        assert capsys.readouterr().err == ""
+
+    def test_starts_the_refresh_because_no_hook_may_have(self, monkeypatch):
+        spawned = []
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: spawned.append(1))
+        monkeypatch.setattr(updates, "deliver", lambda _render: None)
+        cli._print_update_backstop()
+        assert spawned == [1]
+
+    def test_never_raises(self, monkeypatch, capsys):
+        """No command's exit status may depend on an aside."""
+        def _boom():
+            raise RuntimeError("state exploded")
+        monkeypatch.setattr(updates, "spawn_refresh", _boom)
+        cli._print_update_backstop()
+        assert capsys.readouterr().err == ""
 
 
 # ── multi-target status ───────────────────────────────────────────────────────

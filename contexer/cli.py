@@ -7,14 +7,11 @@ import subprocess
 import sys
 import textwrap
 import time
-import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
-from contexer import adapters
+from contexer import adapters, updates
 from contexer.adapters.base import _is_corrupt, _load_safe
-
-_PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
 
 USAGE = """contexer - persistent context for Claude Code, Cursor, Codex, and Gemini CLI
 
@@ -26,6 +23,7 @@ Commands:
                 use --target claude|cursor|codex|gemini|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
+  upgrade       Upgrade Contexer itself, then re-sync config. Add --dry-run to preview.
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
   retire        Retire one decision - it leaves active context, keeping its history:
@@ -94,8 +92,8 @@ Flags:
                   Prompts for confirmation unless --yes is given.
   -y, --yes       Skip the --purge confirmation prompt (for unattended use).
 
-To upgrade the program itself (rebuild the binary):
-  uv tool install --reinstall contexer
+To upgrade the program itself:
+  contexer upgrade
 """
 
 
@@ -104,25 +102,6 @@ def _version() -> str:
         return _dist_version("contexer")
     except PackageNotFoundError:
         return "unknown (not installed as a package)"
-
-
-def _latest_pypi_version() -> str | None:
-    """Latest release on PyPI, or None. Best-effort: never raises, short timeout,
-    and skipped entirely when CONTEXER_NO_UPDATE_CHECK is set (airgapped boxes)."""
-    if os.environ.get("CONTEXER_NO_UPDATE_CHECK"):
-        return None
-    try:
-        with urllib.request.urlopen(_PYPI_JSON_URL, timeout=2) as resp:
-            return json.load(resp)["info"]["version"]
-    except Exception:
-        return None
-
-
-def _version_tuple(v: str) -> tuple | None:
-    try:
-        return tuple(int(p) for p in v.split("."))
-    except (ValueError, AttributeError):
-        return None
 
 
 def _format_age(seconds: float) -> str:
@@ -709,7 +688,104 @@ def reinstall() -> None:
     install()
     print()
     print("Note: this only re-synced the MCP/hook config. To upgrade the program itself,")
-    print("run `uv tool install --reinstall contexer`, then restart your AI assistant.")
+    print("run `contexer upgrade`, which also re-syncs config, then restart your assistant.")
+
+
+def _print_update_backstop() -> None:
+    """Deliver a due update notice through the terminal, for hosts that cannot deliver one.
+
+    The host-independent half of the notification contract. Claude, Codex and Gemini all have a
+    user-facing channel and render the notice themselves through their adapter's `notify()`.
+    Cursor does not: its `user_message` is shown only when an action is BLOCKED, so there is no
+    way to tell a Cursor developer anything without costing them their prompt. This is where
+    they are told instead: the next time they run any `contexer` command, in their own shell.
+
+    It also starts the background refresh, because a machine may go a long time between the
+    hooks that would otherwise do it.
+
+    Delivery goes through `updates.deliver` rather than reading the notice and printing it,
+    so a print that fails (a closed pipe, an unencodable stream) leaves the notice OWED instead
+    of consuming it inside the guard below. That ordering rule exists for exactly this path.
+
+    stderr, not stdout, for the reason `gh` uses stderr: stdout may be piped or parsed, and an
+    operational aside must never end up inside someone's data.
+    """
+    def _render(text: str) -> str:
+        print(f"\ncontexer: {text}", file=sys.stderr)
+        return text
+
+    try:
+        updates.spawn_refresh()
+        updates.deliver(_render)
+    except Exception:
+        pass
+
+
+def upgrade(rest: list | None = None) -> None:
+    """`contexer upgrade` - the one command the update notice is allowed to name.
+
+    Upgrading used to be three steps (upgrade the binary, `contexer reinstall` to re-sync
+    hooks and MCP registration, restart the assistant), which is why a notice alone would
+    have relocated the friction rather than removed it. Two of those three are done here.
+    The third cannot be: the MCP server is spawned once per session and holds state, so
+    restarting is the developer's act and is told to them plainly rather than attempted.
+
+    Which installs may be upgraded automatically is `updates.upgrade_plan`'s call, not this
+    function's, so "which command" and "may we run it" cannot disagree about the same install.
+    """
+    rest = rest or []
+    dry_run = "--dry-run" in rest or "-n" in rest
+    method, detail = updates.install_method()
+    installed = updates.installed_version() or "unknown"
+
+    state = updates.refresh(force=True)
+    latest = state.get("latest")
+    installed_t, latest_t = updates.version_tuple(installed), updates.version_tuple(latest)
+    if latest_t and installed_t and latest_t <= installed_t:
+        print(f"contexer {installed} is already up to date.")
+        return
+    if latest:
+        print(f"contexer {installed} installed, {latest} available.")
+    elif updates.disabled():
+        # Not a network failure. Blaming one would send a developer to debug their proxy over
+        # a setting they chose themselves.
+        print(f"contexer {installed} installed. The update check is off "
+              f"(CONTEXER_NO_UPDATE_CHECK is set), so the latest release is unknown.")
+    else:
+        print(f"contexer {installed} installed; could not reach PyPI to check for a newer "
+              f"release.")
+
+    plan = updates.upgrade_plan(method, detail)
+    if not plan.runnable:
+        print(f"\n{plan.why_not}")
+        print(f"To upgrade:  {plan.command}")
+        if method != updates.UV_TOOL_SOURCE:
+            # A source rebuild re-runs the installer itself, so it needs no separate re-sync.
+            print("Then run:    contexer reinstall")
+        return
+    if dry_run:
+        print(f"\nWould run:  {plan.command}")
+        print("Would then: contexer reinstall")
+        return
+    if not shutil.which("uv"):
+        print("\nuv is not on PATH, so the upgrade cannot be run for you.")
+        print(f"To upgrade:  {plan.command}")
+        return
+
+    print(f"\n-> {plan.command}")
+    result = subprocess.run(plan.command.split(), capture_output=True, text=True)
+    if result.returncode != 0:
+        # Print uv's own words rather than a paraphrase: it explains resolution failures far
+        # better than a generic message could, and a failed upgrade must leave the config
+        # alone rather than re-syncing hooks for a version that was never installed.
+        sys.stderr.write(result.stderr or result.stdout or "")
+        print(f"\nUpgrade failed. Contexer is still {installed}.", file=sys.stderr)
+        sys.exit(1)
+
+    print("-> contexer reinstall")
+    reinstall()
+    print("\nDone. Restart your AI assistant: the MCP server is started once per session, "
+          "so a running session keeps the old version until it restarts.")
 
 
 def _gap_phrase(gap: dict) -> str:
@@ -883,9 +959,13 @@ def status(rest: list | None = None) -> None:
     current = store_dir / sidecars.filename("repo_pointer")
 
     installed = _version()
-    installed_t = _version_tuple(installed)
-    latest = _latest_pypi_version() if installed_t else None
-    latest_t = _version_tuple(latest) if latest else None
+    installed_t = updates.version_tuple(installed)
+    # refresh(force=True) rather than a private fetch: `status` is a diagnostic and wants a
+    # live answer, and writing it back means the per-prompt notice and this line can never
+    # report two different versions in the same run.
+    update_state = updates.refresh(force=True) if installed_t else {}
+    latest = update_state.get("latest")
+    latest_t = updates.version_tuple(latest)
 
     print(f"contexer {installed}")
     print(f"  binary:       {bin_path}")
@@ -896,8 +976,15 @@ def status(rest: list | None = None) -> None:
     print(f"  repo stores:  {len(stores)} ({entries} entries total)")
     print(f"  guard hook:   {_guard_hook_status_line()}")
     if latest_t and installed_t and latest_t > installed_t:
-        print(f"  update:       {latest} available - run `uv tool upgrade contexer`, "
-              f"then restart your AI assistant")
+        print(f"  update:       {latest} available - run `contexer upgrade`")
+    # Its own line, because the `update:` line above fires only when a NEWER release exists and
+    # says nothing about support. A diagnostic read of the state, not a notice: nothing is
+    # consumed here, so whichever surface owes the breach still owes it.
+    floor = update_state.get("floor")
+    floor_t = updates.version_tuple(floor) if isinstance(floor, str) else None
+    if floor_t and installed_t and installed_t < floor_t:
+        print(f"  unsupported:  below the minimum supported version {floor} - "
+              f"run `contexer upgrade`")
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
     current_repo = ""
@@ -1987,6 +2074,16 @@ def _guard_run(rest: list) -> None:
                 print()
             _print_guard_violations(violations)
             sys.exit(1)
+        # A commit is often the only `contexer` command a developer on a host with no
+        # notification channel ever runs, so it is the backstop's most valuable site. Only on
+        # a silent run, though: stacking an upgrade aside on top of an advisory is exactly the
+        # noise the one-line-per-turn budget forbids. Its own guard, because the invariant
+        # that a guard run never fails a commit on its own account outranks any notice.
+        try:
+            if not advisories and not result.get("unchecked"):
+                _print_update_backstop()
+        except Exception:
+            pass
         sys.exit(0)
     except SystemExit:
         raise
@@ -2326,9 +2423,8 @@ def _guard_require_capable_bin() -> str:
               "`guard` command (it is missing, or an older contexer). Installing "
               "the hook anyway would make every commit in this repo fail.",
               file=sys.stderr)
-        print("Upgrade that install (`pip install -U contexer` / `uv tool upgrade "
-              "contexer`), or re-run this command using the contexer you want the "
-              "hook to call.", file=sys.stderr)
+        print("Upgrade that install (`contexer upgrade`), or re-run this command "
+              "using the contexer you want the hook to call.", file=sys.stderr)
         sys.exit(1)
     return bin_path
 
@@ -2623,6 +2719,8 @@ def main() -> None:
         _run_guarded(lambda: uninstall(rest))
     elif cmd == "reinstall":
         _run_guarded(reinstall)
+    elif cmd == "upgrade":
+        _run_guarded(lambda: upgrade(rest))
     elif cmd == "review":
         review()
     elif cmd == "retire":
@@ -2655,3 +2753,9 @@ def main() -> None:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)
         sys.exit(1)
+
+    # Reached only by a subcommand that completed without exiting. Three commands opt out:
+    # `guard` prints its own on its quiet path, `upgrade` IS the remedy, and `status` already
+    # reports the available version on its own line, so adding the aside would say it twice.
+    if cmd not in ("guard", "upgrade", "status"):
+        _print_update_backstop()
