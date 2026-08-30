@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.44.0](https://github.com/bhargavamin/contexer/compare/v0.43.0...v0.44.0) (2026-08-30)
+
+
+### Features
+
+* **cli:** add `contexer upgrade` and the terminal update backstop ([2808c4f](https://github.com/bhargavamin/contexer/commit/2808c4f4abe4fc1ae97f2b1f4fe15a7d4bb0d339))
+* tell developers when a new Contexer release exists ([613aa3a](https://github.com/bhargavamin/contexer/commit/613aa3a8a4cb46e64778ef8976c374538220b9c6))
+* **updates:** deliver new-release notices through a per-adapter seam ([7fb8e62](https://github.com/bhargavamin/contexer/commit/7fb8e627f0cd19f5e25107ee0c546058726a1bf5))
+
+
+### Bug Fixes
+
+* **cli:** keep share help read-only ([d03a173](https://github.com/bhargavamin/contexer/commit/d03a173b540317bf11b7424bccd2d5f3909c6f4e))
+* **cli:** keep share help read-only ([4b882a1](https://github.com/bhargavamin/contexer/commit/4b882a1882198207e7b3af9bb575a207876ee6d5))
+
+
+### Documentation
+
+* align Phase 0 gate status ([261cd2e](https://github.com/bhargavamin/contexer/commit/261cd2e383db44ac77af7530f382baee4c2a2319))
+* complete decision-sharing Phase 0 ([92e7c12](https://github.com/bhargavamin/contexer/commit/92e7c12bd35290df634c8293e02ad6c994a2e362))
+* document update delivery and correct two stale claims ([c17c246](https://github.com/bhargavamin/contexer/commit/c17c2466a36ce03031195de659b6b3bb477ac127))
+* **evidence:** complete readiness closeout ([71c0f0c](https://github.com/bhargavamin/contexer/commit/71c0f0cea227a726f03156a47b45acfdc4e8316f))
+* **evidence:** complete readiness closeout ([fe5e872](https://github.com/bhargavamin/contexer/commit/fe5e872d49886f5092cd9b3ee0936da6e3ae6b12))
+* **evidence:** publish readiness review closeout ([d278102](https://github.com/bhargavamin/contexer/commit/d278102d2e2beaa1d01560b134408dca824f4661))
+* **evidence:** publish readiness review closeout ([bb6ad9b](https://github.com/bhargavamin/contexer/commit/bb6ad9b9d8bdf6ffedd1e3e284d98b089f9d1a66))
+* **evidence:** record closeout follow-up ([61ed51a](https://github.com/bhargavamin/contexer/commit/61ed51ae15d18789bda55af5a39a5a4fb5a47470))
+* **evidence:** record final pointer correction ([18f2c7b](https://github.com/bhargavamin/contexer/commit/18f2c7b01706bc7c2c7fb8a2e1dd3c2391c95bf8))
+* **evidence:** record final pointer correction ([3efcb09](https://github.com/bhargavamin/contexer/commit/3efcb090fde235bbf0be9811520f84384ff484f3))
+* reconcile decision-sharing Phase 0 ([70f6f44](https://github.com/bhargavamin/contexer/commit/70f6f44c5ad8adbcea902371e0d053153cc177bb))
+* reconcile decision-sharing Phase 0 ([c620d1e](https://github.com/bhargavamin/contexer/commit/c620d1e1437d9f777708447beb56e30937101390))
+
 ## [0.43.0](https://github.com/bhargavamin/contexer/compare/v0.42.0...v0.43.0) (2026-08-30)
 
 
