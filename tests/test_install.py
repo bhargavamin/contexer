@@ -567,6 +567,38 @@ class TestBookkeepingWritesAreFailSoft:
         assert 'rm -f "$FLAG" 2>/dev/null || true' in reminders[0]
         assert "git rev-parse" not in reminders[0]
 
+    def test_reinstall_replaces_guarded_git_anchor_hook(self, clean_home):
+        """The final pre-no-Git shape already had the current guard and wording."""
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        old = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); '
+               'if [ -n "$REPO" ]; then { printf \'%s\' "$REPO" > '
+               '~/.contexer/.current_repo; } 2>/dev/null || true; fi; '
+               'FLAG="$HOME/.contexer/.pending_capture"; if [ -f "$FLAG" ]; then '
+               'rm -f "$FLAG" 2>/dev/null || true; '
+               'echo \'{"x": "last turn settled"}\'; else echo \'{}\'; fi '
+               '# contexer-managed-hook')
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        install()
+        reminders = [c for c in self._cmds(clean_home, "UserPromptSubmit")
+                     if "last turn settled" in c]
+        assert len(reminders) == 1
+        assert "git rev-parse" not in reminders[0]
+        assert ".current_repo" not in reminders[0]
+
+    def test_foreign_pending_marker_cannot_mask_current_anchor(self, clean_home):
+        settings_path = clean_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        foreign = "./foreign-audit --watch .pending_capture"
+        settings_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": foreign}]}]}}))
+        install()
+        cmds = self._cmds(clean_home, "UserPromptSubmit")
+        assert foreign in cmds, "foreign marker-bearing hook must survive"
+        reminders = [c for c in cmds if "last turn settled" in c]
+        assert len(reminders) == 1, "the exact current anchor must still be installed"
+
     def test_reinstall_is_idempotent_for_the_guarded_hooks(self, installed_home):
         before = json.loads((installed_home / ".claude" / "settings.json").read_text())
         install()

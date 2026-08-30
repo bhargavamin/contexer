@@ -80,6 +80,20 @@ class TestCursorInstall:
         assert "other" in mcp["mcpServers"]
         assert "contexer" in mcp["mcpServers"]
 
+    def test_removes_exact_retired_teams_server_only(self, home):
+        mcp_path = home / ".cursor" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(json.dumps({"mcpServers": {
+            "contexer-teams": {"type": "http", "url": "https://legacy.invalid/mcp"},
+            "contexer-teams-custom": {"command": "user-owned"},
+            "other": {"command": "other"},
+        }}))
+        cursor.install(home)
+        servers = json.loads(mcp_path.read_text())["mcpServers"]
+        assert "contexer-teams" not in servers
+        assert servers["contexer-teams-custom"] == {"command": "user-owned"}
+        assert servers["other"] == {"command": "other"}
+
 
 class TestCursorUninstall:
     def test_removes_mcp_entry(self, home):
@@ -104,3 +118,17 @@ class TestCursorUninstall:
         cursor.install(home)
         cursor.uninstall(home)
         cursor.uninstall(home)  # must not raise
+
+    def test_removes_exact_retired_teams_server_only(self, home):
+        mcp_path = home / ".cursor" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(json.dumps({"mcpServers": {
+            "contexer": {"command": "contexer"},
+            "contexer-teams": {"type": "http", "url": "https://legacy.invalid/mcp"},
+            "contexer-teams-custom": {"command": "user-owned"},
+        }}))
+        cursor.uninstall(home)
+        servers = json.loads(mcp_path.read_text())["mcpServers"]
+        assert "contexer" not in servers
+        assert "contexer-teams" not in servers
+        assert servers["contexer-teams-custom"] == {"command": "user-owned"}

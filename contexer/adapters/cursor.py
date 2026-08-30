@@ -264,7 +264,12 @@ def install(home: Path) -> list[str]:
 
     mcp_path = cursor_dir / "mcp.json"
     mcp = base._load(mcp_path)
-    mcp.setdefault("mcpServers", {})["contexer"] = {"command": contexer_bin}
+    servers = mcp.setdefault("mcpServers", {})
+    servers["contexer"] = {"command": contexer_bin}
+    # The native Teams MCP surface is retired. Team sync now goes exclusively through
+    # the local Python client, so reinstall must remove the exact legacy key while
+    # preserving every similarly named user-owned server.
+    servers.pop("contexer-teams", None)
     base._save(mcp_path, mcp)
     log.append("  ✓ MCP server registered in ~/.cursor/mcp.json")
 
@@ -305,7 +310,10 @@ def uninstall(home: Path) -> list[str]:
     mcp_path = cursor_dir / "mcp.json"
     if mcp_path.exists():
         mcp = base._load(mcp_path)
-        if mcp.get("mcpServers", {}).pop("contexer", None):
+        servers = mcp.get("mcpServers", {})
+        removed = servers.pop("contexer", None)
+        removed_teams = servers.pop("contexer-teams", None)
+        if removed is not None or removed_teams is not None:
             base._save(mcp_path, mcp)
             log.append("  ✓ MCP server removed from ~/.cursor/mcp.json")
 

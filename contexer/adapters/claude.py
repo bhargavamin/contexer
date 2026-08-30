@@ -12,6 +12,7 @@ from contexer.adapters.base import (
     _bootstrap_command_text,
     _filter_hooks,
     _filter_groups,
+    _has_exact_command,
     _in_commands,
     _in_groups,
     _load,
@@ -782,7 +783,15 @@ def install(home: Path) -> list[str]:
         ups = _filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
 
-    if not _in_groups(ups, ".pending_capture"):
+    # Converge the guarded reminder too. The previous migrations only distinguished
+    # unguarded writes and obsolete wording, so the last pre-no-Git shape (guarded,
+    # current wording, but still running `git rev-parse` and writing `.current_repo`)
+    # survived every reinstall. Exact-command currency removes that owned hook while
+    # preserving foreign siblings, just like the Python-carrying hooks above.
+    ups = _strip_stale(ups, [".pending_capture"], anchor_cmd)
+    hooks["UserPromptSubmit"] = ups
+
+    if not _has_exact_command(ups, anchor_cmd):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...",
             "command": anchor_cmd}]})

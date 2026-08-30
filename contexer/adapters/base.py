@@ -107,6 +107,16 @@ def _in_commands(groups: list, marker: str) -> bool:
                for grp in groups for h in _hooks_of(grp) if isinstance(h, dict))
 
 
+def _has_exact_command(groups: list, command: str) -> bool:
+    """True when a grouped hook list contains exactly ``command``.
+
+    Identity markers are deliberately insufficient for install convergence: a foreign
+    hook may mention one without being owned by Contexer.  After stale owned entries are
+    removed, only the complete generated command proves that the current hook exists.
+    """
+    return any(_hook_command(h) == command for grp in groups for h in _hooks_of(grp))
+
+
 def _filter_hooks(groups: list, remove) -> list:
     """Remove selected hook entries while preserving foreign siblings and group metadata."""
     out = []

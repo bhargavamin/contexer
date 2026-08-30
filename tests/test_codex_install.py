@@ -428,6 +428,37 @@ class TestCodexBookkeepingWritesAreFailSoft:
         assert 'rm -f "$FLAG" 2>/dev/null || true' in reminders[0]
         assert "git rev-parse" not in reminders[0]
 
+    def test_reinstall_replaces_the_guarded_git_anchor_hook(self, home):
+        """The final pre-no-Git shape already had the current guard and wording."""
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        old = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); '
+               'if [ -n "$REPO" ]; then { printf \'%s\' "$REPO" > '
+               '~/.contexer/.current_repo; } 2>/dev/null || true; fi; '
+               'FLAG="$HOME/.contexer/.pending_capture"; if [ -f "$FLAG" ]; then '
+               'rm -f "$FLAG" 2>/dev/null || true; '
+               'echo \'{"x": "last turn settled"}\'; else echo \'{}\'; fi')
+        hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": old}]}]}}))
+        codex.install(home)
+        reminders = [c for c in self._cmds(home, "UserPromptSubmit")
+                     if "last turn settled" in c]
+        assert len(reminders) == 1
+        assert "git rev-parse" not in reminders[0]
+        assert ".current_repo" not in reminders[0]
+
+    def test_foreign_pending_marker_cannot_mask_current_anchor(self, home):
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        foreign = "./foreign-audit --watch .pending_capture"
+        hooks_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": foreign}]}]}}))
+        codex.install(home)
+        cmds = self._cmds(home, "UserPromptSubmit")
+        assert foreign in cmds, "foreign marker-bearing hook must survive"
+        reminders = [c for c in cmds if "last turn settled" in c]
+        assert len(reminders) == 1, "the exact current anchor must still be installed"
+
     def test_reinstall_is_idempotent(self, home):
         # Every migration gate must recognize its own output — otherwise install strips
         # and re-adds hooks forever. This is the property that catches a gate keyed on a

@@ -318,7 +318,12 @@ def install(home: Path) -> list[str]:
     if base._in_groups(ups, ".pending_capture") and not base._in_commands(ups, claude._ANCHOR_GUARD):
         ups = base._filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
-    if not base._in_groups(ups, ".pending_capture"):
+    # The guarded pre-no-Git reminder carried the current wording and write guard,
+    # so the two migrations above did not recognize it as stale. Converge the owned
+    # command exactly; `_strip_stale` preserves foreign siblings in the same group.
+    ups = base._strip_stale(ups, [".pending_capture"], anchor_cmd)
+    hooks["UserPromptSubmit"] = ups
+    if not base._has_exact_command(ups, anchor_cmd):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...", "command": anchor_cmd}]})
     # Converge each python-carrying UserPromptSubmit hook on its exact current command
