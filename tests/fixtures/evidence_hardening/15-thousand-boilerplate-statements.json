@@ -1,0 +1,13 @@
+{
+  "name": "15-thousand-boilerplate-statements",
+  "issue": 4,
+  "summary": "1,000 statements sharing common boilerplate tokens - the merging case.",
+  "generate": {
+    "count": 1000,
+    "kind": "user_directive",
+    "template": "Always validate the incoming request payload before processing it further."
+  },
+  "decisions": [],
+  "expected_candidates": 1,
+  "expected_merged": 999
+}

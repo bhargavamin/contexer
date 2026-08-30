@@ -40,7 +40,7 @@ _SYNC_LOG_CAP = 50
 
 # Fields persisted per cached team decision (the get_context wire projection).
 _ROW_FIELDS = ("id", "type", "title", "content", "rationale", "repo", "agent", "scope",
-               "local_decision_id", "team_id", "team_name", "reconciliation")
+               "local_decision_id", "team_id", "team_name", "reconciliation", "source_retired")
 
 # How stale last_ok_at must be before format_team_section tags the header as possibly
 # stale (the "quietly dead refresher" failure mode: rows keep rendering with no signal).
@@ -134,6 +134,7 @@ def _row_to_dict(rd: RemoteDecision) -> dict:
         "team_id": rd.team_id,
         "team_name": rd.team_name,
         "reconciliation": rd.reconciliation,
+        "source_retired": rd.source_retired,
     }
 
 
@@ -238,6 +239,7 @@ def _sync(repo_path: str, profile: config.Profile,
                 removed.append(rd.id)
             continue
         row = _row_to_dict(rd)
+        prior_row = by_id.get(rd.id)
         if by_id.get(rd.id) == row:
             # Unchanged re-send: the live server's updatedSince filter is INCLUSIVE, so
             # rows stamped exactly at the cursor come back on every delta fetch. Treating
@@ -247,7 +249,15 @@ def _sync(repo_path: str, profile: config.Profile,
             continue
         _apply_reconciliation_metadata(repo_path, row)
         by_id[rd.id] = row
-        new_rows.append(row)
+        if ((prior_row is None and row.get("source_retired") is True)
+                or (prior_row is not None
+                    and (prior_row.get("source_retired") is True)
+                    != (row.get("source_retired") is True))):
+            row_for_event = {**row, "_source_retired_change":
+                             "opened" if row.get("source_retired") is True else "resolved"}
+        else:
+            row_for_event = row
+        new_rows.append(row_for_event)
     for dead in ctx.deleted:
         if by_id.pop(dead, None) is not None:
             removed.append(dead)
@@ -271,7 +281,14 @@ def _sync(repo_path: str, profile: config.Profile,
         seq = int(cache.get("seq", 0)) + 1
         prior = cache.get("sync_log")
         log = list(prior) if isinstance(prior, list) else []
-        log.append({"seq": seq, "ids": [r["id"] for r in new_rows]})
+        divergence_changes = {
+            r["id"]: r["_source_retired_change"] for r in new_rows
+            if r.get("_source_retired_change") in {"opened", "resolved"}
+        }
+        entry = {"seq": seq, "ids": [r["id"] for r in new_rows]}
+        if divergence_changes:
+            entry["source_retired_changes"] = divergence_changes
+        log.append(entry)
         saved["seq"] = seq
         saved["sync_log"] = log[-_SYNC_LOG_CAP:]  # drop oldest; very stale consumers miss old banners only
     _save_cache(repo_path, saved)
@@ -382,6 +399,7 @@ def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
             _write_seen(repo_path, consumer, int(cache.get("seq", 0)))
             return []
         unseen_ids: list = []
+        divergence_changes: dict = {}
         high = seen
         for entry in log:
             if not isinstance(entry, dict):
@@ -390,6 +408,11 @@ def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
             if not isinstance(seq, int) or seq <= seen:
                 continue
             unseen_ids.extend(entry.get("ids") or [])
+            changes = entry.get("source_retired_changes")
+            if isinstance(changes, dict):
+                for rid, state in changes.items():
+                    if state in {"opened", "resolved"}:
+                        divergence_changes[rid] = state
             high = max(high, seq)
         if high > seen:
             _write_seen(repo_path, consumer, high)
@@ -404,7 +427,10 @@ def _collect_unseen(repo_path: str, cache: dict, consumer: str) -> list[dict]:
             emitted.add(rid)
             row = by_id.get(rid)
             if row is not None:  # skip an id deleted since it was logged
-                rows.append(row)
+                rendered_row = dict(row)
+                if rid in divergence_changes:
+                    rendered_row["_source_retired_change"] = divergence_changes[rid]
+                rows.append(rendered_row)
         return rows
     except Exception:
         return []
@@ -435,8 +461,13 @@ def _spawn_refresh(repo_path: str) -> None:
     """Start a detached background refresher — the hook process never waits on it."""
     # argv is fixed and points at our own interpreter and module — no shell, and no part of
     # it is caller- or user-supplied except repo_path, which arrives as its own argv element.
+    # `-P` for the same reason the installed hooks carry it: `-m` prepends the process cwd
+    # to sys.path, and this child inherits the per-prompt hook's cwd = the project root, so
+    # a session in a checked-out contexer repo would import that repo's own contexer/ source
+    # instead of the installed package. stderr is DEVNULL here, so the resulting crash would
+    # be invisible rather than reported.
     subprocess.Popen(
-        [sys.executable, "-m", "contexer.team_context", repo_path],
+        [sys.executable, "-P", "-m", "contexer.team_context", repo_path],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
@@ -586,7 +617,8 @@ def count_deferred_architecture(repo_path: str, *, cache: dict | None = None,
             local_tokens = [(lid, store._tokenize(c)) for lid, c in _local_decisions(repo_path)]
         return sum(
             1 for r in arch_rows
-            if _best_local_overlap(r.get("content", ""), local_tokens)[1] < 0.7
+            if r.get("source_retired") is not True
+            and _best_local_overlap(r.get("content", ""), local_tokens)[1] < 0.7
         )
     except Exception:
         return 0
@@ -704,7 +736,7 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
         # full (i.e. don't already collapse).
         keep, deferred_rows = [], []
         for r in rows:
-            if r.get("type") == "architecture":
+            if r.get("type") == "architecture" and r.get("source_retired") is not True:
                 _, overlap = _best_local_overlap(r.get("content", ""), local_tokens)
                 (deferred_rows if overlap < 0.7 else keep).append(r)
             else:
@@ -734,20 +766,25 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
         # it would merely repeat the title (collapsed-whitespace comparison).
         title, body = store.title_and_body({"title": r.get("title")}, content=content)
         lid, overlap = _best_local_overlap(content, local_tokens)
+        divergence_tag = ", personal source retired; team copy remains authoritative" \
+            if r.get("source_retired") is True else ""
         if lid and overlap >= 0.7:
             # Same rule already stored locally - collapse to a ratification pointer instead of
             # re-injecting the full duplicate text (keeps the team-approval provenance signal).
-            lines.append(f"- [scope=team] ratifies local decision {lid[:8]}{id_tag}")
+            lines.append(f"- [scope=team{divergence_tag}] ratifies local decision {lid[:8]}{id_tag}")
         elif lid and overlap >= 0.5:
             # Heavy but partial overlap: keep the full row (may be a genuine divergence, e.g. a
             # different directive on the same topic) but tag the related local id for the reader.
             scope = r.get("scope", "team")
-            lines.append(f"- [scope={scope}, overlaps local {lid[:8]}]{type_tag} {title}{id_tag}")
+            lines.append(
+                f"- [scope={scope}, overlaps local {lid[:8]}{divergence_tag}]"
+                f"{type_tag} {title}{id_tag}"
+            )
             if body is not None:
                 lines.append(f"    {body}")
         else:
             scope = r.get("scope", "team")
-            lines.append(f"- [scope={scope}]{type_tag} {title}{id_tag}")
+            lines.append(f"- [scope={scope}{divergence_tag}]{type_tag} {title}{id_tag}")
             if body is not None:
                 lines.append(f"    {body}")
     if deferred_count:

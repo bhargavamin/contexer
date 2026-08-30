@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import store
+from contexer import spool, store
 from contexer.adapters import gemini
 
 
@@ -129,6 +129,8 @@ class TestGeminiRuntime:
         repo = str(tmp_path / "repo")
         out = json.loads(gemini.after_write(repo, "not json"))  # must not raise
         assert "hookSpecificOutput" in out
+        # Nothing was recorded, so the evidence spool has nothing to say either.
+        assert spool.evidence_diagnostics(repo)["pending"] == 0
 
     def test_compress_flag_reloads_context_without_edit_reminder(self, home, tmp_path):
         repo = str(tmp_path / "repo")
@@ -222,7 +224,7 @@ class TestGeminiRuntime:
 class TestGeminiAfterWriteHookCwdFallback:
     """Greptile P1, PR #181: in a non-git project the installed AfterTool hook's shell
     wrapper computes an empty $REPO (`git rev-parse --show-toplevel || true`), and
-    after_write used to resolve that via `store.resolve_repo`, which — in this
+    after_write used to resolve that via `store.resolve_repo`, which - in this
     hook-invoked process (not the MCP server, so `_SESSION_REPO` is always empty) —
     falls through to the shared `.current_repo` pointer, recording the edit under
     whatever OTHER repo that pointer names (or discarding it). Fixed by falling back to
@@ -270,7 +272,7 @@ class TestGeminiAfterWriteHookCwdFallback:
 
 class TestGeminiBeforeAgentHookCwdFallback:
     """Greptile P1 #2, PR #181, follow-up to 3fde7aa: after_write records the edited-file
-    signal under `store.hook_cwd_repo`, but `before_agent` — where CAPTURE actually runs
+    signal under `store.hook_cwd_repo`, but `before_agent` - where CAPTURE actually runs
     (`capture_user_constraint`, plus the pending-review nudge and context payloads) — used
     to resolve its repo via bare `store.resolve_repo`, which in this hook-invoked process
     (not the MCP server, so `_SESSION_REPO` is always empty) falls through to the shared

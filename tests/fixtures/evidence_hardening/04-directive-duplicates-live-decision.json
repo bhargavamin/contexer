@@ -1,0 +1,43 @@
+{
+  "name": "04-directive-duplicates-live-decision",
+  "issue": null,
+  "summary": "A directive restating a live approved decision classifies as a duplicate.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "e7c29e1d-5dda-5b76-964f-9e6dba2619a5",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec-live",
+      "status": "approved",
+      "tombstoned": false,
+      "title": "Do not edit the generated client directly. Change the openap",
+      "content": "Do not edit the generated client directly. Change the openapi schema and regenerate.",
+      "subtype": "constraint",
+      "source_files": [],
+      "current_revision_id": "rev-dec-live"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "duplicate",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 50,
+      "target_decision_id": "dec-live",
+      "source_files": [],
+      "uncertainties": []
+    }
+  ]
+}

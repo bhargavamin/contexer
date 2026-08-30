@@ -49,6 +49,11 @@ class TestStoreDoesNotAliasThisLeaf:
         assert retrieval.extract_artifacts(content) == [
             "contexer", "guard", "engine", "guard", "engine", "contexer", "retrieval"]
 
+    def test_shell_script_path_is_a_structural_artifact(self):
+        assert retrieval.raw_path_artifacts(
+            "Always run migrations in deploy/migrate.sh before deploying."
+        ) == ["deploy/migrate.sh", "migrate.sh"]
+
     def test_the_index_sidecar_half_stayed_in_store(self):
         # The suite monkeypatches these THROUGH store; moving them would silently
         # break every such patch, so pin where they live.

@@ -13,7 +13,9 @@ here silently blanks a pane there.
 from typing import NamedTuple
 from urllib.parse import unquote
 
-from contexer import auth, config, console_api, share, share_status, store, team_context
+from contexer import (
+    auth, config, console_api, lifecycle, share, share_status, store, team_context,
+)
 from contexer.ui import daemon
 
 # Mirrored in console.js as maxlength attributes; enforced here because the browser is not
@@ -223,7 +225,7 @@ def _decision_route(method: str, repo_path: str, entry_id: str, rest: list[str],
         return _approve(repo_path, entry_id, body)
 
     if rest == ["restore"] and method == "POST":
-        return _finish_restore(repo_path, entry_id, *store.restore_decision(repo_path, entry_id))
+        return _finish_restore(repo_path, entry_id, *lifecycle.restore_decision(repo_path, entry_id))
 
     raise ApiError(404, "no such endpoint")
 

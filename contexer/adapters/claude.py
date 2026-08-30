@@ -6,12 +6,13 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import memory_sync, sidecars, store
+from contexer import evidence, memory_sync, sidecars, store
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
+    _filter_hooks,
     _filter_groups,
-    _hooks_of,
+    _has_exact_command,
     _in_commands,
     _in_groups,
     _load,
@@ -21,6 +22,19 @@ from contexer.adapters.base import (
 )
 
 NAME = "claude"
+
+# What THIS host's installed hooks can observe (evidence.host_coverage renders it, and only
+# ever downgrades it at runtime). Codex reuses `capture_constraint` and `post_write`
+# verbatim, so its own map is identical by construction rather than by coincidence.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, UserPromptSubmit
+    "file_changes": "captured",                 # post_write, PostToolUse(Write|Edit)
+    # No hook on any host hands Contexer the assistant's own response, so a conclusion is
+    # only ever what the agent chose to report through `record_agent_conclusion`.
+    "assistant_conclusions": "model_reported",
+    "test_results": "unavailable",              # reserved kind, no emitter
+    "diffs": "unavailable",                     # reserved kind, no emitter
+}
 
 
 # Embedded as a trailing shell comment in every hook command we generate, so a hook's
@@ -42,7 +56,9 @@ _ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
 # Modern hooks are never written to repo-level settings, so these substrings can only
 # match hooks we owned; anything else in the file is foreign and must survive.
 _LEGACY_REPO_HOOK_MARKERS = [
-    "Contexer:",                                   # inline SessionStart/PreCompact/PostCompact echoes
+    "Contexer: context compaction starting",       # inline PreCompact echo
+    "Contexer: no context stored",                 # inline legacy empty PostCompact
+    "decision(s) available",                       # inline legacy populated PostCompact
     "get_session_start_context",                   # repo-level SessionStart (dead-clone uv run)
     "capture_context",                             # mcp_tool hook for the removed tool
     "Reminder: if you make a significant decision",  # unconditional every-prompt reminder echo
@@ -77,10 +93,9 @@ def clean_legacy_repo_settings(repo_path: str) -> bool:
             if not isinstance(before, list):
                 continue
             after = _filter_groups(before, _LEGACY_REPO_HOOK_MARKERS)
-            after = [grp for grp in after if not any(
+            after = _filter_hooks(after, lambda h: (
                 isinstance(h, dict) and h.get("type") == "mcp_tool"
-                and h.get("server") == "contexer"
-                for h in _hooks_of(grp))]
+                and h.get("server") == "contexer"))
             if after != before:
                 changed = True
                 if after:
@@ -143,13 +158,20 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         # always supplies a path (its shell's git root, or cwd), which the plain resolver
         # would label `argument` — the one label the audit reads as a DELIBERATE cross-repo
         # write, dismissing the very misroute this is meant to surface.
-        repo, repo_source = store._hook_repo_verbose(repo_path)
+        repo, repo_source = store._hook_repo_verbose(repo_path, raw)
         if not repo:
             return "{}"
+        # Refresh the last-resort pointer on every prompt without putting Git on the
+        # hook path. This preserves repo-implicit MCP writes after missed SessionStart.
+        store.anchor_repo(repo)
         near: list = []
-        entry_id, content, status = store.capture_user_constraint(
-            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw), near,
-            repo_source=repo_source)
+        # evidence.capture_directive is store.capture_user_constraint plus the shadow-mode
+        # user_directive event: same return, same exceptions (this hook's existing
+        # swallow-and-return-"{}" is the outer handler below, unchanged), and Codex reuses
+        # this entrypoint verbatim, so the source stays host-neutral.
+        entry_id, content, status = evidence.capture_directive(
+            repo, store.prompt_from_hook_stdin(raw), store.session_from_hook_stdin(raw),
+            "claude_prompt", near=near, repo_source=repo_source)
         if entry_id is None:
             return "{}"
         msg = store.constraint_ack(content, status, entry_id, near)
@@ -177,7 +199,7 @@ def rationale(repo_path: str, raw: str) -> str:
     Passes the host's session id (Retrieval V1 Part B) so the BM25 router's working set
     can dedup repeat injections within a session; Codex reuses this verbatim."""
     try:
-        repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
+        repo = store.resolve_repo(store.hook_repo_from_stdin(raw, repo_path))
         if not repo:
             return "{}"
         session_id = store.session_from_hook_stdin(raw)
@@ -227,36 +249,31 @@ def post_write(repo_path: str, raw: str) -> str:
     entrypoint does both jobs so the file-edit signal and the capture-reminder flag stay
     in one hook, exactly as the shelved feat/doc-drift branch shipped it.
 
-    THE HAZARD THIS MUST NOT REPEAT: doc-drift's post_write shell wrapper resolved the repo
-    via raw cwd while its sibling UserPromptSubmit hooks resolved it via `git rev-parse
-    --show-toplevel` — a mismatch that silently keyed a DIFFERENT sidecar slug (record_
-    edited_file wrote under one repo identity, the reader looked under another) and killed
-    the feature for any project not opened at its git root. The installed wrapper for THIS
-    hook (see install()'s post_write_cmd) copies the exact `REPO=$(git rev-parse
-    --show-toplevel 2>/dev/null || true) &&` prefix every other UserPromptSubmit hook here
-    uses (cap_con/cap_rat/cap_poll/review_cmd), so record_edited_file's write and Task 3's
-    capture-time read key the identical sidecar. store.hook_cwd_repo is still the fallback
-    for a non-git project (first-class stores keyed by absolute path), matching every other
-    hook-invoked entrypoint in this module.
+    THE HAZARD THIS MUST NOT REPEAT: doc-drift's post_write wrapper and its sibling prompt
+    hooks resolved different repository identities, silently keying different sidecar slugs.
+    All current wrappers pass PWD and every Python entrypoint resolves the same host payload
+    through store.hook_repo_from_stdin. That keeps subdirectory, linked-worktree, and non-Git
+    projects aligned without putting Git on an editor/prompt hook path.
 
     Touching ~/.contexer/.pending_capture (via store.STORE_DIR, not a hardcoded home path,
     so tests that redirect STORE_DIR never touch the real store — #152's best-effort
     invariant) preserves the capture-reminder signal the shell hook this replaces used to
     set (consumed by the next UserPromptSubmit anchor)."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         try:
             data = json.loads(raw)
         except Exception:
             data = {}
         tool_input = data.get("tool_input") if isinstance(data, dict) else None
         fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        relpath = ""
         if isinstance(fp, str) and fp:
             # Own try/except: this signal must not share failure fate with the
             # .pending_capture arm below — a non-OSError escaping record_edited_file
             # (e.g. from guard_engine) must not also cost the capture reminder.
             try:
-                store.record_edited_file(repo, fp)
+                relpath = store.record_edited_file(repo, fp)
             except Exception:
                 pass
         try:
@@ -264,6 +281,15 @@ def post_write(repo_path: str, raw: str) -> str:
             (store.STORE_DIR / sidecars.filename("pending_capture")).touch()
         except OSError:
             pass
+        # Shadow-mode evidence, emitted LAST so neither existing signal above can be
+        # affected by it, and keyed on the path record_edited_file actually recorded (its
+        # return, not the host's raw file_path) so the event and the sidecar agree. The
+        # source is host-neutral: Codex runs this same entrypoint. emit_hook_event never
+        # raises, and the outer handler returns the identical "{}" if it somehow did.
+        if relpath:
+            evidence.emit_hook_event(repo, "file_changed",
+                                     session_id=store.session_from_hook_stdin(raw),
+                                     source="post_tool_use", files=[relpath])
         return "{}"
     except Exception:
         return "{}"
@@ -274,7 +300,7 @@ def review_nudge(repo_path: str, raw: str) -> str:
     has pending ones, inject a one-time nudge. store.pending_review_nudge is per-repo and verifies
     the store, so an already-approved or cross-repo flag yields nothing. Codex reuses this verbatim."""
     try:
-        nudge = store.pending_review_nudge(store.hook_cwd_repo(repo_path))
+        nudge = store.pending_review_nudge(store.hook_repo_from_stdin(raw, repo_path))
         if not nudge:
             return "{}"
         return json.dumps({"hookSpecificOutput": {
@@ -332,7 +358,7 @@ def capture_task(repo_path: str, raw: str) -> str:
 
 
 def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
-    """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
+    """UserPromptSubmit (C7): inject team context changes since the last poll.
 
     Fail-soft. Uses the non-blocking poll: the network sync runs in a detached background
     process and its results inject on the NEXT prompt, so this hook never waits on the
@@ -343,17 +369,33 @@ def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
     (or vice versa)."""
     try:
         from contexer import team_context
-        new = team_context.poll_for_injection(store.hook_cwd_repo(repo_path), consumer)
+        new = team_context.poll_for_injection(
+            store.hook_repo_from_stdin(raw, repo_path), consumer)
         if not new:
             return "{}"
-        # Architecture-typed rows are deferred to a count-only pointer here too, mirroring
+        # A lifecycle-divergence change is always visible, even on architecture rows: hiding the
+        # marker behind the normal count-only deferral would defeat proactive surfacing.
+        lifecycle_changed = [d for d in new if d.get("_source_retired_change") in
+                             {"opened", "resolved"}]
+        lifecycle_ids = {d.get("id") for d in lifecycle_changed}
+        # Other architecture-typed rows are deferred to a count-only pointer here too, mirroring
         # the SessionStart team section (store.session_start_payload) — a freshly-approved
         # architecture decision shouldn't flood the prompt any more than a bulk-loaded one.
-        visible = [d for d in new if d.get("type") != "architecture"]
-        deferred = [d for d in new if d.get("type") == "architecture"]
+        visible = [d for d in new if d.get("id") not in lifecycle_ids
+                   and d.get("type") != "architecture"]
+        deferred = [d for d in new if d.get("id") not in lifecycle_ids
+                    and d.get("type") == "architecture"]
         lines = []
+        if lifecycle_changed:
+            lines.append("Team lifecycle divergence changed:")
+            for d in lifecycle_changed:
+                state = d.get("_source_retired_change")
+                outcome = ("personal source retired; team copy remains authoritative"
+                           if state == "opened" else "personal source restored; divergence resolved")
+                type_tag = f" ({d.get('type')})" if d.get("type") else ""
+                lines.append(f"- {d.get('content', '')}{type_tag} [{outcome}]")
         if visible:
-            lines.append("Team decisions just approved (now in effect):")
+            lines.append("Team context changed (now in effect):")
             for d in visible:
                 type_tag = f" ({d.get('type')})" if d.get("type") else ""
                 lines.append(f"- {d.get('content', '')}{type_tag}")
@@ -384,12 +426,60 @@ def _memory_dir(repo_path: str) -> Path | None:
 
 
 def sync_memory(repo_path: str) -> int:
+    """Import Claude memory-tool facts, then reconcile recorded evidence. Silent, fail-soft.
+
+    Returns the memory-import count, exactly as before. The reconciliation rides along here
+    because this is the one entrypoint the installed SessionStart, PreCompact and SessionEnd
+    hooks ALL already call - all three evidence checkpoints, with no hook command, settings or
+    installer change - and the session-start call doubles as the next-session recovery net for
+    a session that ended without one. It runs on every invocation, including the ones where the
+    memory fingerprint is unchanged and the import short-circuits: the two have nothing to do
+    with each other, and gating one on the other would silence reconciliation on the common
+    path. `reconcile_session` never raises and reads no store - let alone takes the store lock -
+    until it has unconsumed evidence, so a quiet repo costs two lock-free sidecar reads.
+    """
+    stored = _import_memory_facts(repo_path)
+    _reconcile_evidence(repo_path)
+    return stored
+
+
+def _reconcile_evidence(repo_path: str) -> None:
+    """Materialize recorded evidence into decisions pending review. Fail-soft to the point of
+    swallowing an import error: this is a passenger on `sync_memory`, and a passenger must
+    never cost the session its memory import - let alone its SessionStart output.
+
+    CLAUDE-ONLY, and it stays that way (task-05 review, minor M6, settled by Task 06). Codex
+    reuses a lot of this module verbatim - `capture_constraint`, `post_write`, `review_nudge` -
+    and an earlier version of this comment claimed it reused this entrypoint too. It never did,
+    and it must not: `host=NAME` is a literal, so every Codex receipt would have named
+    `claude` as the host that observed the session, in the one block whose whole job is saying
+    who observed what. Codex reconciles through the shared store-side session-start path
+    (`store.session_start_payload`), which its own installed hook calls with `'codex'`.
+
+    THE SESSION-START CALL IS NOW A DOUBLE, DELIBERATELY. Claude's SessionStart hook runs
+    `sync_memory` (this) and then `get_session_start_context`, which reconciles again on the
+    shared path. The second call is a no-op by construction rather than by a marker: this one
+    has already moved the spool's events into their holds, so `reconcile._has_work` finds
+    nothing, returns before the store is read or any lock is taken, and costs two directory
+    listings. Measured at 0.04ms. The brief's rule is to keep the duplicate HARMLESS first and
+    remove it only against a measured cost, using an explicit hook-event argument rather than
+    an external skip marker - and there is no measured cost to remove.
+    """
+    try:
+        from contexer import reconcile
+        repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
+        if repo:
+            reconcile.reconcile_session(repo, host=NAME)
+    except Exception:
+        pass
+
+
+def _import_memory_facts(repo_path: str) -> int:
     """Import Claude memory-tool facts into the store. Silent, fail-soft, idempotent.
 
     Skips the whole import when the memory dir is unchanged since last sync
     (content fingerprint in ~/.contexer/.memory_synced_<slug>). Returns the count
-    of newly-stored entries (0 on skip/absence/error). Wired to SessionStart,
-    PreCompact, and SessionEnd hooks."""
+    of newly-stored entries (0 on skip/absence/error)."""
     try:
         repo = store.resolve_repo(store.hook_cwd_repo(repo_path))
         if not repo:
@@ -437,17 +527,14 @@ def install(home: Path) -> list[str]:
     python = sys.executable
 
     def _py(code: str) -> str:
-        # `|| true` (not `|| pwd`): outside a git work tree REPO is empty, and the
-        # entrypoints treat "" as "no repo" (resolve via session binding / pointer).
-        # A `pwd` fallback could write a non-repo dir into the shared .current_repo.
         return (
-            f'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-            f'"{python}" -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
+            'REPO="$PWD" && '
+            f'"{python}" -P -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
         )
 
     ss_code = (
         "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
-        "repo=sys.argv[1]; raw=sys.stdin.read(); "
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
         # Only record a sane repo — never poison the pointer with a config/home dir —
         # and never let an unwritable ~/.contexer abort the hook (store.anchor_repo is
         # sanity-checked AND fail-soft; see #152).
@@ -460,12 +547,17 @@ def install(home: Path) -> list[str]:
         "_c.pull_team(repo); "
         # session_id (Retrieval V1 Part B): threaded through for compact-source working-set
         # rehydration; "" on hosts/events that omit it, preserving today's behavior.
+        # The trailing 'claude' (Task 06) names the host for the evidence-reconciliation
+        # coverage block the shared session-start path now produces. SINGLE-quoted, because
+        # `_py` wraps this whole string in double quotes - which is also why the migration
+        # gate below matches it with `_in_commands` rather than `_in_groups`.
         "print(json.dumps(store.get_session_start_context(repo, store.source_from_hook_stdin(raw), "
-        "store.session_from_hook_stdin(raw))))"
+        "store.session_from_hook_stdin(raw), 'claude')))"
     )
     boot_code = (
         "from contexer import store; import json,sys; "
-        "result=store.get_bootstrap_context_prompt(sys.argv[1], store.prompt_from_hook_stdin(sys.stdin.read())); "
+        "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
+        "result=store.get_bootstrap_context_prompt(repo, store.prompt_from_hook_stdin(raw)); "
         "print(json.dumps(result))"
     )
 
@@ -474,9 +566,10 @@ def install(home: Path) -> list[str]:
     # reaches stdout, so the hook output stays valid.
     def _sync(tail: str) -> str:
         return (
-            'REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-            f'"{python}" -c "from contexer.adapters import claude; import sys; '
-            'claude.sync_memory(sys.argv[1])" "$REPO"; '
+            'REPO="$PWD" && '
+            f'"{python}" -P -c "from contexer import store; from contexer.adapters import claude; '
+            'import sys; raw=sys.stdin.read(); '
+            'claude.sync_memory(store.hook_repo_from_stdin(raw, sys.argv[1]))" "$REPO"; '
             f"echo '{tail}' # {_HOOK_SENTINEL}"
         )
 
@@ -487,17 +580,9 @@ def install(home: Path) -> list[str]:
         'ToolSearch(query=\'select:mcp__contexer__update_context\')"}')
     sessionend_cmd = _sync("{}")
 
-    # Record the git root in ~/.contexer/.current_repo, but only when we're actually inside
-    # a git work tree — the old `|| pwd` fallback could write a non-repo dir (e.g. ~/.claude),
-    # poisoning the shared pointer so decisions landed in the wrong store file.
-    # Every ~/.contexer write here is best-effort (#152): on a host where the store dir is
-    # not writable the redirect/rm would otherwise fail mid-hook and swallow the reminder
-    # echo. The braces matter — `cmd > f 2>/dev/null` opens the redirect BEFORE stderr is
-    # silenced, so a failed open still leaks its error; `{ cmd > f; } 2>/dev/null` doesn't.
+    # The Python hooks resolve and anchor their workspace from stdin/PWD without spawning Git.
+    # This shell-only reminder owns no repository identity and therefore cannot mis-key it.
     anchor_cmd = (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true); "
-        "if [ -n \"$REPO\" ]; then { printf '%s' \"$REPO\" > ~/.contexer/.current_repo; } "
-        "2>/dev/null || true; fi; "
         "FLAG=\"$HOME/.contexer/.pending_capture\"; "
         "if [ -f \"$FLAG\" ]; then "
         "rm -f \"$FLAG\" 2>/dev/null || true; "
@@ -532,30 +617,29 @@ def install(home: Path) -> list[str]:
         f" # {_HOOK_SENTINEL}"
     )
 
-    cap_con = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-               f'"{python}" -c "from contexer.adapters import claude; import sys; '
+    cap_con = ('REPO="$PWD" && '
+               f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                f'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
-    cap_rat = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-               f'"{python}" -c "from contexer.adapters import claude; import sys; '
+    cap_rat = ('REPO="$PWD" && '
+               f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                f'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
-    cap_poll = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                f'"{python}" -c "from contexer.adapters import claude; import sys; '
+    cap_poll = ('REPO="$PWD" && '
+                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                 f'print(claude.team_poll(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # Nudge to review decisions pending the developer (dropped by store.update_decision). A Python
     # entrypoint (not pure shell) so it is per-repo and can verify the store still has something
     # pending — no false nudge for an already-approved or cross-repo flag.
-    review_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                  f'"{python}" -c "from contexer.adapters import claude; import sys; '
+    review_cmd = ('REPO="$PWD" && '
+                  f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                   f'print(claude.review_nudge(sys.argv[1], sys.stdin.read()))" "$REPO" # {_HOOK_SENTINEL}')
 
     # PostToolUse (Write|Edit): records edited files into the per-session sidecar (issue
     # #175 Task 2) AND still arms .pending_capture — replaces the old pure-shell touch.
-    # $REPO resolution is copied VERBATIM from the sibling UserPromptSubmit hooks above
-    # (cap_con/cap_rat/cap_poll/review_cmd) — see post_write's docstring for why a
-    # cwd-vs-toplevel mismatch here would silently kill the feature.
-    post_write_cmd = ('REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && '
-                      f'"{python}" -c "from contexer.adapters import claude; import sys; '
+    # $REPO resolution is copied VERBATIM from the sibling UserPromptSubmit hooks above.
+    # Python then resolves the host payload/PWD to the same filesystem repository root.
+    post_write_cmd = ('REPO="$PWD" && '
+                      f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
                       f'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       f'# {_HOOK_SENTINEL} .pending_capture')
 
@@ -586,8 +670,8 @@ def install(home: Path) -> list[str]:
     # to the current ss_code (_strip_stale, the gemini.py pattern). The previous gate
     # listed markers a CURRENT hook must carry and stripped only when one was missing —
     # which detects older hooks but not different ones: a hook written by a NEWER or
-    # sibling-branch install (observed live: a 4-arg get_session_start_context call from
-    # a branch that added a consumer param) carries every marker as a superset, survives
+    # sibling-branch install (observed live: an incompatible extra consumer argument) carries
+    # every marker as a superset, survives
     # reinstall forever, and crashes with TypeError on every session start — costing the
     # session its entire context injection. Exact-command currency subsumes all the old
     # marker checks and self-maintains as ss_code evolves.
@@ -600,6 +684,9 @@ def install(home: Path) -> list[str]:
 
     # SessionEnd: flush memory-tool facts on clean exit (deterministic — needs no model).
     se = hooks.setdefault("SessionEnd", [])
+    # Converge on the exact current command (see the SessionStart note above).
+    se = _strip_stale(se, ["sync_memory"], sessionend_cmd)
+    hooks["SessionEnd"] = se
     if not _in_groups(se, "sync_memory"):
         se.append({"hooks": [{"type": "command",
             "statusMessage": "Syncing memory to Contexer...", "command": sessionend_cmd}]})
@@ -619,14 +706,9 @@ def install(home: Path) -> list[str]:
     if _in_groups(put, ".pending_capture") and not _in_groups(put, "claude.post_write"):
         put = _filter_groups(put, [".pending_capture"])
         hooks["PostToolUse"] = put
-    # Migrate: an installed post_write hook that resolves the repo from raw process cwd (no
-    # $REPO threading via `git rev-parse --show-toplevel`) diverges from record_edited_file's
-    # reader whenever cwd is a monorepo subdirectory — see post_write's docstring for the
-    # doc-drift hazard this guards against. Detected by the absence of "show-toplevel"
-    # alongside "claude.post_write".
-    if _in_groups(put, "claude.post_write") and not _in_groups(put, "show-toplevel"):
-        put = _filter_groups(put, ["claude.post_write"])
-        hooks["PostToolUse"] = put
+    # Converge on the exact current command (see the SessionStart note above).
+    put = _strip_stale(put, ["claude.post_write"], post_write_cmd)
+    hooks["PostToolUse"] = put
     if not _in_groups(put, "claude.post_write"):
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": post_write_cmd}]})
@@ -652,6 +734,9 @@ def install(home: Path) -> list[str]:
     if _in_groups(pc, "compaction starting") and not _in_groups(pc, "sync_memory"):
         pc = _filter_groups(pc, ["compaction starting"])
         hooks["PreCompact"] = pc
+    # Converge on the exact current command (see the SessionStart note above).
+    pc = _strip_stale(pc, ["compaction starting"], precompact_cmd)
+    hooks["PreCompact"] = pc
     if not _in_groups(pc, "compaction starting"):
         pc.append({"hooks": [{"type": "command",
             "statusMessage": "Saving decisions before compact...",
@@ -698,7 +783,15 @@ def install(home: Path) -> list[str]:
         ups = _filter_groups(ups, [".pending_capture"])
         hooks["UserPromptSubmit"] = ups
 
-    if not _in_groups(ups, ".pending_capture"):
+    # Converge the guarded reminder too. The previous migrations only distinguished
+    # unguarded writes and obsolete wording, so the last pre-no-Git shape (guarded,
+    # current wording, but still running `git rev-parse` and writing `.current_repo`)
+    # survived every reinstall. Exact-command currency removes that owned hook while
+    # preserving foreign siblings, just like the Python-carrying hooks above.
+    ups = _strip_stale(ups, [".pending_capture"], anchor_cmd)
+    hooks["UserPromptSubmit"] = ups
+
+    if not _has_exact_command(ups, anchor_cmd):
         ups.insert(0, {"hooks": [{"type": "command",
             "statusMessage": "Anchoring repo context...",
             "command": anchor_cmd}]})
@@ -715,6 +808,9 @@ def install(home: Path) -> list[str]:
     if _in_groups(ups, "get_bootstrap_context_prompt") and not _in_groups(ups, "prompt_from_hook_stdin"):
         ups = _filter_groups(ups, ["get_bootstrap_context_prompt"])
         hooks["UserPromptSubmit"] = ups
+    # Converge on the exact current command (see the SessionStart note above).
+    ups = _strip_stale(ups, ["get_bootstrap_context_prompt"], _py(boot_code))
+    hooks["UserPromptSubmit"] = ups
 
     if not _in_groups(ups, "get_bootstrap_context_prompt"):
         ups.append({"hooks": [{"type": "command", "once": True,
@@ -732,6 +828,24 @@ def install(home: Path) -> list[str]:
     if _in_groups(ups, "Reminder: if you make a significant decision"):
         ups = _filter_groups(ups, ["Reminder: if you make a significant decision"])
         hooks["UserPromptSubmit"] = ups
+
+    # Migrate: these four hooks predating -P (see the post_write migration above for why
+    # cwd-shadowing an older contexer/ source directory matters) had no prior upgrade path
+    # at all - each ran unchanged from first install until now, so this is their first.
+    # `_strip_stale`, not a marker-presence check: `ups` holds several distinct hooks in
+    # one list (boot_code among them, migrated above), and `_in_groups(ups, "-P -c")`
+    # would read as globally satisfied the moment ANY one of them picks up -P, leaving
+    # the other three permanently unmigrated. `_strip_stale` compares each GROUP's own
+    # command against its own freshly-built current_cmd, so one hook's fix cannot mask
+    # another's staleness.
+    for marker, current_cmd in (
+        ("claude.capture_constraint", cap_con),
+        ("claude.rationale", cap_rat),
+        ("claude.team_poll", cap_poll),
+        ("claude.review_nudge", review_cmd),
+    ):
+        ups = _strip_stale(ups, [marker], current_cmd)
+    hooks["UserPromptSubmit"] = ups
 
     if not _in_groups(ups, "claude.capture_constraint"):
         ups.append({"hooks": [{"type": "command",
@@ -871,13 +985,9 @@ def uninstall(home: Path) -> list[str]:
             after = _filter_groups(before, markers)
             if event == "UserPromptSubmit":
                 # Also strip any legacy mcp_tool capture hooks (pre-migration installs).
-                after = [
-                    grp for grp in after
-                    if not any(
-                        h.get("type") == "mcp_tool" and h.get("server") == "contexer"
-                        for h in (grp.get("hooks", []) if isinstance(grp, dict) else [])
-                    )
-                ]
+                after = _filter_hooks(after, lambda h: (
+                    isinstance(h, dict) and h.get("type") == "mcp_tool"
+                    and h.get("server") == "contexer"))
             if after != before:
                 changed = True
                 if after:

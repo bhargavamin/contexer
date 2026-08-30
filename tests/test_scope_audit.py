@@ -118,6 +118,22 @@ class TestAuditSessions:
         assert row["session_id"] == "sess-1"
         assert [e["id"] for s in row["stores"] for e in s["entries"]] == ["a1", "b1"]
 
+    @pytest.mark.parametrize("sentinel", ["unknown", "reconcile"])
+    def test_sentinel_session_ids_never_participate(self, store_dir, sentinel):
+        # Same reasoning as the memory-import exclusion: these are LITERALS, not sessions.
+        # `unknown` is what an evidence event carries when the host supplied no session id,
+        # `reconcile` what a decision derived from such evidence records - so every repo with
+        # one shares it, and pairing on them would flag those repos forever.
+        _write_store(store_dir, "/repo/a", [_decision("a1", sentinel)])
+        _write_store(store_dir, "/repo/b", [_decision("b1", sentinel)])
+        assert scope_audit.audit_sessions() == []
+
+    def test_a_real_session_alongside_a_sentinel_is_still_flagged(self, store_dir):
+        _write_store(store_dir, "/repo/a", [_decision("u1", "unknown"), _decision("a1", "s-1")])
+        _write_store(store_dir, "/repo/b", [_decision("b1", "s-1")])
+        (row,) = scope_audit.audit_sessions()
+        assert row["session_id"] == "s-1"
+
     def test_recurrence_from_another_session_is_not_evidence(self, store_dir):
         # session_ids accumulates every session that has TOUCHED an entry; a recurrence
         # recorded from a second session is normal and must not read as a misrouted write.
@@ -170,11 +186,11 @@ class TestAuditSessions:
         """A pre-fix stray worktree store sitting beside its canonical file.
 
         Written under EXPLICIT filenames, not via `_slug`: `_slug` itself canonicalizes
-        through `_canonical_store_key`, so patching that helper would collapse both writes
+        through `canonical_store_key`, so patching that helper would collapse both writes
         onto one filename and the fixture would silently test nothing. A real pre-fix stray
         has its own slug precisely because it was written before that canonicalization.
         """
-        monkeypatch.setattr(store, "_canonical_store_key",
+        monkeypatch.setattr(store, "canonical_store_key",
                             lambda p: "/repo/main" if p in ("/repo/main", "/repo/wt") else p)
         (store_dir / "canonical.json").write_text(json.dumps(
             {"repo_path": "/repo/main", "entries": [_decision("m1", "sess-1")]}))

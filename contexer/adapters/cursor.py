@@ -4,10 +4,21 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import store
+from contexer import evidence, store
 from contexer.adapters import base
 
 NAME = "cursor"
+
+# Prompt directives ONLY. Cursor's hooks cannot observe an edit (`beforeSubmitPrompt` is the
+# one payload this adapter sees, #175), so `file_changes` says unavailable rather than
+# reporting the zero events that absence produces - those are different facts.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, beforeSubmitPrompt
+    "file_changes": "unavailable",              # no write hook
+    "assistant_conclusions": "model_reported",  # the MCP tool, agent-invoked
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
 
 
 def is_present(home: Path) -> bool:
@@ -106,17 +117,15 @@ def _repo_from_verbose(raw: str, repo_path: str) -> tuple[str, str]:
     wrong-store audit reads (`scope_audit.py`). Cursor has one signal the other hosts do not
     (`workspace_roots`), so it gets its own label rather than being flattened into
     `argument`, which the audit reads as a deliberate cross-repo write."""
-    if repo_path:
-        repo, source = store.resolve_repo_verbose(repo_path)
-        return repo, ("hook-arg" if source == "argument" else source)
-    try:
-        roots = json.loads(raw).get("workspace_roots") or []
-        if roots:
-            repo, source = store.resolve_repo_verbose(roots[0])
-            return repo, ("workspace-root" if source == "argument" else source)
-    except Exception:
-        pass
-    return store.resolve_repo_verbose("")
+    hooked = store.hook_repo_from_stdin(raw, repo_path)
+    repo, source = store.resolve_repo_verbose(hooked)
+    if source == "argument":
+        try:
+            roots = json.loads(raw).get("workspace_roots") or []
+        except (AttributeError, TypeError, ValueError):
+            roots = []
+        source = "workspace-root" if not repo_path and roots else "hook-arg"
+    return repo, source
 
 
 def _ensure_rule_file(repo_dir: str) -> None:
@@ -155,7 +164,11 @@ def session_start(repo_path: str, raw: str) -> str:
             # except below, which would inject the bare nudge instead of the real rules.
             store.anchor_repo(repo)
             _ensure_rule_file(repo)
-            payload = store.session_start_payload(repo)
+            # `host=NAME`: the shared payload reconciles this repo's unconsumed evidence, and
+            # Cursor is the host that CAN say least about what it saw (no write hook at all),
+            # so a receipt naming it is the difference between "no file changes" and "no way
+            # to observe one". This is Cursor's only reconciliation checkpoint of any kind.
+            payload = store.session_start_payload(repo, "", "", NAME)
         else:
             payload = {"status": "", "context": ""}
         return json.dumps(format_session_start(payload))
@@ -176,14 +189,20 @@ def _anchor_current_repo(repo: str) -> None:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives."""
+    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives.
+
+    Cursor's evidence is prompt-only: its hooks cannot observe an edit, so this host emits
+    `user_directive` and never `file_changed` - an absent event here means Cursor could not
+    see the edit, which is what the spool should say."""
     try:
         repo, repo_source = _repo_from_verbose(raw, repo_path)
         if repo:
             _anchor_current_repo(repo)
-            store.capture_user_constraint(repo, store.prompt_from_hook_stdin(raw),
-                                          store.session_from_hook_stdin(raw),
-                                          repo_source=repo_source)
+            # Store call + shadow-mode event in one (evidence.capture_directive): identical
+            # return and exceptions, so this hook's swallow-and-pass-through is unchanged.
+            evidence.capture_directive(repo, store.prompt_from_hook_stdin(raw),
+                                       store.session_from_hook_stdin(raw), "cursor_prompt",
+                                       repo_source=repo_source)
     except Exception:
         pass
     return json.dumps(format_prompt_passthrough())
@@ -212,7 +231,7 @@ def capture_task(repo_path: str, raw: str) -> str:
         if isinstance(hk, dict) and isinstance(hk.get("beforeSubmitPrompt"), list):
             bsp = hk["beforeSubmitPrompt"]
             after = [h for h in bsp
-                     if not (isinstance(h, dict) and _HOOK_MARKER_TASK in h.get("command", ""))]
+                     if _HOOK_MARKER_TASK not in base._hook_command(h)]
             if after != bsp:
                 if after:
                     hk["beforeSubmitPrompt"] = after
@@ -230,12 +249,12 @@ def _cmd(entry: str) -> str:
     """A Cursor command hook: pass repo via "" (session_start reads workspace_roots from
     stdin); read stdin for prompt/session. Cursor runs hooks from the project root."""
     python = sys.executable
-    return (f'"{python}" -c "from contexer.adapters import cursor; import sys; '
+    return (f'"{python}" -P -c "from contexer.adapters import cursor; import sys; '
             f'print(cursor.{entry}(\'\', sys.stdin.read()))"')
 
 
 def _has(hook_list: list, marker: str) -> bool:
-    return any(marker in h.get("command", "") for h in hook_list)
+    return any(marker in base._hook_command(h) for h in hook_list)
 
 
 def install(home: Path) -> list[str]:
@@ -245,7 +264,12 @@ def install(home: Path) -> list[str]:
 
     mcp_path = cursor_dir / "mcp.json"
     mcp = base._load(mcp_path)
-    mcp.setdefault("mcpServers", {})["contexer"] = {"command": contexer_bin}
+    servers = mcp.setdefault("mcpServers", {})
+    servers["contexer"] = {"command": contexer_bin}
+    # The native Teams MCP surface is retired. Team sync now goes exclusively through
+    # the local Python client, so reinstall must remove the exact legacy key while
+    # preserving every similarly named user-owned server.
+    servers.pop("contexer-teams", None)
     base._save(mcp_path, mcp)
     log.append("  ✓ MCP server registered in ~/.cursor/mcp.json")
 
@@ -254,13 +278,21 @@ def install(home: Path) -> list[str]:
     cfg["version"] = 1
     hk = cfg.setdefault("hooks", {})
 
+    # Converge each Contexer hook on its exact current command (`base._strip_stale_flat`,
+    # the claude.py/codex.py `_strip_stale` rule for Cursor's FLAT hook shape - these lists
+    # hold bare `{type, command}` dicts, not the grouped shape): a drift the marker checks
+    # below don't know about - the -P flag (without which `python -c` prepends cwd to
+    # sys.path and a checked-out contexer repo shadows the installed package) - would
+    # otherwise leave an installed hook running the old command forever.
     ss = hk.setdefault("sessionStart", [])
+    base._strip_stale_flat(ss, _HOOK_MARKER_SS, _cmd("session_start"))
     if not _has(ss, _HOOK_MARKER_SS):
         ss.append({"type": "command", "command": _cmd("session_start")})
 
     bsp = hk.setdefault("beforeSubmitPrompt", [])
     # Retire any previously-installed task-capture hook (the feature was removed).
-    bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in h.get("command", "")]
+    bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in base._hook_command(h)]
+    base._strip_stale_flat(bsp, _HOOK_MARKER_CON, _cmd("capture_constraint"))
     if not _has(bsp, _HOOK_MARKER_CON):
         bsp.append({"type": "command", "command": _cmd("capture_constraint")})
 
@@ -278,7 +310,10 @@ def uninstall(home: Path) -> list[str]:
     mcp_path = cursor_dir / "mcp.json"
     if mcp_path.exists():
         mcp = base._load(mcp_path)
-        if mcp.get("mcpServers", {}).pop("contexer", None):
+        servers = mcp.get("mcpServers", {})
+        removed = servers.pop("contexer", None)
+        removed_teams = servers.pop("contexer-teams", None)
+        if removed is not None or removed_teams is not None:
             base._save(mcp_path, mcp)
             log.append("  ✓ MCP server removed from ~/.cursor/mcp.json")
 
@@ -293,7 +328,7 @@ def uninstall(home: Path) -> list[str]:
         }.items():
             before = hk.get(event, [])
             after = [h for h in before
-                     if not any(m in h.get("command", "") for m in markers)]
+                     if not any(m in base._hook_command(h) for m in markers)]
             if after != before:
                 changed = True
                 if after:
@@ -313,7 +348,7 @@ def _mcp_and_hooks_ok(home: Path) -> tuple:
     mcp = base._load_safe(cursor_dir / "mcp.json").get("mcpServers", {}).get("contexer")
     hk = base._load_safe(cursor_dir / "hooks.json").get("hooks", {})
     ss = hk.get("sessionStart", []) if isinstance(hk, dict) else []
-    hooks_ok = any(_HOOK_MARKER_SS in h.get("command", "") for h in ss)
+    hooks_ok = any(_HOOK_MARKER_SS in base._hook_command(h) for h in ss)
     return mcp, hooks_ok
 
 

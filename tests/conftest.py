@@ -1,4 +1,6 @@
 """Shared pytest fixtures for the contexer test suite."""
+import os
+import subprocess
 import types
 from pathlib import Path
 
@@ -57,6 +59,30 @@ def tmp_repo(tmp_path, monkeypatch):
 _FORBIDDEN = ("ui.json", "ui.log")
 _TEMP_MARKERS = ("private_tmp", "var_folders", "pytest", "tmp_")
 
+# Families a test has no business creating in the real dir, whatever repo they are keyed to.
+# The evidence spool, its maintenance stamp and the reconcile log/lock arrived with the
+# evidence-capture work; `.evidence_*` is the retired single-sidecar spelling (plus its
+# `.evidence_lock_*`), kept here so a stale checkout that still writes one is caught too.
+# The `_` in `.reconcile_` is load-bearing: `.reconcile-outbox.json` is the share retry
+# queue, which a live session may legitimately write alongside the suite.
+_FORBIDDEN_PREFIXES = (".evidence_", ".reconcile_", ".spool_maintained_")
+_SPOOL_DIR = "evidence"
+
+
+def _spool_dirs(root: Path) -> list[str]:
+    """Every DIRECTORY under `~/.contexer/evidence`, relative to the store dir.
+
+    Directories, not files: once the developer's real dir holds a spool at all, a top-level
+    `evidence` name is in the baseline forever and the check would be blind to everything
+    added inside it. A per-repo spool dir (or a `held/<candidate>` batch) appearing during
+    the run is a test reaching the real store; a live PostToolUse hook appending an event
+    into a spool that already exists only adds FILES, so it can never fail the run - the
+    same "never flag what a live session legitimately writes" line `_FORBIDDEN` draws."""
+    try:
+        return [str(p.relative_to(root.parent)) for p in root.rglob("*") if p.is_dir()]
+    except OSError:
+        return []
+
 
 def _leaked(real_store_dir: Path) -> list[str]:
     if not real_store_dir.is_dir():
@@ -64,7 +90,11 @@ def _leaked(real_store_dir: Path) -> list[str]:
     found = []
     for entry in real_store_dir.iterdir():
         name = entry.name
-        if name in _FORBIDDEN or name.endswith(".deleted.json"):
+        if name == _SPOOL_DIR and entry.is_dir():
+            found.append(name)
+            found.extend(_spool_dirs(entry))
+        elif (name in _FORBIDDEN or name.endswith(".deleted.json")
+                or name.startswith(_FORBIDDEN_PREFIXES)):
             found.append(name)
         elif any(marker in name for marker in _TEMP_MARKERS):
             found.append(name)  # a store keyed to a tmp_path escaped into the real dir
@@ -133,9 +163,10 @@ def no_real_store_writes():
     yield
     new = [n for n in _leaked(real) if n not in before]
     assert not new, (
-        f"tests leaked into the real store dir {real}: {new}. Patch HOME (not just "
-        "store.STORE_DIR or the port) before anything that can spawn a daemon or "
-        "resolve paths from Path.home()."
+        f"tests leaked into the real store dir {real}: {new}. Patch store.STORE_DIR (the "
+        "`tmp_repo` fixture) before anything that spools evidence, reconciles, or takes a "
+        "store-dir lock, and patch HOME (not just store.STORE_DIR or the port) before "
+        "anything that can spawn a daemon, a subprocess, or resolve paths from Path.home()."
     )
     assert _real_config_bytes(real) == config_before, (
         f"tests rewrote the real {real / 'config.toml'}. Patch config.CONFIG_PATH before "
@@ -284,6 +315,80 @@ def populated_repo(tmp_repo):
     store.update_decision(tmp_repo, "decided to use JWT instead of sessions — stateless, easier to scale", "sess-1")
     store.update_decision(tmp_repo, "constraint: never store plaintext passwords, always use bcrypt", "sess-1")
     return tmp_repo
+
+
+# ── the commit-time guard's shared fixtures ─────────────────────────────────
+#
+# Here rather than in tests/test_guard_engine.py because two files need them, and that
+# file is the guard's frozen behavioural specification: reaching into it from
+# test_guard_policy_seam.py meant importing a fixture under another name and re-binding
+# it purely so ruff would stop reading every `repo` parameter as a redefinition. A
+# module that defines its own `repo`/`git_repo` still shadows these, so nothing outside
+# the guard suites changes.
+
+
+@pytest.fixture
+def git_repo(tmp_path, monkeypatch):
+    """A real throwaway git repo, isolated from the developer's global/system git
+    config so commits succeed deterministically regardless of the host machine's
+    setup (mirrors the git_repo fixture pattern in test_store.py's TestInsightCache)."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "guard@test.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Guard Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    return repo
+
+
+@pytest.fixture
+def repo(git_repo, monkeypatch):
+    """`git_repo` with STORE_DIR redirected to a sibling temp dir - for tests
+    that read/write the store or the guard's sidecar files, not just git plumbing.
+    Same pattern as test_store.py's tmp_repo / session_repo_preferred_over_pointer."""
+    monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
+    return git_repo
+
+
+def _write(repo, relpath, content):
+    path = repo / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content)
+    return path
+
+
+def _git(repo, *args, check=True):
+    subprocess.run(["git", "-C", str(repo), *args], check=check,
+                   capture_output=True)
+
+
+def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
+                status="approved", source_files=None, global_store=False,
+                title="", session_id="test-session", approved_by=None):
+    """Build a decision entry via the real entry constructor (so revisions/
+    current_revision_id/status/source all come out shaped exactly like production
+    data) and append it directly to the (repo or global) store - bypassing the
+    novelty filter, which is irrelevant to the guard engine's own tests."""
+    entry = store._new_decision_entry(content, session_id, subtype,
+                                      created_by=created_by, status=status, title=title)
+    if source_files is not None:
+        entry["source_files"] = source_files
+    if approved_by is not None:
+        entry["approved_by"] = approved_by
+    if global_store:
+        data = store.load_global()
+        data["entries"].append(entry)
+        store.save_global(data)
+    else:
+        data = store.load(str(repo))
+        data["entries"].append(entry)
+        store.save(str(repo), data)
+    return entry
 
 
 @pytest.fixture(autouse=True)

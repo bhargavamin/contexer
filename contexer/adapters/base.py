@@ -107,24 +107,131 @@ def _in_commands(groups: list, marker: str) -> bool:
                for grp in groups for h in _hooks_of(grp) if isinstance(h, dict))
 
 
+def _has_exact_command(groups: list, command: str) -> bool:
+    """True when a grouped hook list contains exactly ``command``.
+
+    Identity markers are deliberately insufficient for install convergence: a foreign
+    hook may mention one without being owned by Contexer.  After stale owned entries are
+    removed, only the complete generated command proves that the current hook exists.
+    """
+    return any(_hook_command(h) == command for grp in groups for h in _hooks_of(grp))
+
+
+def _filter_hooks(groups: list, remove) -> list:
+    """Remove selected hook entries while preserving foreign siblings and group metadata."""
+    out = []
+    for grp in groups:
+        hooks = _hooks_of(grp)
+        kept = [h for h in hooks if not remove(h)]
+        if not hooks or len(kept) == len(hooks):
+            out.append(grp)
+        elif kept:
+            out.append({**grp, "hooks": kept})
+    return out
+
+
 def _filter_groups(groups: list, markers: list) -> list:
-    return [
-        grp for grp in groups
-        if not any(marker in str(h) for marker in markers for h in _hooks_of(grp))
-    ]
+    """Remove owned, matching hook entries without claiming marker-bearing foreign hooks."""
+    return _filter_hooks(groups, lambda h: (
+        any(marker in str(h) for marker in markers) and _owned_hook(h, markers)))
+
+
+_OWNER_MARKER = "contexer"
+# The pre-package installer imported a top-level ``store`` module, so its commands do not name
+# the modern package even though these callables unambiguously identify Contexer. Keep this list
+# deliberately narrow: generic markers such as ``sync_memory`` and ``compaction starting`` still
+# require the package marker and therefore cannot claim a user's unrelated hook.
+_LEGACY_STORE_IDENTITIES = frozenset({
+    "get_session_start_context",
+    "get_post_compact_context",
+})
+_NAMESPACED_HOOK_IDENTITIES = frozenset({"claude.capture_task"})
+_PACKAGE_OWNERSHIP_MARKERS = (
+    "contexer-managed-hook",
+    "from contexer",
+    "import contexer",
+    "~/.contexer",
+    "$home/.contexer",
+    "mcp__contexer__",
+)
+_LEGACY_HOOK_TEXT = (
+    "contexer: context compaction starting",
+    "contexer: context reloaded after compaction",
+    "contexer: no context stored",
+    "contexer: 3 decision(s) available",
+)
+
+
+def _hook_command(hook) -> str:
+    """Command of one hook, tolerating hand-edited shapes: a non-dict hook, or an explicit
+    `"command": null` (the `str(... or "")` rule `_in_commands` documents - a plain
+    `.get("command", "")` defaults only when the key is ABSENT and returns None here,
+    which turns the next `marker in cmd` into a TypeError mid-install)."""
+    return str(hook.get("command") or "") if isinstance(hook, dict) else ""
+
+
+def _owned_hook(hook, ident_markers: list) -> bool:
+    """Whether one hook entry carries evidence that Contexer, not merely a marker, owns it."""
+    text = str(hook)
+    lowered = text.casefold()
+    if isinstance(hook, dict) and hook.get("server") == "contexer":
+        return True
+    if any(marker in lowered for marker in _PACKAGE_OWNERSHIP_MARKERS):
+        return True
+    if any(marker in lowered for marker in _LEGACY_HOOK_TEXT):
+        return True
+    cmd = _hook_command(hook)
+    if "store." in cmd and any(m in _LEGACY_STORE_IDENTITIES for m in ident_markers):
+        return True
+    if any(marker in text for marker in _NAMESPACED_HOOK_IDENTITIES):
+        return True
+    return ("reminder: if you make a significant decision" in lowered
+            and "call update_context" in lowered)
+
+
+def _is_ours(cmd: str, ident_markers: list) -> bool:
+    """True when `cmd` is a Contexer hook of this identity: it names the package AND
+    carries one of `ident_markers`.
+
+    The owner half is what makes convergence safe to run unconditionally. Some identity
+    markers are generic English or a generic function name ("compaction starting",
+    "sync_memory"), so a bare marker match reads a user's own hook as ours - and since
+    stripping drops the whole GROUP, an unrelated sibling command in it goes too,
+    silently and permanently. Every Contexer command names the package (an import, the
+    `uv run --directory <clone>` path, or the `contexer-managed-hook` sentinel) in every
+    shape convergence has to recognize, including the pre-sentinel and from-source ones,
+    so this excludes foreign hooks without excusing any of ours."""
+    identities = [m for m in ident_markers if m in cmd]
+    if not identities:
+        return False
+    if _OWNER_MARKER in cmd.casefold():
+        return True
+    return "store." in cmd and any(m in _LEGACY_STORE_IDENTITIES for m in identities)
 
 
 def _strip_stale(groups: list, ident_markers: list, current_cmd: str) -> list:
-    """Drop any group that is a Contexer hook of this identity (a command containing
-    one of ident_markers) but whose command differs from current_cmd — i.e. a stale
-    version from an older install: different phrasing, a from-source `uv run
-    --directory <clone>` path, or a pre-sentinel command. Keeps the current group and
-    every non-Contexer group, so reinstall converges instead of stacking duplicates."""
+    """Drop each Contexer hook of this identity (see `_is_ours`) whose command differs
+    from current_cmd - i.e. a stale version from an older install:
+    different phrasing, a from-source `uv run --directory <clone>` path, or a
+    pre-sentinel command. Filtering is per hook, not per group: group matchers/metadata,
+    current Contexer siblings, and foreign sibling commands all survive."""
     out = []
     for grp in groups:
-        cmds = [h.get("command", "") for h in _hooks_of(grp)]
-        is_this_hook = any(m in c for m in ident_markers for c in cmds)
-        if is_this_hook and current_cmd not in cmds:
-            continue
-        out.append(grp)
+        hooks = _hooks_of(grp)
+        kept = [h for h in hooks
+                if not (_is_ours(_hook_command(h), ident_markers)
+                        and _hook_command(h) != current_cmd)]
+        if not hooks or len(kept) == len(hooks):
+            out.append(grp)
+        elif kept:
+            out.append({**grp, "hooks": kept})
     return out
+
+
+def _strip_stale_flat(hooks: list, marker: str, current_cmd: str) -> None:
+    """`_strip_stale` for a FLAT hook list (Cursor's shape: bare `{type, command}` dicts,
+    no groups). Same rule, in place: drop our own hooks of this identity unless the
+    command is already the current one."""
+    hooks[:] = [h for h in hooks
+                if not _is_ours(_hook_command(h), [marker])
+                or _hook_command(h) == current_cmd]

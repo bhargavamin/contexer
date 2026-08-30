@@ -7,7 +7,8 @@ Two, both deselected in CI for different reasons:
 - **`slow`** — `tests/test_bench_*.py`, the stubbed benchmark harness. ~45s, exercises
   `benchmarks/`, which isn't in the coverage target. Runs in its own CI job.
 - **`perf`** - wall-clock latency assertions (`p99 < 5ms`, `mean < 1ms`, ...) in
-  `test_benchmark.py`, `test_benchmark_extended.py` and `test_store.py`. These calibrate
+  `test_benchmark.py`, `test_benchmark_extended.py`, `test_benchmark_evidence.py` and
+  `test_store.py`. These calibrate
   against fixed hardware and **cannot** hold on shared runners; they never run in CI, and
   `tests/conftest.py` also skips them whenever coverage is on (see below).
 
@@ -92,6 +93,7 @@ Run in this order when verifying a significant change:
 | `test_cli_commands.py` | CLI commands — `status`, `version`, `reinstall`, `uninstall --purge`, dispatch, and `status` resilience against corrupt config/store files | When touching `cli.py` |
 | `test_benchmark.py` | Hit/miss rates, token cost, novelty filter at scale, rationale injection accuracy | When changing filter logic or `get_context_for_prompt` |
 | `test_benchmark_extended.py` | Noise tolerance, edge cases for constraint detection and rationale matching | When changing `_is_prescriptive_constraint`, `_sanitize_directive`, or `get_context_for_prompt` |
+| `test_benchmark_evidence.py` | Spool append cost (flat, and under concurrent writers), reconciliation at the 1000-event spool bound, policy selection/evaluation at the 500-decision store cap, and the exit gate that the prompt path never loads evidence | When changing `spool.py`, `candidates.py`, `reconcile.py` or `policy.py` |
 
 ## What each test suite validates
 

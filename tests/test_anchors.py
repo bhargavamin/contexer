@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from contexer import anchors, review, revisions, store
+from contexer import anchors, lifecycle, review, revisions, store
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ class TestFastPathAndTTL:
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)  # no rename found
         anchors.verify_anchors(str(repo), force=True)
         entry = _reload(repo)
-        assert entry.get("proposed_revision") is not None
+        assert entry.get("proposed_lifecycle") is not None
         # Second forced call must still run (force bypasses TTL) even though a proposal
         # already exists — but the entry is now skipped as a participant (has a proposal).
         result = anchors.verify_anchors(str(repo), force=True)
@@ -202,9 +202,9 @@ class TestRenameReanchor:
         assert result == {"reanchored": 0, "proposed": 1}
         reloaded = _reload(repo)
         assert reloaded["source_files"] == ["p0.py"]   # untouched — no rename applied
-        prop = reloaded.get("proposed_revision")
+        prop = reloaded.get("proposed_lifecycle")
         assert prop is not None
-        assert "p0.py no longer exist" in prop["content"]
+        assert "p0.py no longer exist" in prop["reason"]
 
     def test_ambiguity_mid_chain_not_confident(self, repo, monkeypatch):
         # Hop 1 (old.py -> mid.py) is confident; hop 2 (mid.py -> ???) is ambiguous. The
@@ -329,12 +329,12 @@ class TestPartialLoss:
 # ── total loss ──────────────────────────────────────────────────────────────
 
 class TestTotalLoss:
-    def test_all_files_gone_attaches_rule_shaped_proposal_and_arms_nudge(self, repo, monkeypatch):
+    def test_all_files_gone_proposes_retirement_and_arms_nudge(self, repo, monkeypatch):
         _write(repo, "gone.py")
         _git(repo, "add", "gone.py")
         _commit(repo)
         content = "Use gone.py to configure the thing."
-        _seed_entry(repo, content, source_files=["gone.py"])
+        entry = _seed_entry(repo, content, source_files=["gone.py"])
         os.remove(str(repo / "gone.py"))
 
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)  # no rename found
@@ -342,108 +342,42 @@ class TestTotalLoss:
         assert result == {"reanchored": 0, "proposed": 1}
 
         reloaded = _reload(repo)
-        prop = reloaded.get("proposed_revision")
+        prop = reloaded.get("proposed_lifecycle")
         assert prop is not None
-        # Rule-shaped: approving must yield a sane live revision, so the proposal starts
-        # with the original rule text, not a status memo. Closed, factual wording — not
-        # an open action-request — since approving bakes this text in as the live content.
-        assert prop["content"].startswith(content)
-        assert "(anchors withdrawn on re-verification: gone.py no longer exist)" in prop["content"]
-        assert "confirm whether" not in prop["content"]
-        assert prop["clear_anchors"] is True
-        assert reloaded["status"] == "approved"       # current revision stays trusted
-        # nudge armed
-        assert store._pending_review_flag(str(repo)).exists()
+        assert prop["action"] == "retire"
+        assert prop["source"] == "scan"
+        assert prop["reason"] == "anchors withdrawn on re-verification: gone.py no longer exist"
+        assert prop["basis_revision_id"] == reloaded["current_revision_id"]
+        # A retirement is a state transition, never a rewording: the decision's own content
+        # and revision history are untouched, and the content lane stays empty.
+        assert reloaded["content"] == content
+        assert len(reloaded["revisions"]) == 1
+        assert reloaded.get("proposed_revision") is None
+        assert reloaded["status"] == "approved"       # still live until a human retires it
+        assert store._pending_review_flag(str(repo)).exists()   # nudge armed
+        # And it is genuinely awaiting review, not merely stamped on the entry.
+        assert [e["id"] for e in store.get_pending_decisions(str(repo))] == [entry["id"]]
 
-    def test_approving_clears_anchors_and_exits_participation(self, repo, monkeypatch):
-        # Critical fix: approval must both (a) drop source_files/anchor_commit so the
-        # entry stops re-qualifying, and (b) never let a second verify_anchors run stack
-        # a duplicate withdrawal clause onto the just-approved content.
+    def test_retiring_the_proposal_tombstones_the_decision(self, repo, monkeypatch):
         _write(repo, "gone.py")
         _git(repo, "add", "gone.py")
-        _commit(repo)
-        content = "Use gone.py to configure the thing."
-        entry = _seed_entry(repo, content, source_files=["gone.py"])
-        os.remove(str(repo / "gone.py"))
-        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
-        anchors.verify_anchors(str(repo), force=True)
-
-        store.approve_decision(str(repo), entry["id"], "approve")
-        reloaded = _reload(repo)
-        assert reloaded.get("proposed_revision") is None
-        assert reloaded["content"].startswith(content)
-        assert "(anchors withdrawn on re-verification: gone.py no longer exist)" in reloaded["content"]
-        assert len(reloaded["revisions"]) == 2
-        # (a) mechanism: source_files/anchor_commit dropped, not left pointing at gone.py.
-        assert "source_files" not in reloaded
-        assert "anchor_commit" not in reloaded
-
-        # A subsequent forced run must treat the entry as a non-participant: no second
-        # proposal, no duplicate clause, content unchanged.
-        result = anchors.verify_anchors(str(repo), force=True)
-        assert result == {"reanchored": 0, "proposed": 0}
-        reloaded_again = _reload(repo)
-        assert reloaded_again.get("proposed_revision") is None
-        assert reloaded_again["content"] == reloaded["content"]
-        assert reloaded_again["content"].count("anchors withdrawn on re-verification") == 1
-
-    def test_approving_retirement_pops_stale_anchor_candidates(self, repo, monkeypatch):
-        # `anchor_candidates` legitimately SURVIVE on an already-approved entry (the
-        # pending-twin promote path and _route_containment neither bless nor pop them), so
-        # a retirement approval can meet a stale guess. _promote_proposal clears
-        # source_files/anchor_commit — and the candidate-blessing branch right after it
-        # used to read that now-empty anchor as "nothing anchors this entry" and promote
-        # the stale guess into a REAL anchor, re-anchoring the just-retired decision to
-        # unrelated files and dragging it straight back into decay participation.
-        _write(repo, "gone.py")
-        _write(repo, "unrelated.py")
-        _git(repo, "add", "gone.py", "unrelated.py")
         _commit(repo)
         entry = _seed_entry(repo, "Use gone.py to configure the thing.",
                             source_files=["gone.py"])
-        data = store.load(str(repo))
-        target = next(e for e in data["entries"] if e["id"] == entry["id"])
-        target["anchor_candidates"] = ["unrelated.py"]
-        store.save(str(repo), data)
         os.remove(str(repo / "gone.py"))
-
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
         anchors.verify_anchors(str(repo), force=True)
 
-        store.approve_decision(str(repo), entry["id"], "approve")
-        reloaded = _reload(repo)
-        assert "source_files" not in reloaded
-        assert "anchor_commit" not in reloaded
-        # Retirement moots the guess: the candidates go too, rather than sitting there
-        # waiting for the next approval to bless them.
-        assert "anchor_candidates" not in reloaded
+        ok, _msg = lifecycle.retire_decision(str(repo), entry["id"],
+                                          "the file it describes is gone")
+        assert ok
+        assert store.load(str(repo))["entries"] == []
+        (tomb,) = store.list_deleted(str(repo))
+        assert [r["kind"] for r in tomb["lifecycle"]] == ["retired"]
+        # A second forced run has nothing left to participate.
+        assert anchors.verify_anchors(str(repo), force=True) == {"reanchored": 0, "proposed": 0}
 
-        # And the entry is genuinely out of the participant set now.
-        result = anchors.verify_anchors(str(repo), force=True)
-        assert result == {"reanchored": 0, "proposed": 0}
-        assert _reload(repo).get("proposed_revision") is None
-
-    def test_retirement_approval_preserves_curated_title(self, repo, monkeypatch):
-        # The retirement proposal is bookkeeping — it must not rewrite the decision's
-        # curated title into one derived from content + the withdrawal clause.
-        curated = "Thing configuration lives in gone.py"
-        _write(repo, "gone.py")
-        _git(repo, "add", "gone.py")
-        _commit(repo)
-        entry = _seed_entry(repo, "Use gone.py to configure the thing.",
-                            source_files=["gone.py"], title=curated)
-        os.remove(str(repo / "gone.py"))
-
-        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
-        anchors.verify_anchors(str(repo), force=True)
-        assert _reload(repo)["proposed_revision"]["title"] == curated
-
-        store.approve_decision(str(repo), entry["id"], "approve")
-        reloaded = _reload(repo)
-        assert reloaded["title"] == curated
-        assert revisions.current_revision(reloaded)["title"] == curated
-
-    def test_dismissing_proposal_preserves_entry_and_reproposes_once(self, repo, monkeypatch):
+    def test_dismissing_preserves_entry_and_reproposes_next_cycle(self, repo, monkeypatch):
         _write(repo, "gone.py")
         _git(repo, "add", "gone.py")
         _commit(repo)
@@ -453,21 +387,36 @@ class TestTotalLoss:
         monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: None)
         anchors.verify_anchors(str(repo), force=True)
 
-        store.approve_decision(str(repo), entry["id"], "dismiss")
+        ok, _msg = lifecycle.dismiss_lifecycle(str(repo), entry["id"])
+        assert ok
         reloaded = _reload(repo)
-        assert reloaded.get("proposed_revision") is None
+        assert reloaded.get("proposed_lifecycle") is None
         assert reloaded["content"] == content          # unchanged
         assert len(reloaded["revisions"]) == 1          # no new revision appended
         assert reloaded["source_files"] == ["gone.py"]  # dismiss leaves anchors as-is
 
-        # Dismissal leaves the entry re-qualified: the next TTL cycle re-proposes, with
-        # exactly one clause (never two) since the dedupe guard checks live content, not
-        # the (now-gone) proposal.
+        # Dismiss means "not now": the entry re-qualifies and the next cycle asks again.
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 1}
-        reproposed = _reload(repo)
-        prop = reproposed["proposed_revision"]
-        assert prop["content"].count("anchors withdrawn on re-verification") == 1
+        assert _reload(repo)["proposed_lifecycle"]["action"] == "retire"
+
+    def test_a_developers_own_retirement_proposal_is_never_overwritten(self, repo, monkeypatch):
+        # The entry-level participant filter already skips an entry carrying a proposal, so
+        # this pins the slot rule itself: even reached directly, a scan proposal must not
+        # displace a human one.
+        _write(repo, "gone.py")
+        _git(repo, "add", "gone.py")
+        _commit(repo)
+        entry = _seed_entry(repo, "Use gone.py.", source_files=["gone.py"])
+        assert lifecycle.propose_lifecycle(str(repo), entry["id"], "retire", "I want this gone",
+                                       source="human")["ok"]
+        os.remove(str(repo / "gone.py"))
+
+        calls = []
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
+        assert anchors.verify_anchors(str(repo), force=True) == {"reanchored": 0, "proposed": 0}
+        assert calls == []
+        assert _reload(repo)["proposed_lifecycle"]["reason"] == "I want this gone"
 
     def test_dedupe_guard_skips_when_content_already_carries_clause(self, repo, monkeypatch):
         # Defensive backstop (belt-and-suspenders alongside the approval-clears-anchors
@@ -488,6 +437,7 @@ class TestTotalLoss:
         assert result == {"reanchored": 0, "proposed": 0}
         reloaded = _reload(repo)
         assert reloaded.get("proposed_revision") is None
+        assert reloaded.get("proposed_lifecycle") is None
         assert reloaded["content"] == revisions.normalize_content(content)
         assert reloaded["content"].count("anchors withdrawn on re-verification") == 1
 
@@ -528,8 +478,87 @@ class TestTotalLoss:
         by_id = {e["id"]: e for e in data["entries"]}
         assert by_id[pending["id"]].get("proposed_revision") is None
         assert by_id[ignored["id"]].get("proposed_revision") is None
+        assert by_id[pending["id"]].get("proposed_lifecycle") is None
+        assert by_id[ignored["id"]].get("proposed_lifecycle") is None
         assert by_id[pending["id"]]["source_files"] == ["gone.py"]
         assert by_id[ignored["id"]]["source_files"] == ["gone.py"]
+
+
+# ── legacy clear_anchors proposals (pre-lifecycle-lane stores) ────────────────
+
+class TestLegacyClearAnchorsProposal:
+    """anchors.py no longer CREATES a `clear_anchors` proposed_revision - anchor-loss
+    withdrawal moved to the `proposed_lifecycle` lane. A store written before that move can
+    still hold one pending, so the promote path stays working: a proposal a developer can
+    neither approve nor understand would be worse than the branch it costs."""
+
+    def _legacy_proposal(self, repo, entry, content, *, title=""):
+        data = store.load(str(repo))
+        target = next(e for e in data["entries"] if e["id"] == entry["id"])
+        proposal = review.build_proposal(
+            target, f"{content} (anchors withdrawn on re-verification: gone.py no longer "
+                    "exist)", "", "", "2026-01-01T00:00:00+00:00", source="scan",
+            title=title or target.get("title") or "")
+        proposal["clear_anchors"] = True
+        target["proposed_revision"] = proposal
+        store.save(str(repo), data)
+
+    def test_approving_still_clears_anchors_and_exits_participation(self, repo):
+        _write(repo, "gone.py")
+        _git(repo, "add", "gone.py")
+        _commit(repo)
+        content = "Use gone.py to configure the thing."
+        entry = _seed_entry(repo, content, source_files=["gone.py"])
+        self._legacy_proposal(repo, entry, content)
+        os.remove(str(repo / "gone.py"))
+
+        store.approve_decision(str(repo), entry["id"], "approve")
+        reloaded = _reload(repo)
+        assert reloaded.get("proposed_revision") is None
+        assert reloaded["content"].startswith(content)
+        assert len(reloaded["revisions"]) == 2
+        assert "source_files" not in reloaded          # dropped, not left pointing at gone.py
+        assert "anchor_commit" not in reloaded
+        # And the entry is out of the participant set, so nothing re-proposes on top of it.
+        assert anchors.verify_anchors(str(repo), force=True) == {"reanchored": 0, "proposed": 0}
+
+    def test_approving_pops_stale_anchor_candidates(self, repo):
+        # `anchor_candidates` legitimately SURVIVE on an already-approved entry, so a
+        # retirement approval can meet a stale guess - and the candidate-blessing branch
+        # used to read the freshly-emptied source_files as "nothing anchors this entry" and
+        # promote that guess into a REAL anchor.
+        _write(repo, "gone.py")
+        _write(repo, "unrelated.py")
+        _git(repo, "add", "gone.py", "unrelated.py")
+        _commit(repo)
+        content = "Use gone.py to configure the thing."
+        entry = _seed_entry(repo, content, source_files=["gone.py"])
+        self._legacy_proposal(repo, entry, content)
+        data = store.load(str(repo))
+        next(e for e in data["entries"] if e["id"] == entry["id"])["anchor_candidates"] = \
+            ["unrelated.py"]
+        store.save(str(repo), data)
+        os.remove(str(repo / "gone.py"))
+
+        store.approve_decision(str(repo), entry["id"], "approve")
+        reloaded = _reload(repo)
+        assert "source_files" not in reloaded
+        assert "anchor_commit" not in reloaded
+        assert "anchor_candidates" not in reloaded
+
+    def test_approving_preserves_a_curated_title(self, repo):
+        curated = "Thing configuration lives in gone.py"
+        _write(repo, "gone.py")
+        _git(repo, "add", "gone.py")
+        _commit(repo)
+        content = "Use gone.py to configure the thing."
+        entry = _seed_entry(repo, content, source_files=["gone.py"], title=curated)
+        self._legacy_proposal(repo, entry, content)
+
+        store.approve_decision(str(repo), entry["id"], "approve")
+        reloaded = _reload(repo)
+        assert reloaded["title"] == curated
+        assert revisions.current_revision(reloaded)["title"] == curated
 
 
 # ── budget ────────────────────────────────────────────────────────────────────
@@ -597,8 +626,8 @@ class TestBudget:
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 2}
         by_id = {e["id"]: e for e in store.load(str(repo))["entries"]}
-        assert by_id[fat_entry["id"]].get("proposed_revision") is not None
-        assert by_id[lean_entry["id"]].get("proposed_revision") is not None
+        assert by_id[fat_entry["id"]].get("proposed_lifecycle") is not None
+        assert by_id[lean_entry["id"]].get("proposed_lifecycle") is not None
 
 
 # ── fail-soft ────────────────────────────────────────────────────────────────

@@ -101,7 +101,7 @@ class TestUiStart:
 
     def test_spawns_a_detached_daemon_on_the_configured_port(self, spawns):
         cli.ui_cmd([])
-        assert spawns[0]["argv"] == [sys.executable, "-m", "contexer.ui.server",
+        assert spawns[0]["argv"] == [sys.executable, "-P", "-m", "contexer.ui.server",
                                     "--port", str(daemon.DEFAULT_PORT)]
         assert spawns[0]["start_new_session"] is True
 

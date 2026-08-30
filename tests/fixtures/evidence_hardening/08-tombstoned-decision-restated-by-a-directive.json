@@ -1,0 +1,45 @@
+{
+  "name": "08-tombstoned-decision-restated-by-a-directive",
+  "issue": 7,
+  "summary": "A directive restating a retired decision opens a RECONSIDERATION on that same decision.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "44ef68d7-545e-561f-b98e-0e2d8f0dd270",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec-retired",
+      "status": "approved",
+      "tombstoned": true,
+      "title": "Do not edit the generated client directly. Change the openap",
+      "content": "Do not edit the generated client directly. Change the openapi schema and regenerate.",
+      "subtype": "constraint",
+      "source_files": [],
+      "current_revision_id": "rev-dec-retired"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "reconsider",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 50,
+      "target_decision_id": "dec-retired",
+      "source_files": [],
+      "uncertainties": [
+        "reconsiders dec-retired, which the developer made inactive - only their explicit review restores it"
+      ]
+    }
+  ]
+}

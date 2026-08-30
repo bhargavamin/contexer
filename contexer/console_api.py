@@ -45,6 +45,7 @@ import time
 from pathlib import Path
 
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
+from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
 
@@ -93,7 +94,7 @@ def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:
 def _inspect_store_file(path: Path) -> tuple[str, dict | None, str | None]:
     """(repo_path, parsed store or None, error or None) for one store file.
 
-    Deliberately NOT `load`, which degrades a corrupt store to an empty one — the console
+    Deliberately NOT `load`, which degrades a corrupt store to an empty one - the console
     has to tell "unreadable" from "empty". `repo_path` is resolved even when `entries` is
     malformed, so such a store still reports its own error under its own name. It is NOT
     recoverable when the JSON itself will not parse: the repo path lives inside the file and
@@ -237,7 +238,7 @@ def _resolve_store(slug: str) -> tuple[Path, str, str | None] | None:
     THE security boundary for the console: a repo path is never accepted from a request, so no
     crafted URL can make the daemon read or write an arbitrary filesystem location.
 
-    Three spellings resolve to the same store — the file's own name, `repo_slug(repo_path)`, and
+    Three spellings resolve to the same store - the file's own name, `repo_slug(repo_path)`, and
     `_legacy_slug(repo_path)`. The last one is what keeps a slug STABLE across the pre-hash
     rename: `_store_path` renames `someorg_somerepo.json` to `someorg_somerepo-8539fba8.json`
     on the first `load`, so without it a client's slug stopped resolving the moment anything
@@ -348,7 +349,7 @@ def dashboard_summary(repo_path: str) -> dict:
     pending = [e for e in decisions if store.entry_status(e) == "pending_approval"]
     proposals = [e for e in decisions if e.get("proposed_revision")]
     team = team_snapshot(repo_path)
-    graveyard, tomb_error = store._read_deleted(repo_path)
+    graveyard, tomb_error = store.read_deleted(repo_path)
     tombstoned = graveyard.get("entries", [])
 
     by_subtype: dict[str, int] = {}
@@ -443,7 +444,15 @@ def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
     `entry_id` accepts a full UUID or the 8-char prefix, like every other id-taking store
     function. `confidence` widens from the summary's bare score to {score, factors} here.
     `rationale` is not a local store field today (the share wire hardcodes None); it is
-    projected as whatever the entry carries, so a row imported with one still shows it."""
+    projected as whatever the entry carries, so a row imported with one still shows it.
+
+    `impact_lines` is the shared review block (Task 07), the SAME list `review_pending` and
+    `contexer review` print - as rendered LINES rather than the structured dict, because the
+    console renders lines and nothing in it consumes the structure. It lives on this
+    one-decision read rather than on `dashboard_summary`, which the console polls every 10
+    seconds: the block costs a spool listing, and paying that per tick for a payload consumed
+    only when a developer opens one decision is cost with no reader.
+    """
     entries = [e for e in store.load(repo_path).get("entries", []) if e.get("type") == "decision"]
     entry = store.entry_by_id(entries, entry_id)
     if entry is None:
@@ -471,6 +480,9 @@ def get_decision_detail(repo_path: str, entry_id: str) -> dict | None:
             "is_current": r.get("revision_id") == current_revision_id,
         } for r in entry.get("revisions") or []],
         "proposed_revision": _console_proposed(proposal) if proposal else None,
+        "impact_lines": review_impact.impact_lines(
+            review_impact.review_impact(repo_path, entry,
+                                        review_impact.review_context(repo_path, entries))),
         "share": _console_share_state(entry.get("id", "")),
     }
 
@@ -684,7 +696,7 @@ def list_tombstones(repo_path: str) -> dict:
     the reason those do: every other read of the sidecar degrades a corrupt file to an empty
     list, so without this the view renders "nothing deleted" over a file that actually still
     holds tombstones it could not parse. One read."""
-    data, error = store._read_deleted(repo_path)
+    data, error = store.read_deleted(repo_path)
     rows = [{**_console_summary(e), "deleted_at": e.get("deleted_at"),
              "deleted_by": e.get("deleted_by", "ui")}
             for e in data.get("entries", [])]
@@ -770,4 +782,3 @@ def team_snapshot(repo_path: str) -> dict:
                       "error": last_sync.get("error")},
         "decisions": rows,
     }
-

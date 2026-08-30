@@ -26,17 +26,31 @@ Commands:
                 use --target claude|cursor|codex|gemini|all to override.
   uninstall     Remove the MCP server + hooks. Add --purge to also delete the store.
   reinstall     Re-sync config (uninstall + install). Does NOT rebuild the binary.
-  review        Interactively approve, edit, or ignore pending engineering decisions;
-                also surfaces possibly-overlapping rules for manual consolidation.
+  review        Interactively approve, edit, ignore, or retire pending engineering
+                decisions; also surfaces possibly-overlapping rules for consolidation.
+  retire        Retire one decision - it leaves active context, keeping its history:
+                retire <id> --reason <text> [--replaced-by <id>].
+  restore       Bring one retired decision back: restore <id> [--reason <text>].
   ui            Local web console over the stored decisions: ui [--open] [--stop]
                 [--status] [--port N] [--foreground] [--reset-token].
   share         Push local decisions to your team cloud context: share [id | --all | --global]
                 (default: latest). --global pushes the cross-repo rules in _global.json.
   reconcile     Submit a corrected local decision for team review:
                 reconcile <id> [--team NAME_OR_ID] [--yes].
+  reconcile-session
+                Turn recorded session evidence into decisions pending your review:
+                reconcile-session [--session ID] [--dry-run]. Retirements are only
+                ever recommendations; nothing is retired or approved for you.
   login         Sign in to Contexer Teams (browser OAuth); enables pull/share with no pasted token.
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook - see below).
+  policy        Report what your approved decisions say about one operation:
+                 policy evaluate --operation <op> --diff-file <path|-> [--intent TEXT]
+                 [--file PATH ...] [--json] [--exit-code]. <op> is any of read_files,
+                 write_files, shell, commit, merge, deploy, api_request. A REPORTER, not a
+                 gate: even a `block` verdict exits 0 unless you opt in with --exit-code.
+                 Only an adapter inside the system performing the operation ever enforces
+                 anything.
   scope-audit   Read-only: find decisions saved into the wrong repo's store (a session
                 whose decisions are split across two or more stores). Changes nothing.
   status        Show install state: version, binary path, MCP/hooks, store summary.
@@ -272,7 +286,7 @@ def version() -> None:
 def _print_wrapped(text: str, indent: str = "  ", width: int = 64) -> None:
     """Print a decision body IN FULL, wrapped to the terminal. Deliberately not clipped:
     this is the interactive one-decision-at-a-time surface, so the whole point is that the
-    developer can judge without running a second command. (`_clip_body` still governs the
+    developer can judge without running a second command. (`clip_body` still governs the
     list-shaped surfaces, where a long body would flood the screen.)"""
     for para in (text or "").split("\n"):
         if not para.strip():
@@ -333,8 +347,9 @@ def _review_metadata(repo_path: str, entry: dict,
 
     rows: list[tuple[str, str]] = []
     when = (entry.get("timestamp") or "")[:16].replace("T", " ")
-    origin = _ORIGIN_LABELS.get(entry.get("created_by") or "", entry.get("created_by") or "?")
-    rows.append(("Captured", f"{when} · {origin}" if when else origin))
+    # Origin is NOT repeated here: `review_impact.impact_lines` owns that label for all three
+    # surfaces now, and this row would have been a second, differently-worded copy of it.
+    rows.append(("Captured", when or "(unrecorded)"))
 
     occ = entry.get("occurrence_count") or 1
     sessions = len(entry.get("session_ids") or [entry.get("session_id")])
@@ -356,10 +371,8 @@ def _review_metadata(repo_path: str, entry: dict,
             # " [may be stale: x changed since capture, +N more]" -> the bare fact.
             rows.append(("", "! " + note.strip().lstrip("[").rstrip("]")
                          .replace("may be stale: ", "")))
-    candidates = entry.get("anchor_candidates")
-    if candidates:
-        rows.append(("Would anchor", ", ".join(candidates)))
-
+    # `Would anchor` moved to the shared impact block (review_impact), which renders it beside
+    # the possible-but-uncertain files it will NOT anchor - the pair is the point.
     anchor = _budgeted(budget, ("anchor", anchor_sha),
                        lambda: store.review_anchor_note(repo_path, entry))
     if anchor:
@@ -375,20 +388,80 @@ def _review_metadata(repo_path: str, entry: dict,
     return rows
 
 
-# How a decision got captured, in the developer's terms rather than the schema's.
-_ORIGIN_LABELS = {
-    "human": "your prompt",
-    "ai": "captured by the assistant",
-    "plan": "from an approved plan",
-    "scan": "measured from this repo",
-    "bootstrap": "repo bootstrap",
-    "memory": "imported from memory",
-}
+# How a decision got captured, in the developer's terms rather than the schema's, now lives in
+# `review_impact.ORIGIN_LABELS` - the MCP list and the console render it too, and a second copy
+# here is exactly the drift Task 07's shared block exists to remove.
+
+
+def _print_lifecycle_proposal(entry: dict, life: dict) -> None:
+    """The retirement block under a decision's own text in `contexer review`: who proposed it,
+    why, and - when the decision has moved since - that it is stale and cannot be applied."""
+    from contexer import lifecycle
+
+    print(f"Retirement proposed (source: {life.get('source') or 'unknown'}):")
+    _print_wrapped(life.get("reason") or "(no reason recorded)")
+    replacement = (life.get("replacement_decision_id") or "")[:8]
+    if replacement:
+        print(f"\nReplaced by: {replacement}")
+    if lifecycle.lifecycle_proposal_stale(entry):
+        print("\n! STALE - proposed against an earlier revision of this decision, which has "
+              "changed since.\n  [R] is refused until it is re-proposed against the current "
+              "version; [D] still works.")
+    if entry.get("proposed_revision"):
+        print("\nNote: this decision also has a suggested update pending. Dismissing the "
+              "retirement leaves it for the next `contexer review`.")
+    print()
+
+
+def _print_reconsideration(entry: dict, recon: dict) -> None:
+    """The reconsideration block under an INACTIVE decision's own text in `contexer review`:
+    what the developer restated, which files the evidence CONFIRMED, whether this was asked
+    before, and whether it has gone stale.
+
+    Confirmed files only. A candidate's uncertain paths never reach the proposal at all, so
+    there is nothing here that could become a restoration anchor (runbook invariant 6)."""
+    from contexer import lifecycle
+
+    state = "retired" if entry.get("deleted_at") else "ignored"
+    print(f"You restated this {state} decision:")
+    _print_wrapped(recon.get("content") or "(no wording recorded)")
+    # Confirmed files are rendered by the shared impact block below this one, beside the
+    # uncertain paths it refuses to anchor. Naming them twice, in two vocabularies, is what
+    # made "confirmed" and "possible" blur together on one screen.
+    prior = [row for row in entry.get("reconsideration_history") or []
+             if isinstance(row, dict) and row.get("disposition") == "dismissed"]
+    if prior:
+        print(f"\nAsked before: dismissed {len(prior)} time(s), most recently "
+              f"{(prior[-1].get('occurred_at') or '')[:10]}.")
+    if lifecycle.reconsideration_stale(entry):
+        print("\n! STALE - this decision has changed or moved since the question was raised.\n"
+              "  [Y] and [E] are refused until a fresh restatement raises it again; [D] still "
+              "works.")
+    else:
+        print("\n[Y] brings it back with its whole history - PENDING review unless it was "
+              "approved before.\n  [E] appends your own wording as a new approved revision.")
+    print()
+
+
+def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, str]:
+    """The `[R]etire` sub-flow: confirm the reason, then retire. The proposal's own reason is
+    the default rather than the value - a retirement's reason becomes permanent history, and
+    the developer is the one signing it."""
+    from contexer import lifecycle
+
+    proposed = life.get("reason") or ""
+    print(f'Reason [Enter = "{proposed}"]:')
+    try:
+        reason = input("> ").strip() or proposed
+    except (KeyboardInterrupt, EOFError):
+        return False, "\nSkipped."
+    return lifecycle.retire_decision(repo_path, entry["id"], reason,
+                                     life.get("replacement_decision_id"))
 
 
 def review() -> None:
-    """Interactively review and approve/ignore/edit pending engineering decisions."""
-    from contexer import conflicts, revisions, store
+    """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
+    from contexer import conflicts, lifecycle, review_impact, revisions, store
 
     repo_path = store.git_root(os.getcwd())
     if not repo_path:
@@ -403,10 +476,21 @@ def review() -> None:
 
     print(f"\n{len(pending)} decision(s) pending approval for {Path(repo_path).name}\n")
 
-    approved = ignored = dismissed = edited = skipped = 0
+    approved = ignored = dismissed = edited = skipped = retired = restored = 0
     git_budget = _review_git_budget()   # one budget + memo for the whole run
+    # One store read, one spool listing and one host detection for the WHOLE run, threaded into
+    # every decision's impact block - the queue is normally one session's captures, so a
+    # per-decision rebuild would re-read the same three things once per screen.
+    impact_context = review_impact.review_context(repo_path)
     for i, entry in enumerate(pending, 1):
-        prop = entry.get("proposed_revision")
+        recon = entry.get("proposed_reconsideration")
+        life = None if recon else entry.get("proposed_lifecycle")
+        # A retirement outranks a content question on the same decision: there is no point
+        # settling how a decision should read while its existence is in doubt. Dismissing the
+        # retirement leaves any Suggested Update pending for the next run, which the render says.
+        # A reconsideration outranks both, for the same reason one step further out: the
+        # decision is not live at all.
+        prop = None if (life or recon) else entry.get("proposed_revision")
         print("─" * 66)
         eid = (entry.get("id") or "")[:8]
         heading = f"Decision {i} of {len(pending)}"
@@ -431,17 +515,34 @@ def review() -> None:
         else:
             score, factors = revisions.compute_confidence(entry)
             title, body = store.title_and_body(entry)
-            print(f"[{subtype}]  {store.entry_status(entry).replace('_', ' ')}\n")
+            status = ("reconsideration proposed" if recon
+                      else "retirement proposed" if life
+                      else store.entry_status(entry).replace("_", " "))
+            print(f"[{subtype}]  {status}\n")
             print(title)
             if body is not None:
                 print()
                 _print_wrapped(body)
             print()
+            if life:
+                _print_lifecycle_proposal(entry, life)
+            if recon:
+                _print_reconsideration(entry, recon)
         for label, value in _review_metadata(repo_path, entry, git_budget):
             print(f"{label:<14}{value}")
         print(f"{'Confidence':<14}{score}%" + (f"  ·  {'; '.join(factors)}" if factors else ""))
         print()
-        if prop:
+        # The shared impact block: identical lines to `review_pending`'s, same categories the
+        # console projects. Printed unindented here because the terminal has no list to nest in.
+        for line in review_impact.impact_lines(
+                review_impact.review_impact(repo_path, entry, impact_context)):
+            _print_wrapped(line, indent="", width=76)
+        print()
+        if recon:
+            print("[Y] Restore  [E] Restore with edits  [D] Dismiss  [S] Skip  [Q] Quit")
+        elif life:
+            print("[R] Retire  [D] Dismiss  [S] Skip  [Q] Quit")
+        elif prop:
             print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip  [Q] Quit")
         else:
             print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip  [Q] Quit")
@@ -456,7 +557,61 @@ def review() -> None:
             print("Stopped - the rest stay pending.")
             break
 
-        if choice in ("Y", "YES"):
+        if recon:
+            # Its own branch for the same reason the retirement one is: the decision is not
+            # live, so approve/ignore have nothing to act on. `reconsider_decision` is the one
+            # door back, and it never returns a decision as trusted unless the developer typed
+            # the wording themselves.
+            action = {"Y": "restore", "YES": "restore", "E": "restore_edit",
+                      "EDIT": "restore_edit", "D": "dismiss",
+                      "DISMISS": "dismiss"}.get(choice, "skip")
+            wording = ""
+            if action == "restore_edit":
+                print(f'Current: "{revisions.current_content(entry)}"')
+                try:
+                    wording = input("Edit: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    wording = ""
+                if not wording:
+                    print("\nNo changes made, skipping.")
+                    skipped += 1
+                    continue
+            if action == "skip":
+                skipped += 1
+                print("Skipped - the reconsideration stays pending.")
+                continue
+            ok, msg = lifecycle.reconsider_decision(repo_path, entry["id"], action, wording)
+            if not ok:
+                skipped += 1
+            elif action == "dismiss":
+                dismissed += 1
+            else:
+                restored += 1
+            print(msg)
+        elif life:
+            # Its own branch, not a key bolted onto the content flow: [D] here dismisses the
+            # RETIREMENT, and approve/edit have no meaning for a decision that is already live.
+            if choice in ("R", "RETIRE"):
+                ok, msg = _retire_from_review(repo_path, entry, life)
+                if ok:
+                    retired += 1
+                else:
+                    skipped += 1
+                print(msg)
+            elif choice in ("D", "DISMISS"):
+                ok, msg = lifecycle.dismiss_lifecycle(repo_path, entry["id"])
+                if ok:
+                    dismissed += 1
+                else:
+                    skipped += 1
+                print(msg)
+            else:
+                skipped += 1
+                print("Skipped.")
+        elif choice in ("Y", "YES"):
+            # Repeat the confirmed anchors at the gesture itself, never the possible ones:
+            # this line is the last thing the developer reads before the approval writes them.
+            print(review_impact.anchor_confirmation(entry))
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
@@ -491,6 +646,7 @@ def review() -> None:
                 skipped += 1
                 continue
             if new_content:
+                print(review_impact.anchor_confirmation(entry))
                 ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content)
                 if ok:
                     edited += 1
@@ -513,6 +669,10 @@ def review() -> None:
         parts.append(f"{edited} edited and approved")
     if dismissed:
         parts.append(f"{dismissed} dismissed")
+    if retired:
+        parts.append(f"{retired} retired")
+    if restored:
+        parts.append(f"{restored} restored")
     if ignored:
         parts.append(f"{ignored} ignored")
     if skipped:
@@ -550,6 +710,141 @@ def reinstall() -> None:
     print()
     print("Note: this only re-synced the MCP/hook config. To upgrade the program itself,")
     print("run `uv tool install --reinstall contexer`, then restart your AI assistant.")
+
+
+def _gap_phrase(gap: dict) -> str:
+    """`.gap` rendered as the CUMULATIVE loss ledger it is (ruling R28), never as a live alarm.
+
+    Nothing clears it, so "3 events lost, last <date>" is the honest reading - a count of what
+    this spool has dropped since it existed, not a condition to resolve. A damaged marker says
+    so rather than reporting a number it cannot stand behind, and `prior_drops_unknown` (the
+    count restarted over a damaged marker) is stated because it makes the figure a lower bound.
+
+    LOST and EXPIRED are rendered as the different facts they are: a failed write is this
+    module's own bug, while an unconsumed queue is not, and collapsing them told a developer
+    their spool was failing while burying the failures that ARE worth acting on in the same
+    number.
+
+    EXPIRED IS NO LONGER A BENIGN OUTCOME, and the wording says so. The split was introduced
+    when Codex and Cursor reached no reconciliation entrypoint, so ageing out was the designed
+    end of their queue. Every host now reconciles at session start, so an event that aged out
+    of `pending/` outlived a month of session starts on ANY host - which means reconciliation
+    was skipping, failing or never reached, and this line is the only place a developer would
+    see it. Still not counted as "lost" (nothing failed to record it), but it now reads as
+    something to look into rather than as an explanation that settles the question.
+    """
+    if gap.get("unreadable"):
+        return "loss ledger unreadable"
+    drops, expired = _gap_count(gap, "drops"), _gap_count(gap, "expired")
+    parts = []
+    if drops or not expired:
+        parts.append(f"{drops} event{'' if drops == 1 else 's'} lost")
+    if expired:
+        parts.append(f"{expired} event{'' if expired == 1 else 's'} aged out unreconciled")
+    phrase = ", ".join(parts)
+    if gap.get("prior_drops_unknown"):
+        phrase += " since the ledger was damaged (earlier losses uncounted)"
+    last = str(gap.get("last_at") or "")
+    return f"{phrase}, last {last[:19]}" if last else phrase
+
+
+def _gap_count(gap: dict, key: str) -> int:
+    value = gap.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _evidence_status_lines(repos) -> list[str]:
+    """One `evidence:` line per spool that holds something or has recorded a loss.
+
+    Silent for a spool with neither - which is every repo until a host adapter starts emitting
+    events, so this adds nothing to today's output. An unreadable spool says so rather than
+    reporting zero events: the diagnostics' `readable` flag exists for exactly that.
+
+    The repo set is the caller's (store files plus the current-repo pointer) PLUS every spool
+    directory on disk, because those two do not agree: a repo whose evidence never produced a
+    store entry - every candidate insufficient, or duplicates before any entry existed - has no
+    store file to be found by, and its pending count and `.gap` were invisible in the one
+    surface that reports them. Such a spool is listed by its slug, which is all there is: the
+    slug does not reverse into a path."""
+    from contexer import spool, store
+
+    known = {}
+    for repo in sorted(repos):
+        known[store.repo_slug(repo)] = repo
+    targets = [(known[slug], slug) for slug in sorted(known)]
+    # `(slug, slug)`: the label IS the slug for a spool no store file names.
+    targets += [(slug, slug) for slug in spool.spool_slugs() if slug not in known]
+
+    lines = []
+    for label, slug in targets:
+        diag = spool.evidence_diagnostics("", slug=slug)
+        repo_path = known.get(slug)
+        try:
+            # The store is authoritative for attention debt: one review item may have several
+            # evidence holds, and manual pending entries have no hold at all. A spool-only slug
+            # has no reversible path, so its held-state count is the honest fallback.
+            review_pending = (len(store.get_pending_decisions(repo_path)) if repo_path
+                              else diag["pending_review"])
+        except (OSError, ValueError, TypeError):
+            review_pending = diag["pending_review"]
+        if not any((diag["pending"], diag["held"], diag["quarantine"],
+                    diag["identity_receipts"], diag["identity_receipts_unreadable"])) \
+                and not diag["gap"] and not review_pending and diag["readable"]:
+            continue
+        if diag["readable"]:
+            parts = [f"{diag['pending']} pending"]
+            if diag["held"]:
+                parts.append(f"{diag['held']} held ({diag['held_events']} events)")
+            if review_pending:
+                parts.append(f"{review_pending} review pending")
+            if diag["deferred_attention"]:
+                parts.append(f"{diag['deferred_attention']} deferred")
+            age = diag.get("oldest_attention_age_seconds")
+            if isinstance(age, int):
+                # This age spans ALL attention debt, not merely deferred holds. Keeping it a
+                # separate phrase avoids attributing an old pending review's age to a fresh
+                # deferred candidate, and keeps pending-only debt honest too.
+                parts.append(f"oldest attention {age}s")
+            if diag["incomplete"]:
+                parts.append(f"{diag['incomplete']} incomplete")
+            if diag["held_unattributed"]:
+                # Held with no recorded decision: nothing will ever settle it (see
+                # spool._sweep_orphan_holds), so it is named rather than folded into the count.
+                parts.append(f"{diag['held_unattributed']} unattributed")
+            if diag["held_invalid_state"]:
+                # A manifest carrying a phase this version does not recognize: nothing resumes,
+                # sweeps or deletes it, so the only honest thing is to say it is there.
+                parts.append(f"{diag['held_invalid_state']} in an unknown state")
+            if diag["quarantine"]:
+                parts.append(f"{diag['quarantine']} quarantined")
+            if diag["identity_receipts"]:
+                parts.append(f"{diag['identity_receipts']} identity-routed")
+            if diag["identity_receipts_unreadable"]:
+                parts.append(
+                    f"{diag['identity_receipts_unreadable']} identity receipts unreadable")
+        else:
+            parts = ["spool unreadable"]
+        if diag["gap"]:
+            parts.append(_gap_phrase(diag["gap"]))
+        lines.append(f"  evidence:     {label}: {', '.join(parts)}")
+    return lines
+
+
+def _coverage_status_lines(targets) -> list[str]:
+    """One `coverage:` line per host, saying what its hooks can OBSERVE - which is a different
+    question from what the spool happens to hold. A host with no write hook reports
+    `file changes unavailable`, never the zero events that absence produces, and an
+    agent-reported conclusion is never dressed up as an observed one.
+
+    CAPABILITIES ONLY (`pass_status=False`): `status` runs no reconciliation, so rendering the
+    block's per-pass half would print its DEFAULTS as if they were an outcome - "reconciliation
+    complete, 0 events dropped" beside a count of unconsumed evidence, and on hosts that have no
+    reconciliation checkpoint at all. Only a receipt can report a pass."""
+    from contexer import evidence
+
+    return [f"  coverage:     "
+            f"{evidence.format_coverage(evidence.host_coverage(a.NAME), pass_status=False)}"
+            for a in targets]
 
 
 def status(rest: list | None = None) -> None:
@@ -605,14 +900,27 @@ def status(rest: list | None = None) -> None:
               f"then restart your AI assistant")
     if swept:
         print(f"  cleaned:      {swept} stale temp file(s) from interrupted writes")
+    current_repo = ""
     if current.exists():
         try:
             # UnicodeDecodeError too, not just OSError: the shell hooks write this pointer
             # with `printf` (raw bytes, no encoding contract), so a non-UTF-8 path must
             # print "(unreadable)" rather than traceback out of `contexer status`.
-            print(f"  current repo: {current.read_text(encoding='utf-8').strip()}")
+            current_repo = current.read_text(encoding="utf-8").strip()
+            print(f"  current repo: {current_repo}")
         except (OSError, UnicodeDecodeError):
             print("  current repo: (unreadable)")
+
+    # Every repo status already knows about, plus the one this shell is in: a repo can carry
+    # evidence with no decisions stored yet, and a spool records loss the stores never see.
+    repos = {r for r in (_load_safe(p).get("repo_path") for p in stores)
+             if isinstance(r, str) and r}
+    if current_repo:
+        repos.add(current_repo)
+    for line in _evidence_status_lines(repos):
+        print(line)
+    for line in _coverage_status_lines(targets):
+        print(line)
 
     # Team sync block (Phase 2 observability). ZERO network calls - config.toml + the team
     # cache file are read straight off disk, same as everything else in status(). Never
@@ -1326,13 +1634,39 @@ def _print_guard_unchecked(unchecked: list) -> None:
     commit carrying a secret inside `contexer/store.py` passed as clean. Same
     honest-on-exhaustion rule as `_budgeted`'s "(git is slow ...)" row and
     `anchors._BudgetExceeded`. Capped like the advisory block, since the interesting
-    part is that a gap exists, not the full list."""
-    shown = unchecked[:_GUARD_UNCHECKED_SHOWN]
-    names = ", ".join(f"{u.get('file')} ({u.get('reason')})" for u in shown)
-    if len(unchecked) > len(shown):
-        names += f", +{len(unchecked) - len(shown)} more"
-    _safe_print(f"contexer guard: {len(unchecked)} staged file(s) not checked by armed "
-                f"rules: {names}", file=sys.stderr)
+    part is that a gap exists, not the full list.
+
+    Two kinds of gap share the list and get their own line, because they are gaps in
+    different things and one message cannot be true of both: a row with a `file` is a staged
+    file that went unscanned, a row with a `decision_id` is an armed RULE that could not run
+    at all (an unparseable pattern, an unknown check type). The second is the one a developer
+    cannot otherwise notice - the rule is armed, the commit passes, and nothing ever says the
+    check did not happen."""
+    files = [u for u in unchecked if u.get("file")]
+    dead = [u for u in unchecked if not u.get("file")]
+    if files:
+        _safe_print(f"contexer guard: {len(files)} staged file(s) not checked by armed "
+                    f"rules: {_guard_gap_names(files, 'file')}", file=sys.stderr)
+    if dead:
+        _safe_print(f"contexer guard: {len(dead)} armed rule(s) could not run: "
+                    f"{_guard_gap_names(dead, 'decision_id', width=8)}", file=sys.stderr)
+
+
+def _guard_gap_names(rows: list, key: str, width: int | None = None) -> str:
+    """`a.py (too-large), b.py (budget), +2 more` - capped at _GUARD_UNCHECKED_SHOWN.
+    `width` clips the name (decision ids render at 8 chars everywhere else).
+
+    A row missing its name renders as the reason alone. Only a malformed row can get here,
+    but the caller's partition is an ELSE bucket - a file row whose `file` is empty falls
+    into the rule line - and `str(None)` would print a literal `None (too-large)` there."""
+    def _one(row) -> str:
+        label = str(row.get(key) or "")[:width]
+        reason = f"({row.get('reason')})"
+        return f"{label} {reason}" if label else reason
+
+    shown = rows[:_GUARD_UNCHECKED_SHOWN]
+    names = ", ".join(_one(u) for u in shown)
+    return names + (f", +{len(rows) - len(shown)} more" if len(rows) > len(shown) else "")
 
 
 def _print_guard_explain(candidates: list) -> None:
@@ -1356,6 +1690,139 @@ def _cli_repo() -> str:
     return store.git_root(os.getcwd()) or store.resolve_repo("")
 
 
+def _policy_usage() -> str:
+    """The usage line, with the operation vocabulary read from `policy` rather than restated:
+    the facade accepts all of `policy.OPERATIONS`, and a help text listing fewer is a surface
+    narrower than the thing it documents."""
+    from contexer import policy
+
+    return ("Usage: contexer policy evaluate --operation <" + "|".join(policy.OPERATIONS)
+            + "> [--diff-file PATH|-] [--intent TEXT] [--file PATH ...] [--json] [--exit-code]")
+
+
+def _policy_fail(message: str) -> None:
+    print(f"{message}\n{_policy_usage()}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _read_diff_artifact(path: str) -> tuple[str, list]:
+    """`(content, gaps)` for `--diff-file` - `-` reads stdin.
+
+    Exactly one side is meaningful. A gap is a `policy.UNCHECKED_REASONS` row naming why the
+    bytes could not be handed over, and the caller must then evaluate with NO artifact: an
+    unreadable file passed along as empty content is a policy set judged clean about bytes
+    nobody read, which is the `_staged_content` lesson the guard already paid for.
+
+    The read is bounded at `policy.MAX_ARTIFACT_BYTES + 1` rather than slurping the file and
+    letting validation object afterwards - the point of a cap is to not have the bytes in
+    memory. One byte over is enough to know, and reuses the evaluator's own constant rather
+    than restating the number.
+
+    `-` with a TTY on stdin is REFUSED, the `guard anchors` precedent: `read()` on a terminal
+    blocks until the developer works out that the command is waiting on them and sends EOF,
+    with no prompt and no output to say so. Saying which of the two spellings they wanted is
+    cheaper than a silent hang."""
+    from contexer import policy
+
+    cap = policy.MAX_ARTIFACT_BYTES
+    # `getattr` rather than a plain call: `sys.stdin` is None under a windowed interpreter and
+    # is a stand-in object with no `isatty` under pytest, and neither of those is a terminal.
+    isatty = getattr(sys.stdin, "isatty", None)
+    if path == "-" and isatty is not None and isatty():
+        _policy_fail("contexer policy evaluate: --diff-file - reads the diff from stdin, but "
+                     "stdin is a terminal. Pipe one in (`git diff | contexer policy evaluate "
+                     "... --diff-file -`) or pass a file path.")
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read(cap + 1)
+        else:
+            with open(path, "rb") as handle:
+                raw = handle.read(cap + 1)
+    except OSError:
+        return "", [{"reason": "unreadable", "file": path}]
+    if len(raw) > cap:
+        return "", [{"reason": "too-large", "file": path}]
+    try:
+        return raw.decode("utf-8"), []
+    except UnicodeDecodeError:
+        return "", [{"reason": "binary", "file": path}]
+
+
+def _policy_evaluate(rest: list) -> None:
+    """`contexer policy evaluate` - report what the approved decisions say about one
+    operation. A REPORTER: `--exit-code` is the only way a `block` verdict changes the exit
+    status, because nothing this command does enforces anything."""
+    from contexer import policy_api
+
+    operation = intent = diff_file = ""
+    files: list = []
+    as_json = want_exit_code = False
+    valued = {"--operation", "--diff-file", "--intent", "--file"}
+
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--exit-code":
+            want_exit_code = True
+        elif arg in valued:
+            if i + 1 >= len(rest):
+                _policy_fail(f"contexer policy evaluate: {arg} needs a value.")
+            value = rest[i + 1]
+            i += 1
+            if arg == "--operation":
+                operation = value
+            elif arg == "--diff-file":
+                # An empty value is refused rather than read as "no artifact": that would be a
+                # request the developer thinks carries a diff, evaluated as one that does not.
+                if not value:
+                    _policy_fail("contexer policy evaluate: --diff-file needs a path (or - "
+                                 "for stdin).")
+                diff_file = value
+            elif arg == "--intent":
+                intent = value
+            else:
+                files.append(value)
+        else:
+            _policy_fail(f"contexer policy evaluate: unknown argument: {arg}")
+        i += 1
+
+    gaps: list = []
+    content = ""
+    if diff_file:
+        content, gaps = _read_diff_artifact(diff_file)
+
+    result = policy_api.evaluate_operation(
+        _cli_repo(), intent=intent, operation=operation, files=files,
+        # A gap means the artifact was NOT handed over, so no kind is named either - the
+        # armed policies then report `omitted` beside the gap instead of judging "".
+        artifact_kind="diff" if (diff_file and not gaps) else "",
+        artifact=content, unchecked=gaps)
+
+    # `--json` holds for a refused request too - a machine consumer gets one shape either way.
+    # Scrubbed BEFORE encoding, never after: JSON escaping rewrites the quotes redact's
+    # keyword-gated pattern matches on, so a dump-then-scrub emits a quoted secret verbatim
+    # (see policy_api.scrubbed_result).
+    text = (json.dumps(policy_api.scrubbed_result(result), indent=2, sort_keys=True)
+            if as_json else policy_api.format_result(result, content))
+    print(text, file=sys.stderr if result["errors"] else sys.stdout)
+
+    # A refused request exits 1 because nothing was evaluated - that is a usage failure, not
+    # a verdict. A verdict never moves the exit code unless the developer opted in.
+    if result["errors"] or (want_exit_code and result["verdict"] == "block"):
+        sys.exit(1)
+
+
+def policy_cmd(rest: list) -> None:
+    """`contexer policy evaluate ...`. Any other subcommand exits 1 rather than being
+    ignored - the `guard anchors` rule, so a mistyped word can never read as consent to
+    something this command does not do."""
+    if not rest or rest[0] != "evaluate":
+        _policy_fail(f"Unknown policy subcommand: {' '.join(rest) or '(none)'}")
+    _policy_evaluate(rest[1:])
+
+
 def scope_audit_cmd(rest: list) -> None:
     """`contexer scope-audit` - report decisions that landed in the wrong repo's store.
 
@@ -1368,6 +1835,88 @@ def scope_audit_cmd(rest: list) -> None:
         sys.exit(1)
     from contexer import scope_audit
     print(scope_audit.format_audit(scope_audit.audit_sessions()))
+
+
+def reconcile_session_cmd(rest: list) -> None:
+    """`contexer reconcile-session [--session ID] [--dry-run]` - turn recorded evidence into
+    decisions pending review, and print the receipt.
+
+    Always exits 0: `reconcile_session` never raises and reports what it could not do as
+    `incomplete`, so a reconciliation problem is a line in the report, not a broken shell."""
+    session = ""
+    args = list(rest)
+    if "--session" in args:
+        index = args.index("--session")
+        session = args[index + 1] if index + 1 < len(args) else ""
+        # A flag is never a session id: `--session --dry-run` used to swallow the flag as the
+        # VALUE, silently scoping the pass to a session that cannot exist AND dropping the
+        # dry run - a write where the developer asked for none.
+        if not session or session.startswith("-"):
+            print("Missing value for --session.\n"
+                  "Usage: contexer reconcile-session [--session ID] [--dry-run]",
+                  file=sys.stderr)
+            sys.exit(1)
+        del args[index:index + 2]
+    dry_run = "--dry-run" in args
+    if dry_run:
+        args.remove("--dry-run")
+    if args:
+        print(f"Unknown argument: {' '.join(args)}\n"
+              "Usage: contexer reconcile-session [--session ID] [--dry-run]", file=sys.stderr)
+        sys.exit(1)
+
+    from contexer import reconcile
+    repo = _cli_repo()
+    if not repo:
+        print("No repo detected - run this inside a project directory.", file=sys.stderr)
+        return
+    _safe_print(reconcile.format_receipt(
+        reconcile.reconcile_session(repo, session, dry_run=dry_run)))
+
+
+def _flag_value(args: list, flag: str, usage: str) -> str:
+    """Pull `--flag VALUE` out of `args` in place, exiting with `usage` on a missing or
+    flag-shaped value - the reconcile-session rule, since `--reason --replaced-by x` swallowing
+    a flag as the VALUE is how a retirement gets recorded with a nonsense reason."""
+    if flag not in args:
+        return ""
+    index = args.index(flag)
+    value = args[index + 1] if index + 1 < len(args) else ""
+    if not value or value.startswith("-"):
+        print(f"Missing value for {flag}.\n{usage}", file=sys.stderr)
+        sys.exit(1)
+    del args[index:index + 2]
+    return value
+
+
+def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
+    """`contexer retire <id> --reason <text> [--replaced-by <id>]` and
+    `contexer restore <id> [--reason <text>]`.
+
+    One id, deliberately: retiring moves a decision out of every active surface at once, and a
+    list argument is how one nobody re-read disappears (the same rule `approve_decision` states
+    for approval). Exits non-zero when the store refuses, so a script can tell."""
+    usage = ("Usage: contexer retire <id> --reason <text> [--replaced-by <id>]" if retiring
+             else "Usage: contexer restore <id> [--reason <text>]")
+    args = list(rest)
+    reason = _flag_value(args, "--reason", usage)
+    replacement = _flag_value(args, "--replaced-by", usage) if retiring else ""
+    if len(args) != 1 or args[0].startswith("-") or "," in args[0]:
+        print(f"{'Retire' if retiring else 'Restore'} takes exactly one decision id.\n{usage}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    from contexer import lifecycle
+    repo = _cli_repo()
+    if not repo:
+        print("No repo detected - run this inside a project directory.", file=sys.stderr)
+        sys.exit(1)
+    ok, message = (lifecycle.retire_decision(repo, args[0], reason, replacement) if retiring
+                   else lifecycle.restore_decision(repo, args[0], reason))
+    if not ok:
+        print(message, file=sys.stderr)
+        sys.exit(1)
+    _safe_print(message)
 
 
 def _guard_run(rest: list) -> None:
@@ -2056,6 +2605,10 @@ def main() -> None:
         _run_guarded(reinstall)
     elif cmd == "review":
         review()
+    elif cmd == "retire":
+        _run_guarded(lambda: _lifecycle_cmd(rest, retiring=True))
+    elif cmd == "restore":
+        _run_guarded(lambda: _lifecycle_cmd(rest, retiring=False))
     elif cmd == "ui":
         _run_guarded(lambda: ui_cmd(rest))
     elif cmd == "status":
@@ -2072,8 +2625,12 @@ def main() -> None:
         _run_guarded(lambda: logout_cmd(rest))
     elif cmd == "guard":
         guard(rest)
+    elif cmd == "policy":
+        _run_guarded(lambda: policy_cmd(rest))
     elif cmd == "scope-audit":
         _run_guarded(lambda: scope_audit_cmd(rest))
+    elif cmd == "reconcile-session":
+        _run_guarded(lambda: reconcile_session_cmd(rest))
     else:
         print(f"Unknown command: {cmd}\n", file=sys.stderr)
         _usage(sys.stderr)

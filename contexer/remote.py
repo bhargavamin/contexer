@@ -71,6 +71,155 @@ _WIRE_SOURCE_FILES = True
 _WIRE_SOURCE_FILES_MAX_ITEMS = 10
 _WIRE_SOURCE_FILES_MAX_LEN = 300
 
+# GATE (plan E1/E2): the same shape as `_WIRE_SOURCE_FILES` above, and it shipped CLOSED for the
+# same reason that one did - `source_files` stayed local until the server had accepted the field
+# and a human had verified it end to end against a live endpoint.
+#
+# Two DIFFERENT risks gate lifecycle egress, and neither one covers the other:
+#   * does this server support it at all - answered at runtime by capability discovery
+#     (`decisionLifecycle`, below). An old server never advertises, so it never receives.
+#   * do we know the field SPELLING the advertising server expects - answered only by a human
+#     who has read the server's schema. Nothing in this repo can answer it: the contexer-teams
+#     push schema is server-controlled and not vendored here, and the existing wire already
+#     mixes conventions (`decisionId` camelCase beside `source_files` snake_case), so the name
+#     is not derivable from the ones already on the wire.
+# Getting the second one wrong is not a failed test, it is a permanently stuck outbox row - which
+# is why nothing this gate covers went on the wire until a human had read the server's schema.
+#
+# OPENED on 2026-08-26. The pre-flip checklist was five items - three guessed field names and two
+# closed vocabularies, a strictly bigger set of unknowns than `source_files` had - and every one
+# of them was settled by READING the server's schema and then proving it live, not by inference.
+# What the server now defines (contexer-teams lifecycle merge f216db9, reverified against
+# origin/main 0a3111b during the 2026-08-30 integration, `packages/db/src/validation.ts` +
+# `decision-lifecycle.ts` + migration 0063, `apps/mcp-server/src/tools.ts`):
+#   1. Record-list field name: `lifecycle`. Confirmed - the guess was right.
+#   2. Revision-identity field name: `revision_id`, snake_case. This was the WEAKEST guess, with
+#      counter-evidence in this very file (`asubmit_team_decision` spells the same concept
+#      `"revisionId"`). Confirmed: the server contract fixes snake_case for the PUSH fields
+#      deliberately, because they are this serializer's own shape; the camelCase spelling on the
+#      atomic-submit tool is a different tool's field and stays as it is.
+#   3. Record key names: `event_id` / `kind` / `occurred_at` / `actor` / `reason` /
+#      `revision_id` / `replacement_decision_id`. All confirmed.
+#   4. Both closed vocabularies match the server's enums exactly (`LIFECYCLE_KINDS` /
+#      `LIFECYCLE_ACTORS` in the server's `validation.ts`, re-asserted by CHECK constraints on
+#      `decision_lifecycle_events`). They stay SEPARATE constants here - see below.
+#   5. Bounds: the server's `INPUT_LIMITS.decisionLifecycle` is `{maxEvents: 20, maxIdLength: 200,
+#      maxReasonLength: 300}`, i.e. the numbers below, which were a guess and turned out right.
+# All five, plus the payloads themselves, are frozen in `tests/fixtures/lifecycle-contract.v1.json`
+# - a BYTE-FOR-BYTE copy of the fixture generated in the server repo, asserted against by both
+# suites, so neither side can drift alone.
+#
+# Then the identical live validation `source_files` got, and more of it: the real
+# `RemoteStore` against a locally running migrated server (25 checks, all green) - active push,
+# `get_context` readback, retire, replay with no duplicate row and no timestamp churn, a late
+# older event recorded as history without reversing the projection, restore, the whole sequence
+# again through the batch tool, `retirementReasons=false` sending no prose, the legacy payload
+# accepted with nothing lifecycle-shaped stored, the invalid-params fallback syncing the base
+# while the delta stays pending, and a lead-approved team copy left untouched by a personal
+# retirement. No -32602 on either write tool for a valid payload.
+#
+# That validation is COMMITTED, at `scripts/roundtrip_lifecycle.py` - the twenty-five checks
+# above, in the order they are listed, runnable against a local server (its docstring carries the
+# four prerequisites). "Repeat the identical live validation" is an instruction nobody can follow
+# from prose alone, so re-run that script before changing anything this gate covers, and extend it
+# when the contract grows a scenario.
+#
+# Rolling back is still the one-line change it was, and deliberately still NOT a config toggle -
+# a toggle can be flipped on against a server that rejects the field, which is the failure mode
+# itself. What has changed is that a rejection is no longer catastrophic: `apush_decision` and
+# `apush_decisions` now fall back to the legacy payload once and keep the refused delta pending
+# (see `_lifecycle_fallback_eligible`), so a mis-negotiated optional field costs the history, not
+# the decision.
+_WIRE_LIFECYCLE = True
+
+# Wire bounds for the lifecycle record list. `reason` is free human prose (scrubbed, then
+# truncated rather than dropped - dropping the whole record over a long reason would lose the
+# event, and dropping just the reason would lose the why). `kind` and `actor` are CLOSED
+# vocabularies checked against these tuples rather than passed through: an unknown enum value is
+# the `source="plan"` failure in miniature, and an actor is supposed to be a CATEGORY, so an
+# unrecognized one must never egress as free text that could carry a name or an address.
+#
+# DELIBERATELY NOT `lifecycle.RECORD_KINDS`, even though the three spellings match today. That
+# constant is the LOCAL vocabulary, owned by the module that writes the records; this tuple is
+# the SERVER's enum, now read rather than guessed (item 4 above), and the two merely agree.
+# Deriving one from the other would make a local rename silently change what goes over the wire -
+# the `source="plan"` failure exactly, where a value the server's enum rejects poisons the outbox
+# with a permanent -32602. Reading the schema settled what the values ARE; it did not merge the
+# two owners, and they stay independent for the same reason they always were.
+_WIRE_LIFECYCLE_KINDS = ("retired", "restored", "superseded")
+_WIRE_LIFECYCLE_ACTORS = ("human", "ai", "scan", "plan", "bootstrap", "memory")
+_WIRE_LIFECYCLE_MAX_EVENTS = 20
+_WIRE_LIFECYCLE_MAX_REASON = 300
+_WIRE_LIFECYCLE_MAX_ID = 200
+
+# The two OPTIONAL keys the gate above governs. Named once because three places have to agree on
+# what "this push carried lifecycle data" means: the fallback's eligibility test, the legacy
+# re-serialization, and the batch's per-row retry.
+_WIRE_LIFECYCLE_FIELDS = ("revision_id", "lifecycle")
+
+# A server-returned refusal that is about CAPACITY, not about the payload's shape. Never worth a
+# legacy retry: the base decision would be refused for the same reason, and the correct handling
+# (stay queued, drain when space frees) already exists.
+_QUOTA_ERROR_RE = re.compile(r"rate limit|quota|at capacity", re.I)
+
+# The server's per-row batch skip for a lifecycle payload it will not take. Unlike its
+# `invalid_type`/`invalid_content` siblings this is NOT permanent for the decision - the BASE row
+# is perfectly valid - so it must never be dropped the way those are.
+LIFECYCLE_SKIP_REASON = "invalid_lifecycle"
+
+# Its OPPOSITE, and the two must never be conflated. `invalid_lifecycle` says the payload SHAPE is
+# unsupported, so re-pushing the base without the optional fields is right. `lifecycle_conflict`
+# says the event IDENTITY is contested - the server refused the whole row, wrote no event, and
+# saved no base - so re-pushing the base alone is precisely the resurrection it just refused, i.e.
+# this issue's bug in a new form. It is PERMANENT for that row: an id collision does not clear by
+# waiting, so no legacy retry, no `lifecycle_pending` (there is no synced base to have history
+# outstanding for), and it reaches the caller through the ordinary permanent-skip contract.
+LIFECYCLE_CONFLICT_REASON = "lifecycle_conflict"
+
+# The singular tool's form of the same refusal: a whole-call error whose message the server
+# prefixes with this literal token, precisely so a client cannot mistake it for the invalid-params
+# rejection the optional-protocol fallback answers by re-pushing the base alone.
+_LIFECYCLE_CONFLICT_PREFIX = "lifecycle_conflict:"
+
+
+def lifecycle_fingerprint(caps: "DecisionLifecycleCapabilities | None") -> str:
+    """A short, stable identity for what a server said it accepts.
+
+    Recorded beside a blocked lifecycle delta so a later drain can answer the only question that
+    matters: has the server's answer CHANGED since it rejected this? Retrying an optional payload
+    against an unchanged capability is how a queue turns into a retry storm - the `source="plan"`
+    incident was 192 attempts of exactly that."""
+    if caps is None:
+        return "none"
+    return (f"v{caps.version}:r{int(caps.revisions)}"
+            f"t{int(caps.tombstones)}p{int(caps.retirement_reasons)}")
+
+
+def _lifecycle_fallback_eligible(exc: Exception, args: dict) -> bool:
+    """May this failure be retried once WITHOUT the optional lifecycle fields?
+
+    Three exclusions, and each is a different kind of wrong answer. A push that carried no
+    lifecycle field at all has nothing to strip. An auth/authz failure and an unreachable endpoint
+    are not about the payload, and re-sending would only burn a second round trip on a call that
+    already told us to re-authenticate or back off. A capacity refusal is about the STORE, not the
+    shape, so the base would be refused identically.
+
+    Everything else is merely a CANDIDATE. Whether the lifecycle fields were actually the problem
+    is decided by the retry itself - see `apush_decision` - because a server is free to reject
+    them with a message that names no field at all, and a client that demanded a recognisable
+    message would fall back on the polite servers and wedge on the terse ones."""
+    if not any(k in args for k in _WIRE_LIFECYCLE_FIELDS):
+        return False
+    if isinstance(exc, (RemoteAuthError, RemoteUnavailableError)):
+        return False
+    if str(exc).lstrip().startswith(_LIFECYCLE_CONFLICT_PREFIX):
+        # A contested event identity, not an unsupported shape. The server already rolled the base
+        # write back on purpose; stripping the lifecycle and pushing the base again is the exact
+        # resurrection it refused. This is the one refusal that names itself, so it is matched
+        # rather than discovered by the retry.
+        return False
+    return not _QUOTA_ERROR_RE.search(str(exc))
+
 
 def bound_source_files(source_files: list[str]) -> list[str]:
     """Apply the wire bounds above. ONE definition, deliberately called from BOTH layers, the
@@ -87,12 +236,65 @@ def bound_source_files(source_files: list[str]) -> list[str]:
             if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
 
 
+def _bounded_token(value) -> str:
+    """One lifecycle id or timestamp, or "" when it is missing or implausibly long. These are
+    machine-generated tokens, so an over-long one is corrupt data rather than a long name and is
+    DROPPED rather than truncated - a truncated id would still LOOK like an id while silently
+    pointing at nothing, which is worse than an absent one."""
+    text = str(value or "")
+    return text if 0 < len(text) <= _WIRE_LIFECYCLE_MAX_ID else ""
+
+
+def bound_lifecycle(records: list, *, reasons: bool = True,
+                    redact_on: bool = False) -> list[dict]:
+    """Project a decision's COMPLETED lifecycle history onto the wire shape, whitelist-first.
+
+    ONE definition called from BOTH layers, the same two-layer shape `bound_source_files` and
+    redaction already have: `store._share_projection` applies it so the durable outbox carries
+    exactly what a later drain will send, and `_wire_args` applies it again as the hard
+    guarantee, because it is the only chokepoint every push funnels through - a row queued
+    before this existed never passed through a projection at all.
+
+    Whitelist-first is the privacy boundary, not tidiness: this builds a NEW dict out of six
+    known keys instead of copying and deleting, so a field added to the local record later (a
+    proposal id, an evidence reference, a session id) cannot egress by default. `reason` is the
+    only free text and it is scrubbed before being measured, since redaction can lengthen a
+    string. `reasons=False` is the `retirementReasons` sub-capability being absent: the events
+    still go, without their prose.
+
+    Only records the local lifecycle actually completes are representable - `proposed_lifecycle`
+    is a different key on the entry and is never read here or anywhere on the wire path."""
+    out: list[dict] = []
+    for rec in records or []:
+        if not isinstance(rec, dict) or rec.get("kind") not in _WIRE_LIFECYCLE_KINDS:
+            continue
+        row: dict = {"kind": rec["kind"]}
+        for key in ("event_id", "revision_id", "replacement_decision_id", "occurred_at"):
+            bounded = _bounded_token(rec.get(key))
+            if bounded:
+                row[key] = bounded
+        if rec.get("actor") in _WIRE_LIFECYCLE_ACTORS:
+            row["actor"] = rec["actor"]
+        if reasons:
+            reason = str(rec.get("reason") or "")
+            if redact_on:
+                reason = redact.scrub_text(reason)
+            if reason:
+                row["reason"] = reason[:_WIRE_LIFECYCLE_MAX_REASON]
+        out.append(row)
+    # The MOST RECENT events, not the first: a decision with a long history is most usefully
+    # described by how it ended, and the oldest records are the ones a reader can live without.
+    return out[-_WIRE_LIFECYCLE_MAX_EVENTS:]
+
+
 def _wire_args(*, type: str, content: str, repo: str | None = None,
                rationale: str | None = None, agent: str | None = None,
                confidence: int | None = None, evidence: list[str] | None = None,
                source: str | None = None, decision_id: str | None = None,
                title: str | None = None, source_files: list[str] | None = None,
-               redact_on: bool | None = None) -> dict:
+               redact_on: bool | None = None, revision_id: str | None = None,
+               lifecycle: list | None = None,
+               lifecycle_caps: "DecisionLifecycleCapabilities | None" = None) -> dict:
     """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
     reads an absent key as NULL/unset - so None must not be sent as a literal). The single copy of
     wire-serialization, shared by apush_decision (one) and apush_decisions (batch).
@@ -114,7 +316,18 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     where bounding at each capture site would be a promise several writers have to keep.
 
     `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
-    config.toml per row); None means resolve it here for a lone call."""
+    config.toml per row); None means resolve it here for a lone call.
+
+    `revision_id` and `lifecycle` (plan E1/E2) egress only when BOTH the `_WIRE_LIFECYCLE`
+    constant above is open AND `lifecycle_caps` says this server advertised the matching
+    sub-capability, and each sub-capability is honoured on its own - `tombstones` without
+    `retirementReasons` sends the events with their prose stripped. Like `source_files`, the
+    decision is made HERE, at call time, never captured by a caller: `lifecycle_caps` is
+    resolved by the pushing store immediately before the call, so an outbox row queued before
+    this client had ever spoken to the server drains under whatever is known AT DRAIN TIME, in
+    both directions. `lifecycle_caps=None` means "not supported / not discovered / discovery
+    failed", and all three land in the same place, which is the old shape - an unknown server
+    is an old server."""
     scrub = _redaction_enabled() if redact_on is None else redact_on
     if scrub:
         content = redact.scrub_text(content)
@@ -151,6 +364,25 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
         bounded = bound_source_files(source_files)
         if bounded:
             args["source_files"] = bounded
+    if _WIRE_LIFECYCLE and lifecycle_caps is not None:
+        if lifecycle_caps.revisions and revision_id:
+            # `revision_id`, snake_case, CONFIRMED against contexer-teams lifecycle merge
+            # f216db9 and reverified on origin/main 0a3111b: `pushDecisionFields` in
+            # `apps/mcp-server/src/tools.ts`, and proved live on both write tools. This was the
+            # weakest of the three guesses and the counter-evidence is
+            # still real - `asubmit_team_decision` below spells the same CONCEPT `"revisionId"`
+            # (camelCase) at its own tool's top level - so the two spellings are not a typo to
+            # tidy up: that is a different tool's field, and the push fields are snake_case
+            # deliberately, because they are THIS serializer's shape.
+            args["revision_id"] = revision_id
+        if lifecycle_caps.tombstones and lifecycle:
+            # `lifecycle`, CONFIRMED the same way, same server commit. The record's own seven keys
+            # are pinned byte-for-byte by `tests/fixtures/lifecycle-contract.v1.json`, which is a
+            # copy of the server repo's fixture rather than a second reading of it.
+            events = bound_lifecycle(lifecycle, reasons=lifecycle_caps.retirement_reasons,
+                                     redact_on=scrub)
+            if events:   # an all-unknown-kind list omits the key, never sends []
+                args["lifecycle"] = events
     return args
 
 
@@ -168,6 +400,14 @@ def _reconciliation_wire_body(*, type: str, content: str, repo: str | None = Non
         type=type, content=content, repo=repo, rationale=rationale, agent=agent,
         confidence=confidence, evidence=evidence, source=source, title=title,
         source_files=source_files, redact_on=redact_on)
+
+
+def _caps_version(raw: dict) -> int:
+    """A capability block's advertised version, 0 when it is missing or unparseable."""
+    try:
+        return int(raw.get("version", 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 class RemoteStoreError(Exception):
@@ -227,6 +467,9 @@ class RemoteDecision:
     team_id: str | None = None
     team_name: str | None = None
     reconciliation: dict | None = None
+    # Author-scoped exact-lineage signal from Teams. It changes presentation only: never a local
+    # lifecycle event, proposal, suppression, or Guard input.
+    source_retired: bool = False
 
 
 @dataclass(frozen=True)
@@ -266,8 +509,27 @@ class DecisionReconciliationCapabilities:
 
 
 @dataclass(frozen=True)
+class DecisionLifecycleCapabilities:
+    """What an advertising server accepts of a decision's lifecycle (plan E1).
+
+    The three flags are INDEPENDENT and are read independently at the wire: `revisions` gates
+    the immutable revision identity, `tombstones` gates the completed lifecycle records, and
+    `retirementReasons` gates only the human prose inside those records. Treating the block as
+    all-or-nothing would mean a server that accepts events but not reasons receives neither,
+    which is strictly less than it asked for."""
+
+    version: int
+    revisions: bool
+    tombstones: bool
+    retirement_reasons: bool
+
+
+@dataclass(frozen=True)
 class ServerCapabilities:
     decision_reconciliation: DecisionReconciliationCapabilities | None
+    # Defaulted so every existing construction site (tests, share.py's fallbacks) keeps working
+    # and lands on "not advertised" - which is the same place discovery failure lands.
+    decision_lifecycle: DecisionLifecycleCapabilities | None = None
 
 
 @dataclass(frozen=True)
@@ -301,6 +563,9 @@ class TeamSubmissionResult:
     team: RemoteTeam
 
 
+_UNDISCOVERED = object()   # "we have not asked this server yet", as opposed to "it said no"
+
+
 class RemoteStore:
     """MCP client to the Teams sync endpoint. Construct directly or via ``from_profile``."""
 
@@ -312,6 +577,14 @@ class RemoteStore:
         # Carried only when built via from_profile - the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
+        # _UNDISCOVERED, or a DecisionLifecycleCapabilities, or None - and None is a REAL answer
+        # here ("this server does not do lifecycle"), which is why the sentinel exists at all:
+        # without it a not-advertising server would be re-probed on every push.
+        self._lifecycle_caps = _UNDISCOVERED
+        # Lifecycle deltas this store could not deliver, one row per decision, refilled at the
+        # start of every push call. The BASE decision synced; the optional half did not, and the
+        # caller must record it as still pending rather than reporting the decision fully synced.
+        self.lifecycle_blocked: list[dict] = []
 
     @classmethod
     def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
@@ -349,15 +622,97 @@ class RemoteStore:
                              confidence: int | None = None, evidence: list[str] | None = None,
                              source: str | None = None, decision_id: str | None = None,
                              title: str | None = None,
-                             source_files: list[str] | None = None) -> str:
-        """Async core of :meth:`push_decision`. Awaits the transport (cancellable)."""
-        result = await self._ainvoke("push_decision", _wire_args(
-            type=type, content=content, repo=repo, rationale=rationale, agent=agent,
-            confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title, source_files=source_files, redact_on=self._redact_on()))
+                             source_files: list[str] | None = None,
+                             revision_id: str | None = None,
+                             lifecycle: list | None = None) -> str:
+        """Async core of :meth:`push_decision`. Awaits the transport (cancellable).
+
+        Carries the OPTIONAL-PROTOCOL FALLBACK: a server that advertised `decisionLifecycle` and
+        then refuses the augmented payload gets exactly ONE retry with the base decision alone.
+        The base decision is the thing the developer asked to sync, and losing it because an
+        optional field was mis-negotiated is the failure this whole gate exists to prevent.
+
+        The RETRY IS THE DISCRIMINATOR. `_lifecycle_fallback_eligible` rules out the failures that
+        are definitely not about the payload (auth, unreachable, capacity); everything else is
+        merely a candidate, and only the base push actually SUCCEEDING proves the optional fields
+        were the problem. If the retry fails too, the ORIGINAL error is raised - the failure was
+        unrelated, nothing is recorded as lifecycle-blocked, and the capability is left alone.
+        That is what lets this work against a server whose rejection message names no field."""
+        self.lifecycle_blocked = []
+        caps = await self._alifecycle_caps(
+            [{"lifecycle": lifecycle, "revision_id": revision_id}])
+
+        def _args(for_caps):
+            return _wire_args(
+                type=type, content=content, repo=repo, rationale=rationale, agent=agent,
+                confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
+                title=title, source_files=source_files, redact_on=self._redact_on(),
+                revision_id=revision_id, lifecycle=lifecycle, lifecycle_caps=for_caps)
+
+        args = _args(caps)
+        try:
+            result = await self._ainvoke("push_decision", args)
+        except RemoteStoreError as exc:
+            if not _lifecycle_fallback_eligible(exc, args):
+                raise
+            # Byte-identical to what an old server would have received: the same serializer with
+            # no capability at all, never a hand-stripped copy of the augmented dict.
+            result = await self._ainvoke("push_decision", _args(None))
+            self._note_lifecycle_rejection(decision_id, exc, caps)
         text = _first_text(getattr(result, "content", None))
         match = _SAVED_ID_RE.search(text) if text else None
         return match.group(1) if match else ""
+
+    def _note_lifecycle_rejection(self, decision_id: str | None, exc: Exception,
+                                  caps: "DecisionLifecycleCapabilities | None") -> None:
+        """Record one delivered-base / refused-lifecycle outcome and stop augmenting this store.
+
+        The capability is set to None rather than back to `_UNDISCOVERED`: re-discovering would
+        ask the same server the same question and get the same advertisement, so every later push
+        in this process would re-send the field it just refused. None means "this server does not
+        do lifecycle" for the life of this store, which is the honest reading of an advertisement
+        the server will not honour. A fresh store (next session, next process) re-discovers, so a
+        fixed server is picked up without any explicit reset."""
+        self._lifecycle_caps = None
+        self.lifecycle_blocked.append({
+            "decision_id": decision_id,
+            "reason": str(exc)[:_WIRE_LIFECYCLE_MAX_REASON],
+            "capability": lifecycle_fingerprint(caps),
+        })
+
+    async def advertised_lifecycle_fingerprint(self) -> str:
+        """What this server advertises RIGHT NOW, as a fingerprint - the drain's only question.
+
+        Deliberately a fresh read of the advertisement rather than of `self._lifecycle_caps`,
+        which a rejection deliberately pins at None: a blocked delta must be retried when the
+        SERVER's answer changes, not when this client gives up on it."""
+        try:
+            return lifecycle_fingerprint((await self.aget_capabilities()).decision_lifecycle)
+        except RemoteStoreError:
+            return "unknown"
+
+    def _note_blocked_for_saved(self, rows: list[dict], results: list, exc: Exception,
+                                caps: "DecisionLifecycleCapabilities | None") -> None:
+        """Record a refused lifecycle delta for the rows the legacy retry CONFIRMED it saved.
+
+        The whole partition in one line, and it is the fix for this issue: a `lifecycle_pending`
+        outbox row asserts "the base decision is already synced, only its history is outstanding",
+        so creating one for a row the retry did not save states something untrue about the server
+        and buries the base decision's real failure. Both fallbacks used to mark every
+        lifecycle-carrying row blocked immediately after the retry CALL, before looking at what
+        came back, so a row the retry rejected as `invalid_content` was filed as history-pending
+        for a decision that does not exist remotely.
+
+        Everything not in `results` is deliberately left exactly where the server put it, because
+        each arm already has a correct owner downstream: a `quota_exceeded` skip stays a transient
+        skip, so the caller re-queues an ordinary base-pending row that still carries the complete
+        lifecycle payload; a permanent skip stays permanent and is dropped by the existing
+        skip contract; and a row in neither list is caught by the accounting check at the end of
+        the batch, which fails so the caller's original queued row survives untouched."""
+        saved_ids = {str(r.get("decisionId")) for r in results if r.get("decisionId")}
+        for kw in rows:
+            if str(kw.get("decision_id")) in saved_ids:
+                self._note_lifecycle_rejection(kw.get("decision_id"), exc, caps)
 
     async def apush_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
         """Async core of :meth:`push_decisions`: batch-push many decisions in ONE call, awaiting
@@ -372,13 +727,50 @@ class RemoteStore:
         queued and drops permanent ones. Per-row validation on the server means one bad row is
         skipped, never sinking the batch. Raises RemoteStoreError if the response omits a submitted
         decisionId - an unconfirmed row must not be treated as done, so it stays queued."""
+        self.lifecycle_blocked = []
         redact_on = self._redact_on()  # resolved once for the whole batch (honors this store's profile)
-        result = await self._ainvoke(
-            "push_decisions",
-            {"decisions": [_wire_args(**kw, redact_on=redact_on) for kw in kwargs_list]})
+        caps = await self._alifecycle_caps(kwargs_list)  # one discovery for the whole batch
+
+        def _batch(rows, for_caps):
+            return {"decisions": [_wire_args(**kw, redact_on=redact_on, lifecycle_caps=for_caps)
+                                  for kw in rows]}
+
+        args = _batch(kwargs_list, caps)
+        try:
+            result = await self._ainvoke("push_decisions", args)
+        except RemoteStoreError as exc:
+            # The whole-call form of the singular fallback: a batch schema that rejects the
+            # optional fields sinks every row atomically, so the same one-retry-as-legacy rule
+            # applies, judged the same way (the retry succeeding is the proof).
+            carried = [kw for kw in kwargs_list
+                       if kw.get("lifecycle") or kw.get("revision_id")]
+            if not carried or not _lifecycle_fallback_eligible(exc, {"lifecycle": True}):
+                raise
+            result = await self._ainvoke("push_decisions", _batch(kwargs_list, None))
+            legacy = getattr(result, "structuredContent", None) or {}
+            self._note_blocked_for_saved(carried, legacy.get("results") or [], exc, caps)
         structured = getattr(result, "structuredContent", None) or {}
         results = structured.get("results") or []
         skipped_rows = structured.get("skipped") or []
+        # PER-ROW form of the same fallback. The server rejects only the offending decision
+        # (`invalid_lifecycle`) instead of the call, so those rows are re-pushed once as legacy
+        # and their deltas recorded as blocked. Left in `skipped` they would be read as a
+        # PERMANENT rejection and dropped - discarding a base decision that was never invalid.
+        # A `lifecycle_conflict` row is deliberately NOT collected here: the server refused the
+        # whole row on purpose, so it falls through untouched to the permanent-skip contract below.
+        rejected_ids = {str(r.get("decisionId")) for r in skipped_rows
+                        if r.get("reason") == LIFECYCLE_SKIP_REASON and r.get("decisionId")}
+        if rejected_ids:
+            retry_rows = [kw for kw in kwargs_list if kw.get("decision_id") in rejected_ids]
+            retried = await self._ainvoke("push_decisions", _batch(retry_rows, None))
+            again = getattr(retried, "structuredContent", None) or {}
+            # Blocked only for what the retry CONFIRMED it saved - the same partition the
+            # whole-call arm applies, and for the same reason.
+            self._note_blocked_for_saved(retry_rows, again.get("results") or [],
+                                         RemoteStoreError(LIFECYCLE_SKIP_REASON), caps)
+            results = [*results, *(again.get("results") or [])]
+            skipped_rows = [r for r in skipped_rows if r.get("reason") != LIFECYCLE_SKIP_REASON]
+            skipped_rows = [*skipped_rows, *(again.get("skipped") or [])]
         saved = [str(r.get("id", "")) for r in results]
         skipped = [{"decision_id": str(r.get("decisionId")), "reason": r.get("reason", "invalid")}
                    for r in skipped_rows if r.get("decisionId")]
@@ -418,6 +810,7 @@ class RemoteStore:
                 team_name=row.get("teamName"),
                 reconciliation=(dict(row["reconciliation"])
                                 if isinstance(row.get("reconciliation"), dict) else None),
+                source_retired=row.get("sourceRetired") is True,
             )
             for row in rows
         ]
@@ -439,22 +832,55 @@ class RemoteStore:
         ]
 
     async def aget_capabilities(self) -> ServerCapabilities:
-        """Discover optional server protocols before creating durable operations."""
+        """Discover optional server protocols before creating durable operations.
+
+        Each block is parsed independently: a server advertising one and not the other must not
+        lose the one it does advertise. An absent or non-dict block is None - never a
+        default-True shape, since an unknown server is an old server."""
         result = await self._ainvoke("get_capabilities", {})
         structured = getattr(result, "structuredContent", None) or {}
-        raw = (structured.get("capabilities") or {}).get("decisionReconciliation")
-        if not isinstance(raw, dict):
-            return ServerCapabilities(decision_reconciliation=None)
-        try:
-            version = int(raw.get("version", 0))
-        except (TypeError, ValueError):
-            version = 0
-        return ServerCapabilities(decision_reconciliation=DecisionReconciliationCapabilities(
-            version=version,
-            atomic_submit=raw.get("atomicSubmit") is True,
-            preview=raw.get("preview") is True,
-            three_way_merge=raw.get("threeWayMerge") is True,
-        ))
+        advertised = structured.get("capabilities") or {}
+        raw = advertised.get("decisionReconciliation")
+        reconciliation = None
+        if isinstance(raw, dict):
+            reconciliation = DecisionReconciliationCapabilities(
+                version=_caps_version(raw),
+                atomic_submit=raw.get("atomicSubmit") is True,
+                preview=raw.get("preview") is True,
+                three_way_merge=raw.get("threeWayMerge") is True,
+            )
+        raw = advertised.get("decisionLifecycle")
+        lifecycle = None
+        if isinstance(raw, dict):
+            lifecycle = DecisionLifecycleCapabilities(
+                version=_caps_version(raw),
+                revisions=raw.get("revisions") is True,
+                tombstones=raw.get("tombstones") is True,
+                retirement_reasons=raw.get("retirementReasons") is True,
+            )
+        return ServerCapabilities(decision_reconciliation=reconciliation,
+                                  decision_lifecycle=lifecycle)
+
+    async def _alifecycle_caps(self, rows: list[dict]) -> DecisionLifecycleCapabilities | None:
+        """The lifecycle capability governing THIS push, discovered lazily and memoized.
+
+        Discovery costs a round trip, so it is skipped entirely unless a row actually carries
+        something the capability would gate - the overwhelmingly common push (a live decision
+        with no lifecycle history) stays exactly as cheap as it was, and with the gate constant
+        closed nothing here ever runs at all.
+
+        Any failure - an old server with no `get_capabilities` tool, a timeout, a rejected
+        token - resolves to None, i.e. the old shape. That direction is the whole rule: a push
+        must never be upgraded by a discovery attempt that did not actually succeed."""
+        if not _WIRE_LIFECYCLE or not any(r.get("lifecycle") or r.get("revision_id")
+                                          for r in rows):
+            return None
+        if self._lifecycle_caps is _UNDISCOVERED:
+            try:
+                self._lifecycle_caps = (await self.aget_capabilities()).decision_lifecycle
+            except RemoteStoreError:
+                self._lifecycle_caps = None
+        return self._lifecycle_caps
 
     async def apreview_decision_reconciliation(
             self, decision_id: str, team_id: str, *, type: str, content: str,
@@ -549,7 +975,9 @@ class RemoteStore:
                       confidence: int | None = None, evidence: list[str] | None = None,
                       source: str | None = None, decision_id: str | None = None,
                       title: str | None = None,
-                      source_files: list[str] | None = None) -> str:
+                      source_files: list[str] | None = None,
+                      revision_id: str | None = None,
+                      lifecycle: list | None = None) -> str:
         """Push one local decision to the caller's personal Teams context (sync shim).
 
         Returns the server decision id (best-effort; ``""`` if the response carries none).
@@ -559,7 +987,8 @@ class RemoteStore:
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title, source_files=source_files)))
+            title=title, source_files=source_files, revision_id=revision_id,
+            lifecycle=lifecycle)))
 
     def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:
         """Batch-push decisions in ONE call (sync shim over :meth:`apush_decisions`). Off-loop
@@ -584,6 +1013,10 @@ class RemoteStore:
 
     def get_capabilities(self) -> ServerCapabilities:
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.aget_capabilities()))
+
+    def lifecycle_capability_fingerprint(self) -> str:
+        return self._run_with_reactive_refresh(
+            lambda: asyncio.run(self.advertised_lifecycle_fingerprint()))
 
     def preview_decision_reconciliation(self, decision_id: str, team_id: str,
                                         **decision) -> DecisionReconciliationPreview:

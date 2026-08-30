@@ -14,25 +14,16 @@ import time
 import pytest
 
 from contexer import guard_engine, revisions, store
+from tests.conftest import _git, _seed_entry, _write
 
 
-# ── fixtures ────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def git_repo(tmp_path, monkeypatch):
-    """A real throwaway git repo, isolated from the developer's global/system git
-    config so commits succeed deterministically regardless of the host machine's
-    setup (mirrors the git_repo fixture pattern in test_store.py's TestInsightCache)."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "guard@test.local"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Guard Test"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
-    return repo
-
+# ── local helpers ───────────────────────────────────────────────────────────
+#
+# `git_repo`, `repo`, `_write`, `_git` and `_seed_entry` live in tests/conftest.py:
+# tests/test_guard_policy_seam.py needs the same five, and reaching into this file for
+# them meant importing a fixture under another name and re-binding it purely to stop
+# ruff reading every `repo` parameter as a redefinition. Shared fixtures belong in
+# conftest; the two helpers with no second reader stay here.
 
 # "café/módulo.py" — built from escapes on purpose: a pasted glyph is invisible
 # in a diff and easy to mangle. Any path outside ASCII is C-quoted by
@@ -40,56 +31,8 @@ def git_repo(tmp_path, monkeypatch):
 _NON_ASCII_REL = "caf\u00e9/m\u00f3dulo.py"
 
 
-def _write(repo, relpath, content):
-    path = repo / relpath
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, bytes):
-        path.write_bytes(content)
-    else:
-        path.write_text(content)
-    return path
-
-
-def _git(repo, *args, check=True):
-    subprocess.run(["git", "-C", str(repo), *args], check=check,
-                    capture_output=True)
-
-
 def _commit(repo, message="init"):
     _git(repo, "commit", "-q", "-m", message)
-
-
-@pytest.fixture
-def repo(git_repo, monkeypatch):
-    """`git_repo` with STORE_DIR redirected to a sibling temp dir — for Task-2 tests
-    that read/write the store or the guard's sidecar files, not just git plumbing.
-    Same pattern as test_store.py's tmp_repo / session_repo_preferred_over_pointer."""
-    monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
-    return git_repo
-
-
-def _seed_entry(repo, content, *, subtype="architecture", created_by="human",
-                 status="approved", source_files=None, global_store=False,
-                 title="", session_id="test-session", approved_by=None):
-    """Build a decision entry via the real entry constructor (so revisions/
-    current_revision_id/status/source all come out shaped exactly like production
-    data) and append it directly to the (repo or global) store — bypassing the
-    novelty filter, which is irrelevant to the guard engine's own tests."""
-    entry = store._new_decision_entry(content, session_id, subtype,
-                                       created_by=created_by, status=status, title=title)
-    if source_files is not None:
-        entry["source_files"] = source_files
-    if approved_by is not None:
-        entry["approved_by"] = approved_by
-    if global_store:
-        data = store.load_global()
-        data["entries"].append(entry)
-        store.save_global(data)
-    else:
-        data = store.load(str(repo))
-        data["entries"].append(entry)
-        store.save(str(repo), data)
-    return entry
 
 
 # ── _staged_files ────────────────────────────────────────────────────────────
@@ -648,12 +591,9 @@ class TestGuardPairs:
         assert len(pairs) == 1
         assert pairs[0]["file"] == "auth/jwt.py"
 
-    def test_anchor_candidates_never_pair_but_pair_after_approval(self, repo):
-        """THE invariant test for issue #175 Task 3: a decision captured without
-        source_files, whose session edited auth/jwt.py, accrues that file only as an
-        `anchor_candidates` guess — never real `source_files` — so it must pair NOTHING
-        with the guard while pending. Only the human's approval blesses the candidate
-        into a real anchor via _anchor_sources, at which point it pairs normally.
+    def test_recent_edit_candidates_never_pair_or_promote_on_plain_approval(self, repo):
+        """A recent-edit sidecar is proximity, not scope. It pairs nothing while pending,
+        and approving only the decision text expires the guess without anchoring it.
 
         created_by="plan" (not the "ai" default) so the entry both lands pending_approval
         (constraint subtype forces approval_required for plan too, same as ai) AND is a
@@ -675,6 +615,21 @@ class TestGuardPairs:
         assert pairs == []
 
         ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        assert ok
+        entry = store.entry_by_id(store.load(str(repo))["entries"], eid)
+        assert not entry.get("source_files")
+        assert "anchor_candidates" not in entry
+        assert guard_engine._guard_pairs(str(repo), ["auth/jwt.py"]) == []
+
+    def test_explicit_file_selection_promotes_and_pairs(self, repo):
+        store.record_edited_file(str(repo), "auth/jwt.py")
+        stored, eid = store.update_decision(
+            str(repo), "Decided to use JWT for auth", "sess-1", "constraint",
+            created_by="plan")
+        assert stored
+
+        ok, _msg = store.approve_decision(
+            str(repo), eid, "approve", source_files=["auth/jwt.py"])
         assert ok
         entry = store.entry_by_id(store.load(str(repo))["entries"], eid)
         assert entry["source_files"] == ["auth/jwt.py"]
@@ -809,7 +764,8 @@ class TestGuardStaged:
         _git(repo, "add", "auth/jwt.py")
         assert guard_engine.guard_staged(str(repo))["advisories"] == []
 
-        ok, _msg = store.approve_decision(str(repo), eid, "approve")
+        ok, _msg = store.approve_decision(
+            str(repo), eid, "approve", source_files=["auth/jwt.py"])
         assert ok
         advisories = guard_engine.guard_staged(str(repo))["advisories"]
         assert len(advisories) == 1
@@ -1108,7 +1064,7 @@ class TestAutoApprovalNeverSetsApprovedByHuman:
 class TestApprovedByStampInvalidatedByNonHumanRevision:
     """`approved_by` is an ENTRY-level stamp, but pattern/convention trivial updates via
     `update_context(replace_id=...)` (and memory-sync refreshes) apply IN PLACE as a new
-    current revision (`revisions.append_revision`) — before this fix the entry kept its 'human' stamp
+    current revision (`revisions.append_revision`) - before this fix the entry kept its 'human' stamp
     while the live content became unreviewed AI/tool text, so the guard trusted (and advised
     with) content the developer never actually saw. `revisions.append_revision` now pops `approved_by`
     whenever the new revision's `source` isn't 'human'; a genuine ratification site
@@ -1170,7 +1126,7 @@ class TestApprovedByStampInvalidatedByNonHumanRevision:
 
     def test_suggested_update_promotion_ordering_pin(self, repo):
         """Ordering pin: `_apply_approval` stamps `approved_by` AFTER `_promote_proposal`
-        (which calls `revisions.append_revision` with the proposal's own source — 'ai' by default,
+        (which calls `revisions.append_revision` with the proposal's own source - 'ai' by default,
         NOT 'human'). If a future change stamped BEFORE promoting again, the chokepoint's
         invalidation would immediately erase the stamp the approval action just set, and
         this assertion would catch it. The promoted revision's own `source` field stays
@@ -2113,82 +2069,6 @@ class TestArmedRulesLifecycle:
         store.approve_decision(str(repo), entry["id"], "ignore")
         after = guard_engine.guard_staged(str(repo))
         assert after["violations"] == []
-
-
-# ── Task 3: _rule_violations ──────────────────────────────────────────────────
-
-class TestRuleViolations:
-    def test_regex_hit_reports_correct_path_and_line(self, repo):
-        entry = _seed_entry(repo, "Never commit TODO markers", title="No TODOs")
-        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
-                                 "paths": "", "message": "no TODOs", "armed_at": "t"}
-        content = "line one\nline two\n# TODO fix\nline four\n"
-        hits = guard_engine._rule_violations([entry], "a.py", content)
-        assert len(hits) == 1
-        assert hits[0]["path"] == "a.py"
-        assert hits[0]["line"] == 3
-        assert hits[0]["decision_id"] == entry["id"]
-        assert hits[0]["title"] == "No TODOs"
-        assert hits[0]["message"] == "no TODOs"
-
-    def test_regex_no_match_no_violation(self, repo):
-        entry = _seed_entry(repo, "Never commit TODO markers")
-        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
-                                 "paths": "", "message": "", "armed_at": "t"}
-        assert guard_engine._rule_violations([entry], "a.py", "nothing to see here\n") == []
-
-    def test_regex_case_insensitive_flag_honored(self, repo):
-        entry = _seed_entry(repo, "Never commit todo markers")
-        entry["guard_check"] = {"type": "regex", "pattern": "todo", "flags": "i",
-                                 "paths": "", "message": "", "armed_at": "t"}
-        hits = guard_engine._rule_violations([entry], "a.py", "# TODO fix\n")
-        assert len(hits) == 1
-
-    def test_paths_glob_filters_out_non_matching_file(self, repo):
-        entry = _seed_entry(repo, "Never commit TODO markers")
-        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
-                                 "paths": "*.md", "message": "", "armed_at": "t"}
-        hits = guard_engine._rule_violations([entry], "a.py", "# TODO fix\n")
-        assert hits == []
-
-    def test_paths_glob_matches_intended_file(self, repo):
-        entry = _seed_entry(repo, "Never commit TODO markers")
-        entry["guard_check"] = {"type": "regex", "pattern": "TODO", "flags": "",
-                                 "paths": "*.py", "message": "", "armed_at": "t"}
-        hits = guard_engine._rule_violations([entry], "a.py", "# TODO fix\n")
-        assert len(hits) == 1
-
-    def test_secret_rule_catches_aws_key(self, repo):
-        entry = _seed_entry(repo, "Never commit secrets")
-        entry["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
-                                 "paths": "", "message": "", "armed_at": "t"}
-        content = "line one\nkey = 'AKIAIOSFODNN7EXAMPLE'\nline three\n"
-        hits = guard_engine._rule_violations([entry], "a.py", content)
-        assert len(hits) == 1
-        assert hits[0]["line"] == 2
-
-    def test_secret_rule_catches_pem_block(self, repo):
-        entry = _seed_entry(repo, "Never commit secrets")
-        entry["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
-                                 "paths": "", "message": "", "armed_at": "t"}
-        pem = (
-            "before\n"
-            "-----BEGIN RSA PRIVATE KEY-----\n"
-            "MIIEpAIBAAKCAQEA1234567890abcdefG\n"
-            "abcdefghijklmnopqrstuvwxyz0123456\n"
-            "-----END RSA PRIVATE KEY-----\n"
-            "after\n"
-        )
-        hits = guard_engine._rule_violations([entry], "a.py", pem)
-        assert len(hits) == 1
-
-    def test_secret_rule_ignores_generic_prose_password(self, repo):
-        entry = _seed_entry(repo, "Never commit secrets")
-        entry["guard_check"] = {"type": "secret", "pattern": "", "flags": "",
-                                 "paths": "", "message": "", "armed_at": "t"}
-        content = 'password = "hunter2-wordy"\n'
-        hits = guard_engine._rule_violations([entry], "a.py", content)
-        assert hits == []
 
 
 # ── Task 3: guard_staged integration (violations) ─────────────────────────────

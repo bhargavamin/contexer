@@ -170,28 +170,23 @@ def resolve_repo(repo_path: str) -> str:
     return resolve_repo_verbose(repo_path)[0]
 
 
-def _hook_repo_verbose(repo_path: str) -> tuple[str, str]:
+def _hook_repo_verbose(repo_path: str, raw: str = "") -> tuple[str, str]:
     """`resolve_repo_verbose` for a HOOK process, with honest labels for its two extra
     signals: `hook-arg` | `hook-cwd` | `session` | `pointer` | `none`.
 
-    A hook never arrives with an empty argument the way an MCP tool call does - the installed
-    shell wrapper runs `git rev-parse --show-toplevel` and passes the result, and
-    `hook_cwd_repo` substitutes the process cwd when that comes back empty. Both therefore
-    reach `resolve_repo_verbose` as a sane ARGUMENT, so a hook could only ever report
-    `argument` - the one label the audit reads as "a caller deliberately named this repo",
-    i.e. exactly the reading that would dismiss a misroute as intentional. Splitting them
-    keeps that word meaning what the audit claims it means, and names the two signals a hook
-    actually has: the shell's git root, and the process cwd."""
-    hooked = hook_cwd_repo(repo_path)
+    Hook commands pass their cwd and host payload, never a shell-computed Git root. The resolver
+    walks parent directories for a `.git` marker without spawning Git, preserving monorepo and
+    linked-worktree roots while keeping prompt/editor hooks within their latency invariant."""
+    hooked = hook_repo_from_stdin(raw, repo_path)
     repo, source = resolve_repo_verbose(hooked)
     if source == "argument":
-        source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
+        source = "hook-payload" if raw else "hook-arg" if (repo_path or "").strip() else "hook-cwd"
     return repo, source
 
-# _canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
-# functools.lru_cache: failures must return uncached (a transient git timeout would
-# otherwise pin the wrong key for the life of the long-lived MCP server), and lru_cache
-# cannot express "cache only on success". A hit is honored ONLY when the path's current
+# canonical_store_key result cache: path -> (gitdir_line, result). A manual dict, NOT
+# functools.lru_cache: failures must return uncached (a partially-written worktree gitfile
+# must not pin the wrong key for the life of the long-lived MCP server). A hit is honored ONLY
+# when the path's current
 # `gitdir:` line still equals the cached one - a worktree path removed and later reused
 # by a DIFFERENT repo's worktree in the same process must not resolve to the former
 # repo's store. Bounded: cleared wholesale past _CANON_CACHE_MAX before the next insert.
@@ -199,7 +194,7 @@ _CANON_CACHE: dict[str, tuple[str, str]] = {}
 _CANON_CACHE_MAX = 256
 
 
-def _canonical_store_key(path: str) -> str:
+def canonical_store_key(path: str) -> str:
     """STORE-KEY canonicalization only: the main-worktree root for a linked-worktree
     path, else `path` unchanged. Linked git worktrees each report their own
     `--show-toplevel`, so without this every worktree got its own store file.
@@ -209,20 +204,19 @@ def _canonical_store_key(path: str) -> str:
       os.path.join("", ".git") would stat `.git` relative to CWD, collapsing the GLOBAL
       store key into the repo store whenever cwd is itself a worktree.
     - Fast path: no regular `.git` FILE at `path` → return unchanged (main repos have a
-      `.git` directory; non-git dirs have nothing). Zero subprocess.
+      `.git` directory; non-git dirs have nothing).
     - The gitfile's `gitdir:` value must contain `/worktrees/` - this excludes
       submodules (`.../.git/modules/<name>`) and `git init --separate-git-dir` repos
-      with zero subprocesses (separate-git-dir is a real false-positive: a gitdir named
+      (separate-git-dir is a real false-positive: a gitdir named
       `.git`, e.g. `--separate-git-dir=/backup/.git`, would mis-key the store to /backup).
-    - One subprocess: `git rev-parse --path-format=absolute --show-toplevel
-      --git-common-dir` (`--path-format=absolute` is required - from a main worktree
-      `--git-common-dir` returns the relative `.git`). If the common dir is `<x>/.git`
-      with an existing, sane `<x>`, the key is `<x>`; else `path` (bare-repo hosts
-      `repo.git` keep per-worktree keys - documented limitation).
-    - Cached ONLY on subprocess success, keyed to the gitfile's current `gitdir:` line:
+    - Resolve the linked worktree's own `commondir` file (normally `../..`) relative to its
+      gitdir. If that points at an existing `<x>/.git` with sane `<x>`, the key is `<x>`;
+      otherwise return `path`. This is the same fact Git reports, without running Git from
+      editor/prompt hooks.
+    - Cached ONLY on a successful file derivation, keyed to the gitfile's current `gitdir:` line:
       the stat + tiny gitfile read run on EVERY call (only actual gitfile paths pay the
       read), so a cache hit is honored only while the path still belongs to the same
-      worktree - a reused path pointing at a different repo re-resolves via subprocess.
+      worktree - a reused path pointing at a different repo re-derives from its metadata.
       A path that became a plain repo (`.git` directory) misses at the isfile check
       regardless of cache state.
     Entirely fail-soft: never raises."""
@@ -246,20 +240,20 @@ def _canonical_store_key(path: str) -> str:
         cached = _CANON_CACHE.get(path)
         if cached is not None and cached[0] == gitdir:
             return cached[1]
-        out = subprocess.run(
-            ["git", "-C", path, "rev-parse", "--path-format=absolute",
-             "--show-toplevel", "--git-common-dir"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if out.returncode != 0:
+        gitdir_path = Path(gitdir)
+        if not gitdir_path.is_absolute():
+            gitdir_path = Path(path, gitdir_path)
+        try:
+            common_value = (gitdir_path / "commondir").read_text(
+                encoding="utf-8", errors="replace").splitlines()[0].strip()
+        except (OSError, IndexError):
             return path
-        lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
-        if len(lines) != 2:
+        if not common_value:
             return path
-        common_dir = lines[1]
+        common_dir = Path(os.path.realpath(gitdir_path / common_value))
         result = path
-        if os.path.basename(common_dir) == ".git":
-            parent = os.path.dirname(common_dir)
+        if common_dir.name == ".git" and common_dir.is_dir():
+            parent = str(common_dir.parent)
             if os.path.isdir(parent) and is_sane_repo(parent):
                 result = parent
         if len(_CANON_CACHE) > _CANON_CACHE_MAX:
@@ -281,7 +275,7 @@ def _legacy_slug(repo_path: str) -> str:
     # `/a/my repo` all collapsed to the same file. Retained only to migrate old stores.
     # Canonicalizes identically to repo_slug - otherwise the pre-hash migration compare in
     # _store_path and console_api._resolve_store's reverse mapping go inconsistent.
-    return _legacy_raw_slug(_canonical_store_key(repo_path))
+    return _legacy_raw_slug(canonical_store_key(repo_path))
 
 
 def _raw_slug(repo_path: str) -> str:
@@ -297,7 +291,7 @@ def repo_slug(repo_path: str) -> str:
     # readable base (a `.`/space vs a literal `_`) no longer share one store file.
     # The path is canonicalized first so every worktree of a repo shares the main
     # worktree's store (and every slug-keyed sidecar: lock, .deleted, flags, indexes).
-    return _raw_slug(_canonical_store_key(repo_path))
+    return _raw_slug(canonical_store_key(repo_path))
 
 
 def _store_path(repo_path: str) -> Path:
@@ -374,7 +368,7 @@ def save(repo_path: str, data: dict) -> None:
     # Record the CANONICAL repo path so a store written from any linked worktree stops
     # flip-flopping its recorded path between last-writer worktrees. (The global store
     # never routes through here - save_global writes it directly.)
-    data["repo_path"] = _canonical_store_key(data.get("repo_path") or repo_path)
+    data["repo_path"] = canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
     atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
     # The retrieval index is a disposable sidecar maintained ONLY here - every store
@@ -442,7 +436,7 @@ def _global_path() -> Path:
 def _read_global() -> tuple[dict, str | None]:
     """(global store data, parse error) from ONE read of `_global.json`.
 
-    The same degrade-but-report split `console_api._read_store` and `_read_deleted` carry: the
+    The same degrade-but-report split `console_api._read_store` and `read_deleted` carry: the
     data is an empty store when the file cannot be parsed, and `error` is the ONLY thing that
     tells "no global rules" from "the global file is unreadable". A missing file is a genuinely
     empty store, so it reports no error. Every WRITER must check it - this file holds one
@@ -717,6 +711,43 @@ def _near_misses(content: str, existing: list) -> list[str]:
     return out
 
 
+def similar_decisions(entry: dict, decisions: list, limit: int = _NEAR_MISS_CAP) -> list[dict]:
+    """The live decisions a reviewer should read BEFORE approving `entry`: same grey band as
+    `_near_misses` (0.25 <= overlap < 0.7), as structured rows rather than ack strings.
+
+    PURE - it takes the already-loaded decisions rather than reading the store, because its
+    caller (`review_impact`) renders a whole queue and a per-entry `load` would be one whole-file
+    parse per rendered decision. The band constant is shared with `_near_misses` on purpose:
+    "close enough that a human should look, not close enough for the dedup to act" is one
+    judgment, and two spellings of it would drift.
+
+    `conflict` is `conflicts.has_open_conflict`, the same gate the render sites use - a similar
+    decision that is itself carrying an unreviewed update is the case where approving this one
+    silently creates a third version of the same rule.
+    """
+    from contexer import conflicts        # function-level: same cycle rule as matches_query
+    tokens = _tokenize(revisions.current_content(entry))
+    if not tokens:
+        return []
+    mine = str(entry.get("id") or "")
+    scored = []
+    for other in decisions:
+        if str(other.get("id") or "") == mine or other.get("type") != "decision":
+            continue
+        if entry_status(other) == "ignored":
+            continue
+        ratio = _overlap_ratio(tokens, _tokenize(revisions.current_content(other)))
+        if _NEAR_MISS_FLOOR <= ratio < 0.7:
+            scored.append((ratio, other))
+    scored.sort(key=lambda t: (-t[0], str(t[1].get("id") or "")))
+    return [{"id": str(e.get("id") or ""),
+             "title": e.get("title") or revisions.derive_title(revisions.current_content(e)),
+             "status": entry_status(e),
+             "overlap": round(ratio, 2),
+             "conflict": conflicts.has_open_conflict(e)}
+            for ratio, e in scored[:limit]]
+
+
 def _is_storable(content: str) -> bool:
     """Content needs at least one real token to be a storable decision. Punctuation-
     or whitespace-only content is rejected - this preserves the pre-refactor behavior
@@ -764,11 +795,14 @@ def title_and_body(entry: dict, content: str | None = None) -> tuple[str, str | 
 _BODY_CLIP = 400  # human review surfaces only - model-facing retrieval keeps full content
 
 
-def _clip_body(body: str, limit: int = _BODY_CLIP) -> str:
+def clip_body(body: str, limit: int = _BODY_CLIP) -> str:
     """Clip a decision body for HUMAN surfaces (review lists, share previews) at a word
     boundary, marking how much was elided. The developer signs off on the title + first
     sentences; the full text stays one step away (contexer ui / get_context). Model-facing
-    renders never clip - the AI needs the full reasoning."""
+    renders never clip - the AI needs the full reasoning.
+
+    Public because it has TWO reader modules (`lifecycle`'s proposal blocks and
+    `review_impact`'s evidence rows), which Rule 2 makes an interface rather than coupling."""
     if len(body) <= limit:
         return body
     cut = body.rfind(" ", 0, limit)
@@ -920,21 +954,67 @@ def _session_set(match: dict) -> set[str]:
     return sessions
 
 
-def _record_recurrence(match: dict, session_id: str = "") -> None:
-    """Record another near-duplicate hit on a matched entry: bump occurrence_count and
-    track the distinct session that produced it.
+MAX_RECURRENCES = 20            # bounded history; the counts above it stay exact
+
+
+def _append_recurrence(match: dict, session_id: str, source: str, match_kind: str,
+                       overlap: float) -> None:
+    """Append (or bump) one row of a matched entry's bounded recurrence history.
+
+    ONE row per (decision, session, match kind), with an in-session `count` rather than a row
+    per prompt: the constraint hook fires on EVERY prompt, so a developer who restates a rule
+    six times in one session must not push five older sessions out of a 20-row window. The
+    rows a reviewer actually needs are the distinct sessions; how loudly one session said it is
+    the count.
+
+    Rebuilt from a filtered copy rather than appended to in place, and every field is coerced,
+    because this is bookkeeping: a hand-edited store must never be the thing that breaks a
+    write. The list is capped at `MAX_RECURRENCES`, oldest first out - `occurrence_count` and
+    `session_ids` stay exact, so nothing is LOST by the cap, only the per-hit detail.
+    """
+    history = [row for row in (match.get("recurrences") or []) if isinstance(row, dict)]
+    key = (str(session_id), str(match_kind))
+    now = datetime.now(timezone.utc).isoformat()
+    for row in history:
+        if (str(row.get("session_id") or ""), str(row.get("match_kind") or "")) == key:
+            row["count"] = int(row.get("count") or 1) + 1
+            row["occurred_at"] = now
+            if source:
+                row["source"] = source
+            match["recurrences"] = history[-MAX_RECURRENCES:]
+            return
+    history.append({"occurred_at": now, "session_id": str(session_id),
+                    "source": str(source), "match_kind": str(match_kind),
+                    "overlap": round(float(overlap or 0.0), 2), "count": 1})
+    match["recurrences"] = history[-MAX_RECURRENCES:]
+
+
+def _record_recurrence(match: dict, session_id: str = "", *, source: str = "",
+                       match_kind: str = "overlap", overlap: float = 0.0) -> None:
+    """Record another near-duplicate hit on a matched entry: bump occurrence_count, track the
+    distinct session that produced it, and append a bounded history row saying how the match
+    was made.
 
     The count drives display ranking, eviction protection, and the ×N confidence marker
     - it does NOT change the entry's subtype. A decision's category (architecture,
     pattern, constraint, convention) is a semantic judgment made when it is captured,
     never inferred from how often the same text recurs. Recurrence measures repetition,
     not reuse-across-different-problems, so it cannot tell a genuine pattern from a
-    one-off decision that simply got restated."""
+    one-off decision that simply got restated.
+
+    Neither does it touch confidence or approval status: a rule repeated a hundred times is
+    still a rule a human has or has not approved, and letting repetition promote it would make
+    a chatty session an approval mechanism.
+
+    Callers hold the store lock already - this only mutates the loaded entry, exactly as it
+    always did, so the history lands in the same save.
+    """
     match["occurrence_count"] = match.get("occurrence_count", 1) + 1
     sessions = _session_set(match)
     if session_id:
         sessions.add(session_id)
     match["session_ids"] = sorted(sessions)
+    _append_recurrence(match, session_id, source, match_kind, overlap)
 
 
 def _keep_top(items: list, limit: int, pin_last: bool = False) -> list:
@@ -1069,6 +1149,8 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
 # al+w(?:ay|ya)s catches "always", "allways" (double-l), "alwyas" (transposition).
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
+    r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
+    r"|"
     r"al+w(?:ay|ya)s"               # always + common typos: allways, alwyas
     r"|never"                        # never
     r"|must\s+(?:always|never)"      # must always / must never
@@ -1238,7 +1320,336 @@ _MAX_DIRECTIVE_LEN = 300
 _SYSTEM_TEXT_PREFIXES = (
     "<task-notification", "<system-reminder", "<persisted-output",
     "[contexer", "contexer:",
+    # Claude Code's usage-limit-reset notice arrives as UNTAGGED user-turn text, and its
+    # "do not repeat work" clause is a full prohibition trigger - it was auto-captured as
+    # a trusted constraint on every limit reset (twice on one real machine), and retiring
+    # it re-opened a reconsideration on the next reset. The prefix stops before "has
+    # reset" so a rewording of the tail still matches; no genuine user directive starts
+    # with this harness-owned sentence.
+    "your claude.ai usage limit",
 )
+
+# Prescriptive words quoted inside recognizable output/document containers are observations,
+# not clean user directives. This is deliberately SHAPE-based and anchored: an ordinary prompt
+# may discuss logs, changelogs or README files without becoming output itself. A suspicious row
+# rejected here can still be recorded by the evidence pipeline through an explicit agent report;
+# what it cannot do is bypass review as a human-stated standing rule.
+_NON_DIRECTIVE_CONTAINER = re.compile(
+    r"^\s*(?:"
+    r">\s+"                                      # Markdown blockquote
+    r"|\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\]\s+"
+    r"(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b"
+    r"|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?\s+(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b"
+    r"|File\s+[\"'][^\"']+[\"'],\s+line\s+\d+\b"  # Python traceback frame
+    r"|\[?(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\]?(?:\s|:)"
+    r"|pytest(?:\s+output)?\s*:"                 # labelled pytest output
+    r"|[EF]\s{3,}(?:[A-Za-z_][\w.]*(?:Error|Exception)|AssertionError)\s*:"
+    r"|FAILED\s+\S+::\S+\s+-\s+"
+    r"|[A-Za-z_][\w.]*(?:Error|Exception):\s+"   # traceback exception tail
+    r"|(?:[^:\n]+[/\\])?[^:\n]+:\d+:\s+"      # grep -n / ripgrep row
+    r"|[-*]\s+(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)"
+    r"(?:\([^)]+\))?!?:"                         # Conventional Commit changelog row
+    r"|\+(?:\s|\S)"                             # lifted added diff content line
+    r"|-(?:\t|\s{2,}|\S)"                      # lifted removed line; '- rule' stays a bullet
+    r"|(?:(?:log|test|console|terminal|command|tool|shell)(?:\s+output)?|output|stdout|stderr|"
+    r"console)\s*(?::|[>|]|[\u2013\u2014-])"
+    # Speaker/role labels quote somebody else's words; the hook cannot authenticate the label.
+    # Explicit developer-owned wrappers remain eligible (`Rule:`, `Constraint:`, `Decision:`...).
+    r"|(?:(?:our|the)\s+)?(?:assistant|system|user|tool|claude|copilot|lead|manager|developer|"
+    r"maintainer|reviewer|owner|architect|speaker\s+\d+)\s*"
+    r"(?::|[>|]|[\u2013\u2014]|\s+-\s+)\s*"
+    r"(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|from\s+now\s+on\b|"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))"
+    r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
+    r"|(?:the\s+)?(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
+    r"\s+(?:says?|said|states?|reads)\b"
+    r"|(?:as\s+)?(?:the\s+|our\s+)?(?:README|documentation|docs?|release\s+notes?|"
+    r"issues?|changelog|log|output|CI\s+(?:error|output)|lead|manager|developer|maintainer|"
+    r"reviewer|(?!I\b)[A-Z][A-Za-z.'-]*)\s+"
+    r"(?:says?|said|states?|stated|writes?|wrote|recommends?|recommended|"
+    r"tells?(?:\s+(?:me|us|you))?\s+to|told(?:\s+(?:me|us|you))?\s+to)\s*[:,]?[ \t]+"
+    r"(?:(?:that\s+)?(?:we|you|they|I)\s+|that\s+)?"
+    r"(?=(?:always|never|must\b|do\s+not\b|don['’]t\b|from\s+now\s+on\b|"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))"
+    r"|[A-Z][A-Za-z .'-]{0,40}\s+(?:says?|said|states?|stated|writes?|wrote|"
+    r"recommends?|recommended|tells?|told)\s*,?\s*[\"“]"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_CONTAINER_HEADER = re.compile(
+    r"^(?P<header>.{1,120}?)(?P<delimiter>:|[>|]|[\u2013\u2014-])\s*$")
+_OUTPUT_HEADER_MARKER = re.compile(
+    r"\b(?:output|results?|response|transcript)\b", re.IGNORECASE)
+_STANDALONE_OUTPUT_HEADER = re.compile(
+    r"(?:[a-z0-9_.\u2019'/-]+\s+){0,5}(?:output|results?|response|transcript)"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|"
+    r"(?:from|/)\s*[a-z0-9_. -]{1,40}))?",
+    re.IGNORECASE,
+)
+_BARE_OUTPUT_HEADER = re.compile(
+    r"(?:log|test|console|terminal|command|tool|shell|stdout|stderr)"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. -]{1,40}))?",
+    re.IGNORECASE,
+)
+_SPEAKER_HEADER = re.compile(
+    r"(?:(?:our|the)\s+)?(?:assistant|system|user|tool|claude|copilot|lead|manager|developer|"
+    r"maintainer|reviewer|owner|architect|speaker\s+\d+)"
+    r"(?:\s+message)?"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. -]{1,40}))?",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_SPEAKER_HEADER = re.compile(
+    r"[a-z][a-z0-9_.\u2019'-]*(?:\s+[a-z0-9_.\u2019'-]+){0,2}"
+    r"(?:\s*(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. '-]{1,40}))?",
+    re.IGNORECASE,
+)
+_STANDALONE_ATTRIBUTION_HEADER = re.compile(
+    r"[a-z][a-z0-9_.\u2019'-]*(?:\s+[a-z][a-z0-9_.\u2019'-]*){0,3}"
+    r"(?:\s*\([^()\n]{1,40}\))?\s+"
+    r"(?:\d{1,2}:\d{2}(?:\s*[ap]m)?|\u00b7\s*today\s+at\s+\d{1,2}:\d{2}|"
+    r"(?:wrote|commented)(?:\s+\d+\s+hours?\s+ago)?|app\s+\d{1,2}:\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _container_header_text(label: str) -> str:
+    """Bounded text before a terminal transcript-label delimiter, or ``""``."""
+    match = _CONTAINER_HEADER.fullmatch(label.strip())
+    return match.group("header").strip() if match else ""
+
+
+def _normalized_container_label(label: str) -> str:
+    """Drop bounded Markdown/YAML wrapper syntax without touching the label's words."""
+    value = label.strip()
+    value = re.sub(r"^#{1,6}\s+", "", value)
+    value = re.sub(r"^[-*]\s+", "", value)
+    return value
+
+
+def _is_output_container_label(label: str) -> bool:
+    label = _normalized_container_label(label)
+    header = _container_header_text(label)
+    if header:
+        return bool(_OUTPUT_HEADER_MARKER.search(header)
+                    or _BARE_OUTPUT_HEADER.fullmatch(header))
+    standalone = label.strip()
+    return bool(len(standalone) <= 120 and (
+        _STANDALONE_OUTPUT_HEADER.fullmatch(standalone)
+        or _BARE_OUTPUT_HEADER.fullmatch(standalone)))
+
+
+def _is_speaker_container_label(label: str) -> bool:
+    label = _normalized_container_label(label)
+    header = _container_header_text(label)
+    if header and _SPEAKER_HEADER.fullmatch(header):
+        return True
+    standalone = label.strip()
+    if _SPEAKER_HEADER.fullmatch(standalone):
+        return True
+    wrapped = re.fullmatch(
+        r"(?:<\s*([^>]{1,60})\s*>|\[\s*([^\]]{1,60})\s*\])", standalone)
+    if wrapped and _SPEAKER_HEADER.fullmatch(wrapped.group(1) or wrapped.group(2)):
+        return True
+    chatml = re.fullmatch(r"<\|\s*([^|]{1,60})\s*\|>", standalone)
+    if chatml and _SPEAKER_HEADER.fullmatch(chatml.group(1).strip()):
+        return True
+    assigned = re.fullmatch(
+        r"role\s*[:=]\s*(['\"]?)(.{1,60}?)\1", standalone, re.IGNORECASE)
+    return bool(assigned and _SPEAKER_HEADER.fullmatch(assigned.group(2).strip()))
+
+
+def _is_ambiguous_speaker_container_label(label: str) -> bool:
+    """An unknown attributed voice: buffer for review unless clear user authority resumes."""
+    normalized = _normalized_container_label(label)
+    if len(normalized) <= 120 and _STANDALONE_ATTRIBUTION_HEADER.fullmatch(normalized):
+        return True
+    header = _container_header_text(normalized)
+    if not header or not _AMBIGUOUS_SPEAKER_HEADER.fullmatch(header) \
+            or _CLEAR_SCOPE_LABEL.search(header) \
+            or _EXPLICIT_AUTHORITY_LABEL.search(header) \
+            or _EXPLICIT_AUTHORITY_RESET.match(header):
+        return False
+    base = re.split(r"\s*(?:\(|\[|/)\s*", header, maxsplit=1)[0].strip()
+    words = base.split()
+    # Unknown one-token labels (`Alice`/`alice`) and conventional proper names are
+    # attribution-shaped. Ordinary prose wrappers such as `I got this:` are not.
+    return len(words) == 1 or all(word[:1].isupper() for word in words)
+_EXPLICIT_AUTHORITY_RESET = re.compile(
+    r"(?:from\s+now\s+on|going\s+forward|I(?:'m|\s+am)\s+(?:telling|asking)\s+you\s+to)\b",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_LABELLED_DIRECTIVE = re.compile(
+    r"^[a-z][a-z0-9_.\u2019'-]*(?:\s+[a-z0-9_.\u2019'-]+){0,2}\s*"
+    r"(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. '-]{1,40})?\s*"
+    r"(?::|[>|]|[\u2013\u2014]|\s+-\s+)\s*"
+    r"(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|from\s+now\s+on\b|"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_STANDALONE_ATTRIBUTION = re.compile(
+    _STANDALONE_ATTRIBUTION_HEADER.pattern
+    + r"\s*\n\s*(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|"
+      r"from\s+now\s+on\b|going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CLEAR_SCOPE_LABEL = re.compile(
+    r"^(?:(?:for|in|when)\b|dependencies\b|testing\b|ci\b|database\b|frontend\b)",
+    re.IGNORECASE,
+)
+_EXPLICIT_AUTHORITY_LABEL = re.compile(
+    r"^(?:rule|constraint|convention|decision|policy|important|reminder|requirement|"
+    r"store\s+this\s+decision)\b",
+    re.IGNORECASE,
+)
+
+
+def _explicit_correction_tail(line: str) -> str:
+    """Return a developer-voice correction after attributed content, never quoted content.
+
+    Bare adversatives remain part of the reported statement. Only an explicit authority reset
+    ("from now on", "going forward", or "I am telling/asking you") can cross back into the
+    developer's voice, and a reset still inside an open quote is refused.
+    """
+    match = re.search(
+        r"(?:\bbut\b|\bhowever\b)[\s,:-]*"
+        r"(?P<tail>(?:from\s+now\s+on\b|going\s+forward\b|"
+        r"I(?:'m|\s+am)\s+(?:telling|asking)\s+you\s+to\b).*)$",
+        line, flags=re.IGNORECASE)
+    if match is None:
+        return ""
+    prefix = line[:match.start("tail")]
+    if prefix.count('"') % 2 or prefix.count("“") > prefix.count("”"):
+        return ""
+    return re.sub(
+        r"^\s*I(?:'m|\s+am)\s+(?:telling|asking)\s+you\s+to\s+",
+        "", match.group("tail"), flags=re.IGNORECASE).strip()
+
+
+def _directive_candidate_text(text: str) -> str:
+    """Remove recognizable quoted/output lines while preserving clean directive siblings.
+
+    Rejecting a whole mixed prompt because one line was a log hides an explicit directive on
+    the next line. Conversely, storing the original mixed prompt would promote the log as part
+    of the rule. This small line-state parser returns only text eligible for directive capture;
+    indented traceback continuations stay inside the container until an unindented line begins.
+    """
+    raw = str(text or "")
+    if raw.strip().lower().startswith(
+            ("[contexer", "contexer:", "your claude.ai usage limit")):
+        # These injected shapes have no closing delimiter, so there is no sound boundary after
+        # which a line can be attributed back to the developer. Refuse the whole prompt.
+        return ""
+    kept = []
+    after_container = False
+    in_output_container = False
+    ambiguous_container: list[str] | None = None
+    ambiguous_separated = False
+    in_fence = ""
+    in_injected_tag = ""
+    for line in raw.splitlines():
+        if in_fence:
+            close_at = line.find(in_fence)
+            if close_at < 0:
+                continue
+            line = line[close_at + len(in_fence):]
+            in_fence = ""
+            if not line.strip():
+                after_container = True
+                continue
+        fence_hits = [(line.find(marker), marker) for marker in ("```", "~~~")
+                      if line.find(marker) >= 0]
+        if fence_hits:
+            open_at, marker = min(fence_hits)
+            prefix = line[:open_at].strip()
+            if prefix and _CONSTRAINT_TRIGGER.search(prefix):
+                kept.append(prefix)
+            elif not prefix and kept and kept[-1].rstrip().endswith(":") \
+                    and not _CONSTRAINT_TRIGGER.search(kept[-1]):
+                kept.pop()
+            remainder = line[open_at + len(marker):]
+            close_at = remainder.find(marker)
+            if close_at < 0:
+                in_fence = marker
+                after_container = True
+                continue
+            line = remainder[close_at + len(marker):]
+            if not line.strip():
+                after_container = True
+                continue
+        stripped = line.strip()
+        if in_fence:
+            continue
+        lower = stripped.lower()
+        if ambiguous_container is not None:
+            if not stripped:
+                ambiguous_container.append("")
+                ambiguous_separated = True
+                continue
+            if ambiguous_separated and _EXPLICIT_AUTHORITY_RESET.match(stripped):
+                ambiguous_container = None
+                ambiguous_separated = False
+                after_container = False
+                kept.append(line)
+            else:
+                ambiguous_container.append(line)
+            continue
+        if in_output_container:
+            if not stripped:
+                in_output_container = False
+                after_container = True
+                continue
+            # A labelled output block has no reliable indentation contract. Only an explicit
+            # developer-authority reset can end it without a blank separator.
+            if _EXPLICIT_AUTHORITY_RESET.match(stripped):
+                in_output_container = False
+                after_container = False
+                kept.append(line)
+            continue
+        if in_injected_tag:
+            if f"</{in_injected_tag}>" in lower:
+                in_injected_tag = ""
+            continue
+        injected_tag = next((tag for tag in (
+            "system-reminder", "persisted-output", "task-notification")
+            if lower.startswith(f"<{tag}")), "")
+        if injected_tag:
+            if f"</{injected_tag}>" not in lower:
+                in_injected_tag = injected_tag
+            after_container = True
+            continue
+        if lower.startswith(_SYSTEM_TEXT_PREFIXES):
+            after_container = True
+            continue
+        if _is_output_container_label(stripped) or _is_speaker_container_label(stripped):
+            in_output_container = True
+            after_container = True
+            continue
+        if _is_ambiguous_speaker_container_label(stripped):
+            ambiguous_container = [line]
+            ambiguous_separated = False
+            continue
+        if _NON_DIRECTIVE_CONTAINER.search(line):
+            # A quoted statement and the developer's own correction can share one line:
+            # `README says X, but from now on Y`. Keep only the clear adversative clause.
+            tail = _explicit_correction_tail(line)
+            if tail and _CONSTRAINT_TRIGGER.search(tail):
+                kept.append(tail)
+            after_container = True
+            continue
+        if after_container and (not line.strip() or line[:1].isspace()):
+            continue
+        after_container = False
+        kept.append(line)
+    if ambiguous_container is not None:
+        kept.extend(ambiguous_container)
+    return "\n".join(kept)
+
+
+_DIRECTIVE_WRAPPER_ONLY = re.compile(
+    r"^(?:store\s+this\s+decision|from\s+now\s+on|going\s+forward|henceforth|"
+    r"as\s+a\s+rule|rule)\s*[:.!-]?\s*$", re.IGNORECASE)
 
 # Deictic referents point at an object only this conversation can resolve - a strong
 # signal the directive is session-scoped intent, not a standing rule. Still stored
@@ -1253,7 +1664,8 @@ _SYSTEM_TEXT_PREFIXES = (
 # Bare "that" is dropped entirely: relative/complementizer uses ("code that fails",
 # "ensure that X") dominate and are never deictic.
 _DEICTIC_THIS_THESE_THOSE = re.compile(
-    r"\b(?:this|these|those)\b(?!\s+(?:repo|repository|project|codebase)\b)", re.IGNORECASE)
+    r"\b(?:this|these|those)\b"
+    r"(?!\s+(?:repo|repository|project|codebase)\b|\s+decision\s*:)", re.IGNORECASE)
 _DEICTIC_IT = re.compile(r"(?<!make\s)\bit\b(?!\s+a\s+\w)", re.IGNORECASE)
 _DEICTIC_HERE = re.compile(r"\bhere\b(?!\W*$)", re.IGNORECASE)
 # "for now" scopes a directive to the current moment, same conversation-local signal as
@@ -1304,21 +1716,23 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
     Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
     and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
-    t = text.strip()
+    t = _directive_candidate_text(text).strip()
     # Pasted blobs and tool/system-injected text are never clean user directives.
     if not t or len(t) > _MAX_DIRECTIVE_LEN:
+        return False, ""
+    if _DIRECTIVE_WRAPPER_ONLY.fullmatch(t):
         return False, ""
     if t.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in t:
         return False, ""
     if t.endswith("?"):
         return False, ""
-    if _SARCASM_EXCLUDES.search(text.strip()):
+    if _SARCASM_EXCLUDES.search(t):
         return False, ""
-    if not _CONSTRAINT_TRIGGER.search(text):
+    if not _CONSTRAINT_TRIGGER.search(t):
         return False, ""
     # Strip soft conversational prose ("don't worry", "I don't know"); if a broadened
     # prohibition trigger only matched inside that prose, it was not a directive.
-    deprosed = _SOFT_PROSE_EXCLUDE.sub("", text)
+    deprosed = _SOFT_PROSE_EXCLUDE.sub("", t)
     if not _CONSTRAINT_TRIGGER.search(deprosed):
         return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive
@@ -1356,10 +1770,35 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     return True, subtype
 
 
+# Public alias, one definition read from outside: the evidence ledger has to know whether a
+# prompt WAS a directive when capture_user_constraint raised before it could report, and a
+# second copy of this detector in another module would drift from this one. Public rather
+# than read as a private name across the boundary (CLAUDE.md, "Module boundaries" Rule 2).
+is_prescriptive_directive = _is_prescriptive_constraint
+
+
+def _match_overlap(content: str, match: dict) -> float:
+    """The max-denominator overlap between a capture and the entry it matched. Recomputed
+    rather than threaded out of `_find_match`, which answers a yes/no question on a hot path;
+    this runs only once a match already exists."""
+    return _overlap_ratio(_tokenize(content), _tokenize(match.get("content", "")))
+
+
 def capture_user_constraint(
     repo_path: str, prompt: str, session_id: str,
-    near_misses: list | None = None, repo_source: str = "",
+    near_misses: list | None = None, repo_source: str = "", *, source: str = "",
 ) -> tuple[str, str, str] | tuple[None, None, None]:
+    """`capture_user_constraint_with_meta` without the meta - the 3-tuple every existing
+    caller wants, unchanged. See that function for the behaviour."""
+    return capture_user_constraint_with_meta(
+        repo_path, prompt, session_id, near_misses, repo_source, source=source)[:3]
+
+
+def capture_user_constraint_with_meta(
+    repo_path: str, prompt: str, session_id: str,
+    near_misses: list | None = None, repo_source: str = "", *, source: str = "",
+    blocking: bool = True,
+) -> tuple:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
     stored but NOT auto-trusted - it lands pending_approval so the developer can generalize,
@@ -1384,18 +1823,32 @@ def capture_user_constraint(
     matches (see _near_misses) for a brand-new entry - the caller forwards it to
     constraint_ack so the developer can confirm a consolidation.
 
-    Returns (entry_id, sanitized_content, status) if stored, (None, None, None) otherwise.
+    Returns (entry_id, sanitized_content, status, meta) - the first three exactly as
+    `capture_user_constraint` has always returned them, so no existing caller changes.
     `status` is one of "approved" | "pending_approval" | "promoted" | "revision_proposed" |
-    "revision_already_pending" - pass it to constraint_ack() for the matching notice."""
+    "revision_already_pending" - pass it to constraint_ack() for the matching notice.
+
+    `meta` is `{}` except on the SILENT paths, where the 3-tuple is (None, None, None) and a
+    caller has no way to tell "not a directive" from "the developer said this again". A
+    restatement of a live rule now carries `meta["recurrence"]` = the entry it matched, how it
+    matched, and the sanitized content - which is what lets the evidence wrapper spool the
+    repetition (outstanding issue 3) without this path having to know anything about evidence.
+    `source` is the caller's own source category, recorded on the history row for the same
+    reason: only the caller knows which host prompt hook it came from.
+    """
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
-        return None, None, None
-    content = _sanitize_directive(prompt.strip())[:600]
+        return None, None, None, {}
+    content = _sanitize_directive(_directive_candidate_text(prompt).strip())[:600]
     if not _is_storable(content):
-        return None, None, None
+        return None, None, None, {}
     deictic = _is_deictic(content)
-    status = "pending_approval" if deictic else "approved"
-    with store_lock(repo_slug(repo_path)):
+    ambiguous_label = bool(_AMBIGUOUS_STANDALONE_ATTRIBUTION.search(content)) or (
+        bool(_AMBIGUOUS_LABELLED_DIRECTIVE.search(content))
+        and not _CLEAR_SCOPE_LABEL.search(content)
+        and not _EXPLICIT_AUTHORITY_LABEL.search(content))
+    status = "pending_approval" if deictic or ambiguous_label else "approved"
+    with store_lock(repo_slug(repo_path), blocking=blocking):
         data = load(repo_path)
         # 'ignored' entries never block a re-typed rule from landing fresh (Fix 3).
         decisions_only = [e for e in data["entries"]
@@ -1413,17 +1866,30 @@ def capture_user_constraint(
                 match["status"] = "approved"
                 match["approved_at"] = now
                 match["approved_by"] = "human"
-                _record_recurrence(match, session_id)
+                _record_recurrence(match, session_id, source=source,
+                                   overlap=_match_overlap(content, match))
                 save(repo_path, data)
-                return match["id"], revisions.current_content(match), "promoted"
-            return None, None, None
+                return match["id"], revisions.current_content(match), "promoted", {}
+            # The developer restated a rule the store already holds. This used to be a pure
+            # no-op - no write, no record, nothing for anyone downstream to see (outstanding
+            # issue 3). It is now recorded as recurrence HISTORY: the count and the distinct
+            # sessions are the corroboration a reviewer reads, and the meta lets the evidence
+            # wrapper spool the repetition. Still no new entry, no status change, no
+            # confidence change - repetition is not approval.
+            matched = _match_overlap(content, match)
+            _record_recurrence(match, session_id, source=source, overlap=matched)
+            save(repo_path, data)
+            return None, None, None, {"recurrence": {
+                "entry_id": match["id"], "match_kind": "overlap", "content": content,
+                "overlap": round(matched, 2),
+                "occurrence_count": match.get("occurrence_count", 1)}}
         # Containment routing: a superset/subset restatement of a stored rule evades the
         # max-denominator metric above - consolidate onto the first contained entry
         # instead of accumulating a new overlapping one.
         hit = _find_containment(content, decisions_only)
         if hit is not None:
             return _route_containment(repo_path, data, hit, content, subtype,
-                                      deictic, session_id)
+                                      deictic, session_id, source)
         if near_misses is not None:
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
@@ -1436,12 +1902,11 @@ def capture_user_constraint(
             entry["repo_source"] = repo_source
         # Guard anchor accrual (issue #175): a deictic directive lands pending_approval and
         # created_by="human" - the ONE provenance that is guard-TRUSTED the moment it is
-        # approved - so it is the highest-value candidate carrier there is. Same status gate
-        # as update_decision's: only a pending entry can ever see the pending->approved
-        # transition where _apply_approval blesses candidates into a real anchor; a clean
-        # directive is born approved and would just strand them. Same never-guard-input
-        # semantics too: _guard_pairs never reads `anchor_candidates`, and the review surface
-        # renders them as `would anchor:` before the developer signs off.
+        # approved - so its nearby edits must be especially careful not to become authority.
+        # Same status gate as update_decision's: a clean directive is born approved and would
+        # just strand this review-only metadata. `_guard_pairs` never reads
+        # `anchor_candidates`; the review surface labels these sidecar guesses as possible and
+        # plain approval expires them unless the reviewer explicitly selects source_files.
         if status == "pending_approval":
             candidates = _read_edited_files(repo_path)
             if candidates:
@@ -1452,7 +1917,7 @@ def capture_user_constraint(
         # Deliberately does NOT arm the .pending_review flag: the in-band ack (constraint_ack)
         # already notifies the developer, and the SessionStart pending-count pointer covers
         # persistence - a second nudge from this path would double up.
-        return entry["id"], content, status
+        return entry["id"], content, status, {}
 
 
 # ── Proposal-slot policy (who may take a decision's ONE unreviewed Suggested Update slot)
@@ -1463,9 +1928,11 @@ def capture_user_constraint(
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
-                       deictic: bool, session_id: str) -> tuple:
+                       deictic: bool, session_id: str, source: str = "") -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
-    Called under the store lock; saves and returns the capture 3-tuple. Never creates a
+    Called under the store lock; saves and returns the capture 4-tuple (see
+    capture_user_constraint_with_meta - the recurrence branches carry the meta that lets a
+    repetition be spooled as evidence). Never creates a
     new entry, and never silently replaces a trusted rule's current revision.
 
     New content LONGER (the observed bug - superset restatement):
@@ -1490,10 +1957,18 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
     pending = entry_status(hit) == "pending_approval"
     pending_twin = pending and hit.get("created_by") == "human"
 
-    def _recur_silently():
-        _record_recurrence(hit, session_id)
+    contained = _containment_ratio(_tokenize(content), _tokenize(hit.get("content", "")))
+
+    def _recurred():
+        """Silent to the caller, but no longer silent in the record: the same bounded
+        history a plain overlap duplicate gets, tagged as the containment match it was."""
+        _record_recurrence(hit, session_id, source=source, match_kind="containment",
+                           overlap=contained)
         save(repo_path, data)
-        return None, None, None
+        return None, None, None, {"recurrence": {
+            "entry_id": hit["id"], "match_kind": "containment", "content": content,
+            "overlap": round(contained, 2),
+            "occurrence_count": hit.get("occurrence_count", 1)}}
 
     if longer:
         if pending_twin:
@@ -1504,18 +1979,20 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
                     rev["content"] = revisions.normalize_content(content)
                 revisions.sync_decision_cache(hit)
                 hit["updated_at"] = now
-                _record_recurrence(hit, session_id)
+                _record_recurrence(hit, session_id, source=source,
+                                   match_kind="containment", overlap=contained)
                 save(repo_path, data)
-                return hit["id"], revisions.current_content(hit), "pending_approval"
+                return hit["id"], revisions.current_content(hit), "pending_approval", {}
             revisions.append_revision(hit, content, source="human", approved_at=now)
             hit["status"] = "approved"
             hit["approved_at"] = now
             hit["approved_by"] = "human"
-            _record_recurrence(hit, session_id)
+            _record_recurrence(hit, session_id, source=source,
+                               match_kind="containment", overlap=contained)
             save(repo_path, data)
-            return hit["id"], revisions.current_content(hit), "promoted"
+            return hit["id"], revisions.current_content(hit), "promoted", {}
         if pending:
-            return _recur_silently()  # never propose on an unreviewed base
+            return _recurred()  # never propose on an unreviewed base
         norm = revisions.normalize_content(content)
         prop = hit.get("proposed_revision")
         displaced = False
@@ -1528,7 +2005,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             # Equal-or-higher trust keeps the refusal: never clobber it (it would vanish
             # unreviewed); surface the new phrasing to the developer instead.
             if not review.outranks_proposal("human", prop):
-                return hit["id"], norm, "revision_already_pending"
+                return hit["id"], norm, "revision_already_pending", {}
             # Displaced, not discarded - same archival shape as edit_decision's dropped
             # proposal, so the timeline can still show what was suggested.
             hit.setdefault("superseded_proposals", []).append({**prop, "superseded_at": now})
@@ -1544,8 +2021,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             # proposal is heavier - something already awaiting review just changed - so that
             # one arms the deterministic nudge too.
             if displaced:
-                _touch_pending_review(repo_path)
-        return hit["id"], norm, "revision_proposed"
+                touch_pending_review(repo_path)
+        return hit["id"], norm, "revision_proposed", {}
 
     if pending_twin and not deictic:
         # Terse clean restatement is the activation gesture: bless revision 1 in place,
@@ -1554,7 +2031,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
         hit["status"] = "approved"
         hit["approved_at"] = now
         hit["approved_by"] = "human"
-        _record_recurrence(hit, session_id)
+        _record_recurrence(hit, session_id, source=source,
+                           match_kind="containment", overlap=contained)
         if cur is not None:
             cur["approved_at"] = now
             score, factors = revisions.compute_confidence(hit)
@@ -1562,8 +2040,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             cur["evidence"] = factors
         revisions.sync_decision_cache(hit)
         save(repo_path, data)
-        return hit["id"], revisions.current_content(hit), "promoted"
-    return _recur_silently()
+        return hit["id"], revisions.current_content(hit), "promoted", {}
+    return _recurred()
 
 
 def constraint_ack(content: str, status: str, entry_id: str = "",
@@ -1828,7 +2306,7 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
         if not changed:
             return accepted
         save(repo_path, data)
-        _touch_pending_review(repo_path)
+        touch_pending_review(repo_path)
         return True
 
 
@@ -1863,7 +2341,13 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     otherwise the entry would re-qualify as an anchor-decay participant on the very next
     TTL cycle and stack a second withdrawal clause onto the content this approval just
     wrote. An explicit stashed marker, not a wording/content heuristic, so this never
-    misfires on an ordinary proposal that happens to mention missing files."""
+    misfires on an ordinary proposal that happens to mention missing files.
+
+    LEGACY, and staying: `anchors.py` no longer CREATES `clear_anchors` proposals - anchor-loss
+    withdrawal moved to the `proposed_lifecycle` lane, where approving retires the decision
+    outright instead of keeping it live with a withdrawal clause. This branch remains because a
+    store written before that move can still hold one pending, and a proposal that stopped
+    being promotable would be a proposal the developer can neither approve nor understand."""
     prop = entry.get("proposed_revision") or {}
     if prop.get("subtype"):
         entry["subtype"] = prop["subtype"]
@@ -1934,15 +2418,100 @@ def _offer_already_made(repo_path: str) -> bool:
         return False
 
 
-def _touch_pending_review(repo_path: str) -> None:
-    """Drop the per-repo .pending_review flag - the next-prompt consumer (pending_review_nudge)
+def touch_pending_review(repo_path: str) -> None:
+    """Drop the per-repo .pending_review flag — the next-prompt consumer (pending_review_nudge)
     reads it to nudge the developer to review pending decisions mid-session. Fail-soft: a
-    flag-write error must never break capture."""
+    flag-write error must never break capture.
+
+    Public because it has TWO reader modules - `anchors.verify_anchors` and
+    `lifecycle.propose_lifecycle` - and two readers are an undeclared interface, not coupling."""
     try:
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         _pending_review_flag(repo_path).touch()
     except OSError:
         pass
+
+
+MAX_EVIDENCE_SUMMARIES = 50     # see record_evidence_summary on why not MAX_RECURRENCES
+
+
+def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> bool:
+    """Append one settled-candidate summary to a decision's own history. Returns whether it
+    landed.
+
+    ADDITIVE and nothing else: the entry grows an `evidence_summary` list (and, only once it
+    has actually overflowed, an `evidence_summary_dropped` count) and no other key is touched,
+    so a store written before this key existed loads and renders unchanged.
+
+    BOUNDED AT `MAX_EVIDENCE_SUMMARIES`, and the drop is RECORDED rather than silent. This list
+    is the one place a settled candidate's disposition lives once the raw events are deleted,
+    so an unbounded one grows for as long as a rule keeps being restated (measured in review:
+    31 rows for 31 repetitions, beside a `recurrences` list correctly capped at 20 on the same
+    entry). Evicting a row does cost the detail runbook invariant 3 leans on, which is why the
+    count of what left is stamped on the entry - the same "truncation is recorded, not silent"
+    rule `_anchor_sources` follows with `source_files_total`.
+
+    The cap is deliberately NOT `MAX_RECURRENCES`. A recurrence row COLLAPSES - one per
+    (session, match kind), with a count - so 20 rows cover 20 sessions however loudly each one
+    spoke. A summary row does not collapse: it is one settled candidate, carrying the ids of
+    the events it accounts for, so each eviction loses a distinct receipt. The bound therefore
+    sits where storage is still trivial (a few KB) and the record stays long.
+
+    KNOWN INTERACTION, stated rather than guarded: `reconcile._recorded_summaries` builds its
+    idempotency set from this list, so a receipt evicted before its held events were deleted
+    would be filed a second time on the next pass. Reaching it needs
+    `MAX_EVIDENCE_SUMMARIES` other candidates to settle on the SAME decision between one
+    candidate's summary write and its delete, which only a repeatedly failing delete produces.
+    The cost is one duplicated receipt row, never a wrong disposition and never a lost event -
+    `_finalize` still deletes - so it is not worth a second bookkeeping structure to prevent.
+
+    This is where a disposition LIVES once reconciliation deletes the raw events it settled
+    (`spool.finalize_candidate_evidence` returns the summary, this preserves it) - the decision
+    keeps the receipt for the evidence it came from. A missing entry returns False rather than
+    raising: the candidate is settled either way, and only the receipt is lost.
+
+    A TOMBSTONED decision is written too, and that is not an edge case: an approved retirement
+    proposal settles precisely because its decision left the live store, so refusing there
+    would throw away the one disposition the lifecycle lane exists to record. An unreadable
+    tombstone sidecar refuses rather than replacing it, the rule `lifecycle.tombstone_entry`
+    already follows.
+
+    BOTH lookups filter `type == "decision"`, and the symmetry is the point: the store holds
+    tasks too, a deleted task is no more a decision than a live one, and an id that would be
+    refused against the live store must not be accepted a few lines later just because the
+    entry has since been deleted. `reconcile._reconcile` draws the same line on both sides of
+    its own projection for the same reason.
+    """
+    if not entry_id or not isinstance(summary, dict):
+        return False
+
+    def _appended(entry: dict) -> None:
+        history = entry.get("evidence_summary")
+        # Rebuilt rather than appended to: a hand-edited non-list would otherwise raise here,
+        # and this is bookkeeping - it must never be the thing that breaks a store write.
+        history = (history if isinstance(history, list) else []) + [dict(summary)]
+        dropped = len(history) - MAX_EVIDENCE_SUMMARIES
+        if dropped > 0:
+            entry["evidence_summary_dropped"] = \
+                int(entry.get("evidence_summary_dropped") or 0) + dropped
+        entry["evidence_summary"] = history[-MAX_EVIDENCE_SUMMARIES:]
+
+    with store_lock(repo_slug(repo_path)):
+        data = load(repo_path)
+        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
+                            entry_id)
+        if entry is not None:
+            _appended(entry)
+            save(repo_path, data)
+            return True
+        graveyard, error = read_deleted(repo_path)
+        entry = None if error else entry_by_id(
+            [e for e in graveyard["entries"] if e.get("type") == "decision"], entry_id)
+        if entry is None:
+            return False
+        _appended(entry)
+        _save_deleted(repo_path, graveyard)
+    return True
 
 
 def pending_review_nudge(repo_path: str) -> str | None:
@@ -2200,9 +2769,23 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
 def update_decision_with_meta(repo_path: str, content: str, session_id: str, subtype: str = "",
                               created_by: str = "ai", replace_id: str = "", title: str = "", *,
                               source_files: list | None = None,
-                              repo_source: str = "") -> tuple[bool, str | None, dict]:
+                              repo_source: str = "",
+                              force_pending: bool = False,
+                              anchor_candidates: list | None = None,
+                              anchor_candidates_confirmed: bool = False,
+                              ) -> tuple[bool, str | None, dict]:
     """Store (or route) one decision, plus a `meta` dict - `{}` except on a refused proposal
     slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
+
+    `force_pending` makes a NEWLY CREATED entry land `pending_approval` whatever
+    `_classify_level` would have said. It exists for a caller whose captures are INFERRED
+    rather than stated - reconcile.py, deriving decisions from recorded evidence - where the
+    `suggested` tier is the wrong resting place: a suggested decision injects at session start
+    yet never appears in `review_pending`, so it is trusted without ever having been offered
+    for review. Bootstrap's medium-tier conventions chose `pending_approval` for exactly this
+    reason. It touches nothing else: novelty filtering, revision construction and every
+    `replace_id` route are unchanged, so an inferred CORRECTION still lands in the trust-ordered
+    proposal slot rather than being forced anywhere.
 
     `source_files` anchors a NEWLY CREATED entry to the
     repo-relative files it describes plus the current git HEAD, so later injections can flag
@@ -2220,7 +2803,21 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
     `repo_source` is the diagnostic half of the wrong-store problem: which signal in
     `resolve_repo_verbose` picked the store this write is landing in. Recorded on new
     entries only, and only when the caller actually resolved verbosely - every existing
-    caller omits it and is unaffected."""
+    caller omits it and is unaffected.
+
+    `anchor_candidates` OVERRIDES the recently-edited-files guess this function would
+    otherwise stash on a new pending entry, empty list included. It exists for a caller that
+    already knows which files its capture is about and can therefore say so more truthfully
+    than a time window can - reconciliation, which passes the candidate's own CONFIRMED
+    `source_files` and so never lets a merely-nearby edit become an anchor guess. `None` (every
+    other caller) keeps the sidecar accrual exactly as it was. Like the sidecar guess it
+    replaces, it is never guard input: `_guard_pairs` reads `source_files` only, and a human
+    approval is still what turns a candidate into an anchor. `anchor_candidates_confirmed`
+    is accepted only with an explicit candidate list and records that its paths came from a
+    structural evidence link; sidecar guesses remain non-authoritative unless the reviewer
+    passes them back explicitly through `approve_decision(source_files=...)`."""
+    if anchor_candidates_confirmed and anchor_candidates is None:
+        raise ValueError("confirmed anchor candidates require an explicit candidate list")
     content = revisions.normalize_content(content)
     with store_lock(repo_slug(repo_path)):
         data = load(repo_path)
@@ -2283,7 +2880,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                         target["proposed_revision"] = review.build_proposal(
                             target, content, subtype, session_id, now, title=title)
                         save(repo_path, data)
-                        _touch_pending_review(repo_path)
+                        touch_pending_review(repo_path)
                         return True, target["id"], {}
                     # Non-gated (human/scan/bootstrap, or pattern/convention) OR pending/untrusted:
                     # correct the current revision's title in place - no new revision.
@@ -2315,7 +2912,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                     # and _apply_approval's pending edit: rewrite the current revision, mint
                     # no new version, stay pending_approval so the WHOLE amended draft still
                     # gets its one human review. anchor_candidates/memory_key are untouched -
-                    # candidates are blessed at approval, not here.
+                    # confirmed candidates may promote at approval; sidecar guesses expire.
                     if entry_status(target) == "pending_approval":
                         rev = revisions.current_revision(target)
                         if rev is not None:
@@ -2351,7 +2948,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                         target, content, subtype, session_id, now, title=title,
                         source_files=source_files)
                     save(repo_path, data)
-                    _touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
+                    touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"], {}
                 # Trivial change (pattern/convention, or any human/scan/bootstrap change) →
                 # apply immediately as a new approved revision. History is preserved: the
@@ -2370,12 +2967,32 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
         match = _find_match(content, decisions_only)
         if match is not None:
-            _record_recurrence(match, session_id)
+            if entry_status(match) == "ignored":
+                # An INACTIVE decision restated is not a recurrence of a live rule: bumping
+                # `occurrence_count` on something the developer switched off records the
+                # opposite of what happened, and would rank a discarded decision as
+                # increasingly corroborated. This path stores nothing and changes nothing;
+                # it REPORTS the match so the reconsideration lane can surface it for a human,
+                # which is the only thing allowed to bring an inactive decision back.
+                return False, None, {"inactive_match": {
+                    "entry_id": match["id"], "status": entry_status(match),
+                    "overlap": round(_match_overlap(content, match), 2)}}
+            _record_recurrence(match, session_id, source=created_by,
+                               overlap=_match_overlap(content, match))
             save(repo_path, data)
             return False, None, {}
-        if _is_tombstoned(repo_path, content):
-            return False, None, {}          # discarded silently, like any other filtered capture
-        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by, title=title)
+        tombstoned = _tombstoned_match(repo_path, content)
+        if tombstoned is not None:
+            # Discarded silently as far as STORAGE goes, like any other filtered capture - but
+            # REPORTED, exactly as the ignored branch above is, so the reconsideration lane and
+            # the evidence pipeline can name the decision this restatement is actually about
+            # instead of settling evidence against nothing.
+            return False, None, {"inactive_match": {
+                "entry_id": tombstoned.get("id") or "", "status": "retired",
+                "overlap": round(_match_overlap(content, tombstoned), 2)}}
+        entry = _new_decision_entry(content, session_id, subtype, created_by=created_by,
+                                    title=title,
+                                    status="pending_approval" if force_pending else "")
         # Which signal chose THIS store (see resolve_repo_verbose). Stamped only when the
         # caller resolved verbosely and passed it on, and only on a brand-new entry - a
         # recurrence or containment route above has already returned, and re-stamping an
@@ -2384,14 +3001,14 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
             entry["repo_source"] = repo_source
         _anchor_sources(repo_path, entry, source_files)
         # Guard anchor accrual (issue #175 Task 3): when the model didn't name source_files
-        # itself, the session's recently-edited files are a candidate anchor - NOT a real one.
+        # itself, the session's recently-edited files are a possible relationship - NOT an
+        # anchor. Reconciliation may instead pass structurally confirmed candidates explicitly.
         # `anchor_candidates` is a distinct field the guard's pairing engine never reads
-        # (_guard_pairs only consumes `source_files`), so a candidate can never pair before a
-        # human blesses it via approval (see _apply_approval). Gated on the entry's ACTUAL
-        # resulting status (pending_approval), not on created_by alone: pending_approval is
-        # exactly the status _apply_approval's plain approve/edit flow blesses on a
-        # pending->approved transition, so gating on that outcome directly is self-enforcing -
-        # a future created_by value can't silently strand candidates on a born-approved or
+        # (_guard_pairs only consumes `source_files`). Plain approval promotes only a candidate
+        # marked structurally confirmed; a recent-edit guess requires explicit reviewer-selected
+        # `source_files` and otherwise expires. Gated on the entry's ACTUAL resulting status
+        # (pending_approval), not on created_by alone, so a future created_by value cannot
+        # silently strand candidates on a born-approved or
         # born-suggested entry the way an enumerated created_by tuple could (a "human" capture
         # is always born approved via _classify_level, so the old created_by-only gate WAS
         # stranding candidates on it). The status gate alone isn't quite enough, though: a
@@ -2399,17 +3016,29 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         # architecture decision) can also land pending_approval, but it never touched a
         # specific file THIS session - the edited-files signal only correlates with a live
         # conversational capture - so scan/bootstrap/memory are excluded explicitly too.
+        # A caller that passed `anchor_candidates` KNOWS which files this capture is about, so
+        # its list replaces the sidecar read entirely - including when it is empty, which is
+        # the caller saying "none of the recent edits belong to this decision". That is what
+        # keeps reconciliation's uncertain paths out of the anchor pipeline: the edited-files
+        # sidecar and the aggregator's `temporal_backward` window are the SAME 1800 seconds,
+        # written by the same PostToolUse call, so every backward-linked path is guaranteed to
+        # be a fresh sidecar entry at the moment reconciliation materializes the decision - and
+        # a candidate the aggregator refused to anchor was otherwise landing here as a sidecar
+        # guess indistinguishable from scope. The explicit empty list prevents that re-entry.
         if (not entry.get("source_files")
                 and created_by not in ("scan", "bootstrap", "memory")
                 and entry_status(entry) == "pending_approval"):
-            candidates = _read_edited_files(repo_path)
-            if candidates:
-                entry["anchor_candidates"] = candidates[-MAX_SOURCE_FILES:]
+            guesses = (_read_edited_files(repo_path) if anchor_candidates is None
+                       else [f for f in anchor_candidates if isinstance(f, str) and f])
+            if guesses:
+                entry["anchor_candidates"] = guesses[-MAX_SOURCE_FILES:]
+                if anchor_candidates_confirmed:
+                    entry["anchor_candidates_confirmed"] = True
         data["entries"].append(entry)
         data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
         save(repo_path, data)
         if entry_status(entry) == "pending_approval":
-            _touch_pending_review(repo_path)  # a brand-new decision awaits review (after save)
+            touch_pending_review(repo_path)  # a brand-new decision awaits review (after save)
         return True, entry["id"], {}
 
 
@@ -2462,6 +3091,7 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
                 # session's edited files described a guess that's now moot, cleared rather
                 # than left dangling on an already-anchored entry.
                 entry.pop("anchor_candidates", None)
+                entry.pop("anchor_candidates_confirmed", None)
                 changed = True
         if changed:
             save(repo_path, data)
@@ -2481,8 +3111,8 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
 
     `has_caller_source_files`: True when `approve_decision` was itself given `source_files` -
     it applies those (and clears any `anchor_candidates`) AFTER this returns, so this function
-    must not waste a git call promoting candidates that are about to be overridden anyway (see
-    the candidate-blessing branches below, issue #175 Task 3)."""
+    must not waste a git call promoting a structurally confirmed candidate that is about to be
+    overridden anyway (see the confirmed-candidate branches below, issue #175 Task 3)."""
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
     if entry is None and entry_id:
         entry = next((e for e in data["entries"] if e.get("id", "").startswith(entry_id)), None)
@@ -2507,7 +3137,7 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         prop_had_source_files = bool((entry.get("proposed_revision") or {}).get("source_files"))
         # Read BEFORE promoting - _promote_proposal consumes the proposal. `clear_anchors`
         # (anchors.py's total-loss retirement) means this approval RETIRES the entry's anchor;
-        # the candidate-blessing branch below must not then read the freshly-emptied
+        # the confirmed-candidate branch below must not then read the freshly-emptied
         # source_files as "nothing anchors this entry" and promote a stale guess into a real
         # anchor, which would re-anchor the just-retired decision to unrelated files and drag
         # it straight back into anchor-decay participation (and Tier-1 guard pairing).
@@ -2534,7 +3164,8 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         if not prop_had_source_files and entry.get("source_files"):
             _anchor_sources(repo_path, entry, entry["source_files"])
         elif (not prop_had_source_files and not has_caller_source_files
-                and not prop_clear and entry.get("anchor_candidates")):
+                and not prop_clear and entry.get("anchor_candidates")
+                and entry.get("anchor_candidates_confirmed") is True):
             # Nothing else anchors this entry - the Suggested Update's own stashed
             # source_files wins when present (above), and a caller-passed source_files
             # is about to override anyway; only then do the accrued candidates fill the gap.
@@ -2547,6 +3178,13 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         # for some later approval to bless it back into an anchor.
         if entry.get("source_files") or prop_clear:
             entry.pop("anchor_candidates", None)
+            entry.pop("anchor_candidates_confirmed", None)
+        elif action in ("approve", "edit") and entry.get("anchor_candidates"):
+            # A recent-edit guess not explicitly selected by the reviewer expires with the
+            # review. Keeping it on an approved entry would let share or a later code path
+            # mistake an unratified relationship for scope.
+            entry.pop("anchor_candidates", None)
+            entry.pop("anchor_candidates_confirmed", None)
         stored = revisions.current_content(entry)
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2596,12 +3234,16 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
     # captured with source_files while still pending) gets its anchor_commit refreshed here too.
     if entry.get("source_files"):
         _anchor_sources(repo_path, entry, entry["source_files"])
-    elif not has_caller_source_files and entry.get("anchor_candidates"):
-        # The pending->approved transition IS the human signature the candidates were waiting
-        # on: bless them into a real anchor now, via the one anchoring path (_anchor_sources),
-        # and drop the candidate field - it has served its purpose.
+    elif (not has_caller_source_files and entry.get("anchor_candidates")
+          and entry.get("anchor_candidates_confirmed") is True):
+        # Structurally confirmed evidence candidates may be blessed by the content approval.
+        # Recent-edit guesses require the reviewer to pass `source_files` explicitly.
         _anchor_sources(repo_path, entry, entry["anchor_candidates"])
         entry.pop("anchor_candidates", None)
+        entry.pop("anchor_candidates_confirmed", None)
+    elif entry.get("anchor_candidates"):
+        entry.pop("anchor_candidates", None)
+        entry.pop("anchor_candidates_confirmed", None)
     stored_content = revisions.current_content(entry)
     preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
@@ -2616,14 +3258,35 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
 
 
 def get_pending_decisions(repo_path: str) -> list[dict]:
-    """Returns all decisions awaiting the developer: brand-new pending_approval entries
-    AND live decisions carrying a Suggested Update (proposed_revision)."""
+    """Returns all decisions awaiting the developer: brand-new pending_approval entries, live
+    decisions carrying a Suggested Update (proposed_revision), live decisions carrying a
+    retirement proposal (proposed_lifecycle), and INACTIVE decisions carrying a
+    reconsideration proposal. An entry carrying several proposals appears once.
+
+    The reconsideration lane is the one that reaches outside the live store: an IGNORED
+    decision is here in the store with an inactive status, but a RETIRED one is in the
+    tombstone sidecar, and both are equally a question waiting on the developer. Counting them
+    here rather than in each surface is what makes the mid-session nudge, the MCP review list
+    and `contexer review` agree - a lane only one of the three could see would be a lane whose
+    proposal silently never surfaces (`lifecycle.pending_reconsiderations` is the reader).
+    """
+    from contexer import lifecycle       # function-level: same cycle rule as the call sites
+                                         # in format_pending_review below
     data = load(repo_path)
-    return [
+    live = [
         e for e in data.get("entries", [])
         if e.get("type") == "decision"
-        and (entry_status(e) == "pending_approval" or e.get("proposed_revision"))
+        and (entry_status(e) == "pending_approval" or e.get("proposed_revision")
+             or e.get("proposed_lifecycle") or e.get("proposed_reconsideration"))
     ]
+    # Only the RETIRED half is added here: the ignored half is already in `live` above, and
+    # `deleted_at` is exactly what separates a tombstoned entry from one that never left.
+    # Deduped by id as well, because an interrupted restoration leaves the same decision in
+    # both files with the stamp still on the live copy - one decision, one review item, which
+    # is what this function's contract promises.
+    seen = {str(e.get("id") or "") for e in live}
+    return live + [e for e in lifecycle.pending_reconsiderations(repo_path)
+                   if e.get("deleted_at") and str(e.get("id") or "") not in seen]
 
 
 def format_pending_review(repo_path: str) -> str:
@@ -2631,11 +3294,23 @@ def format_pending_review(repo_path: str) -> str:
     content + the action to take - for the in-session `review_pending` tool (the conversational
     twin of the `contexer review` terminal command). Content IS shown here: this is the
     on-demand surface, pulled only when the developer asks to review, so it is where the detail
-    belongs (unlike the deliberately terse SessionStart count)."""
-    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
+    belongs (unlike the deliberately terse SessionStart count).
+
+    The impact block under each decision (`review_impact.impact_lines`) is the SAME list
+    `contexer review` prints and the same categories the console projects: what the evidence
+    was, which files will and will not be anchored, and what approval does and does not enable.
+    Rendering it here rather than describing it here is the point - three surfaces phrasing
+    "uncertain file" three ways is how one of them ends up sounding confirmed.
+
+    Pending content is DATA, not instruction: every body is quoted and every proposal is
+    labelled, and nothing on this surface tells the model to act on the content it renders."""
+    from contexer import conflicts, lifecycle, review_impact   # function-level: same cycle
+                                                # rule as anchors.verify_anchors' call site
     pending = get_pending_decisions(repo_path)
     if not pending:
         return "Nothing pending review."
+    context = review_impact.review_context(repo_path)
+    seen_coverage: set = set()   # host capability is one fact per render, not one per decision
     total = len(pending)
     shown = pending[:_FILTERED_DISPLAY]  # cap like get_context, so a big backlog can't flood context
     header = f"{_pl(total, 'decision')} pending your review"
@@ -2646,12 +3321,17 @@ def format_pending_review(repo_path: str) -> str:
     for d in shown:
         eid = (d.get("id") or "")[:8]
         st = d.get("subtype") or "decision"
-        prop = d.get("proposed_revision")
+        recon = d.get("proposed_reconsideration")
+        # A reconsideration outranks a content question on the same decision for the reason a
+        # retirement does: there is no point settling how a decision should READ while it is
+        # not live at all.
+        prop = None if recon else d.get("proposed_revision")
+        life = None if recon else d.get("proposed_lifecycle")
         if prop:
             raw_current = revisions.current_content(d)
             raw_detected = prop.get("content", "")
-            current = _clip_body(raw_current)
-            detected = _clip_body(raw_detected)
+            current = clip_body(raw_current)
+            detected = clip_body(raw_detected)
             clipped = clipped or current != raw_current or detected != raw_detected
             lines.append(f"- {eid} [{st}] update")
             lines.append(f'    current:  "{current}"')
@@ -2659,19 +3339,32 @@ def format_pending_review(repo_path: str) -> str:
             steer = conflicts.memo_steer_line(d)
             if steer:
                 lines.append(f"    {steer}")
-            if d.get("anchor_candidates"):
-                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
-            lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")')
+            action = f'    approve_decision(entry_id="{eid}", action="approve|edit|skip|dismiss")'
         else:
             title, body = title_and_body(d)
             lines.append(f'- {eid} [{st}] {title}')
             if body is not None:
-                clipped_body = _clip_body(body)
+                clipped_body = clip_body(body)
                 clipped = clipped or clipped_body != body
                 lines.append(f'    "{clipped_body}"')
-            if d.get("anchor_candidates"):
-                lines.append(f"    would anchor: {', '.join(d['anchor_candidates'])}")
-            lines.append(f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
+            # A live decision whose only pending item is a retirement is already approved -
+            # offering to approve it again would be the one action approve_decision rejects.
+            # An INACTIVE one is not approvable at all: `reconsider_decision` is its only
+            # door back, and approve_decision would refuse or, worse, trust it silently.
+            action = ("" if (life or recon) else
+                      f'    approve_decision(entry_id="{eid}", action="approve|edit|ignore")')
+        if life:
+            lines.extend(lifecycle.review_lines(d, eid))
+        if recon:
+            lines.extend(lifecycle.reconsideration_review_lines(d, eid))
+        lines.extend(f"    {line}" for line in review_impact.impact_lines(
+            review_impact.review_impact(repo_path, d, context), seen_coverage))
+        if action:
+            # The action goes LAST, under the impact block, and repeats the confirmed anchors
+            # immediately beneath itself: the informed-signature rule is about the files being
+            # in front of the developer at the moment of the gesture, not somewhere above it.
+            lines.append(action)
+            lines.append(f"    {review_impact.anchor_confirmation(d)}")
     lines.append("\nReview each one with the developer before approving, and act on their "
                  "answer ONE id at a time - there is no bulk approve, and approving a "
                  "mis-captured decision makes it trusted standing context in every future "
@@ -2697,12 +3390,25 @@ MAX_TOMBSTONES = MAX_ENTRIES      # sidecar cap; see _keep_recent_tombstones for
 
 
 def _deleted_path(repo_path: str) -> Path:
-    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    # Best-effort create, the third of the family with `_store_path`/`_global_path` and for the
+    # identical reason (#152): a READER only needs the path, and on a host where ~/.contexer can
+    # be neither created nor written, raising here crashes a hook that merely wanted to load.
+    # This one kept its bare mkdir because every reader of the tombstone sidecar used to sit on
+    # a write path - until the reconsideration lane put one on session start, where an
+    # unwritable STORE_DIR then cost the session its whole context injection. Writers still
+    # surface the failure at their own write (`_save_deleted` does its own).
+    try:
+        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    except OSError:
+        pass
     return STORE_DIR / sidecars.filename("deleted", slug=repo_slug(repo_path))
 
 
-def _read_deleted(repo_path: str) -> tuple[dict, str | None]:
+def read_deleted(repo_path: str) -> tuple[dict, str | None]:
     """(sidecar data, parse error) from ONE read of the tombstone sidecar.
+
+    Public because it has TWO reader modules - `console_api.list_tombstones` and
+    `lifecycle.tombstone_entry` - and two readers are an undeclared interface, not coupling.
 
     Same degrade-but-report split as `load` + `load_diagnostics` for the live store: the data
     is an empty graveyard when the file cannot be parsed, and `error` is the ONLY thing that
@@ -2729,8 +3435,14 @@ def _read_deleted(repo_path: str) -> tuple[dict, str | None]:
 def _load_deleted(repo_path: str) -> dict:
     """The tombstone sidecar, degraded to an empty graveyard when it cannot be parsed - the
     read every capture-time guard wants. A caller that must tell empty from unreadable uses
-    `_read_deleted` (internal) or `deleted_diagnostics` (public)."""
-    return _read_deleted(repo_path)[0]
+    `read_deleted` or `deleted_diagnostics` instead."""
+    return read_deleted(repo_path)[0]
+
+
+def load_deleted(repo_path: str) -> dict:
+    """The public spelling of `_load_deleted`, for a module outside store.py that needs the
+    tombstones (reconcile.py projects them so a re-stated retired decision is surfaced fresh)."""
+    return _load_deleted(repo_path)
 
 
 def deleted_diagnostics(repo_path: str) -> dict:
@@ -2739,7 +3451,7 @@ def deleted_diagnostics(repo_path: str) -> dict:
     The sidecar twin of `load_diagnostics`, and it exists for the same reason: every other
     read of this file degrades a corrupt sidecar to "no tombstones", which would make the
     console's Deleted view render a broken file as an empty graveyard."""
-    error = _read_deleted(repo_path)[1]
+    error = read_deleted(repo_path)[1]
     return {"ok": error is None, "error": error}
 
 
@@ -2759,8 +3471,13 @@ def entry_by_id(entries: list, entry_id: str) -> dict | None:
     return next((e for e in entries if e.get("id", "").startswith(entry_id)), None)
 
 
-def _is_tombstoned(repo_path: str, content: str) -> bool:
-    """True when `content` restates a decision the developer deleted.
+def _tombstoned_match(repo_path: str, content: str) -> dict | None:
+    """The tombstoned decision `content` restates, or None.
+
+    The MATCH rather than a bare bool: capture is filtered either way, but the caller reports
+    which decision it matched so reconciliation can file its receipt on that decision instead
+    of holding evidence attributed to nothing. Exactly the shape the ignored branch already
+    returns.
 
     Without this guard a deleted decision comes straight back at the next session from
     `CLAUDE.md`, the memory tool, or a repo scan, and the delete looks broken. Judged with
@@ -2774,14 +3491,14 @@ def _is_tombstoned(repo_path: str, content: str) -> bool:
     handled: `deleted_diagnostics` reports it so the Deleted view says "unreadable", and
     `delete_decision` refuses to write over a sidecar it could not parse, so a corrupt file
     never costs more than the tombstones it had already lost."""
-    return _find_match(content, _load_deleted(repo_path).get("entries", [])) is not None
+    return _find_match(content, _load_deleted(repo_path).get("entries", []))
 
 
 def _keep_recent_tombstones(entries: list) -> list:
     """The MAX_TOMBSTONES most recently deleted tombstones, oldest first. Under the cap the
     list is returned untouched, so ordinary use keeps plain append order.
 
-    The sidecar was uncapped, and `_is_tombstoned` runs `_find_match` over ALL of it inside the
+    The sidecar was uncapped, and `_tombstoned_match` runs `_find_match` over ALL of it in the
     lock on every capture - so an unbounded graveyard turns into unbounded WRITE latency, which
     is the cost the sidecar deliberately moved off the per-prompt read path. Bounded at the same
     MAX_ENTRIES the live store already evicts at, so the guard beside the novelty check can
@@ -2795,79 +3512,25 @@ def _keep_recent_tombstones(entries: list) -> list:
 
 
 def delete_decision(repo_path: str, entry_id: str, actor: str = "ui") -> tuple[bool, str]:
-    """Move a decision out of the live store into the tombstone sidecar. Returns (ok, message).
+    """The console's delete: a retirement under the console's own vocabulary. Returns
+    (ok, message).
 
-    Both files are written inside ONE lock, sidecar FIRST: a crash between the two writes
-    leaves the entry in both places (visible and restorable) rather than in neither.
+    A call site into `lifecycle.tombstone_entry`, so tombstone history is uniform however a
+    decision left the live store - but with `stale_guard=False`, because a developer clicking
+    Delete is not resolving anyone's retirement proposal. The console's wording is deliberately
+    unchanged: terminology moves to lifecycle language on the CLI/MCP surfaces first.
 
-    Only entries of `type` "decision" are addressable - an id-taking write surface must not be
-    able to tombstone some other kind of entry that happens to share the id space.
+    Function-level import, mirroring `format_pending_review`'s conflicts import: lifecycle.py
+    reads `store` through the module object at call time, so an eager import here would make
+    store.py's own load depend on it."""
+    from contexer import lifecycle
 
-    Refuses outright when the sidecar cannot be parsed: writing a fresh graveyard over it would
-    destroy every tombstone already in it, and un-block every one of those decisions for
-    re-capture. A refusal is recoverable; that is not."""
-    with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
-        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
-                             entry_id)
-        if entry is None:
-            return False, f"Decision {entry_id!r} not found."
-        graveyard, error = _read_deleted(repo_path)
-        if error is not None:
-            return False, (f"Cannot delete {entry['id'][:8]}: {_deleted_path(repo_path).name} is "
-                           f"unreadable ({error}), and overwriting it would discard every "
-                           "tombstone already in it. Move that file aside, then retry.")
-        entry["deleted_at"] = datetime.now(timezone.utc).isoformat()
-        entry["deleted_by"] = actor
-        graveyard["repo_path"] = repo_path
-        graveyard["entries"] = _keep_recent_tombstones(graveyard["entries"] + [entry])
-        _save_deleted(repo_path, graveyard)
-        data["entries"] = [e for e in data["entries"] if e is not entry]
-        save(repo_path, data)
-        return True, f"Deleted {entry['id'][:8]}. It can be restored from the Deleted view."
-
-
-def restore_decision(repo_path: str, entry_id: str) -> tuple[bool, str]:
-    """Move a tombstoned decision back into the live store. Returns (ok, message).
-
-    Write order MIRRORS delete_decision instead of repeating it: the live store goes first
-    here, so the crash window again duplicates the entry rather than dropping it.
-
-    Idempotent against that very window. A delete that crashed between its two writes leaves
-    the entry in BOTH files; appending unconditionally then put the same id in the live store
-    twice, and since every id-taking store function resolves only the first match, the second
-    copy was unreachable and undeletable. When the id is already live the sidecar copy is the
-    stale one, so it is dropped instead of appended.
-
-    Refuses when the live store is at capacity rather than evicting to make room: the old
-    `_keep_top(..., pin_last=True)` pinned the RESTORED entry, so it dropped some other
-    decision - and unlike a delete, that one got no tombstone. An action the console frames as
-    non-destructive must not destroy anything."""
-    with store_lock(repo_slug(repo_path)):
-        graveyard = _load_deleted(repo_path)
-        entry = entry_by_id(graveyard["entries"], entry_id)
-        if entry is None:
-            return False, f"Deleted decision {entry_id!r} not found."
-        data = load(repo_path)
-        # Full id, never the caller's prefix: this asks "is THIS entry already live".
-        if entry_by_id(data["entries"], entry["id"]) is not None:
-            graveyard["repo_path"] = repo_path
-            graveyard["entries"] = [e for e in graveyard["entries"] if e is not entry]
-            _save_deleted(repo_path, graveyard)
-            return True, (f"{entry['id'][:8]} was already in the live store - dropped the "
-                          "leftover tombstone instead of storing a second copy.")
-        if len(data["entries"]) >= MAX_ENTRIES:
-            return False, (f"Cannot restore {entry['id'][:8]}: the store already holds "
-                           f"{MAX_ENTRIES} entries, the maximum. Restoring would evict another "
-                           "decision with no tombstone - delete one yourself first.")
-        entry.pop("deleted_at", None)
-        entry.pop("deleted_by", None)
-        data["entries"].append(entry)
-        save(repo_path, data)
-        graveyard["repo_path"] = repo_path
-        graveyard["entries"] = [e for e in graveyard["entries"] if e is not entry]
-        _save_deleted(repo_path, graveyard)
-        return True, f"Restored {entry['id'][:8]}."
+    ok, message, entry = lifecycle.tombstone_entry(
+        repo_path, entry_id, reason=lifecycle.CONSOLE_DELETE_REASON, replacement_id=None,
+        deleted_by=actor, stale_guard=False)
+    if not ok:
+        return False, message
+    return True, f"Deleted {entry['id'][:8]}. It can be restored from the Deleted view."
 
 
 def list_deleted(repo_path: str) -> list[dict]:
@@ -3091,25 +3754,13 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     title = entry.get("title") or revisions.derive_title(content)
     evidence = rev.get("evidence") or None
     source_files = [f for f in (entry.get("source_files") or []) if f]
-    # Fall back to the session's edited-files candidates when nothing is anchored yet. A
-    # pending_approval decision IS shareable (_shareable_entries only excludes "ignored"), so
-    # without this every decision shared before its local approval reaches Teams with no files
-    # at all - the anchor exists, it just hasn't been blessed yet. Deliberately one-directional:
-    # this reads `anchor_candidates`, it never writes `source_files`, because that field is the
-    # commit guard's Tier-1 pairing input (_guard_pairs) and a guess must not become guard input
-    # without a human. Teams renders what it receives as claimed, unverified metadata - the same
-    # trust level a candidate actually has - so a guess is safe THERE and not safe here.
-    # Already canonicalized and capped at write (record_edited_file / MAX_SOURCE_FILES).
-    # `source_files_unconfirmed` is what keeps the LOCAL surface honest: sharing is an outward,
-    # hard-to-undo action, and every other human-facing surface labels a candidate as a guess
-    # (`would anchor:` in format_pending_review, `Would anchor` in cli._review_metadata). Rendering
-    # a guess in the confirm-preview as a plain `files:` line, identical to a blessed anchor, would
-    # be the one place the developer signs without seeing what they are signing. Extra key like
-    # `redacted`/`status`: the wire builders read named fields, so it never egresses.
-    unconfirmed = False
-    if not source_files:
+    # A structurally confirmed evidence candidate is authoritative enough to preserve as the
+    # proposed scope when a pending decision is shared for a Team lead's review. A recent-edit
+    # sidecar guess is not: Teams Check consumes `source_files` as applicability metadata and
+    # has no candidate-certainty bit on the wire, so those guesses must never egress. The marker
+    # is set only by reconcile's structural extraction path; plain capture cannot set it.
+    if not source_files and entry.get("anchor_candidates_confirmed") is True:
         source_files = [f for f in (entry.get("anchor_candidates") or []) if f]
-        unconfirmed = bool(source_files)
     # Redact at the projection so the confirm-preview and durable outbox show exactly what
     # the wire will send (a legacy on-disk secret shows redacted, not a false raw value).
     # `redacted` counts scrubbed secrets for the preview banner; extra key ignored by the
@@ -3141,9 +3792,18 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     # through the same "sending N of M" line that capture-time truncation already uses rather
     # than needing a second notice.
     wire_total = len(source_files)
-    if source_files:
+    lifecycle = entry.get("lifecycle")
+    if source_files or lifecycle:
         from contexer import remote
         source_files = remote.bound_source_files(source_files)
+        # COMPLETED lifecycle events only (plan E2): `lifecycle` is written solely by
+        # lifecycle.tombstone_entry / restore_decision, i.e. only once a human has actually
+        # retired or restored the decision. `proposed_lifecycle` is a different key, is not read
+        # here, and has no wire parameter at all - an unreviewed retirement stays home. Bounded
+        # and scrubbed at this layer so the durable outbox carries exactly what a later drain
+        # sends; `remote._wire_args` bounds again as the chokepoint guarantee, and decides there
+        # whether the server ever sees it.
+        lifecycle = remote.bound_lifecycle(lifecycle or [], redact_on=bool(redact_on))
     return {
         "id": entry.get("id", ""),
         # Stable local revision identity used by atomic team submission/idempotency. Extra key for
@@ -3164,13 +3824,15 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
         # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
         "source_files": source_files,
-        "source_files_unconfirmed": unconfirmed,
+        # Reaches the wire subject to remote._WIRE_LIFECYCLE *and* the server having advertised
+        # `decisionLifecycle.tombstones` - see that constant. `[]` for the ordinary decision
+        # that has never been retired or restored, so downstream builders read it uniformly.
+        "lifecycle": lifecycle or [],
         # How many files this decision really governs, when fewer are being sent: either
         # _anchor_sources truncated at capture, or the wire bounds dropped an over-long path
         # just above. Extra key like `redacted`/`status`: read by the preview, never by a
         # wire builder.
-        "source_files_total": max(
-            wire_total, 0 if unconfirmed else (entry.get("source_files_total") or 0)),
+        "source_files_total": max(wire_total, entry.get("source_files_total") or 0),
     }
 
 
@@ -3248,7 +3910,7 @@ def _share_item_line(proj: dict, maxlen: int = 0) -> str:
     stripped line while content may carry newlines/runs of spaces, so comparing raw strings
     would show a spurious body line even when the two are the same text), so the preview
     matches exactly what the wire will send. Content truncated to `maxlen` (0 = full); callers
-    doing human-surface clipping (e.g. format_shareable_list) do it themselves via `_clip_body`
+    doing human-surface clipping (e.g. format_shareable_list) do it themselves via `clip_body`
     on a shallow-copied dict before calling in - `maxlen` is a separate, lower-level knob and
     not where that clipping mechanism lives. Shared by the MCP and CLI push previews so both
     render identically."""
@@ -3352,7 +4014,7 @@ def format_shareable_list(repo_path: str) -> str:
         header += f" - showing {len(shown)} of {total}, run `contexer share` in a terminal for the rest"
     lines = [header + ". Tell me which to share, then I'll preview and confirm:\n"]
     for it in shown:
-        clipped_it = {**it, "content": _clip_body(it.get("content", ""))}
+        clipped_it = {**it, "content": clip_body(it.get("content", ""))}
         lines.append(_share_item_line(clipped_it))
     lines.append('\nShare the selected: share_decision(decision_id="<id>[,<id2>…]") '
                  "- previews first; add confirm=true to send.")
@@ -3377,13 +4039,13 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
     id or a comma-separated selection; `profile` is passed in to avoid re-reading config.toml.
 
-    `source_files` (issue #174 Task 5): each projection carries its scrubbed anchored files, and
+    `source_files` (issue #174 Task 5): each projection carries its scrubbed authoritative files
+    (approved anchors, or structurally confirmed scope on a pending evidence proposal), and
     the wire sends them while `remote._WIRE_SOURCE_FILES` is open (see that constant), so the
     per-decision `files:` line reads as plain fact. The note survives for the rollback case: if
     the gate is ever closed again, the line regains its honest "(not yet sent - server support
-    pending)" suffix rather than silently promising files that won't actually go out. A second,
-    independent suffix marks files that came from `anchor_candidates` rather than a blessed
-    anchor, so this surface labels a guess as a guess like every other human-facing one does."""
+    pending)" suffix rather than silently promising files that won't actually go out. Recent-edit
+    guesses are excluded from the projection entirely."""
     from contexer import remote
     from contexer.config import default_endpoint, load_profile
     prof = profile or load_profile()  # resolved ONCE - governs both endpoint and redaction
@@ -3399,8 +4061,6 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         files = p.get("source_files") or []
         if files:
             note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent - server support pending)"
-            if p.get("source_files_unconfirmed"):
-                note += " (unconfirmed - this session's edits, not yet approved)"
             total = p.get("source_files_total") or 0
             if total > len(files):
                 note += f" (sending {len(files)} of {total})"
@@ -3663,6 +4323,24 @@ def _cached_insight(repo_path: str) -> tuple[str, bool]:
     return level, decisive
 
 
+def _cached_insight_read_only(repo_path: str) -> tuple[str, bool]:
+    """Return a fresh-enough cached insight without invoking Git or writing bookkeeping.
+
+    Prompt/editor hooks use this lane. Session-start and explicit setup paths may populate the
+    normal cache, but a cache miss at prompt time deliberately degrades to the neutral choice
+    rather than violating the no-subprocess latency invariant.
+    """
+    try:
+        cached = json.loads(_insight_cache_path(repo_path).read_text(encoding="utf-8"))
+        level, decisive, ts = cached["level"], cached["decisive"], cached["ts"]
+        if level in _INSIGHT_ORDER and isinstance(decisive, bool) \
+                and time.time() - ts < _INSIGHT_CACHE_TTL:
+            return level, decisive
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return "low", False
+
+
 def _newcomer_answer_block(label: str, level: str, decisive: bool) -> list[str]:
     """Instructions for a repo question asked as the first prompt: ANSWER it, then store
     findings - never a blocking menu. Insight-tailored using the commit signal Contexer
@@ -3741,8 +4419,9 @@ GAP_ASK_GUIDE = (
 )
 
 
-def _build_bootstrap_context(repo_path: str) -> list[str]:
-    level, decisive = _cached_insight(repo_path)
+def _build_bootstrap_context(repo_path: str, *, allow_git: bool = True) -> list[str]:
+    level, decisive = (_cached_insight(repo_path) if allow_git
+                       else _cached_insight_read_only(repo_path))
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
 
@@ -3943,6 +4622,61 @@ def _join_context_sections(*parts: str) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _filesystem_repo_root(path: str) -> str:
+    """Nearest `.git`-marked ancestor, or the sane starting directory for non-Git projects."""
+    if not path:
+        return ""
+    try:
+        # Keep the host's lexical absolute path. Resolving `/tmp` to `/private/tmp` on macOS
+        # would key hooks differently from an explicit MCP call carrying the same `/tmp` path.
+        start = Path(os.path.abspath(os.path.expanduser(path)))
+    except (OSError, RuntimeError):
+        return ""
+    if start.is_file():
+        start = start.parent
+    if not is_sane_repo(str(start)):
+        return ""
+    for candidate in (start, *start.parents):
+        if not is_sane_repo(str(candidate)):
+            break
+        if (candidate / ".git").is_file() or (candidate / ".git").is_dir():
+            return str(candidate)
+    return str(start)
+
+
+def hook_repo_from_stdin(raw: str, fallback: str = "") -> str:
+    """Resolve a hook workspace without Git: host payload first, then the wrapper's cwd.
+
+    Claude/Codex/Gemini provide `cwd`; Cursor provides `workspace_roots`. Unknown hosts still
+    receive the explicit fallback. Only a bounded parent walk for `.git` occurs; no spool scan,
+    store lock, subprocess, or network call is reachable from this resolver.
+    """
+    candidates = []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        for key in ("cwd", "workspace_root", "project_dir"):
+            if isinstance(data.get(key), str):
+                candidates.append(data[key])
+        roots = data.get("workspace_roots")
+        if isinstance(roots, list):
+            candidates.extend(root for root in roots if isinstance(root, str))
+    if fallback:
+        candidates.append(fallback)
+    if not candidates:
+        try:
+            candidates.append(os.getcwd())
+        except OSError:
+            pass
+    for candidate in candidates:
+        repo = _filesystem_repo_root(candidate)
+        if repo:
+            return repo
+    return ""
+
+
 def hook_cwd_repo(repo_path: str) -> str:
     """Fallback repo identity for hook-invoked payload builders: the hook's own cwd.
 
@@ -3956,13 +4690,7 @@ def hook_cwd_repo(repo_path: str) -> str:
     resolution chain instead of selecting a junk store. This is NOT the retired
     `|| pwd` shell fallback: nothing here writes the shared .current_repo pointer
     unguarded - callers that anchor the pointer still sanity-check first."""
-    if repo_path:
-        return repo_path
-    try:
-        cwd = os.getcwd()
-    except OSError:  # cwd unlinked since the process started - hooks must never crash
-        return repo_path
-    return cwd if is_sane_repo(cwd) else repo_path
+    return hook_repo_from_stdin("", repo_path)
 
 
 def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> dict:
@@ -4021,7 +4749,7 @@ def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> d
 
 
 def session_start_payload(repo_path: str, source: str = "", session_id: str = "",
-                          *, console_url: bool = False) -> dict:
+                          host: str = "", *, console_url: bool = False) -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
 
@@ -4053,7 +4781,13 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     counts from what `team` actually rendered (nor drive `shown` negative).
 
     session_id (Retrieval V1 Part B): optional, "" preserves every existing caller. Threaded
-    through to `_local_session_start_payload` for compact-source working-set rehydration."""
+    through to `_local_session_start_payload` for compact-source working-set rehydration.
+
+    `host` names the adapter whose SessionStart is calling, for the evidence-reconciliation
+    coverage block this path now produces. It is the ADAPTER's to supply, because the store
+    genuinely does not know which host started the session; an omitted one resolves to
+    `manual`, whose static map claims nothing (`evidence._MANUAL_COVERAGE`), so a caller that
+    predates this argument under-reports rather than over-claiming what it could observe."""
     resolved = hook_cwd_repo(repo_path)
     if resolved != repo_path and is_sane_repo(resolved):
         # The cwd fallback engaged (non-git project dir): anchor the shared pointer
@@ -4061,7 +4795,7 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         # bare MCP calls (no repo_path) in this session resolve to the same store.
         anchor_repo(resolved)
     repo_path = resolved
-    payload = _local_session_start_payload(repo_path, source, session_id)
+    payload = _local_session_start_payload(repo_path, source, session_id, host)
     # text/count/deferred come from ONE team_context snapshot (see _team_section_with_counts)
     # so the status-suffix arithmetic below can never describe a different moment than `team`.
     team, count, deferred = _team_section_with_counts(repo_path)
@@ -4088,7 +4822,54 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     }, repo_path, console_url)
 
 
-def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "") -> dict:
+def _pending_review_notice(total: int) -> str:
+    """The count-only session-start pointer at the review queue.
+
+    Count, never content, deliberately: a startup must not dump every pending decision's text.
+    The identified list is pulled on demand via `review_pending` (in-session) or
+    `contexer review` (terminal), and the per-decision content is surfaced at capture time.
+
+    ONE definition because there are now two call sites. A repo whose only pending item is a
+    reconsideration on a RETIRED decision has no live decisions at all, so it takes the
+    no-context branch, and a second copy of this text there would be a second copy to keep in
+    step with this one."""
+    notice = (
+        f"{_pl(total, 'decision')} pending your review (recorded, not yet "
+        "trusted — not listed here to keep startup light). Offer to show them to the "
+        "developer when appropriate: call review_pending to list them, then "
+        "approve_decision — or they can run `contexer review` in a terminal."
+    )
+    if total >= _BACKLOG_ESCALATE:
+        notice += (" This backlog is growing — proactively offer to work through it this "
+                   "session, one decision at a time (there is no bulk approve; a blanket "
+                   "clear would trust whatever misfired into the queue).")
+    return notice
+
+
+def _reconcile_note(receipt: dict) -> str:
+    """Concise count-only reconciliation news for the session-start status line.
+
+    COVERAGE, never content. What a candidate says reaches the developer through the ordinary
+    pending-review queue, which the count pointer below already renders from the post-reconcile
+    store; a startup line must never carry raw candidate text. A complete pass is silent unless
+    attention admission deferred work, in which case the developer gets ONE retained-count
+    diagnostic rather than one line per candidate. A `skipped` pass says nothing because
+    another pass holding the lock is the design working rather than news. `partial` and `error`
+    remain visible because acknowledged evidence has not been fully accounted for.
+    """
+    notes = []
+    if (receipt.get("coverage") or {}).get("reconciliation") in ("partial", "error"):
+        notes.append("Evidence reconciliation was incomplete: some recorded evidence is still "
+                     "unconsumed, run `contexer reconcile-session` to retry.")
+    deferred = receipt.get("deferred")
+    if isinstance(deferred, int) and not isinstance(deferred, bool) and deferred > 0:
+        notes.append(f"{deferred} evidence candidate{'' if deferred == 1 else 's'} deferred "
+                     "for review capacity; all recorded evidence was retained.")
+    return "" if not notes else " " + " ".join(notes)
+
+
+def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "",
+                                 host: str = "") -> dict:
     """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
@@ -4116,6 +4897,46 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # fresh one. Fail-soft end to end (log write included), and a no-op read when the index
     # is healthy - no guard needed here.
     ensure_retrieval_index(repo_path)
+    # Periodic spool retention plus the orphan-hold sweep, on a 24h TTL. It landed here as the
+    # retention path for a host that never reconciled; the reconcile call below now covers
+    # every host, so this is the sweep that runs INDEPENDENTLY of whether a pass happens -
+    # reconciliation skips on lock contention and returns early on an empty spool, and
+    # `_sweep_orphan_holds` has no other caller. Session start is not an editor hook, so the
+    # spool's never-scan-in-a-hook rule holds. Positioned with `ensure_retrieval_index` and for
+    # the same reason - unconditional on `source`, ahead of the `resume` early-return, since a
+    # resumed session's spool grows exactly like a fresh one's. `maintain_spool` is
+    # self-gating (no spool dir / inside its TTL = no work) and never raises, so the call
+    # site is deliberately unguarded on the strength of that promise.
+    from contexer import spool         # function-level: spool imports store at ITS top
+    spool.maintain_spool(repo_path)
+    # Materialize unconsumed evidence BEFORE the store is read below, so anything this pass
+    # proposes reaches THIS session's pending-review count instead of the next one's. This is
+    # the store-side path every host traverses at session start, which is what closes
+    # OUTSTANDING-ISSUES item 1 for all four of them at once: Codex and Cursor had no
+    # reconciliation entrypoint at all and Gemini had none at session start, so a session that
+    # crashed left its evidence in the spool until somebody ran the tool by hand.
+    #
+    # `session_id=""` is DELIBERATE and is not the session id this call was handed: the whole
+    # point is that evidence from a session that ended without a checkpoint participates, and
+    # scoping the pass to this session would skip exactly that evidence forever.
+    #
+    # Unguarded on the same promise as `maintain_spool` above - `reconcile_session` NEVER
+    # raises, and a pass that could not finish returns a receipt marked incomplete. That
+    # receipt is what `_reconcile_note` renders; the alternative, a try/except here, would
+    # swallow the very diagnostic the brief requires to stay visible.
+    #
+    # It is also non-blocking: the reconcile flock is `LOCK_NB`, so a second session starting
+    # on the same repo skips its pass rather than waiting behind this one, and the fast path
+    # takes no store lock, no store read and no lock file at all when the spool is empty -
+    # which is every session start on a repo with no evidence waiting.
+    #
+    # What it costs when the spool is NOT empty is measured, and stated once in
+    # `reconcile_session`'s own docstring (a full spool is the worst case, it is a one-time
+    # drain, and by ruling P4 it is disclosed rather than gated). Read it before assuming this
+    # line is free.
+    from contexer import reconcile     # function-level: reconcile imports store at ITS top
+    reconcile_note = _reconcile_note(reconcile.reconcile_session(repo_path, session_id="",
+                                                                 host=host))
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
@@ -4124,7 +4945,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     if source == "resume":
         if decisions:
             return {
-                "status": f"Contexer: session resumed - {_pl(len(decisions), 'decision')} already loaded in conversation",
+                "status": f"Contexer: session resumed - {_pl(len(decisions), 'decision')} already loaded in conversation{reconcile_note}",
                 "context": "",
             }
         # Best-effort: the flag only silences a duplicate bootstrap offer on the first
@@ -4150,7 +4971,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         return {
-            "status": "Contexer: resumed with no stored context - mining this conversation for decisions",
+            "status": f"Contexer: resumed with no stored context - mining this conversation for decisions{reconcile_note}",
             "context": "\n".join(sys_parts),
         }
 
@@ -4194,9 +5015,22 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except Exception:
         pass  # verification is opportunistic; a session start must never fail on it
 
+    # Read before the no-context branch below, because the reconsideration lane is the one
+    # that can be non-empty when `decisions` is empty: a repo whose only decision was RETIRED
+    # holds it in the tombstone sidecar, and a question about it still waits on the developer.
+    from contexer import lifecycle       # function-level: same cycle rule as every other
+                                         # store.py call site into this module
+    reconsidering = lifecycle.pending_reconsiderations(repo_path)
+
     if not decisions:
         if source == "compact" and _offer_already_made(repo_path):
-            return {"status": "", "context": ""}
+            # The deliberately-silent path: a compaction continuing a session whose developer
+            # already dismissed the setup offer injects nothing. The reconcile note is the ONE
+            # thing that still speaks here, `.strip()`ped because it is written as a suffix.
+            # This branch is reachable exactly when reconciliation stored no decision, which is
+            # what a `partial`/`error` pass looks like from here - so it is the branch where
+            # dropping the diagnostic would hide it in the case it was written for.
+            return {"status": reconcile_note.strip(), "context": ""}
         _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
         sys_parts = []
@@ -4209,9 +5043,11 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                     sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(lines)
+        if reconsidering:
+            sys_parts.append(_pending_review_notice(len(reconsidering)))
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "status": f"Contexer: no context stored{global_note} - setup offer on next prompt",
+            "status": f"Contexer: no context stored{global_note} - setup offer on next prompt{reconcile_note}",
             "context": "\n".join(sys_parts),
         }
 
@@ -4220,7 +5056,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # be explicitly approved before becoming trusted engineering knowledge.
     pending = [d for d in decisions if entry_status(d) == "pending_approval"]
     with_proposals = [d for d in decisions
-                      if d.get("proposed_revision") and entry_status(d) != "pending_approval"]
+                      if (d.get("proposed_revision") or d.get("proposed_lifecycle"))
+                      and entry_status(d) != "pending_approval"]
     trusted = [d for d in decisions if entry_status(d) in ("approved", "suggested")]
     pre_loaded = [d for d in trusted if d.get("subtype") in ("convention", "constraint", "pattern")]
     deferred_count = len(trusted) - len(pre_loaded)
@@ -4276,23 +5113,17 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             "Call get_context BEFORE reading files for any question about architecture, "
             "design decisions, rationale, or patterns."
         )
-    # Count-only, deliberately terse: a startup should not dump every pending decision's
-    # content (overwhelming). The identified list is pulled on demand via `review_pending`
-    # (in-session) or `contexer review` (terminal); the per-decision content is surfaced at
-    # capture time, not here.
-    total_pending = len(pending) + len(with_proposals)
+    # The reconsideration lane is counted here too, and it is the one that also lives OUTSIDE
+    # `decisions`: an ignored twin sits in that list with an inactive status (so neither filter
+    # above matches it) and a retired one is in the tombstone sidecar entirely. It was the only
+    # proposal lane invisible at session start, and the mid-session nudge is fire-once - so a
+    # question the developer did not act on that one time was never raised again. Deduped by
+    # id, since an ignored entry can carry a Suggested Update as well.
+    counted = {str(d.get("id") or "") for d in pending + with_proposals}
+    total_pending = len(pending) + len(with_proposals) + sum(
+        1 for e in reconsidering if str(e.get("id") or "") not in counted)
     if total_pending:
-        notice = (
-            f"{_pl(total_pending, 'decision')} pending your review (recorded, not yet "
-            "trusted - not listed here to keep startup light). Offer to show them to the "
-            "developer when appropriate: call review_pending to list them, then "
-            "approve_decision - or they can run `contexer review` in a terminal."
-        )
-        if total_pending >= _BACKLOG_ESCALATE:
-            notice += (" This backlog is growing - proactively offer to work through it this "
-                       "session, one decision at a time (there is no bulk approve; a blanket "
-                       "clear would trust whatever misfired into the queue).")
-        sys_parts.append(notice)
+        sys_parts.append(_pending_review_notice(total_pending))
 
     # B1: size-gated standing topic map - a one-line overview once the store is big
     # enough that "call get_context before reading files" alone stops being actionable.
@@ -4336,22 +5167,28 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                              "'review pending' or run `contexer review`")
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
-    return {"status": status, "context": "\n".join(sys_parts)}
+    return {"status": status + reconcile_note, "context": "\n".join(sys_parts)}
 
 
-def get_session_start_context(repo_path: str, source: str = "", session_id: str = "") -> dict:
+def get_session_start_context(repo_path: str, source: str = "", session_id: str = "",
+                              host: str = "") -> dict:
     """Claude Code SessionStart hook output. Thin envelope over session_start_payload -
     kept for back-compat with installed hooks and the existing test suite.
 
     session_id (Retrieval V1 Part B): "" preserves every existing caller (Codex/Cursor
     still call this without it).
 
+    `host` (Task 06): the calling adapter's name, for the evidence-reconciliation coverage
+    block. Both installed hook commands that reach this function pass it as a literal, and an
+    install that predates the argument keeps working and reports `manual`, which claims
+    nothing rather than claiming another host's capabilities.
+
     `console_url=True` here and nowhere else: this envelope is the ONE path that renders
     `status` into a `systemMessage` (Claude and Codex), the only developer-facing channel any
     adapter has. See `_with_console_url`."""
     from contexer.adapters import claude
     return claude.format_session_start(
-        session_start_payload(repo_path, source, session_id, console_url=True))
+        session_start_payload(repo_path, source, session_id, host, console_url=True))
 
 
 # The article is OPTIONAL - "what is repo doing?" (no this/the) is just as much a newcomer
@@ -4432,7 +5269,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
             except OSError:
                 pass
             return {"status": "", "context": ""}
-    level, decisive = _cached_insight(repo_path)
+    level, decisive = _cached_insight_read_only(repo_path)
     repo_name = Path(repo_path).name if repo_path else ""
     label = f'"{repo_name}"' if repo_name else "this repo"
     if _is_newcomer_question(prompt):
@@ -4449,7 +5286,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
             # would re-open the picker the developer just dismissed, one modal per prompt.
             return {"status": "", "context": ""}
         _arm_offer(repo_path)
-        lines = _build_bootstrap_context(repo_path)
+        lines = _build_bootstrap_context(repo_path, allow_git=False)
     return {"status": "", "context": "\n".join(lines)}
 
 
@@ -4771,7 +5608,7 @@ def _edited_files_path(repo_path: str) -> Path:
     return STORE_DIR / sidecars.filename("edited_files", slug=repo_slug(repo_path))
 
 
-def record_edited_file(repo_path: str, file_path: str) -> None:
+def record_edited_file(repo_path: str, file_path: str) -> str:
     """Record file_path as edited in this repo, stamped with the current time. Dedup: a
     path already present has its timestamp refreshed in place (never duplicated). Capped at
     _EDITED_FILES_CAP entries, evicting the oldest by timestamp. Silent no-op on a falsy
@@ -4785,14 +5622,23 @@ def record_edited_file(repo_path: str, file_path: str) -> None:
     at module top, for the same load-order reason _anchor_sources does: guard_engine
     imports store at ITS top, so an eager import here would recreate that cycle.
 
-    Fail-soft: a write error must never break the calling hook."""
+    Fail-soft: a write error must never break the calling hook.
+
+    RETURNS the canonical repo-relative path for `file_path`, or "" when there is none to
+    record (falsy path, unresolvable, or outside the repo). The evidence ledger's
+    `file_changed` event names that return value rather than canonicalizing the host's raw
+    `file_path` a second time, so the event and this sidecar can only ever name the same file
+    - the caller has no second spelling to get wrong, and no reader of `_guard_relpath` is
+    added outside guard_engine. A path that resolved but whose SIDECAR WRITE then failed is
+    still returned: the edit happened, and the ledger records it independently of this file."""
     if not file_path:
-        return
+        return ""
+    relpath = ""
     try:
         from contexer import guard_engine
         relpath = guard_engine._guard_relpath(repo_path, file_path)
         if guard_engine._escapes_repo(relpath):
-            return
+            return ""
         STORE_DIR.mkdir(mode=0o700, exist_ok=True)
         entries = [e for e in _load_edited_entries(repo_path) if e["path"] != relpath]
         entries.append({"path": relpath, "mtime": time.time()})
@@ -4801,6 +5647,7 @@ def record_edited_file(repo_path: str, file_path: str) -> None:
         atomic_write(_edited_files_path(repo_path), json.dumps(entries))
     except OSError:
         pass
+    return relpath
 
 
 def _load_edited_entries(repo_path: str) -> list[dict]:
@@ -4915,7 +5762,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
 
     Before store keys were canonicalized, each linked worktree wrote its own
     `~/.contexer/<raw slug>.json`. This standalone entrypoint folds those strays into the
-    main store. NEVER call it from repo_slug/_canonical_store_key (every writer acquires
+    main store. NEVER call it from repo_slug/canonical_store_key (every writer acquires
     store_lock(repo_slug(repo)), so a merge fired during slug computation would deadlock or
     do an unlocked read-modify-write). Candidates come ONLY from self-detection (the
     incoming path itself collapsed) and `git worktree list` enumeration - LIVE worktrees
@@ -4928,10 +5775,10 @@ def migrate_worktree_strays(repo_path: str) -> int:
     Fail-soft throughout: never raises; returns the number of entries merged."""
     try:
         resolved = resolve_repo(repo_path) or repo_path
-        canonical = _canonical_store_key(resolved)
+        canonical = canonical_store_key(resolved)
         if not is_sane_repo(canonical):
             return 0
-        incoming_collapsed = _canonical_store_key(resolved) != resolved
+        incoming_collapsed = canonical_store_key(resolved) != resolved
         # Cheap gate: .git/worktrees exists only when worktrees were ever added.
         if not (incoming_collapsed
                 or os.path.isdir(os.path.join(canonical, ".git", "worktrees"))):
@@ -5099,8 +5946,6 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         global_data = load_global()
         by_id.update({e.get("id"): e for e in global_data.get("entries", [])
                      if e.get("type") == "decision" and e.get("id") in missing})
-    stale = _staleness_notes(repo_path, [by_id[d] for d in ids
-                                         if d in by_id and entry_status(by_id[d]) != "ignored"])
     lines: list[str] = []
     conflicted = False
     for did in ids:
@@ -5114,7 +5959,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         id_tag = f" (id={entry_id})" if entry_id else ""
         title, body, extras = conflicts._conflict_view(e)
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
-                     f"{title}{id_tag}{stale.get(did, '')}")
+                     f"{title}{id_tag}")
         if body is not None:
             lines.append(f"    {body}")
         for extra in extras:
@@ -5154,7 +5999,7 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
     data = load(repo_path)
     if data.get("entries"):
         for kw in ordered_kws:
-            result = get_context(repo_path, query=kw)
+            result = get_context(repo_path, query=kw, _include_staleness=False)
             if "No matching decisions" not in result and "No context stored" not in result:
                 text = f"[Contexer: auto-fetched for this question]\n{result}"
                 return text, _rendered_meta("strong", text)
@@ -5168,7 +6013,7 @@ def _legacy_prompt_context(repo_path: str, ordered_kws: list[str], is_project: b
                 if k not in _PROJECT_CONTEXT_WORDS and k not in _OVERVIEW_GENERIC_WORDS
             ]
             if not non_project_kws:
-                result = get_context(repo_path)
+                result = get_context(repo_path, _include_staleness=False)
                 if "No context stored" not in result:
                     text = f"[Contexer: project context]\n{result}"
                     return text, _rendered_meta("overview", text)
@@ -5457,7 +6302,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
             if not non_project_kws:
                 data = load(repo_path)
                 if data.get("entries"):
-                    result = get_context(repo_path)
+                    result = get_context(repo_path, _include_staleness=False)
                     if "No context stored" not in result:
                         text = f"[Contexer: project context]\n{result}"
                         return text, _rendered_meta("overview", text)
@@ -5522,7 +6367,8 @@ def _team_display_cap() -> int:
 
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
-                files: list[str] | None = None, _active_only: bool = False) -> str:
+                files: list[str] | None = None, _active_only: bool = False,
+                _include_staleness: bool = True) -> str:
     """Returns stored context for the given repo.
 
     files: optional repo-relative or absolute files the caller is about to work on - when
@@ -5537,6 +6383,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
 
     _active_only: internal flag - when True, exclude pending_approval and ignored entries
     (used by auto-injection paths so only trusted decisions reach the AI automatically).
+
+    _include_staleness: internal flag - prompt hooks set False because staleness probes run Git;
+    explicit MCP/UI reads keep the default and continue to render those notes.
 
     Team context (pulled by C5 and cached separately) is appended as its own section so
     the agent reads local (personal) and team decisions together, scope-tagged.
@@ -5616,7 +6465,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         if total > display_limit:
             filter_note += f" - showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")
-        stale = _staleness_notes(repo_path, shown)
+        stale = _staleness_notes(repo_path, shown) if _include_staleness else {}
         for d in shown:
             subtype_tag = f" [{d['subtype']}]" if d.get("subtype") else ""
             st = entry_status(d)
@@ -6428,7 +7277,7 @@ def bootstrap_apply(repo_path: str, session_id: str, insight: str = "",
             pending = sum(1 for i in new_pending if i in surviving)
             save(repo_path, data)
             if pending:
-                _touch_pending_review(repo_path)  # medium-tier items await review (after save)
+                touch_pending_review(repo_path)  # medium-tier items await review (after save)
 
     return {**result, "stored": stored, "pending": pending, "skipped": skipped}
 
@@ -6599,7 +7448,7 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
         if changed:
             save(repo_path, data)
             if review_needed:
-                _touch_pending_review(repo_path)  # a disappearance now awaits review (after save)
+                touch_pending_review(repo_path)  # a disappearance now awaits review (after save)
         return changed
 
 
@@ -6646,6 +7495,15 @@ _CONSOLE_EXPORTS = frozenset({
     "list_decisions", "get_decision_detail", "list_tombstones", "list_global_rules",
     "delete_global_rule",
 })
+# Same mechanism once more for `lifecycle.py`, and deliberately ONE name. `restore_decision`
+# was public on `store` before the lifecycle lane took it, so the facade keeps that spelling
+# resolving for anything outside this repo. Every OTHER lifecycle name is new - it was never
+# on `store`, so there is no back-compat to keep and nothing to re-export: `propose_lifecycle`,
+# `retire_decision`, `dismiss_lifecycle`, `attach_lifecycle_proposal` and
+# `lifecycle_proposal_stale` are imported from the module that owns them by the callers that
+# need them (anchors, reconcile, cli, server, ui/api all do exactly that), which is what keeps
+# the boundary visible instead of letting store slowly re-accumulate the surface it just shed.
+_LIFECYCLE_EXPORTS = frozenset({"restore_decision"})
 
 
 def __getattr__(name):
@@ -6658,14 +7516,18 @@ def __getattr__(name):
     if name in _CONSOLE_EXPORTS:
         from contexer import console_api
         return getattr(console_api, name)
+    if name in _LIFECYCLE_EXPORTS:
+        from contexer import lifecycle
+        return getattr(lifecycle, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
     # Paired with the __getattr__ above (PEP 562): without this, dir(store) omits every
-    # lazily-resolved entrypoint (the five guard ones, record_conflict_memo, and the
-    # console reads), since they are never assigned into the module namespace. Mirror
-    # ALL export sets, i.e. exactly what __getattr__ resolves: listing only some left a
-    # name answerable by getattr but absent from dir(), a split that no longer matches
-    # the facade the moment any set changes.
-    return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS, *_CONSOLE_EXPORTS])
+    # lazily-resolved entrypoint (the five guard ones, record_conflict_memo, the console
+    # reads, and restore_decision), since they are never assigned into the module
+    # namespace. Mirror ALL export sets, i.e. exactly what __getattr__ resolves: listing
+    # only some left a name answerable by getattr but absent from dir(), a split that no
+    # longer matches the facade the moment any set changes.
+    return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS, *_CONSOLE_EXPORTS,
+                   *_LIFECYCLE_EXPORTS])

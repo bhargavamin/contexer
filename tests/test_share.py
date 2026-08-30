@@ -830,6 +830,40 @@ def test_enqueue_caps_at_50_drops_oldest(tmp_repo):
     assert "d54" in ids  # newest kept
 
 
+def test_enqueue_at_cap_never_evicts_a_pending_lifecycle_delta(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 2)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+    share._enqueue({"decision_id": "ordinary-1", "content": "one", "attempts": 0})
+    share._enqueue({"decision_id": "ordinary-2", "content": "two", "attempts": 0})
+
+    entries = share._load_outbox()
+    assert [(e["decision_id"], e.get("stage")) for e in entries] == [
+        ("pending", "lifecycle_pending"), ("ordinary-2", None)]
+
+
+def test_enqueue_refuses_instead_of_evicting_when_cap_is_all_lifecycle(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+
+    with pytest.raises(RuntimeError, match="no safely evictable row"):
+        share._enqueue({"decision_id": "new", "content": "new", "attempts": 0,
+                        "stage": "lifecycle_pending", "capability": "v2"})
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
+
+
+def test_enqueue_does_not_report_success_after_evicting_its_own_ordinary_row(
+        tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+
+    with pytest.raises(RuntimeError, match="no safely evictable row"):
+        share._enqueue({"decision_id": "ordinary", "content": "body", "attempts": 0})
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
+
+
 # ── outbox: drain_outbox ──────────────────────────────────────────────────────────
 
 def test_drain_outbox_noop_when_empty(tmp_repo, monkeypatch):
@@ -1052,6 +1086,22 @@ def test_a_failed_queue_is_reported_as_not_queued_not_as_queued(tmp_repo, monkey
     status = share._finish_share(dec, "r", None, "https://example.test")
     assert status.outcome == share_status.NOT_QUEUED
     assert (status.lost, status.queued) == (1, 0)   # unsaved, and it does not claim a retry
+
+
+def test_share_reports_not_queued_when_lifecycle_rows_consume_the_cap(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+    store.update_decision(tmp_repo, "a new decision cannot displace lifecycle history", "s1",
+                          subtype="constraint")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+
+    status = share.share(tmp_repo, profile=TEAM)
+
+    assert status.outcome == share_status.NOT_QUEUED
+    assert (status.lost, status.queued) == (1, 0)
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
 
 
 def test_cancellation_still_wins_when_queueing_fails(tmp_repo, monkeypatch):
@@ -1322,10 +1372,12 @@ def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
     assert [x["decision_id"] for x in fake.batches[0]] == ["good1234"]  # only the valid one shared
 
 
-def test_share_ids_empty_shares_most_recent(monkeypatch):
+def test_share_ids_empty_shares_most_recent(tmp_repo, monkeypatch):
+    # `tmp_repo` patches STORE_DIR as well as providing the path: `share_ids` takes the outbox
+    # lock before dispatch, so the test must never create `.outbox.lock` in the real store.
     monkeypatch.setattr(share, "share", lambda repo, did="", **k:
                         _ok_status(server_id=f"recent:{did}"))
-    assert share.share_ids("/repo", [], profile=TEAM).server_id == "recent:"
+    assert share.share_ids(tmp_repo, [], profile=TEAM).server_id == "recent:"
 
 
 def _ok_status(sent=1, **kw):
@@ -1334,8 +1386,6 @@ def _ok_status(sent=1, **kw):
     These tests replace a share function to check WHICH ids the CLI passed and that it printed
     what came back. They used to return a bare sentence, because a sentence was the return type."""
     return share_status.ShareStatus(share_status.SYNCED, sent=sent, total=sent, **kw)
-
-
 def _three_shareable(monkeypatch):
     from contexer import config
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")

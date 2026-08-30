@@ -1,0 +1,60 @@
+{
+  "name": "03-unrelated-edit-before-directive",
+  "issue": null,
+  "summary": "An unrelated edit before the directive must never become its anchor.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "61adc88e-f383-5c47-b31e-02b17c1a49cd",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "file_changed",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "typo in the readme",
+      "files": [
+        "README.md"
+      ],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "d259c8af-d801-5d45-80be-4d0e8d42baf5",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:01:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 50,
+      "target_decision_id": null,
+      "source_files": [],
+      "uncertainties": []
+    },
+    {
+      "kind": "insufficient",
+      "title": "Files changed with no stated decision",
+      "subtype": "architecture",
+      "score": 10,
+      "target_decision_id": null,
+      "source_files": [
+        "README.md"
+      ],
+      "uncertainties": [
+        "files changed in session sess-a with no stated decision to review"
+      ]
+    }
+  ]
+}

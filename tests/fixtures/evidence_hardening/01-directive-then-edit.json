@@ -1,0 +1,49 @@
+{
+  "name": "01-directive-then-edit",
+  "issue": null,
+  "summary": "A directive followed by the edit it explains groups into one candidate.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "faf93153-a71a-5dc4-a872-d213150576db",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "fa55aa1f-0bdc-5005-9897-6e7502df3436",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "file_changed",
+      "occurred_at": "2026-08-01T10:01:00+00:00",
+      "source": "replay",
+      "summary": "regenerated the client",
+      "files": [
+        "src/generated/client.ts"
+      ],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 60,
+      "target_decision_id": null,
+      "source_files": [
+        "src/generated/client.ts"
+      ],
+      "uncertainties": []
+    }
+  ]
+}

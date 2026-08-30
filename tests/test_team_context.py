@@ -666,6 +666,33 @@ def test_defer_architecture_defers_non_ratifying_rows(tmp_repo):
     assert "1 team architecture decision" in out
 
 
+def test_defer_architecture_never_hides_lifecycle_divergence(tmp_repo):
+    decisions = [{
+        "id": "arch-div", "type": "architecture", "content": "Team picked Postgres",
+        "rationale": None, "repo": None, "agent": None, "scope": "team",
+        "source_retired": True,
+    }]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": None, "decisions": decisions})
+    out = team_context.format_team_section(tmp_repo, defer_architecture=True)
+    assert "Team picked Postgres" in out
+    assert "personal source retired; team copy remains authoritative" in out
+    assert "synced but deferred" not in out
+    assert team_context.count_deferred_architecture(tmp_repo) == 0
+
+
+def test_account_cache_clear_removes_divergence_marker_before_next_account(tmp_repo):
+    decisions = [{
+        "id": "team-secret", "type": "constraint", "content": "First account team rule",
+        "rationale": None, "repo": None, "agent": None, "scope": "team",
+        "source_retired": True,
+    }]
+    team_context._save_cache(tmp_repo, {"repo_key": "k", "cursor": "c1", "decisions": decisions})
+    assert "personal source retired" in team_context.format_team_section(tmp_repo)
+    assert team_context.clear_caches() >= 1
+    assert team_context._load_cache(tmp_repo)["decisions"] == []
+    assert team_context.format_team_section(tmp_repo) == ""
+
+
 def test_dedup_ratifies_variant_ignores_row_title(tmp_repo):
     # The "ratifies" pointer never surfaces content OR title - only the local id - so a
     # title on the collapsed row must not leak into it.
@@ -1367,7 +1394,24 @@ def test_team_poll_injects_new_rows(monkeypatch):
                         lambda rp, consumer="claude": [{"id": "t1", "content": "New team rule", "type": "constraint"}])
     out = claude.team_poll("/repo", "{}")
     assert "New team rule" in out
-    assert "just approved" in out.lower()
+    assert "context changed" in out.lower()
+
+
+def test_team_poll_surfaces_architecture_divergence_open_and_clear(monkeypatch):
+    from contexer.adapters import claude
+    rows = [{
+        "id": "a1", "content": "Team picked Postgres", "type": "architecture",
+        "source_retired": True, "_source_retired_change": "opened",
+    }]
+    monkeypatch.setattr(team_context, "poll_for_injection", lambda *a, **k: rows)
+    opened = claude.team_poll("/repo", "{}")
+    assert "Team picked Postgres" in opened
+    assert "personal source retired; team copy remains authoritative" in opened
+    assert "just approved" not in opened.lower()
+
+    rows[0] = {**rows[0], "source_retired": False, "_source_retired_change": "resolved"}
+    cleared = claude.team_poll("/repo", "{}")
+    assert "personal source restored; divergence resolved" in cleared
 
 
 def test_team_poll_threads_consumer(monkeypatch):
@@ -1401,3 +1445,21 @@ def test_team_poll_all_architecture_still_injects_deferred_line(monkeypatch):
     assert out != "{}"
     assert "Team picked Postgres over MySQL" not in out
     assert "1 team architecture decision" in out
+
+
+def test_the_detached_refresher_is_spawned_isolated_from_the_cwd(monkeypatch):
+    """`-P` on the spawn argv. This child is started from the per-prompt hook, so it
+    inherits cwd = the project root, and `-m` prepends that to sys.path exactly as `-c`
+    does: in a checked-out contexer repo the refresher would import that repo's own
+    contexer/ source instead of the installed package. Its stderr is DEVNULL, so the
+    resulting crash is invisible rather than reported."""
+    import sys as _sys
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+
+    monkeypatch.setattr(team_context.subprocess, "Popen", _FakePopen)
+    team_context._spawn_refresh("/repo")
+    assert captured["argv"] == [_sys.executable, "-P", "-m", "contexer.team_context", "/repo"]

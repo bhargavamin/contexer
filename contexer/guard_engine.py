@@ -10,7 +10,6 @@ cycle resolves cleanly. Approval-time anchoring (`approve_decision`,
 and stays in store.py.
 """
 
-import fnmatch
 import hashlib
 import json
 import os
@@ -20,7 +19,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import redact          # pure stdlib leaf (no cycle): secret redaction
+from contexer import policy          # pure leaf (no cycle): THE deterministic evaluator
 from contexer import retrieval       # pure stdlib leaf (no cycle): path/module artifact shapes
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import sidecars
@@ -663,7 +662,7 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     path-like artifact it mentions (_guard_content_artifacts), expanded to its
     possible file spellings (_artifact_path_spellings), canonicalized, and kept
     only if the file exists in the working tree. Deduped (first-seen order)
-    and capped at store.MAX_SOURCE_FILES — the same cap _anchor_sources
+    and capped at store.MAX_SOURCE_FILES - the same cap _anchor_sources
     itself enforces on write."""
     seen: set[str] = set()
     results: list[str] = []
@@ -717,14 +716,16 @@ def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
 #   MANAGEMENT (arm_guard / disarm_guard): under store_lock, WRITES the store,
 #   and MAY raise ValueError — arming/disarming is a deliberate developer act, so
 #   a malformed request should fail loudly, not degrade silently.
-#   RUN (_armed_rules / _rule_violations, and guard_staged's violations half):
+#   RUN (_armed_rules / _evaluate_rules, and guard_staged's violations half):
 #   store-READ-ONLY and fail-soft, exactly like the Tier-1 engine above — rule
 #   evaluation must never raise out of guard_staged and never block a commit on
 #   its own failure (see _GUARD_TIME_BUDGET below: a catastrophic regex fails
 #   OPEN, never partial-blocks).
+# What a rule MEANS on both paths is `policy`'s: `policy.validate_check` decides
+# what may be armed, `policy.rule_matches` decides what counts as a hit. This
+# module owns only the git-shaped half - which files, read how, budgeted by what,
+# reported where - so the deterministic check exists in exactly one place.
 
-_GUARD_CHECK_TYPES = frozenset({"regex", "secret"})
-_GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
 # Wall-clock seconds, across the WHOLE guard_staged call: the deadline is stamped
 # at the top of guard_staged and threaded through BOTH tiers — Tier-2 rule
 # evaluation (checked between files/rules) and Tier-1 pairing (checked per
@@ -733,38 +734,13 @@ _GUARD_MACHINE_CHECKABLE_MSG = "guard rules must be machine-checkable"
 _GUARD_TIME_BUDGET = 2.0
 
 
-def _validate_guard_check(check_type: str, pattern: str, flags: str) -> None:
-    """Refuse anything not deterministically machine-checkable — the structural
-    half of arm_guard's refusal contract (entry existence and approval status are
-    checked by the caller, which needs the store loaded first). Every failure
-    here raises the SAME message: the caller only needs to know arming was
-    refused because the request wasn't checkable, not which specific rule of
-    the check tripped."""
-    if check_type not in _GUARD_CHECK_TYPES:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-    if check_type == "secret":
-        # `secret` always means "match redact.HIGH_CONFIDENCE_PATTERNS" — a
-        # pattern alongside it is nonsensical, not merely redundant.
-        if pattern:
-            raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-        return
-    if not pattern:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-    if set(flags) - {"i"}:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-    try:
-        re.compile(pattern, re.IGNORECASE if "i" in flags else 0)
-    except re.error:
-        raise ValueError(_GUARD_MACHINE_CHECKABLE_MSG)
-
-
 def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
               flags: str = "", paths: str = "", message: str = "") -> str:
     """Arm a decision with a machine-checkable commit-time rule — the blocking
     (Tier-2) counterpart to Tier-1's advisory pairing. MANAGEMENT path: under
-    store_lock, may raise ValueError (see _validate_guard_check for the
+    store_lock, may raise ValueError (see policy.validate_check for the
     machine-checkable refusals; separately refuses an entry that doesn't exist,
-    or one whose entry_status isn't "approved" — an armed rule must already be
+    or one whose entry_status isn't "approved" - an armed rule must already be
     developer-trusted, since arming an unreviewed AI guess would let it block a
     commit no human ever signed off on).
 
@@ -772,7 +748,7 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
     an 8-char prefix — tried against the REPO store first, then the GLOBAL
     store, so a global armed rule (see _armed_rules) also blocks every repo's
     commits, matching how global rules are already injected everywhere else."""
-    _validate_guard_check(check_type, pattern, flags)
+    policy.validate_check(check_type, pattern, flags)
     repo = store.resolve_repo(repo_path)
     guard_check = {"type": check_type, "pattern": pattern, "flags": flags,
                     "paths": paths, "message": message,
@@ -834,7 +810,7 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
 
 def _armed_rules(entries: list[dict]) -> list[dict]:
     """The subset of `entries` that are BOTH carrying a guard_check AND STILL
-    entry_status == "approved" right now — status is re-checked at RUN time,
+    entry_status == "approved" right now - status is re-checked at RUN time,
     never trusted from arm time, so a decision later ignored or superseded
     stops firing without an explicit disarm. Pure, no I/O; the caller gathers
     from repo + global stores by calling this once per store and concatenating
@@ -843,60 +819,93 @@ def _armed_rules(entries: list[dict]) -> list[dict]:
 
 
 def _rule_selects(rule: dict, path: str) -> bool:
-    """Whether one armed rule's `paths` glob applies to `path` (no glob = every file).
+    """Whether one armed ENTRY's `paths` glob applies to `path` - unwrapping the guard_check
+    the entry carries and delegating the glob itself to `policy.rule_selects`, which is the
+    one definition of it.
 
-    Extracted so the ONE definition serves both callers rather than each keeping its own
-    copy: `_rule_violations` uses it to decide what to scan, and `_guard_violations` uses
-    it to decide whether an unscannable file is worth REPORTING as unchecked. Without it
-    there, a rule armed `--paths "src/**/*.py"` made a staged 4MB `data/dump.json` print
-    a "not checked by armed rules" line on every commit, naming a gap that does not exist
-    because no armed rule would ever have been run against that file."""
-    paths_glob = (rule.get("guard_check") or {}).get("paths") or ""
-    return not paths_glob or fnmatch.fnmatch(path, paths_glob)
+    Kept as a named function because BOTH of this module's callers want it entry-shaped:
+    `_evaluate_rules` uses it to decide what to offer the evaluator, and `_guard_violations`
+    uses it to decide whether an unscannable file is worth REPORTING as unchecked, and to
+    settle scope once per file before the file is read. Without it there, a
+    rule armed `--paths "src/**/*.py"` made a staged 4MB `data/dump.json` print a "not checked
+    by armed rules" line on every commit, naming a gap that does not exist because no armed
+    rule would ever have been run against that file."""
+    return policy.rule_selects(rule.get("guard_check") or {}, path)
 
 
-def _rule_violations(rules: list[dict], path: str, content: str) -> list[dict]:
-    """Evaluate every entry in `rules` (as returned by _armed_rules) against one
-    staged file's content. `path` must already be _guard_relpath's canonical
-    output. A rule whose guard_check["paths"] glob doesn't fnmatch `path` is
-    skipped entirely (empty paths = applies to every staged file).
+def _armed_policy(entry: dict, path: str) -> dict:
+    """One armed store entry as `policy`'s applicable-policy shape (the same shape
+    `policy.select_policies` emits), so the evaluator never sees a store entry.
 
-    `regex` rules match line-by-line (so a hit's reported line number is exact);
-    an unparseable pattern (defensive only — arm_guard already validates at arm
-    time) is skipped rather than raised. `secret` rules match any hit from
-    redact.HIGH_CONFIDENCE_PATTERNS against the WHOLE file content, not
-    per-line — the PEM private-key pattern spans multiple lines (BEGIN/…/END),
-    so per-line splitting would silently defeat it; the line number is then
-    derived from the match's character offset via a newline count.
+    Selection stays HERE rather than being handed to `policy.select_policies`, and that is
+    deliberate: `select_policies` gates on `policy.is_trusted` (the mirror of
+    `_guard_trusted`), which is TIER-1's rule. Tier 2 gates on `_armed_rules` - approved AND
+    explicitly armed - because arming is itself a deliberate developer act, more deliberate
+    than approval. Routing Tier 2 through the trust gate would silently disarm every rule a
+    developer armed on an approved decision whose revision source is `ai`, which is a
+    behaviour change, not a refactor.
 
-    Each hit: {path, line, decision_id, title, message}."""
-    out: list[dict] = []
-    for rule in rules:
-        gc = rule.get("guard_check") or {}
-        if not _rule_selects(rule, path):
-            continue
-        decision_id = rule.get("id", "")
-        title = rule.get("title") or revisions.derive_title(revisions.current_content(rule))
-        message = gc.get("message") or ""
-        check_type = gc.get("type")
+    Those decisions arise through ORDINARY CAPTURE, not just legacy migration (controller
+    ruling R42): `store._classify_level` returns `auto` when content matches
+    `store._SCAN_FACT_PATTERNS`, and `_level_to_status` maps `auto` -> `approved`, so an
+    `ai` capture whose text merely LOOKS like a scan fact is born approved with revision
+    source `ai` and no `approved_by` stamp. `arm_guard` gates on approved status alone and
+    accepts it. Nothing in the suite seeds an armed untrusted entry, so this would have been
+    a silent kill, not a caught one."""
+    rev = revisions.current_revision(entry) or {}
+    return {"decision_id": entry.get("id", ""),
+            "revision_id": rev.get("revision_id", ""),
+            "kind": "armed",
+            "title": entry.get("title") or revisions.derive_title(revisions.current_content(entry)),
+            "rule": entry.get("guard_check") or {},
+            "matched_files": [path]}
 
-        if check_type == "regex":
-            flags = re.IGNORECASE if "i" in (gc.get("flags") or "") else 0
-            try:
-                compiled = re.compile(gc.get("pattern", ""), flags)
-            except re.error:
-                continue
-            for lineno, line in enumerate(content.splitlines(), start=1):
-                if compiled.search(line):
-                    out.append({"path": path, "line": lineno, "decision_id": decision_id,
-                                "title": title, "message": message})
-        elif check_type == "secret":
-            for pat in redact.HIGH_CONFIDENCE_PATTERNS:
-                for m in pat.finditer(content):
-                    lineno = content.count("\n", 0, m.start()) + 1
-                    out.append({"path": path, "line": lineno, "decision_id": decision_id,
-                                "title": title, "message": message})
-    return out
+
+def _evaluate_rules(rules: list[dict], path: str,
+                    content: str) -> tuple[list[dict], list[dict]]:
+    """Judge `rules` (as returned by _armed_rules) against ONE staged file's already-read
+    content, through `policy.evaluate_policies`. Returns (violation rows, dead-rule rows).
+
+    This is the whole Tier-2 adapter seam: git-shaped work - which entries are armed, which
+    files are staged, reading them, the wall-clock budget - stays in this module, and the
+    judging is the evaluator's. A rule whose guard_check["paths"] glob doesn't fnmatch `path`
+    is not offered to it at all (empty paths = applies to every staged file).
+
+    A DEAD RULE is the second return value: `policy.evaluate_policies` reports an armed rule
+    it could not run (an unparseable pattern, an unknown check type) as an `unchecked` row
+    rather than as a clean pass, and the guard surfaces that to the developer instead of
+    swallowing it. A rule that silently never fires is the failure the developer is least
+    able to notice - they believe they are protected and they are not. It is reported, never
+    blocked on: a rule that cannot run is the guard's own limitation, the same class as an
+    exhausted budget.
+
+    ONE difference from the pre-evaluator path, unreachable today but recorded because it
+    inverts the fail direction: `policy.evaluate_policies` catches an internal failure
+    ITSELF and returns what it judged, where the old inline judging let the exception unwind
+    to `guard_staged`'s catch-all, which discarded every violation accumulated across all
+    earlier files and rules and exited 0. So a raise here used to fail OPEN and would now
+    fail CLOSED - the accumulated violations survive and the commit is blocked. Nothing can
+    currently reach it: `rule_matches` catches `re.error`/`TypeError`, `_match` cannot exceed
+    the armed verdict ceiling, `content` is always a str by the time `_guard_violations` has
+    it, and a malformed `guard_check` raises in `_rule_selects` ABOVE this call, where the old
+    fail-open behaviour still holds. If that ever changes, this is the line to re-read.
+
+    Cost this pays that the old path did not: `evaluate_policies` computes a
+    `policy_set_version` (a JSON dump plus a sha256) per call, and `_guard_violations` calls
+    it once per (file, rule), so a 500-file x 5-rule run computes ~2500 of them - on top of
+    the title derivation in `_armed_policy`, which the old path ran only on a HIT. Both are
+    small against a budget where one 1MB `secret` scan costs ~155ms, and the budget tests
+    pass; they are named so the next person tuning this knows where the cost sits."""
+    policies = [_armed_policy(e, path) for e in rules if _rule_selects(e, path)]
+    if not policies:
+        return [], []
+    result = policy.evaluate_policies(
+        policies, {"artifact": {"kind": "file_content", "content": content}})
+    hits = [{"path": path, "line": m["line"], "decision_id": m["decision_id"],
+             "title": m["title"], "message": m["message"]} for m in result["matches"]]
+    dead = [{"decision_id": g.get("decision_id", ""), "reason": g["reason"]}
+            for g in result["unchecked"]]
+    return hits, dead
 
 
 def _guard_violations(repo: str, staged: list[str],
@@ -923,6 +932,11 @@ def _guard_violations(repo: str, staged: list[str],
     scoped to `src/**/*.py` does not make an unscannable `data/dump.json` look like
     missed coverage.
 
+    The same list also carries DEAD RULES - `{"decision_id", "reason"}` rows for an armed
+    rule `policy.evaluate_policies` could not run at all (see `_evaluate_rules`). Same
+    principle, one axis over: a rule that never fires must not read as a rule that found
+    nothing. They carry no `file` key, which is what tells the two row kinds apart.
+
 Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reach are
     reported through the same list (reason `budget`) rather than being left to the hard
     deadline. That ordering is deliberate: the deadline fails OPEN by discarding every
@@ -935,6 +949,10 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
         return [], [], False
     violations: list[dict] = []
     unchecked: list[dict] = []
+    # A dead rule is a property of the RULE, not of any one staged file, so it is reported
+    # once per run keyed on (decision, reason) - otherwise one broken pattern would print a
+    # line for every staged file it selects.
+    dead: dict[tuple, dict] = {}
     # Stop scanning with _GUARD_SCAN_RESERVE left, so the run returns normally (violations
     # kept, gaps named) rather than tripping the hard deadline, which discards everything.
     soft_deadline = deadline - _GUARD_SCAN_RESERVE
@@ -949,7 +967,7 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
             return [], [], True
         # Scope is decided ONCE, here, before the file is read or charged to the budget,
         # and the rest of the loop trusts it. Applicability used to be settled inside
-        # `_rule_violations` instead, which meant a file no rule selects was still
+        # the per-rule judging instead, which meant a file no rule selects was still
         # `git show`n and still charged to the budget before being scanned against nothing.
         # That is a security bug, not just waste: arm one rule `--paths "src/*.py"`, stage
         # a few MB of `data/*.json` next to one `src/app.py` holding a secret, and the
@@ -976,8 +994,11 @@ Scanning stops at `deadline - _GUARD_SCAN_RESERVE` and the files it did not reac
         for rule in selectors:
             if time.time() > deadline:
                 return [], [], True
-            violations.extend(_rule_violations([rule], relpath, content))
-    return violations, unchecked, False
+            hits, gaps = _evaluate_rules([rule], relpath, content)
+            violations.extend(hits)
+            for gap in gaps:
+                dead.setdefault((gap["decision_id"], gap["reason"]), gap)
+    return violations, unchecked + list(dead.values()), False
 
 
 def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
@@ -1006,10 +1027,11 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     clears).
 
     "unchecked" carries the staged files an armed rule could not be run against
-    (see _guard_violations), and like "total_advisories" the key is present only
-    when there is something to report, so a clean run's dict shape is unchanged.
-    It never affects the exit code: a file the guard could not read is a gap in
-    the report, not a violation to block on."""
+    AND the armed rules that could not run at all (see _guard_violations), and
+    like "total_advisories" the key is present only when there is something to
+    report, so a clean run's dict shape is unchanged. It never affects the exit
+    code: neither a file the guard could not read nor a rule it could not run is
+    a violation to block on - both are the guard's own limitations."""
     try:
         if os.environ.get("CONTEXER_GUARD") == "0":
             return {"advisories": [], "violations": [], "skipped": "env"}

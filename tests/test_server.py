@@ -577,3 +577,136 @@ def test_session_id_falls_back_when_env_var_is_empty_string():
     seen = _session_id_from_subprocess({"CLAUDE_CODE_SESSION_ID": ""})
     assert seen != ""
     assert uuid.UUID(seen).version == 4
+
+
+# ── evaluate_policy ──────────────────────────────────────────────────────────────
+# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing - a `block` is a
+# sentence for the model to relay to the developer, not a refusal, and an `allow` is not
+# permission to stop asking them.
+
+
+def _armed_secret_rule(tmp_repo):
+    from tests.test_policy_api import _arm, _seed
+    entry = _seed(tmp_repo, "Never commit credentials", title="No secrets")
+    _arm(tmp_repo, entry["id"], "secret")
+    return entry
+
+
+def test_evaluate_policy_reports_a_block_as_text_and_refuses_nothing(tmp_repo, monkeypatch):
+    from tests.test_policy_api import AWS_KEY
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    entry = _armed_secret_rule(tmp_repo)
+    before = store.load(tmp_repo)
+
+    out = server.evaluate_policy(tmp_repo, operation="commit", artifact_kind="diff",
+                                 artifact=f"+key={AWS_KEY}\n")
+
+    assert isinstance(out, str) and "verdict: block" in out
+    assert entry["id"] in out                       # names which decision objected
+    assert store.load(tmp_repo) == before           # a read tool: nothing written
+
+
+def test_evaluate_policy_redacts_the_artifact_out_of_what_it_returns(tmp_repo, monkeypatch):
+    from tests.test_policy_api import AWS_KEY
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    _armed_secret_rule(tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="commit", artifact_kind="diff",
+                                 artifact=f"+AWS_ACCESS_KEY_ID={AWS_KEY}\n")
+    assert "verdict: block" in out and AWS_KEY not in out
+
+
+def test_evaluate_policy_returns_errors_instead_of_raising(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="rm-rf")
+    assert "Not evaluated" in out and "operation must be one of" in out
+
+
+def test_evaluate_policy_reports_gaps_rather_than_a_clean_pass(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    _armed_secret_rule(tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="commit")   # no artifact at all
+    assert "evaluation_status: partial" in out and "omitted" in out
+
+
+def test_evaluate_policy_delegates_to_the_shared_facade(tmp_repo, monkeypatch):
+    # The tool must stay a wrapper: no policy logic of its own, no second selection path.
+    seen = {}
+
+    def fake(repo_path, **kw):
+        seen["repo_path"] = repo_path
+        seen.update(kw)
+        return {"verdict": "allow", "evaluation_status": "complete", "basis": "deterministic",
+                "matches": [], "unchecked": [], "policy_set_version": "sha256:x",
+                "repo_path": repo_path, "errors": []}
+
+    monkeypatch.setattr(server.policy_api, "evaluate_operation", fake)
+    server.evaluate_policy("/repo/x", intent="ship it", operation="deploy",
+                           files=["a.py"], artifact_kind="deployment", artifact="plan")
+    assert seen == {"repo_path": "/repo/x", "intent": "ship it", "operation": "deploy",
+                    "files": ["a.py"], "artifact_kind": "deployment", "artifact": "plan"}
+
+
+def test_evaluate_policy_docstring_is_self_approval_proofed():
+    """The one guardrail a tool docstring can carry: the model must not read `block` as a
+    refusal it should obey silently, nor `allow` as the developer's agreement."""
+    doc = server.evaluate_policy.__doc__
+    assert "ADVISORY" in doc
+    assert "does not refuse" in doc
+    assert "not permission" in doc
+
+
+# ── record_agent_conclusion ──────────────────────────────────────────────────
+
+def test_record_agent_conclusion_short_circuits_without_a_repo(monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda *a, **k: pytest.fail("reached the emitter with no repo"))
+    assert server.record_agent_conclusion("anything") == "Skipped - repo path not detected."
+
+
+def test_record_agent_conclusion_spools_evidence_and_writes_no_decision(tmp_repo, monkeypatch):
+    from contexer import spool
+
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: tmp_repo)
+
+    message = server.record_agent_conclusion(
+        "The codegen step overwrites src/generated/client.ts.",
+        rationale="It runs on every build.", files=["src/generated/client.ts"])
+
+    assert "EVIDENCE" in message and "not as a decision" in message
+    (event,) = spool.list_pending_evidence(tmp_repo, server.SESSION_ID)
+    assert event["kind"] == "agent_conclusion"
+    assert event["attributes"]["reported_by"] == "agent"
+    # The tool is an emitter, not a capture path: nothing reaches the store from here.
+    assert store.load(tmp_repo)["entries"] == []
+
+
+def test_record_agent_conclusion_delegates_rather_than_emitting_its_own_event(monkeypatch):
+    # A second hand-built event here would be a second schema to drift from evidence.py's.
+    seen = {}
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda repo, summary, **kw: (seen.update(
+                            {"repo": repo, "summary": summary, **kw}) or (True, "ok")))
+
+    assert server.record_agent_conclusion("a conclusion", rationale="why", files=["a.py"]) == "ok"
+    assert seen == {"repo": "/repo/x", "summary": "a conclusion", "rationale": "why",
+                    "files": ["a.py"], "session_id": server.SESSION_ID}
+
+
+def test_record_agent_conclusion_reports_a_failed_append(tmp_repo, monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: tmp_repo)
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda *a, **k: (False, "NOT recorded - the conclusion could not be "
+                                                "spooled (disk is on fire)."))
+    assert "NOT recorded" in server.record_agent_conclusion("x")
+
+
+def test_record_agent_conclusion_docstring_never_promises_storage():
+    """The tool's instructions are the only thing standing between "record a conclusion" and
+    a model treating it as `update_context`. They must say what it is NOT."""
+    doc = server.record_agent_conclusion.__doc__
+    assert "evidence" in doc.lower()
+    assert "nothing is stored as a decision" in doc
+    assert "Do NOT call it for progress narration" in doc
+    assert "update_context instead" in doc

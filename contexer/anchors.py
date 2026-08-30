@@ -17,9 +17,9 @@ Shape mirrors `store.verify_scan_conventions` deliberately:
     entry in the store carries `source_files` at all (the common case for every repo
     whose decisions were never anchored);
   - one `load` + one `save` under one `store_lock`, not a write per entry;
-  - proposals are attached via `review.build_proposal` and armed for review via
-    `store._touch_pending_review`, AFTER the save (same ordering as every other proposal
-    site in store.py) — never a direct status flip.
+  - proposals are attached via `lifecycle.attach_lifecycle_proposal` and armed for review via
+    `store.touch_pending_review`, AFTER the save (same ordering as every other proposal
+    site in store.py) - never a direct status flip, and never a retirement.
 
 Per anchored, active-status entry with no proposal already pending, each `source_files`
 path is classified against the working tree:
@@ -32,24 +32,24 @@ path is classified against the working tree:
 The entry-level outcome then follows from what was collected:
   - partial loss (something survives, whether as-is or renamed) -> the anchor list is
     refreshed to the surviving/renamed set in place; still not a review event.
-  - total loss (every anchored file is gone, none renamed) -> a rule-shaped
-    `proposed_revision` is attached (current content + a trailing closed, factual
-    "anchors withdrawn on re-verification" clause — never an open action-request, since
-    approving a proposal makes its content the LIVE revision: a baked-in question would
-    ship as the decision's permanent text) and the pending-review nudge is armed. The
-    proposal also stashes `clear_anchors = True`, honored by `store._promote_proposal` —
-    approving must drop `source_files`/`anchor_commit` from the entry, or it would
-    re-qualify as a participant next TTL cycle and stack a second withdrawal clause onto
-    the content the first approval just wrote (it also drops any `anchor_candidates`,
-    which retirement moots). A dedupe guard additionally refuses to attach a second
-    clause if the entry's current CONTENT already carries one (belt and suspenders
-    alongside the clear-on-approval fix, not a substitute for it). Dismissing a proposal
-    leaves the entry, `source_files` included, untouched — and since dismissal never
-    writes the clause into the content, that guard cannot fire for it: a dismissed
-    retirement is re-proposed on EVERY TTL cycle until the developer approves it or
-    ignores the decision. Dismiss means "not now", not "never ask again".
+  - total loss (every anchored file is gone, none renamed) -> a `proposed_lifecycle`
+    retirement (`lifecycle.attach_lifecycle_proposal`, source "scan") is attached and the
+    pending-review nudge is armed. The decision's CONTENT is never touched: a retirement
+    is a state transition, not a rewording, and encoding it as new decision text was
+    what the plan's C2 lane exists to stop. Approving it (`lifecycle.retire_decision`) moves
+    the decision into the tombstone sidecar with its lifecycle history; dismissing it
+    (`lifecycle.dismiss_lifecycle`) leaves the entry, `source_files` included, exactly as it
+    was, so the next TTL cycle re-proposes - dismiss means "not now", not "never ask
+    again", until the developer retires the decision or ignores it.
 
-Contexer NEVER deletes an anchored decision on its own: the total-loss path only ever
+    Dedupe is structural rather than a reason comparison: an entry already carrying a
+    `proposed_lifecycle` is not a participant at all, so a sitting proposal can never be
+    duplicated. The older content-marker guard stays for one narrow case it still
+    answers - a LEGACY entry whose live content already carries the withdrawal clause an
+    approved pre-lane proposal wrote - since re-proposing retirement for text that
+    already says its anchors were withdrawn is noise.
+
+Contexer NEVER retires an anchored decision on its own: the total-loss path only ever
 proposes, through the ordinary review flow (`review_pending` / the `.pending_review`
 nudge / `contexer review`), and a developer who dismisses that proposal keeps the entry
 exactly as it was.
@@ -84,17 +84,19 @@ exhaustion never leaves a half-applied change behind.
 to participate: participation requires a real `source_files` anchor, which a candidate by
 definition is not. They can still RIDE ALONG on a participant, though — an approved entry
 that was anchored and also carries a stale guess (candidates survive the pending-twin
-promote path and `_route_containment`, neither of which pops them) — which is why approving
-a retirement drops them along with the anchor (`store._promote_proposal`'s `clear_anchors`
-handling): left behind, they would be blessed into a fresh anchor by the very next approval
-and pull the retired decision back into decay participation."""
+promote path and `_route_containment`, neither of which pops them). Under the lifecycle
+lane a retired decision leaves the live store entirely, so a leftover guess goes with it
+and can no longer be blessed into a fresh anchor by a later approval; the `clear_anchors`
+handling in `store._promote_proposal` / `store._apply_approval` that used to be the answer
+stays only for LEGACY stores still holding a pre-lane proposal."""
 
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from contexer import review, revisions      # pure stdlib leaf (no cycle): revision lifecycle
+from contexer import revisions              # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import sidecars
+from contexer import lifecycle      # module object too, same reason: see docstring above
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 _ANCHOR_VERIFY_TTL = 86400   # 24h — file layouts don't churn fast enough to re-check every
@@ -115,7 +117,7 @@ _ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store.MAX_SOURCE_FILES + 1
 # one of its (at most MAX_SOURCE_FILES) anchored paths missing, and each of those paths
 # potentially needing the full rename chain (up to _RENAME_CHAIN_MAX hops, 2 calls per hop
 # — `log` + `show`) before resolving or giving up, plus at most one `rev-parse HEAD` for
-# the outcome — so a budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 1` guarantees
+# the outcome - so a budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 1` guarantees
 # the FIRST entry of every run always completes. That guarantee is what makes the run make
 # forward progress: a smaller budget lets a single fat entry exhaust it inside its own file
 # loop, so that entry — and every entry after it — is skipped on every run, forever,
@@ -124,10 +126,12 @@ _ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store.MAX_SOURCE_FILES + 1
 
 _ACTIVE_STATUSES = ("approved", "suggested")
 
-# The exact, stable substring every anchor-decay withdrawal clause carries — used both to
-# build the clause and, defensively, to detect one already present (see verify_anchors's
-# dedupe guard in the total-loss branch).
-_ANCHOR_WITHDRAWN_MARKER = "(anchors withdrawn on re-verification:"
+# The stable wording every anchor-decay withdrawal carries. The CORE is the lifecycle
+# proposal's reason; the MARKER is the parenthesised clause a pre-lane `proposed_revision`
+# used to write into decision content, still recognised so a legacy entry that already
+# carries one is not asked about again (verify_anchors's dedupe guard).
+_ANCHOR_WITHDRAWN_CORE = "anchors withdrawn on re-verification:"
+_ANCHOR_WITHDRAWN_MARKER = f"({_ANCHOR_WITHDRAWN_CORE}"
 
 
 class _BudgetExceeded(Exception):
@@ -222,8 +226,9 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
 
     Participants: `type == "decision"`, non-empty `source_files`, `entry_status` in
     ("approved", "suggested") — the same "active status" set `_rehydrate_working_set`
-    uses — and no `proposed_revision` already pending (an entry mid-review is skipped
-    outright, never piled onto with a second proposal).
+    uses - and neither a `proposed_revision` nor a `proposed_lifecycle` already pending (an
+    entry mid-review is skipped outright, never piled onto with a second proposal; that is
+    also what makes retirement-proposal dedupe structural rather than a text comparison).
 
     Fast path (session-start latency): participants are collected from a single `load`
     BEFORE the TTL stamp is touched and before any git work. Zero participants — every
@@ -248,6 +253,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                 and e.get("source_files")
                 and store.entry_status(e) in _ACTIVE_STATUSES
                 and e.get("proposed_revision") is None
+                and e.get("proposed_lifecycle") is None
             ]
             if not participants:
                 return {"reanchored": 0, "proposed": 0}
@@ -330,26 +336,20 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                         continue
 
                     # Total loss: every anchored file is gone, none renamed. Propose,
-                    # never apply — the decision keeps rendering its current content
-                    # until a human reviews the proposal (approve promotes the withdrawal
-                    # note and exits anchor-decay participation, dismiss keeps the entry
-                    # exactly as it was, ignore retires it deliberately).
-                    current = revisions.current_content(entry)
-                    if _ANCHOR_WITHDRAWN_MARKER in current:
-                        continue  # dedupe guard: already carries a withdrawal clause
-                    proposal_content = (
-                        f"{current} {_ANCHOR_WITHDRAWN_MARKER} {', '.join(missing)} "
-                        f"no longer exist)"
-                    )
-                    # Carry the entry's existing title: this proposal is bookkeeping, and
-                    # promoting it must not let review.build_proposal's empty-title fallback
-                    # re-derive a title from content-plus-withdrawal-clause, silently
-                    # destroying a curated one.
-                    proposal = review.build_proposal(
-                        entry, proposal_content, "", "", now, source="scan",
-                        title=entry.get("title") or "")
-                    proposal["clear_anchors"] = True
-                    entry["proposed_revision"] = proposal
+                    # never apply - the decision keeps rendering exactly as it does now
+                    # until a human answers (retire_decision tombstones it with its
+                    # history, dismiss_lifecycle keeps it live and lets the next TTL
+                    # cycle ask again).
+                    if _ANCHOR_WITHDRAWN_MARKER in revisions.current_content(entry):
+                        continue  # legacy entry whose content already says this
+                    # In-memory attach, not lifecycle.propose_lifecycle: this run already holds
+                    # the store lock and saves once at the end, and flock is not reentrant
+                    # across two opens of the same file in one process.
+                    if lifecycle.attach_lifecycle_proposal(
+                            entry, "retire",
+                            f"{_ANCHOR_WITHDRAWN_CORE} {', '.join(missing)} no longer exist",
+                            source="scan", now=now) is None:
+                        continue   # a developer's own retirement proposal holds the slot
                     proposed += 1
                     changed = True
                     review_needed = True
@@ -363,7 +363,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
             if changed:
                 store.save(repo_path, data)
                 if review_needed:
-                    store._touch_pending_review(repo_path)  # a retirement now awaits review
+                    store.touch_pending_review(repo_path)  # a retirement now awaits review
             return {"reanchored": reanchored, "proposed": proposed}
     except Exception:
         return {"reanchored": 0, "proposed": 0}

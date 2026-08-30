@@ -5,10 +5,20 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import sidecars, store
+from contexer import evidence, sidecars, store
 from contexer.adapters import base
 
 NAME = "gemini"
+
+# What this host's installed hooks observe. `before_agent` captures directives and
+# `AfterTool(write_file|replace)` captures edits; nothing hands over the model's response.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, BeforeAgent
+    "file_changes": "captured",                 # after_write, AfterTool(write_file|replace)
+    "assistant_conclusions": "model_reported",  # the MCP tool, agent-invoked
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
 
 # Fix 1: namespaced so it doesn't collide with Claude's ~/.contexer/.pending_capture flag.
 _PENDING_CAPTURE = sidecars.filename("gemini_capture")
@@ -95,7 +105,7 @@ def session_start(repo_path: str, raw: str) -> str:
     rationale; this mirrors it so SessionStart keys the same store `before_agent` and
     `after_write` do."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
             return _output("SessionStart", [])
         _anchor(repo)
@@ -107,7 +117,12 @@ def session_start(repo_path: str, raw: str) -> str:
             marker = _session_marker(raw)
             if marker is not None:
                 _flag_drop(marker)
-        payload = store.session_start_payload(repo, source)
+        # `host=NAME`: the shared payload now reconciles this repo's unconsumed evidence, so
+        # Gemini gains a SessionStart checkpoint beside the PreCompress and SessionEnd ones
+        # `_reconcile_evidence` already gives it. Those two stay: they are the safety net for
+        # a session that compresses or ends without ever starting again, and this one is the
+        # recovery net for a session that ended without either.
+        payload = store.session_start_payload(repo, source, "", NAME)
         return _output("SessionStart", [payload.get("context", "")])
     except Exception:
         return _output("SessionStart", [])
@@ -128,7 +143,7 @@ def before_agent(repo_path: str, raw: str) -> str:
     so a hook firing in the home/config dir still resolves to nothing rather than a junk
     store."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
             return _output("BeforeAgent", [])
         _anchor(repo)
@@ -175,9 +190,13 @@ def before_agent(repo_path: str, raw: str) -> str:
         # used rather than by re-resolving: this host deliberately does NOT run the
         # `resolve_repo` chain here (see the docstring above), and a stamp must never change
         # what it is describing.
-        repo_source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
-        entry_id, content, status = store.capture_user_constraint(
-            repo, prompt, session_id, near, repo_source=repo_source)
+        repo_source = "hook-payload" if raw else "hook-arg" if (repo_path or "").strip() \
+            else "hook-cwd"
+        # Same store call plus the shadow-mode user_directive event (see
+        # evidence.capture_directive): identical return, identical exceptions, so this
+        # hook's existing outer handler still owns what happens on failure.
+        entry_id, content, status = evidence.capture_directive(
+            repo, prompt, session_id, "gemini_prompt", near=near, repo_source=repo_source)
         if entry_id is not None:
             contexts.append(store.constraint_ack(content, status, entry_id, near))
 
@@ -200,10 +219,10 @@ def after_write(repo_path: str, raw: str) -> str:
 
     Repo resolution is `hook_cwd_repo`, NOT `resolve_repo` (Greptile P1, PR #181): this
     is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
-    and `resolve_repo` would fall through to the shared `.current_repo` pointer — which can
-    name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
-    var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
-    are first-class stores keyed by absolute path, so silently recording under whatever repo
+    and `resolve_repo` would fall through to the shared `.current_repo` pointer - which can
+    name a DIFFERENT repo entirely. Hook wrappers pass PWD and the Python resolver combines
+    it with the host payload without spawning Git; non-git projects are first-class stores
+    keyed by absolute path, so silently recording under whatever repo
     the pointer happens to hold (or discarding the edit if it holds nothing sane) starves the
     real project's pending captures of anchor candidates. `hook_cwd_repo` falls back to this
     process's own cwd instead — which IS the project directory for a hook — guarded by
@@ -211,13 +230,21 @@ def after_write(repo_path: str, raw: str) -> str:
     claude.post_write's identical fallback for the sibling PostToolUse recording path."""
     _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if repo:
             data = json.loads(raw)
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
             fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             if isinstance(fp, str) and fp:
-                store.record_edited_file(repo, fp)
+                # Shadow-mode evidence rides the SAME recorded path (record_edited_file's
+                # return), so this event and Claude's post_tool_use one differ only in
+                # `source`. Inside the existing handler: the reminder below is unaffected.
+                relpath = store.record_edited_file(repo, fp)
+                if relpath:
+                    evidence.emit_hook_event(
+                        repo, "file_changed",
+                        session_id=store.session_from_hook_stdin(raw),
+                        source="gemini_after_tool", files=[relpath])
     except Exception:
         pass
     return json.dumps({
@@ -233,12 +260,28 @@ def after_write(repo_path: str, raw: str) -> str:
     })
 
 
+def _reconcile_evidence(repo_path: str) -> None:
+    """Materialize recorded evidence into decisions pending review, at Gemini's own two
+    checkpoint events. Fail-soft to the point of swallowing an import error, and cheap in the
+    quiet case: `reconcile_session` reads no store until it has unconsumed evidence. The twin
+    of `claude._reconcile_evidence`, which rides on `sync_memory` because Claude's three
+    checkpoints all call it - Gemini has no such shared entrypoint, so it is wired per event."""
+    try:
+        from contexer import reconcile
+        repo = store.hook_cwd_repo(repo_path)
+        if repo:
+            reconcile.reconcile_session(repo, host=NAME)
+    except Exception:
+        pass
+
+
 def pre_compress(repo_path: str, raw: str) -> str:
     """Defer full context reload to the first turn after compression."""
     # Fix 3: only set the reload flag here. Compression is not a file write, so
     # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
     # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
     _flag_set(store.STORE_DIR / _PENDING_RELOAD)
+    _reconcile_evidence(repo_path)
     return json.dumps({"suppressOutput": True})
 
 
@@ -250,14 +293,15 @@ def session_end(repo_path: str, raw: str) -> str:
             marker.unlink(missing_ok=True)
     except Exception:
         pass
+    _reconcile_evidence(repo_path)
     return json.dumps({"suppressOutput": True})
 
 
 def _cmd(entry: str) -> str:
     python = sys.executable
     return (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "
-        f'"{python}" -c "from contexer.adapters import gemini; import sys; '
+        'REPO="$PWD" && '
+        f'"{python}" -P -c "from contexer.adapters import gemini; import sys; '
         f'print(gemini.{entry}(sys.argv[1], sys.stdin.read()))" "$REPO"'
     )
 

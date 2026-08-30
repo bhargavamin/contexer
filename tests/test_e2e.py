@@ -105,9 +105,11 @@ class TestInstall:
         cli.install()
         hooks = _settings(tmp_home).get("hooks", {})
         ups = hooks.get("UserPromptSubmit", [])
-        anchor_cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])
-                       if ".current_repo" in str(h)]
-        assert any(".pending_capture" in c for c in anchor_cmds)
+        reminder_cmds = [h.get("command", "") for g in ups for h in g.get("hooks", [])
+                         if "last turn settled" in str(h)]
+        assert len(reminder_cmds) == 1
+        assert ".pending_capture" in reminder_cmds[0]
+        assert "git rev-parse" not in reminder_cmds[0]
 
     def test_pending_review_hook_registered(self, tmp_home):
         cli.install()
@@ -211,7 +213,8 @@ class TestReinstallIdempotency:
         ups = hooks.get("UserPromptSubmit", [])
         put = hooks.get("PostToolUse", [])
         return {
-            "anchor": sum(1 for g in ups for h in g.get("hooks", []) if ".current_repo" in str(h)),
+            "reminder": sum(1 for g in ups for h in g.get("hooks", [])
+                            if "last turn settled" in str(h)),
             "capture_constraint": sum(1 for g in ups for h in g.get("hooks", [])
                                       if "claude.capture_constraint" in h.get("command", "")),
             "pending_capture": sum(1 for g in put for h in g.get("hooks", [])
@@ -223,7 +226,7 @@ class TestReinstallIdempotency:
         cli.install()
         cli.install()
         counts = self._counts(tmp_home)
-        assert counts["anchor"] == 1
+        assert counts["reminder"] == 1
         assert counts["capture_constraint"] == 1
         assert counts["pending_capture"] == 1
 
@@ -243,7 +246,7 @@ class TestReinstallIdempotency:
         settings_path.write_text(json.dumps(old))
         cli.install()
         counts = self._counts(tmp_home)
-        assert counts["anchor"] == 1
+        assert counts["reminder"] == 1
 
 
 # ── 3. Session start states ───────────────────────────────────────────────────
@@ -766,6 +769,9 @@ class TestNewcomerQuestionDetection:
         maintainer, not quizzed. The commit signal tunes phrasing, never blocks the answer."""
         _git_commit(git_repo, ME, 5)
         _set_me(git_repo)
+        # Session-start/explicit setup may populate this cache. The prompt fallback itself
+        # is read-only and never invokes Git; a cold cache intentionally uses neutral wording.
+        assert store._cached_insight(git_repo) == ("high", True)
         ctx = store.get_bootstrap_context_prompt(git_repo, "what is repo doing?")[
             "hookSpecificOutput"]["additionalContext"]
         assert "OVERRIDE" in ctx and "Answer it" in ctx
@@ -1306,18 +1312,24 @@ class TestPatternPromotion:
         data = store.load(tmp_repo)
         assert any(e["id"] == eid for e in data["entries"]), "pinned new entry must not be evicted"
 
-    def test_constraint_hook_near_dup_does_not_write_or_promote(self, tmp_repo):
-        """capture_user_constraint is a silent no-op on a near-duplicate: no disk write,
-        and it must never promote an architecture entry from a constraint phrasing."""
+    def test_constraint_hook_near_dup_records_recurrence_without_promoting(self, tmp_repo):
+        """capture_user_constraint stays silent to its CALLER on a near-duplicate and must
+        never promote an architecture entry from a constraint phrasing.
+
+        What it no longer does is stay silent in the RECORD (hardening Task 03): the developer
+        restated a rule the store already holds, so that is recurrence history on the matched
+        decision. The category, the content and the status are untouched - repetition ranks a
+        decision, it never reclassifies or approves one.
+        """
         store.update_decision(tmp_repo, "Validate requests at the API boundary with Pydantic", SESSION, "architecture")
-        before = (store._store_path(tmp_repo)).stat().st_mtime_ns
         eid, _, _ = store.capture_user_constraint(tmp_repo, "always validate requests at the API boundary", SESSION)
         assert eid is None
         data = store.load(tmp_repo)
         arch = next(e for e in data["entries"] if "Pydantic" in e["content"])
         assert arch["subtype"] == "architecture", "constraint hook must not promote architecture"
-        assert arch.get("occurrence_count", 1) == 1, "constraint hook must not bump the count"
-        assert (store._store_path(tmp_repo)).stat().st_mtime_ns == before, "no write on near-dup"
+        assert len(data["entries"]) == 1, "a restatement never accumulates a second entry"
+        assert arch["occurrence_count"] == 2
+        assert [r["match_kind"] for r in arch["recurrences"]] == ["overlap"]
 
 
 # ── 7. Context retrieval ──────────────────────────────────────────────────────
