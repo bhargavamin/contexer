@@ -63,10 +63,10 @@ ARTIFACTS = (Path(__file__).resolve().parent.parent / ".superpowers" / "sdd"
 
 _T0 = datetime(2026, 8, 1, 10, 0, 0, tzinfo=timezone.utc)
 _NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://contexer.dev/tests/evidence-hardening/evals")
-NATURAL_DIRECTIVE_HOLDOUT = (
+NATURAL_DIRECTIVE_REGRESSION = (
     Path(__file__).parent / "fixtures" / "directive_holdout" / "natural-prompts.json")
-NATURAL_DIRECTIVE_HOLDOUT_SHA256 = (
-    "9f7d14797f8f2a541a1568af5055f90c1ae985954bcd0050972377e4112e4984")
+NATURAL_DIRECTIVE_REGRESSION_SHA256 = (
+    "d845566f015c9c361614a0f0a845bf5733c84fa2be22870fb39c2006729933f3")
 
 
 def _armed(repo: str) -> list:
@@ -174,9 +174,9 @@ def _directive_scores() -> dict:
     }
 
 
-def _natural_directive_scores() -> dict:
-    """Separate one-shot holdout result; this corpus is never a classifier tuning input."""
-    document = json.loads(NATURAL_DIRECTIVE_HOLDOUT.read_text(encoding="utf-8"))
+def _natural_directive_regression_scores() -> dict:
+    """Separate labeled regression result with no pass/fail threshold in this evaluation."""
+    document = json.loads(NATURAL_DIRECTIVE_REGRESSION.read_text(encoding="utf-8"))
     rows = document["cases"]
     labelled_positive = {row["id"] for row in rows if row["directive"]}
     detected = {row["id"] for row in rows
@@ -198,18 +198,21 @@ def _natural_directive_scores() -> dict:
     }
 
 
-def test_natural_prompt_holdout_is_the_frozen_pre_implementation_corpus():
-    payload = NATURAL_DIRECTIVE_HOLDOUT.read_bytes()
-    assert hashlib.sha256(payload).hexdigest() == NATURAL_DIRECTIVE_HOLDOUT_SHA256
+def test_natural_prompt_regression_corpus_has_recorded_provenance_and_hash():
+    payload = NATURAL_DIRECTIVE_REGRESSION.read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == NATURAL_DIRECTIVE_REGRESSION_SHA256
     document = json.loads(payload)
     assert document["schema_version"] == 1
+    assert document["recorded_at"] == "2026-08-30"
+    assert document["labeling_owner"].startswith("Codex implementation session ")
+    assert "does not establish independent pre-tuning holdout provenance" in document["collection"]
     assert len({row["id"] for row in document["cases"]}) == len(document["cases"])
     assert {type(row["directive"]) for row in document["cases"]} == {bool}
 
 
-def test_natural_prompt_holdout_is_reported_separately_without_a_tuning_gate():
-    scores = _natural_directive_scores()
-    print("natural directive holdout: " + json.dumps(scores, sort_keys=True))
+def test_natural_prompt_regression_is_reported_separately_without_a_tuning_gate():
+    scores = _natural_directive_regression_scores()
+    print("natural directive regression: " + json.dumps(scores, sort_keys=True))
     assert scores["cases"] == scores["positive"] + scores["negative"] == 24
 
 
@@ -1210,7 +1213,7 @@ def test_the_evaluation_report_is_written(tmp_repo, request):
         "candidate_quality": quality,
         "adversarial_file_attachment": _adversarial_file_attachment(),
         "directive_detection": directives,
-        "natural_directive_holdout": _natural_directive_scores(),
+        "natural_directive_regression": _natural_directive_regression_scores(),
         "agent_only_reconsiderations": _agent_only_reconsiderations(),
         "review_items_per_realistic_session": _review_items_for_a_realistic_session(),
         "evidence_loss": loss,
@@ -1290,10 +1293,11 @@ def _markdown(report: dict) -> str:
               "a markdown blockquote) that `store._is_prescriptive_constraint` has no shape "
               "left to recognize. A capture that slips through is one reviewable decision: "
               "it arms no policy and anchors no file.", ""]
-    natural = report["natural_directive_holdout"]
-    lines += ["## Natural-prompt directive holdout", "",
-              "Frozen and labelled before the Task 04 classifier change; reported separately "
-              "and never used as a tuning threshold.", "",
+    natural = report["natural_directive_regression"]
+    lines += ["## Labeled natural-prompt directive regression corpus", "",
+              "The fixture and classifier change landed together, so independent holdout "
+              "provenance is not claimed. This evaluation applies no pass/fail threshold to the "
+              "corpus; do not use it for future classifier tuning.", "",
               "| Cases | Recall | Precision | False positives | False negatives |",
               "| --- | --- | --- | --- | --- |",
               f"| {natural['cases']} | {natural['recall']:.2f} | "
