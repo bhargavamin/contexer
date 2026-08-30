@@ -9,9 +9,10 @@ immutable pointer to the plan and this ledger; it must not grow a second ledger.
 
 ## 1. Scope boundary
 
-Phase A is paused. Phase 0 may preserve/checkpoint prior work and create documentation-only
-commits/PRs, but it must not add production behavior, schema changes, or Phase B work. Phase A may
-resume only after every Phase 0 gate is complete and this status is changed to `phase_0_complete`.
+Phase A remained paused throughout Phase 0. Phase 0 preserved/checkpointed prior work and created
+documentation-only commits/PRs; it added no production behavior, schema changes, or Phase B work.
+With every Phase 0 gate complete and this status set to `phase_0_complete`, Phase A may now resume
+at A1.
 
 ## 2. Fetched baselines
 

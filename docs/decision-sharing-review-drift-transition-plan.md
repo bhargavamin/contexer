@@ -910,7 +910,7 @@ Before implementation begins:
 - [x] Create separate implementation branches; Teams still deploys first after Phase A.
 - [x] Ratify the sidecar schema, capability shape, repository compatibility rule, and enforcement
       choice UX before writing migrations.
-- [ ] Complete the Phase 0 ledger, immutable Teams pointer, diff checks, and independent review.
+- [x] Complete the Phase 0 ledger, immutable Teams pointer, diff checks, and independent review.
 - [ ] Add invariant tests before implementation.
 
 Before declaring complete:
