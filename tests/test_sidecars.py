@@ -110,6 +110,7 @@ class TestClassification:
         "team_creds":       ("auth._creds_path", {}),
         "guard_dismissed":  ("guard_engine._guard_dismissed_path", {"slug": None}),
         "reconcile_lock":   (None, {"slug": None}),       # reconcile builds through filename
+        "update_check":     ("updates.state_path", {}),
         "console_state":    (None, {}),                      # ui/daemon.py keeps its own literal
         "console_log":      (None, {}),                      # (import allowlist; see sidecars.py)
         "working_set":      (None, {"slug": None, "session": "abc"}),   # _ws_path hashes the id
@@ -150,9 +151,10 @@ class TestClassification:
     def test_the_declared_name_matches_what_the_code_actually_writes(self, tmp_repo):
         """Direction two: for every kind with a builder, the builder's name equals the
         template's. This is what catches a declaration that has drifted from the code."""
-        from contexer import anchors, auth, guard_engine, share, team_context
+        from contexer import anchors, auth, guard_engine, share, team_context, updates
         mods = {"store": store, "share": share, "auth": auth, "anchors": anchors,
-                "guard_engine": guard_engine, "team_context": team_context}
+                "guard_engine": guard_engine, "team_context": team_context,
+                "updates": updates}
         slug = store.repo_slug(tmp_repo)
         checked = 0
         for kind, (producer, fields) in self.PRODUCERS.items():

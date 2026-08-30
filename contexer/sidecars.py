@@ -85,6 +85,13 @@ KINDS: tuple[Kind, ...] = (
     Kind("team_creds",       ".team_auth.json",            DURABLE,   "the team bearer token"),
     Kind("guard_dismissed",  ".guard_dismissed_{slug}.json", DURABLE, "explicit per-pair human dismissals, permanent"),
     Kind("reconcile_lock",  ".reconcile_{slug}.lock",      DURABLE, "flock target for the evidence consumer"),
+    # Machine-global, not per-repo: the budget is "tell them once per RELEASE", and a
+    # slug-keyed flag fires once per repo per release instead. Durable rather than a cache
+    # because it holds which version the developer was already told about, and losing that
+    # re-announces a release they have already seen - noise, in the one feature whose whole
+    # design constraint is not being noisy. Re-fetching the version costs one request.
+    Kind("update_check",     ".update_check.json",         DURABLE,   "latest release seen, declared floor, and "
+                                                                      "which of each the developer was told about"),
 
 
     # ── session bookkeeping: the session it belonged to is over ────────────────────────

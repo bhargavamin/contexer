@@ -7,6 +7,9 @@ An adapter is a *module* (duck-typed, no class needed) that exposes:
   install(home: Path) -> list[str]    # wire MCP + hooks; return human-facing log lines
   uninstall(home: Path) -> list[str]  # remove MCP + hooks; return log lines
   status_lines(home: Path) -> list[str]  # diagnostic lines for `contexer status`
+  notify(text: str) -> dict | None       # hook-output fields carrying a user-facing
+                                         # notice, or None when this host has no channel
+                                         # the developer (not the model) actually sees
 
 Plus hook entrypoints called from the hook command strings, each returning the
 JSON string to print on stdout (never raises — hooks must not crash the host).

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import remote, store
+from contexer import remote, store, updates
 
 
 def pytest_collection_modifyitems(config, items):
@@ -39,6 +39,29 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.slow)
         if covering and item.get_closest_marker("perf"):
             item.add_marker(skip_perf)
+
+
+@pytest.fixture(autouse=True)
+def _quiet_update_check(tmp_path, monkeypatch):
+    """Disable the update check for the whole suite, and prove it stays disabled.
+
+    Same reasoning as the forbidden-artefact guard below, and for the same reason it exists:
+    `cli.main()` ends by delivering any due update notice, and `store.STORE_DIR` is resolved
+    from the real home at import time, so a test that merely dispatches a command would read
+    the DEVELOPER's `.update_check.json`, mark their pending release as already announced,
+    and fork a real network refresher. Setting the documented opt-out silences every entry
+    point at once, and redirecting `state_path` means that even a path which somehow ignored
+    the env var writes into the test's own tmp dir rather than the real one.
+
+    Neither patch touches a shared module. An earlier version stubbed `updates.subprocess`'s
+    `Popen` attribute, which is the `subprocess` module itself, and broke every
+    `subprocess.run` in the suite; both names here are rebound on `updates` alone.
+
+    `tests/test_updates.py` deletes this env var in its own autouse fixture, so the module
+    that is actually testing this behaviour still exercises it.
+    """
+    monkeypatch.setenv("CONTEXER_NO_UPDATE_CHECK", "1")
+    monkeypatch.setattr(updates, "state_path", lambda: tmp_path / ".update_check.json")
 
 
 @pytest.fixture
