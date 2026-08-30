@@ -1,5 +1,99 @@
 # Changelog
 
+## [0.43.0](https://github.com/bhargavamin/contexer/compare/v0.42.0...v0.43.0) (2026-08-30)
+
+
+### Features
+
+* **evidence:** add event schema and pure validation for the evidence ledger ([66148d0](https://github.com/bhargavamin/contexer/commit/66148d0ae9f36bb3b3d0f44f3e459b2baaf9632b))
+* **evidence:** add the per-event JSON spool storage engine ([d8f7554](https://github.com/bhargavamin/contexer/commit/d8f7554b6ec8c399dd6d465c6dc1a42e016ac976))
+* **evidence:** bound deferred review attention ([e0ab4cf](https://github.com/bhargavamin/contexer/commit/e0ab4cf925e741710fd2fecc576fb99fd5814320))
+* **evidence:** contain directive and anchor scope ([d7b4d90](https://github.com/bhargavamin/contexer/commit/d7b4d90394bfb4ce6986225a4531a1ee9961ed87))
+* **evidence:** emit host-adapter events in shadow mode ([61e3975](https://github.com/bhargavamin/contexer/commit/61e397579e283e28862fad9eb8d7dd7ef731b547))
+* **evidence:** group and score evidence into decision candidates ([ad3f00a](https://github.com/bhargavamin/contexer/commit/ad3f00aed7e8c239f91aec0fc43d7af1ea373714))
+* **evidence:** harden decision-evidence readiness ([97c479c](https://github.com/bhargavamin/contexer/commit/97c479c86aeaf36ab1311298fd4837b8f37bc18e))
+* **evidence:** preserve typed links and recurrences ([1c541dd](https://github.com/bhargavamin/contexer/commit/1c541dd6e38bc6d33cf7aa084e6745eda0021b70))
+* **evidence:** quarantine foreign repository events ([3cbd3df](https://github.com/bhargavamin/contexer/commit/3cbd3df270c3165a6b85289fad1e0d601c066c65))
+* **evidence:** read and record candidate checkpoints ([20893e8](https://github.com/bhargavamin/contexer/commit/20893e862a0d5ec198b8ec6f614de33a787f07aa))
+* **evidence:** reconcile recorded evidence into decisions pending review ([fa72ccb](https://github.com/bhargavamin/contexer/commit/fa72ccb7a6a5d2551e09bc849f05aab0ac6ab277))
+* **evidence:** report host capture coverage ([c663af3](https://github.com/bhargavamin/contexer/commit/c663af3a319b11b2adfbd344cb3b2dc7750e2da5))
+* **evidence:** store events in an atomic per-repo sidecar ([58e8656](https://github.com/bhargavamin/contexer/commit/58e865610c8493361cf68a7fa3bc237c2d93b67b))
+* **lifecycle:** add the proposed_lifecycle lane, retire and restore ([8d873bc](https://github.com/bhargavamin/contexer/commit/8d873bc8723df0ea08dfaf900493a8e8841c3b6c))
+* **lifecycle:** expose retire, restore and dismiss on the CLI and MCP ([1d31263](https://github.com/bhargavamin/contexer/commit/1d3126319483978f5b6a6de48cef857fd00d1259))
+* **policy:** add the evaluate_policy tool and the policy evaluate command ([c009c33](https://github.com/bhargavamin/contexer/commit/c009c33b24ef36084780dafb2b71ac7673ef377a))
+* **policy:** add the policy request/result types and pure selection ([0dc5917](https://github.com/bhargavamin/contexer/commit/0dc59179410652987facb9f9adfe571d6d9dabae))
+* **remote:** open the lifecycle wire gate against a validated Teams contract ([953d58b](https://github.com/bhargavamin/contexer/commit/953d58bcd951d0ef761b01f94f38245fb3ff5d49))
+* **review:** preview evidence and policy impact ([42ae4fc](https://github.com/bhargavamin/contexer/commit/42ae4fca9d78c968cae85c95017e2cb2eebd6a80))
+* **teams:** negotiate revision and lifecycle sync, gate closed ([8a0a7ec](https://github.com/bhargavamin/contexer/commit/8a0a7ec4bd89b9a1ef18f20265eca45c2df7a989))
+* **teams:** render lifecycle divergence ([aac871a](https://github.com/bhargavamin/contexer/commit/aac871aadac63e0c3dc8f3e621faa2b7ab1b6f0d))
+
+
+### Bug Fixes
+
+* **adapters:** isolate hook python from cwd and converge stale hook commands ([8527bad](https://github.com/bhargavamin/contexer/commit/8527bad1c3b3e3c164b73b0ba0731a611d79530f))
+* **adapters:** strip only contexer-owned hooks and tolerate null commands ([aad40ca](https://github.com/bhargavamin/contexer/commit/aad40cadb08c69c611912d6487cfd4b04dcb7ff6))
+* **candidates:** attach a file change to a fileless directive seed ([65ae14c](https://github.com/bhargavamin/contexer/commit/65ae14c9700da7e78b96c9881157b45da14a1e87))
+* **evidence:** close the spool, store and CLI residuals ([dc56ef8](https://github.com/bhargavamin/contexer/commit/dc56ef8e42e119cd36cd65073f85702112882c54))
+* **evidence:** four review fixes to the spool engine ([d84c2c3](https://github.com/bhargavamin/contexer/commit/d84c2c3f96fe01501213613926845f78e9f9cab2))
+* **evidence:** harden integrated readiness gates ([4cb5f44](https://github.com/bhargavamin/contexer/commit/4cb5f4447954c8610371acda122579c3ec12dff9))
+* **evidence:** keep hold/finalize soft on every I/O failure ([a3d19ee](https://github.com/bhargavamin/contexer/commit/a3d19ee8d5f23f9ec0acd2d5e73513bf18f34976))
+* **evidence:** keep inferred decisions reviewable end to end ([684c080](https://github.com/bhargavamin/contexer/commit/684c0807d5a394b0254af2923464b2ac9b0f4ccc))
+* **evidence:** keep uncertain paths out of anchor candidates ([78e05aa](https://github.com/bhargavamin/contexer/commit/78e05aa12c2f50345d0d6e54e04c47df16e1f6d2))
+* **evidence:** key every event by the repo path ([818d9f1](https://github.com/bhargavamin/contexer/commit/818d9f1c624e7197e7abab9d1075fcdf717edb3d))
+* **evidence:** refuse to compact when the evidence lock is not held ([9b4c78d](https://github.com/bhargavamin/contexer/commit/9b4c78dd7b85bca20ff74e6a4a79979c519bc13d))
+* **evidence:** return an error for an unhashable `kind` instead of raising ([e253c17](https://github.com/bhargavamin/contexer/commit/e253c1728e9f41f139f6be0aa194f62673dc9380))
+* **evidence:** stop status reporting a reconciliation it never ran ([025ca08](https://github.com/bhargavamin/contexer/commit/025ca085a2c4088ce6f6721f1640f7f4e634d2c9))
+* **evidence:** tell an absent spool from an unreadable one ([d61a8c8](https://github.com/bhargavamin/contexer/commit/d61a8c86d61195d94730a58f57e0d063ea5b7328))
+* **evidence:** test a held candidate's recorded status against the spool's vocabulary ([5a2fe46](https://github.com/bhargavamin/contexer/commit/5a2fe463bacd097d8511482f4530023435c367e5))
+* **evidence:** three cross-module defects and the merge-triage cleanup ([f5e22d5](https://github.com/bhargavamin/contexer/commit/f5e22d5ad0ee85e2208dbd463f53297f821ea7a7))
+* **evidence:** three review fixes to the spool rewiring ([9542b5a](https://github.com/bhargavamin/contexer/commit/9542b5a8f9511d07f45e97a7015e12f952446a20))
+* **guard:** state the fail-direction inversion where it will be read ([58bb423](https://github.com/bhargavamin/contexer/commit/58bb423b4ab0b8e8508dd0c07bd324dd65f7a568))
+* **install:** converge legacy assistant wiring ([071204c](https://github.com/bhargavamin/contexer/commit/071204cda8825e697b6bd8a3d53f07d411b37527))
+* **integration:** preserve adapter and lifecycle retry invariants ([3af0f2e](https://github.com/bhargavamin/contexer/commit/3af0f2efb6d6164119e1148239d9332c764e5cae))
+* **integration:** verify evidence port against current baselines ([badb74a](https://github.com/bhargavamin/contexer/commit/badb74a1a302429f41fe34ea9f4318f5dd7785c5))
+* **lifecycle:** bind reconsideration to the basis the evidence was classified at ([8def30e](https://github.com/bhargavamin/contexer/commit/8def30eec7c1110a5a00f2752ab85a39e88d7880))
+* **lifecycle:** review inactive decision reconsideration ([83adc09](https://github.com/bhargavamin/contexer/commit/83adc09b1fe844bc86efe81f7d6ad05ea616690b))
+* **lifecycle:** settle reconsiderations on their receipt, not on a shared record ([e09db8e](https://github.com/bhargavamin/contexer/commit/e09db8efa935e6ab8add89a375833e14bc108b7a))
+* **policy:** report a non-string armed pattern instead of escaping ([daadd1c](https://github.com/bhargavamin/contexer/commit/daadd1c77be5b974e1a1c8ebe6a75276aecf6a6d))
+* **policy:** scope rule judging to the files it selects, not the whole artifact ([bda8799](https://github.com/bhargavamin/contexer/commit/bda8799f5b470b48fee71c65c494fa6f935c27d4))
+* **policy:** scrub the JSON result before encoding, not after ([4fce6da](https://github.com/bhargavamin/contexer/commit/4fce6da3c3a83a39534f7ecf810febf02d1707a4))
+* **policy:** stop two gaps in the evaluator from reading as clean ([abe82b1](https://github.com/bhargavamin/contexer/commit/abe82b18d52dffa9d903d7ebabdef9f73dcbec7b))
+* **policy:** three self-review fixes to the evaluate surfaces ([59350dd](https://github.com/bhargavamin/contexer/commit/59350dd504b11be248ad20f5ac89c4ef50e1a8e2))
+* **reconcile:** derive resume dispositions from observed review state ([5f07135](https://github.com/bhargavamin/contexer/commit/5f07135e1160fc9084a4f93518884779e4fe02d7))
+* **reconcile:** hold evidence across the materialize-before-hold crash window ([11a361a](https://github.com/bhargavamin/contexer/commit/11a361a9061ee46684cb72ffb4ee58c725a051c4))
+* **reconcile:** settle lifecycle checkpoints on retirement, not on a revision ([8cf789b](https://github.com/bhargavamin/contexer/commit/8cf789b7f401f2da9f9f868cdaa7a410ed5ef81b))
+* **reconcile:** take the reconcile lock only once there is work ([77a0450](https://github.com/bhargavamin/contexer/commit/77a0450c385d7ddbd3a994f059b26ffb7558bfa2))
+* **reconcile:** time-scope shared dismissal receipts ([3cff720](https://github.com/bhargavamin/contexer/commit/3cff720a6f121253108860e53d2463bd5c29b910))
+* **review:** say that approving a dormant armed rule re-activates it ([ba77e86](https://github.com/bhargavamin/contexer/commit/ba77e86bb456d5455174dd11b6782d0e4db714fd))
+* **review:** stop the impact block promising anchors it never writes ([743cfc3](https://github.com/bhargavamin/contexer/commit/743cfc32d732aba19226e3c0cb17606161bdd44d))
+* **share:** keep a lifecycle delta refused during a drain ([576e0a5](https://github.com/bhargavamin/contexer/commit/576e0a583b8d3a4dbcc749dbe235d4a77168abb0))
+* **share:** record a blocked lifecycle delta only for a confirmed saved base ([e879109](https://github.com/bhargavamin/contexer/commit/e8791093e06e414f1ed0bc910e86094ed3f7a4f7))
+* **spool:** file a durable receipt before orphan evidence is removed ([c191f63](https://github.com/bhargavamin/contexer/commit/c191f63aabc7224c3c05fd3a35ea38db2586a030))
+* **store:** reject the harness usage-limit-reset notice as a constraint ([d4df4e9](https://github.com/bhargavamin/contexer/commit/d4df4e9bd91f46c78e7f5661a9e1a45e8083a932))
+* **teams:** four self-review fixes to the lifecycle wire projection ([a9286e9](https://github.com/bhargavamin/contexer/commit/a9286e9b8174deb3e36e777e6440e86eeb9339d4))
+
+
+### Performance Improvements
+
+* **evidence:** index aggregation and reconcile at session start ([79dbe6f](https://github.com/bhargavamin/contexer/commit/79dbe6feb9d0b7d4f693b41925db7ee776df84ee))
+
+
+### Documentation
+
+* add evidence-capture and policy-evaluation implementation plan ([773b662](https://github.com/bhargavamin/contexer/commit/773b662200be358cbaf3b26724eefefe9689c9cd))
+* **evidence:** correct the spool docs that still say hosts never reconcile ([cf9a43b](https://github.com/bhargavamin/contexer/commit/cf9a43b1c7d92e2ccc6c3483b5b25af3a34ccdb5))
+* **evidence:** correct two spool docstrings the fixes made wrong ([b526669](https://github.com/bhargavamin/contexer/commit/b52666907ef34f0f19531a47e8232ef92fba5fce))
+* **evidence:** finish the sweep of retired never-reconciles claims ([d42c6aa](https://github.com/bhargavamin/contexer/commit/d42c6aa52e5d31ec03a44b8c426f391ed583833b))
+* **evidence:** record the hardening outcome across the architecture docs ([d425ac5](https://github.com/bhargavamin/contexer/commit/d425ac58a48697ace32d85d2d4ccea2238aba3e8))
+* **lifecycle:** record the Issue 3 fallback partition in CLAUDE.md ([09c5e65](https://github.com/bhargavamin/contexer/commit/09c5e65d0576662d82d2486a07c43e9921df4bc0))
+* **lifecycle:** record the Task 08 contract, evidence and open concerns ([b294aa3](https://github.com/bhargavamin/contexer/commit/b294aa31510561a9a07eed4e33284cda59e17f08))
+* put the aggregation ceiling where it will be read, and fix three claims ([ce1da3b](https://github.com/bhargavamin/contexer/commit/ce1da3bc90f81ecaf0c96b2e016ce36219b8d9ea))
+* record the evidence and policy modules in the architecture record ([2a8c834](https://github.com/bhargavamin/contexer/commit/2a8c834bd7021b54734fbe18d3593b205944e5b2))
+* record the three fixes and the vocabulary owners in the architecture record ([e77bbc9](https://github.com/bhargavamin/contexer/commit/e77bbc9ca2979cd43dbfb64a9589999ee4279718))
+* revise plan to per-event JSON evidence spool ([64ef8c4](https://github.com/bhargavamin/contexer/commit/64ef8c4ce153bfee5af22d430d146df36350127a))
+* **server:** state reconcile_session's real per-host automatic checkpoints ([ff88681](https://github.com/bhargavamin/contexer/commit/ff88681fc33cc0482d5697888a0eeab71f1fcb77))
+* **teams:** put the pre-flip checklist inline, with its counter-evidence ([2988707](https://github.com/bhargavamin/contexer/commit/298870714a1bff664cd7947b282bb293dd80fe7e))
+
 ## [0.42.0](https://github.com/bhargavamin/contexer/compare/v0.41.0...v0.42.0) (2026-08-29)
 
 
