@@ -360,7 +360,7 @@ def capture_task(repo_path: str, raw: str) -> str:
 
 
 def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
-    """UserPromptSubmit (C7): inject team decisions newly approved since the last poll.
+    """UserPromptSubmit (C7): inject team context changes since the last poll.
 
     Fail-soft. Uses the non-blocking poll: the network sync runs in a detached background
     process and its results inject on the NEXT prompt, so this hook never waits on the
@@ -374,14 +374,29 @@ def team_poll(repo_path: str, raw: str, consumer: str = "claude") -> str:
         new = team_context.poll_for_injection(store.hook_cwd_repo(repo_path), consumer)
         if not new:
             return "{}"
-        # Architecture-typed rows are deferred to a count-only pointer here too, mirroring
+        # A lifecycle-divergence change is always visible, even on architecture rows: hiding the
+        # marker behind the normal count-only deferral would defeat proactive surfacing.
+        lifecycle_changed = [d for d in new if d.get("_source_retired_change") in
+                             {"opened", "resolved"}]
+        lifecycle_ids = {d.get("id") for d in lifecycle_changed}
+        # Other architecture-typed rows are deferred to a count-only pointer here too, mirroring
         # the SessionStart team section (store.session_start_payload) — a freshly-approved
         # architecture decision shouldn't flood the prompt any more than a bulk-loaded one.
-        visible = [d for d in new if d.get("type") != "architecture"]
-        deferred = [d for d in new if d.get("type") == "architecture"]
+        visible = [d for d in new if d.get("id") not in lifecycle_ids
+                   and d.get("type") != "architecture"]
+        deferred = [d for d in new if d.get("id") not in lifecycle_ids
+                    and d.get("type") == "architecture"]
         lines = []
+        if lifecycle_changed:
+            lines.append("Team lifecycle divergence changed:")
+            for d in lifecycle_changed:
+                state = d.get("_source_retired_change")
+                outcome = ("personal source retired; team copy remains authoritative"
+                           if state == "opened" else "personal source restored; divergence resolved")
+                type_tag = f" ({d.get('type')})" if d.get("type") else ""
+                lines.append(f"- {d.get('content', '')}{type_tag} [{outcome}]")
         if visible:
-            lines.append("Team decisions just approved (now in effect):")
+            lines.append("Team context changed (now in effect):")
             for d in visible:
                 type_tag = f" ({d.get('type')})" if d.get("type") else ""
                 lines.append(f"- {d.get('content', '')}{type_tag}")

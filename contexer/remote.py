@@ -467,6 +467,9 @@ class RemoteDecision:
     team_id: str | None = None
     team_name: str | None = None
     reconciliation: dict | None = None
+    # Author-scoped exact-lineage signal from Teams. It changes presentation only: never a local
+    # lifecycle event, proposal, suppression, or Guard input.
+    source_retired: bool = False
 
 
 @dataclass(frozen=True)
@@ -807,6 +810,7 @@ class RemoteStore:
                 team_name=row.get("teamName"),
                 reconciliation=(dict(row["reconciliation"])
                                 if isinstance(row.get("reconciliation"), dict) else None),
+                source_retired=row.get("sourceRetired") is True,
             )
             for row in rows
         ]

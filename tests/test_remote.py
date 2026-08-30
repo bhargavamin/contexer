@@ -711,13 +711,15 @@ def test_apush_decision_awaits_acall_tool_and_parses(monkeypatch):
 
 def test_aget_context_awaits_acall_tool_and_parses(monkeypatch):
     structured = {"result": [{"id": "1", "type": "constraint", "content": "c", "rationale": None,
-                              "repo": "r", "agent": "a", "scope": "team"}],
+                              "repo": "r", "agent": "a", "scope": "team",
+                              "sourceRetired": True}],
                   "deleted": ["9"], "cursor": "2026-01-01T00:00:00Z"}
     monkeypatch.setattr(remote, "_acall_tool", _aseam(lambda *a: _result(structured=structured)))
     ctx = asyncio.run(RemoteStore("https://t/mcp", "tok").aget_context(repo="r"))
     assert isinstance(ctx, RemoteContext)
     assert ctx.deleted == ["9"]
     assert ctx.decisions[0].content == "c"
+    assert ctx.decisions[0].source_retired is True
 
 
 def test_team_discovery_and_submission_use_structured_mcp_results(monkeypatch):

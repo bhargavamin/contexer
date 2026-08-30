@@ -140,6 +140,11 @@ And what the agent receives weeks later, in a fresh session, in any of the four 
 
 Trust is explicit: AI-*proposed* decisions are held for your review (`contexer review`) and never reach a session until you approve them. Approved decisions are versioned: history preserved, latest approved revision replayed. Cost is flat and tiny (roughly 26 tokens per rule at session start, nothing on unrelated prompts).
 
+In Teams mode, retiring your personal source does not silently retire a lead-approved team copy.
+Your synced team context marks that exact disagreement while the copy remains authoritative, and
+the target team's leads receive a content-free review item; restoring the source or retiring the
+team copy clears the marker. This signal never creates a local proposal or changes Guard behavior.
+
 Deep dive: **[how it works](docs/how-it-works.md)** · **[day-to-day usage & CLI](docs/usage.md)**
 
 ### Honest limits
