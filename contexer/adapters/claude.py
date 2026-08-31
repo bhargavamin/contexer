@@ -18,6 +18,7 @@ from contexer.adapters.base import (
     _load,
     _load_safe,
     _save,
+    _scan_automatic_proposals,
     _strip_stale,
 )
 
@@ -164,6 +165,10 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         # Refresh the last-resort pointer on every prompt without putting Git on the
         # hook path. This preserves repo-implicit MCP writes after missed SessionStart.
         store.anchor_repo(repo)
+        # D6 local-only prompt fallback. The helper checks policy presence before importing the
+        # scanner and never waits for network work; it must run even when this prompt contains no
+        # directive and the capture path below returns early.
+        _scan_automatic_proposals(repo)
         near: list = []
         # evidence.capture_directive is store.capture_user_constraint plus the shadow-mode
         # user_directive event: same return, same exceptions (this hook's existing
@@ -426,7 +431,7 @@ def _memory_dir(repo_path: str) -> Path | None:
 
 
 def sync_memory(repo_path: str) -> int:
-    """Import Claude memory-tool facts, then reconcile recorded evidence. Silent, fail-soft.
+    """Import memory facts, reconcile evidence, and scan automatic proposals. Fail-soft.
 
     Returns the memory-import count, exactly as before. The reconciliation rides along here
     because this is the one entrypoint the installed SessionStart, PreCompact and SessionEnd
@@ -440,6 +445,9 @@ def sync_memory(repo_path: str) -> int:
     """
     stored = _import_memory_facts(repo_path)
     _reconcile_evidence(repo_path)
+    # SessionStart, PreCompact, and SessionEnd all call this entrypoint. Proposal scanning is
+    # local and bounded; any uploader starts detached only after its intent is durable.
+    _scan_automatic_proposals(repo_path)
     return stored
 
 

@@ -93,6 +93,8 @@ KINDS: tuple[Kind, ...] = (
          "append-only proposal outcomes and activation baselines"),
     Kind("proposal_attention", ".team-proposal-attention.json", DURABLE,
          "proposal intents requiring explicit developer attention"),
+    Kind("proposal_diagnostics", ".team-proposal-diagnostics.jsonl", DURABLE,
+         "private size-bounded stderr sink for detached proposal uploader telemetry"),
     Kind("share_policy_lock", ".team_share_policy_{slug}.lock", DURABLE,
          "independent flock target for one repository proposal policy"),
     Kind("proposal_outbox_lock", ".team-proposal-outbox.lock", DURABLE,

@@ -823,6 +823,22 @@ def test_scanner_starts_detached_only_after_intent_and_receipt_are_durable(
     assert observed[0][1][-1]["state"] == "queued"
 
 
+def test_scanner_can_leave_durable_intent_for_external_hook_worker(
+        tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    monkeypatch.setattr(
+        share_policy, "start_detached_drainer",
+        lambda *_args: pytest.fail("hook scan must not start an in-process daemon thread"),
+    )
+
+    outcome = share_policy.scan_and_enqueue(tmp_repo, start_worker=False)
+
+    assert outcome.result == "queued"
+    assert len(share_policy.read_outbox()) == 1
+    assert share_policy.read_receipts()[-1]["state"] == "queued"
+
+
 def test_scanner_is_idempotent_and_heals_missing_queued_receipt(tmp_repo, monkeypatch):
     entry = _entry(revision_id="revision-human")
     _activate_scanner(tmp_repo, monkeypatch, [entry])
@@ -1104,6 +1120,33 @@ def test_drainer_telemetry_never_receives_destination_or_decision_prose(
         intent["repo_path"], "Platform",
     ):
         assert sensitive not in encoded
+
+
+def test_empty_drainer_emits_terminal_noop(tmp_repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        share_policy.decision_observability,
+        "emit_decision_operation",
+        lambda operation, **fields: calls.append((operation, fields)),
+    )
+
+    assert share_policy.drain_once() == []
+
+    assert calls == [("drain", {
+        "result": "no_op",
+        "reason_code": "none",
+        "error_class": "none",
+        "started_ns": calls[0][1]["started_ns"],
+        "diagnostic_id": None,
+        "team_id": None,
+        "decision_id": None,
+        "policy_generation": None,
+        "idempotency_key": None,
+        "candidate_id": None,
+        "attempt": None,
+        "queue_depth": 0,
+        "replayed": None,
+    })]
 
 
 def test_drainer_recovers_receipt_before_removal_crash_without_resubmitting(

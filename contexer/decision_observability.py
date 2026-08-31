@@ -129,6 +129,28 @@ def _enqueue_records(records: Iterable[dict]) -> None:
     _PENDING.put_nowait(encoded)
 
 
+def flush_pending(timeout: float = 1.0) -> bool:
+    """Boundedly flush already-enqueued records before a detached worker process exits.
+
+    Normal callers remain enqueue-and-return. This shutdown seam is for the independent uploader
+    process, whose private stderr is a regular local file; sink failures still call ``task_done``
+    and telemetry can never change the proposal outcome.
+    """
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout < 0:
+        return False
+    deadline = time.monotonic() + float(timeout)
+    try:
+        with _PENDING.all_tasks_done:
+            while _PENDING.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _PENDING.all_tasks_done.wait(remaining)
+        return True
+    except Exception:
+        return False
+
+
 def emit_decision_operation(
     operation: str,
     *,

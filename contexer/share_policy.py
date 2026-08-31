@@ -193,6 +193,10 @@ def proposal_attention_path() -> Path:
     return store.STORE_DIR / sidecars.filename("proposal_attention")
 
 
+def proposal_diagnostics_path() -> Path:
+    return store.STORE_DIR / sidecars.filename("proposal_diagnostics")
+
+
 def policy_lock_path(repo_path: str) -> Path:
     return store.STORE_DIR / sidecars.filename(
         "share_policy_lock", slug=store.repo_slug(repo_path))
@@ -934,9 +938,9 @@ def _emit_scan(outcome: ScanOutcome, started_ns: int) -> None:
     )
 
 
-def _finish_scan(outcome: ScanOutcome, started_ns: int) -> ScanOutcome:
+def _finish_scan(outcome: ScanOutcome, started_ns: int, *, start_worker: bool = True) -> ScanOutcome:
     _emit_scan(outcome, started_ns)
-    if outcome.result == "queued" and outcome.queued:
+    if start_worker and outcome.result == "queued" and outcome.queued:
         # Thread creation is the only prompt-path work here. Capability discovery, preview, and
         # submission happen in the daemon after this committed local append has returned.
         start_detached_drainer()
@@ -944,7 +948,7 @@ def _finish_scan(outcome: ScanOutcome, started_ns: int) -> ScanOutcome:
 
 
 def scan_and_enqueue(repo_path: str, *, decision_ids: set[str] | None = None,
-                     is_global: bool = False) -> ScanOutcome:
+                     is_global: bool = False, start_worker: bool = True) -> ScanOutcome:
     """Bounded, local-only backstop that durably queues every newly eligible revision.
 
     Every sidecar lock is non-blocking on this path.  Editor/MCP mutations are already
@@ -953,26 +957,30 @@ def scan_and_enqueue(repo_path: str, *, decision_ids: set[str] | None = None,
     imported or called here, and no decision-store lock is acquired.
     """
     started = time.monotonic_ns()
+
+    def finish(outcome: ScanOutcome) -> ScanOutcome:
+        return _finish_scan(outcome, started, start_worker=start_worker)
+
     try:
         if is_global or not store.is_sane_repo(repo_path):
-            return _finish_scan(ScanOutcome("skipped", "global_decision"), started)
+            return finish(ScanOutcome("skipped", "global_decision"))
         try:
             with _sidecar_lock(policy_lock_path(repo_path), blocking=False):
                 policy = load_policy(repo_path)
         except BlockingIOError:
-            return _finish_scan(ScanOutcome("no_op", "lock_busy"), started)
+            return finish(ScanOutcome("no_op", "lock_busy"))
         if policy is None or policy.get("paused_reason"):
-            return _finish_scan(ScanOutcome("skipped", "policy_disabled"), started)
+            return finish(ScanOutcome("skipped", "policy_disabled"))
 
         origin = store.run_git(repo_path, "remote", "get-url", "origin")
         current_repo_key = repo_key.canonical_repo_key(origin)
         if not current_repo_key or current_repo_key != policy["repo_key"]:
-            return _finish_scan(ScanOutcome("failure", "validation_error"), started)
+            return finish(ScanOutcome("failure", "validation_error"))
         try:
             with _sidecar_lock(proposal_receipts_lock_path(), blocking=False):
                 receipts = fold_receipts(read_receipts())
         except BlockingIOError:
-            return _finish_scan(ScanOutcome("no_op", "lock_busy"), started)
+            return finish(ScanOutcome("no_op", "lock_busy"))
 
         entries = store.load(repo_path).get("entries", [])[:store.MAX_ENTRIES]
         selected = None
@@ -1041,27 +1049,22 @@ def scan_and_enqueue(repo_path: str, *, decision_ids: set[str] | None = None,
                 saw_failure = "validation_error"
 
         if saw_failure:
-            return _finish_scan(
-                ScanOutcome("failure", saw_failure, scanned, queued, skipped), started)
+            return finish(ScanOutcome("failure", saw_failure, scanned, queued, skipped))
         if queued:
-            return _finish_scan(
-                ScanOutcome("queued", "none", scanned, queued, skipped), started)
+            return finish(ScanOutcome("queued", "none", scanned, queued, skipped))
         if saw_lock_busy:
-            return _finish_scan(
-                ScanOutcome("no_op", "lock_busy", scanned, queued, skipped), started)
+            return finish(ScanOutcome("no_op", "lock_busy", scanned, queued, skipped))
         if scanned == 1 and only_reason == "duplicate_receipt":
-            return _finish_scan(
-                ScanOutcome("no_op", only_reason, scanned, queued, skipped), started)
+            return finish(ScanOutcome("no_op", only_reason, scanned, queued, skipped))
         if scanned == 1 and only_reason not in (None, "none"):
-            return _finish_scan(
-                ScanOutcome("skipped", only_reason, scanned, queued, skipped), started)
-        return _finish_scan(ScanOutcome("success", "none", scanned, queued, skipped), started)
+            return finish(ScanOutcome("skipped", only_reason, scanned, queued, skipped))
+        return finish(ScanOutcome("success", "none", scanned, queued, skipped))
     except SidecarDataError:
-        return _finish_scan(ScanOutcome("failure", "corrupt_queue"), started)
+        return finish(ScanOutcome("failure", "corrupt_queue"))
     except Exception:
         # This wrapper runs after the functional mutation committed. Any unexpected local
         # filesystem/git/schema failure is diagnostic only and must never change that result.
-        return _finish_scan(ScanOutcome("failure", "validation_error"), started)
+        return finish(ScanOutcome("failure", "validation_error"))
 
 
 def enqueue_after_local_mutation(repo_path: str, decision_id: str) -> ScanOutcome:
@@ -1467,6 +1470,7 @@ def drain_once(profile: Profile | None = None) -> list[OperationOutcome]:
                 _finish_drain(outcome, started, None)
                 return [outcome]
             if not intents:
+                _finish_drain(OperationOutcome("no_op", "none"), started, None, queue_depth=0)
                 return []
             try:
                 current_profile = profile or load_profile()
@@ -1495,6 +1499,33 @@ def drain_once(profile: Profile | None = None) -> list[OperationOutcome]:
         )
         _finish_drain(outcome, started, None)
         return [outcome]
+
+
+def run_detached_drainer() -> None:
+    """Run and flush one child-process drain behind a closed failure boundary.
+
+    ``drain_once`` already converts expected transport, schema, and filesystem failures. This
+    outer boundary exists for unexpected ``BaseException`` subclasses too: detached stderr is a
+    structured JSONL sink, so Python must never write a raw traceback, exception value, or local
+    path into it. The durable queue remains the recovery mechanism after any such failure.
+    """
+    started = time.monotonic_ns()
+    try:
+        drain_once()
+    except BaseException:
+        try:
+            _finish_drain(
+                OperationOutcome("failure", "validation_error", _diagnostic_id()),
+                started,
+                None,
+            )
+        except BaseException:
+            pass
+    finally:
+        try:
+            decision_observability.flush_pending()
+        except BaseException:
+            pass
 
 
 def start_detached_drainer(profile: Profile | None = None) -> bool:

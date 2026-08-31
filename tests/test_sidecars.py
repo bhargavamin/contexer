@@ -29,7 +29,7 @@ class TestClassification:
         ".reconcile_x.lock",              # evidence consumer lock
         ".team_share_policy_repo-1.json",
         ".team-proposal-outbox.json", ".team-proposal-receipts.jsonl",
-        ".team-proposal-attention.json",
+        ".team-proposal-attention.json", ".team-proposal-diagnostics.jsonl",
         ".team_share_policy_repo-1.lock", ".team-proposal-outbox.lock",
         ".team-proposal-drainer.lock", ".team-proposal-receipts.lock",
         ".team-proposal-attention.lock",
@@ -120,6 +120,7 @@ class TestClassification:
         "proposal_outbox":  ("share_policy.proposal_outbox_path", {}),
         "proposal_receipts": ("share_policy.proposal_receipts_path", {}),
         "proposal_attention": ("share_policy.proposal_attention_path", {}),
+        "proposal_diagnostics": ("share_policy.proposal_diagnostics_path", {}),
         "share_policy_lock": ("share_policy.policy_lock_path", {"slug": None}),
         "proposal_outbox_lock": ("share_policy.proposal_outbox_lock_path", {}),
         "proposal_drainer_lock": ("share_policy.proposal_drainer_lock_path", {}),

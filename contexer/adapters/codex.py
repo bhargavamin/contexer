@@ -148,12 +148,15 @@ def install(home: Path) -> list[str]:
         )
 
     ss_code = (
-        "from contexer import store; from contexer.adapters import claude as _c; import json,sys; "
+        "from contexer import store; from contexer.adapters import base as _b, claude as _c; "
+        "import json,sys; "
         "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
         # Sanity-checked AND fail-soft (#152): under Codex's managed sandbox the workspace
         # is writable but ~/.contexer may not be, and the old unguarded write raised
         # PermissionError — aborting SessionStart over a pointer file it did not need.
         "store.anchor_repo(repo); "
+        # D6 lifecycle recovery: bounded local scan; any uploader starts detached.
+        "_b._scan_automatic_proposals(repo); "
         # Refresh team context (Path B seam) before building context — fail-soft, so a sync
         # hiccup never breaks session start. session_start_payload then renders it (T1).
         "_c.pull_team(repo); "
@@ -176,6 +179,14 @@ def install(home: Path) -> list[str]:
         "from contexer import store; import json,sys; "
         "raw=sys.stdin.read(); repo=store.hook_repo_from_stdin(raw, sys.argv[1]); "
         "print(json.dumps(store.get_post_compact_context(repo, store.session_from_hook_stdin(raw))))"
+    )
+    precompact_cmd = (
+        'REPO="$PWD" && '
+        f'"{python}" -P -c "from contexer import store; from contexer.adapters import base as _b; '
+        'import sys; raw=sys.stdin.read(); '
+        '_b._scan_automatic_proposals(store.hook_repo_from_stdin(raw, sys.argv[1]))" "$REPO"; '
+        "echo '{\"systemMessage\": \"Contexer: context compaction starting — call "
+        "update_context for any decisions not yet stored\"}'"
     )
     # Repository identity is owned by Python hooks, resolved from stdin/PWD without Git.
     anchor_cmd = (
@@ -293,10 +304,12 @@ def install(home: Path) -> list[str]:
             hooks.pop("Stop", None)
 
     pc = hooks.setdefault("PreCompact", [])
+    pc = base._strip_stale(pc, ["compaction starting"], precompact_cmd)
+    hooks["PreCompact"] = pc
     if not base._in_groups(pc, "compaction starting"):
         pc.append({"hooks": [{"type": "command",
             "statusMessage": "Saving decisions before compact...",
-            "command": "echo '{\"systemMessage\": \"Contexer: context compaction starting — call update_context for any decisions not yet stored\"}'"}]})
+            "command": precompact_cmd}]})
 
     poc = hooks.setdefault("PostCompact", [])
     # Migrate: replace any installed PostCompact group whose command isn't byte-identical

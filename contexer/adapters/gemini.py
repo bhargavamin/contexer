@@ -109,6 +109,7 @@ def session_start(repo_path: str, raw: str) -> str:
         if not repo:
             return _output("SessionStart", [])
         _anchor(repo)
+        base._scan_automatic_proposals(repo)
         # Fix 7: only reset the first-prompt marker on a genuinely new session.
         # Resume and /clear continue an existing session — preserve the marker so
         # before_agent does not re-run bootstrap and task capture on the next prompt.
@@ -147,6 +148,8 @@ def before_agent(repo_path: str, raw: str) -> str:
         if not repo:
             return _output("BeforeAgent", [])
         _anchor(repo)
+        # Bounded local-only fallback; policy-disabled repos pay only one sidecar presence check.
+        base._scan_automatic_proposals(repo)
         prompt = store.prompt_from_hook_stdin(raw)
         session_id = store.session_from_hook_stdin(raw)
         contexts: list[str] = []
@@ -281,7 +284,10 @@ def pre_compress(repo_path: str, raw: str) -> str:
     # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
     # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
     _flag_set(store.STORE_DIR / _PENDING_RELOAD)
-    _reconcile_evidence(repo_path)
+    repo = store.hook_repo_from_stdin(raw, repo_path)
+    if repo:
+        _reconcile_evidence(repo)
+        base._scan_automatic_proposals(repo)
     return json.dumps({"suppressOutput": True})
 
 
@@ -293,7 +299,10 @@ def session_end(repo_path: str, raw: str) -> str:
             marker.unlink(missing_ok=True)
     except Exception:
         pass
-    _reconcile_evidence(repo_path)
+    repo = store.hook_repo_from_stdin(raw, repo_path)
+    if repo:
+        _reconcile_evidence(repo)
+        base._scan_automatic_proposals(repo)
     return json.dumps({"suppressOutput": True})
 
 

@@ -164,6 +164,9 @@ def session_start(repo_path: str, raw: str) -> str:
             # except below, which would inject the bare nudge instead of the real rules.
             store.anchor_repo(repo)
             _ensure_rule_file(repo)
+            # Cursor exposes sessionStart but no write/lifecycle-end hook. This is a bounded
+            # recovery checkpoint, not a promise of post-write parity with other hosts.
+            base._scan_automatic_proposals(repo)
             # `host=NAME`: the shared payload reconciles this repo's unconsumed evidence, and
             # Cursor is the host that CAN say least about what it saw (no write hook at all),
             # so a receipt naming it is the difference between "no file changes" and "no way
@@ -198,6 +201,9 @@ def capture_constraint(repo_path: str, raw: str) -> str:
         repo, repo_source = _repo_from_verbose(raw, repo_path)
         if repo:
             _anchor_current_repo(repo)
+            # beforeSubmitPrompt cannot inject context, but it can carry the local-only fallback.
+            # Any upload begins on a detached worker after this hook has durably queued the intent.
+            base._scan_automatic_proposals(repo)
             # Store call + shadow-mode event in one (evidence.capture_directive): identical
             # return and exceptions, so this hook's swallow-and-pass-through is unchanged.
             evidence.capture_directive(repo, store.prompt_from_hook_stdin(raw),
