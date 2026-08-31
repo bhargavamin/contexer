@@ -115,6 +115,7 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each. Also surfaces possibly-overlapping constraint/convention rules — keep the best one and retire the rest with `approve_decision(id, action="ignore")`, which works on already-approved rules too (Contexer itself never merges or deletes) |
 | `contexer ui [--open]` | Start the local web console over every store on this machine and print its URL (`--open` also opens the browser). See [the local console](ui.md) |
 | `contexer ui --status\|--stop\|--port N\|--foreground\|--reset-token` | Report on, stop, re-port, run in the foreground, or re-credential the console |
+| `contexer pull` | Fetch your team's decisions for this repo into the local team cache. Local-first: a quiet no-op outside team mode, or when the cloud is unreachable. Must be run inside a git repository |
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer reconcile <id> [--team NAME_OR_ID] [--yes]` | Preview a corrected local decision and submit it to the selected team for lead review |
