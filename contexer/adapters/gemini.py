@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import evidence, sidecars, store, updates
+from contexer import evidence, store, updates
 from contexer.adapters import base
 
 NAME = "gemini"
@@ -21,8 +21,6 @@ EVIDENCE_COVERAGE = {
 }
 
 # Fix 1: namespaced so it doesn't collide with Claude's ~/.contexer/.pending_capture flag.
-_PENDING_CAPTURE = sidecars.filename("gemini_capture")
-_PENDING_RELOAD = sidecars.filename("gemini_reload")
 _REMINDER = (
     "Contexer: you wrote or edited files last turn — call update_context for: "
     "(1) any NEW architecture/pattern/constraint/convention decisions; "
@@ -81,7 +79,7 @@ def _session_marker(raw: str) -> Path | None:
     if not identity:
         return None
     digest = hashlib.sha256(str(identity).encode()).hexdigest()[:24]
-    return store.STORE_DIR / sidecars.filename("gemini_first", slug=digest)
+    return store.sidecar_path("gemini_first", slug=digest)
 
 
 def _anchor(repo: str) -> None:
@@ -189,8 +187,8 @@ def before_agent(repo_path: str, raw: str) -> str:
         # "you edited files last turn" reminder redundant and misleading — the
         # write happened before compression, not on the immediately preceding turn.
         # When both flags are present, consume the capture flag silently.
-        reload_flag = store.STORE_DIR / _PENDING_RELOAD
-        pending = store.STORE_DIR / _PENDING_CAPTURE
+        reload_flag = store.sidecar_path("gemini_reload")
+        pending = store.sidecar_path("gemini_capture")
         if reload_flag.exists():
             _flag_drop(reload_flag)
             _flag_drop(pending)
@@ -262,7 +260,7 @@ def after_write(repo_path: str, raw: str) -> str:
     process's own cwd instead — which IS the project directory for a hook — guarded by
     `is_sane_repo` so a session opened in the home/config dir still records nothing. Matches
     claude.post_write's identical fallback for the sibling PostToolUse recording path."""
-    _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
+    _flag_set(store.sidecar_path("gemini_capture"))
     try:
         repo = store.hook_repo_from_stdin(raw, repo_path)
         if repo:
@@ -312,9 +310,9 @@ def _reconcile_evidence(repo_path: str) -> None:
 def pre_compress(repo_path: str, raw: str) -> str:
     """Defer full context reload to the first turn after compression."""
     # Fix 3: only set the reload flag here. Compression is not a file write, so
-    # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
-    # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
-    _flag_set(store.STORE_DIR / _PENDING_RELOAD)
+    # setting the gemini_capture flag would inject a misleading "you edited files last
+    # turn" reminder alongside the reload. after_write owns that flag.
+    _flag_set(store.sidecar_path("gemini_reload"))
     repo = store.hook_repo_from_stdin(raw, repo_path)
     if repo:
         _reconcile_evidence(repo)

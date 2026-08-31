@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from contexer import decision_observability, remote, repo_key, revisions, share, sidecars, store
+from contexer import decision_observability, remote, repo_key, revisions, share, store
 from contexer.config import ConfigError, Profile, load_profile
 
 
@@ -178,44 +178,44 @@ def _emit(operation: str, outcome: OperationOutcome, started_ns: int, *,
 
 
 def policy_path(repo_path: str) -> Path:
-    return store.STORE_DIR / sidecars.filename("share_policy", slug=store.repo_slug(repo_path))
+    return store.sidecar_path("share_policy", slug=store.repo_slug(repo_path))
 
 
 def proposal_outbox_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_outbox")
+    return store.sidecar_path("proposal_outbox")
 
 
 def proposal_receipts_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_receipts")
+    return store.sidecar_path("proposal_receipts")
 
 
 def proposal_attention_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_attention")
+    return store.sidecar_path("proposal_attention")
 
 
 def proposal_diagnostics_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_diagnostics")
+    return store.sidecar_path("proposal_diagnostics")
 
 
 def policy_lock_path(repo_path: str) -> Path:
-    return store.STORE_DIR / sidecars.filename(
+    return store.sidecar_path(
         "share_policy_lock", slug=store.repo_slug(repo_path))
 
 
 def proposal_outbox_lock_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_outbox_lock")
+    return store.sidecar_path("proposal_outbox_lock")
 
 
 def proposal_drainer_lock_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_drainer_lock")
+    return store.sidecar_path("proposal_drainer_lock")
 
 
 def proposal_receipts_lock_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_receipts_lock")
+    return store.sidecar_path("proposal_receipts_lock")
 
 
 def proposal_attention_lock_path() -> Path:
-    return store.STORE_DIR / sidecars.filename("proposal_attention_lock")
+    return store.sidecar_path("proposal_attention_lock")
 
 
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
@@ -239,7 +239,7 @@ def _sidecar_lock(path: Path, *, blocking: bool = True):
     handle = None
     try:
         if store.fcntl is not None:
-            store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            store.ensure_store_dir()
             handle = open(path, "a+b")
             try:
                 store.fcntl.flock(
@@ -293,7 +293,7 @@ def _read_drainer_claim(path: Path) -> dict | None:
 
 def _write_drainer_claim(path: Path, claim: dict | None) -> None:
     """Rewrite the lease inode while its short coordination flock is held."""
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     path.touch(mode=0o600, exist_ok=True)
     path.chmod(0o600)
     with open(path, "r+", encoding="utf-8") as handle:
@@ -716,7 +716,7 @@ def save_policy(repo_path: str, policy: dict) -> None:
         with _sidecar_lock(policy_lock_path(repo_path)):
             if policy_path(repo_path).exists():
                 load_policy(repo_path)
-            store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            store.ensure_store_dir()
             store.atomic_write(policy_path(repo_path), json.dumps(normalized, indent=2))
     except SidecarDataError as exc:
         outcome = OperationOutcome("refused", "validation_error", exc.diagnostic_id)
@@ -736,7 +736,7 @@ def read_attention() -> list[dict]:
 
 
 def _write_json_list(path: Path, records: list[dict]) -> None:
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     store.atomic_write(path, json.dumps(records, indent=2, ensure_ascii=False))
 
 
@@ -856,7 +856,7 @@ def append_receipt(receipt: dict, *, blocking: bool = True) -> None:
         records = read_receipts()
         records.append(normalized)
         path = proposal_receipts_path()
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.ensure_store_dir()
         if len(records) > RECEIPT_LOG_CAP:
             records = list(fold_receipts(records).values())[-RECEIPT_LOG_CAP:]
             text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records)
@@ -883,7 +883,7 @@ def append_receipts(receipts: list[dict]) -> None:
         if len(records) > RECEIPT_LOG_CAP:
             records = list(fold_receipts(records).values())[-RECEIPT_LOG_CAP:]
         text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records)
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.ensure_store_dir()
         store.atomic_write(proposal_receipts_path(), text)
 
 

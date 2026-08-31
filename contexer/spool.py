@@ -23,9 +23,9 @@ they run ONLY from reconciliation or maintenance (`run_retention`), never from a
 
 A leaf module: it imports `evidence` for the one schema gate (`validate_event` - validation
 lives there and is never reimplemented here) and reaches `store` through the MODULE OBJECT at
-call time (`store.STORE_DIR`, `store.repo_slug`, `store.load`), the load-order discipline
+call time (`store.store_dir`, `store.repo_slug`, `store.load`), the load-order discipline
 `guard_engine.py` documents, so store.py never needs this module at import time and a test
-patching `contexer.store.STORE_DIR` is seen here.
+patching `contexer.store.STORE_DIR` is seen here - `store_dir()` reads that constant.
 
 `.gap` is an honesty marker, not a queue: it records what left the spool without being
 consumed, and nothing here ever clears it - a successful run does not un-lose an event, so
@@ -140,7 +140,15 @@ _EVENT_ID_IN_NAME = re.compile(r"-([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\
 # ── layout ───────────────────────────────────────────────────────────────────────
 
 def _evidence_root() -> Path:
-    return store.STORE_DIR / "evidence"
+    """The spool root DIRECTORY, deliberately not a declared sidecar kind.
+
+    `sidecars.py` declares FILE names, and every one is distinctive enough that a scan for
+    the literal catches a hand-written copy. "evidence" is not: it is this package's own
+    module name and a common word in its event vocabulary, so declaring it would make that
+    scan report seven false offenders and stop meaning anything. What lives under here is a
+    TREE (`evidence/<repo-slug>/...`) whose layout this module owns end to end, not one name
+    two modules could disagree about."""
+    return store.store_dir() / "evidence"
 
 
 def _repo_dir(repo_path: str, slug: str = "") -> Path:
@@ -215,7 +223,7 @@ def _ensure_dir(path: Path) -> Path:
     """`mkdir -p` at 0700 on every level, including the ones `Path.mkdir(parents=True)` would
     create at the default mode - the spool holds verbatim prompt text, so 0700 is the point."""
     chain = [path]
-    while chain[-1] != store.STORE_DIR and chain[-1].parent != chain[-1]:
+    while chain[-1] != store.store_dir() and chain[-1].parent != chain[-1]:
         chain.append(chain[-1].parent)
     for directory in reversed(chain):
         directory.mkdir(mode=_DIR_MODE, exist_ok=True)
@@ -1361,7 +1369,7 @@ def _maintenance_stamp(repo_path: str) -> Path:
     """Same key as every other periodic-sweep stamp here: `store.repo_slug` over the repo the
     caller already resolved, so writer and reader agree without either re-resolving (see
     `anchors._anchor_verify_stamp_path`)."""
-    return store.STORE_DIR / f".spool_maintained_{store.repo_slug(repo_path)}"
+    return store.sidecar_path("spool_maintained", slug=store.repo_slug(repo_path))
 
 
 def maintain_spool(repo_path: str, force: bool = False) -> dict:
@@ -1393,7 +1401,7 @@ def maintain_spool(repo_path: str, force: bool = False) -> dict:
             if mtime is not None and time.time() - mtime < _MAINTENANCE_TTL:
                 return {}
         try:
-            store.STORE_DIR.mkdir(mode=_DIR_MODE, exist_ok=True)
+            store.ensure_store_dir()
             stamp.touch()
         except OSError:
             pass                        # an unwritable stamp costs a re-scan, never the sweep

@@ -120,9 +120,7 @@ def _scan_automatic_proposals(repo_path: str):
         repo = _store.hook_cwd_repo(repo_path)
         if not repo:
             return None
-        from contexer import sidecars
-        policy = _store.STORE_DIR / sidecars.filename(
-            "share_policy", slug=_store.repo_slug(repo))
+        policy = _store.sidecar_path("share_policy", slug=_store.repo_slug(repo))
         if not policy.is_file():
             return None
         from contexer import share_policy
