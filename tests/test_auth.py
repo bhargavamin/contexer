@@ -16,13 +16,14 @@ from pathlib import Path
 import pytest
 
 from contexer import auth, config, store
+from tests.seams import redirect_store_dir
 
 TEAM = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token=None)
 
 
 @pytest.fixture
 def creds_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / ".contexer" / "config.toml")  # login self-configures
     return tmp_path
 

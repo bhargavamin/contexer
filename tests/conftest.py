@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from contexer import remote, store, updates
+from tests.seams import redirect_store_dir
 
 
 def pytest_collection_modifyitems(config, items):
@@ -67,7 +68,7 @@ def _quiet_update_check(tmp_path, monkeypatch):
 @pytest.fixture
 def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return str(tmp_path / "repo")
 
 
@@ -331,7 +332,7 @@ def _fake_transport(server: FakeTeamsServer):
 def team_stack(tmp_path, monkeypatch):
     """Hermetic Teams backend: isolates STORE_DIR, pins a git origin, and routes
     RemoteStore's transport to an in-memory FakeTeamsServer. Returns the server."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(store, "run_git", lambda repo, *a: FakeTeamsServer.ORIGIN)
     server = FakeTeamsServer()
     monkeypatch.setattr(remote, "_acall_tool", _fake_transport(server))
@@ -378,7 +379,7 @@ def repo(git_repo, monkeypatch):
     """`git_repo` with STORE_DIR redirected to a sibling temp dir - for tests
     that read/write the store or the guard's sidecar files, not just git plumbing.
     Same pattern as test_store.py's tmp_repo / session_repo_preferred_over_pointer."""
-    monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
+    redirect_store_dir(monkeypatch, git_repo.parent / ".contexer")
     return git_repo
 
 

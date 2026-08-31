@@ -20,6 +20,7 @@ import pytest
 import contexer.share as share_mod
 import contexer.share_status as share_status
 from contexer import config as _config_mod
+from tests.seams import redirect_store_dir
 from contexer import review
 from contexer import server, store
 
@@ -298,7 +299,7 @@ def test_resolve_conflict_no_repo(monkeypatch):
 @pytest.mark.parametrize("target", ["all", "ALL", "*", " all "])
 def test_approve_decision_all_is_refused(monkeypatch, tmp_path, target):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/bulk/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     for c in ("Never commit secrets", "Never log PII"):
@@ -311,7 +312,7 @@ def test_approve_decision_all_is_refused(monkeypatch, tmp_path, target):
 
 def test_approve_decision_comma_list_is_refused(monkeypatch, tmp_path):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/comma/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     for c in ("Never commit secrets", "Never log PII"):
@@ -325,7 +326,7 @@ def test_approve_decision_comma_list_is_refused(monkeypatch, tmp_path):
 
 def test_bulk_refusal_covers_ignore_too(monkeypatch, tmp_path):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/ignorebulk/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     store.update_decision(repo, "Never commit secrets", "s", "constraint")
@@ -337,7 +338,7 @@ def test_bulk_refusal_covers_ignore_too(monkeypatch, tmp_path):
 
 def test_approve_decision_single_id_still_works(monkeypatch, tmp_path):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/single/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     _ok, eid = store.update_decision(repo, "Never commit secrets", "s", "constraint")

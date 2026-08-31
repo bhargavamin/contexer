@@ -21,6 +21,7 @@ import time
 import pytest
 
 from contexer import retrieval, store
+from tests.seams import redirect_store_dir
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
@@ -184,7 +185,7 @@ ONDEMAND_QUERIES = [
 @pytest.fixture(scope="module")
 def populated_store(tmp_path_factory, monkeypatch_module):
     store_dir = tmp_path_factory.mktemp("bench_store")
-    monkeypatch_module.setattr(store, "STORE_DIR", store_dir)
+    redirect_store_dir(monkeypatch_module, store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
 
     for content in CONVENTIONS:
@@ -618,7 +619,7 @@ LARGE_MISS_PROMPTS = [
 @pytest.fixture(scope="module")
 def large_store(tmp_path_factory, monkeypatch_module):
     store_dir = tmp_path_factory.mktemp("bench_large_store")
-    monkeypatch_module.setattr(store, "STORE_DIR", store_dir)
+    redirect_store_dir(monkeypatch_module, store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
 
     for content in LARGE_CONVENTIONS:

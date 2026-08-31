@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 import pytest
 
 from contexer import store
+from tests.seams import redirect_store_dir
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -125,7 +126,7 @@ class TestStatisticalReliability:
     @pytest.fixture(autouse=True)
     def _setup(self, base_store_dir, monkeypatch):
         d, repo = base_store_dir
-        monkeypatch.setattr(store, "STORE_DIR", d)
+        redirect_store_dir(monkeypatch, d)
         self.repo = repo
 
     @pytest.mark.perf
@@ -248,7 +249,7 @@ class TestDisplayCapBoundaries:
 
     @pytest.fixture(autouse=True)
     def _fresh(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+        redirect_store_dir(monkeypatch, tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         self.repo = "/bench/cap"
 
@@ -324,7 +325,7 @@ class TestStorageAtCapacity:
     @pytest.fixture(autouse=True)
     def _setup(self, full_store, monkeypatch):
         d, repo = full_store
-        monkeypatch.setattr(store, "STORE_DIR", d)
+        redirect_store_dir(monkeypatch, d)
         self.d, self.repo = d, repo
 
     def test_cap_enforced(self):
@@ -429,7 +430,7 @@ class TestRealisticPromptNoise:
     @pytest.fixture(autouse=True)
     def _setup(self, base_store_dir, monkeypatch):
         d, repo = base_store_dir
-        monkeypatch.setattr(store, "STORE_DIR", d)
+        redirect_store_dir(monkeypatch, d)
         self.repo = repo
 
     def test_noisy_prompt_distribution(self):
@@ -596,7 +597,7 @@ class TestDecisionLengthSensitivity:
 
     @pytest.fixture(autouse=True)
     def _fresh(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+        redirect_store_dir(monkeypatch, tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         self.repo = "/bench/length"
 
@@ -668,7 +669,7 @@ class TestDecisionLengthSensitivity:
 class TestConcurrentSessionIsolation:
 
     def test_current_repo_race_condition(self, base_store_dir, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+        redirect_store_dir(monkeypatch, tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         current_file = tmp_path / ".current_repo"
         current_file.write_text("/init")
@@ -704,7 +705,7 @@ class TestConcurrentSessionIsolation:
         # writers interleave, the store file on disk is always complete valid JSON.
         # Lost updates (last-write-wins) can still happen — that needs locking and
         # is reported informationally below — but a torn/corrupt file cannot.
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+        redirect_store_dir(monkeypatch, tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         repo = "/bench/concurrent"
         errors: list[str] = []
@@ -746,7 +747,7 @@ class TestConcurrentSessionIsolation:
         # INVARIANT: while writers continuously rewrite the store, every read of the
         # file parses as valid JSON — readers see old-or-new content, never partial.
         # With the previous non-atomic write_text() this flaked; os.replace makes it law.
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+        redirect_store_dir(monkeypatch, tmp_path)
         tmp_path.mkdir(parents=True, exist_ok=True)
         repo = "/bench/torn-read"
         # Large payload so a non-atomic write would have a wide torn window.

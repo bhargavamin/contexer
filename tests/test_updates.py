@@ -12,6 +12,7 @@ import time
 import pytest
 
 from contexer import store, updates
+from tests.seams import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 
@@ -42,7 +43,7 @@ def _isolated_state(tmp_path, monkeypatch):
     Autouse rather than opt-in: a single test that forgets would write the developer's real
     `~/.contexer/.update_check.json` and suppress their next genuine update notice.
     """
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     (tmp_path / ".contexer").mkdir(parents=True)
     # conftest redirects state_path suite-wide and disables the check; this module is the one
     # that actually exercises it, so both are put back under this test's own tmp dir.

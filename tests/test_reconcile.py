@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from contexer import candidates, cli, evidence, lifecycle, reconcile, review_impact, spool, store
+from tests.seams import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
@@ -401,7 +402,7 @@ class TestEvidenceRepoIdentity:
 
     def test_receipt_copied_from_another_spool_never_authorizes_raw_expiry(
             self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         repo_a = str(tmp_path / "repo-a")
         repo_c = str(tmp_path / "repo-c")
         event = _identity_event("/foreign/source-repo", "cross-spool-receipt")

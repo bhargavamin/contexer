@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from contexer import evidence, share_policy, spool, store
+from tests.seams import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 # The keys that legitimately differ between two hosts observing the same edit.
@@ -256,7 +257,7 @@ class TestPromptHooksNeverRunGit:
     @pytest.mark.parametrize("host", ["claude", "codex", "cursor", "gemini"])
     def test_cache_cold_linked_worktree_uses_one_shared_identity_without_subprocess(
             self, tmp_path, monkeypatch, host):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         main = tmp_path / "main"
         gitdir = main / ".git" / "worktrees" / "wt"
         gitdir.mkdir(parents=True)

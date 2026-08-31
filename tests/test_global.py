@@ -4,12 +4,13 @@ import json
 import pytest
 
 from contexer import store
+from tests.seams import redirect_store_dir
 
 
 @pytest.fixture(autouse=True)
 def isolated_store(tmp_path, monkeypatch):
     """Redirect STORE_DIR to tmp_path so tests never touch ~/.contexer/."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
     return tmp_path
 

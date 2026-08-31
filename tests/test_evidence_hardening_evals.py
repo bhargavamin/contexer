@@ -45,6 +45,7 @@ from contexer import (
     spool,
     store,
 )
+from tests.seams import redirect_store_dir
 from tests.test_evidence_hardening_replays import (
     FIXTURES,
     GENERATED,
@@ -650,7 +651,7 @@ def test_a_worktree_and_its_main_checkout_share_one_spool(tmp_path, monkeypatch)
     second spool nobody scans. The alternative fails silently, which is why it is pinned here
     rather than inferred from the store-key tests.
     """
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     store._CANON_CACHE.clear()
     root = Path(os.path.realpath(tmp_path))
     main = root / "main"

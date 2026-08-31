@@ -6,12 +6,13 @@ from pathlib import Path
 import pytest
 
 from contexer import revisions, store
+from tests.seams import redirect_store_dir
 
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     """Real git repo with one commit, STORE_DIR isolated; returns its path as a str."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     path = tmp_path / "gitrepo"
@@ -113,7 +114,7 @@ def test_bogus_anchor_fails_soft(repo):
 
 
 def test_non_git_repo_fails_soft(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     plain = str(tmp_path / "plain")
     os.mkdir(plain)
     store.update_decision(plain, SUMMARY, "s1", "architecture", source_files=["auth.py"])

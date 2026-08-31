@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from contexer import anchors, lifecycle, review, revisions, store
+from tests.seams import redirect_store_dir
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -34,7 +35,7 @@ def git_repo(tmp_path, monkeypatch):
 def repo(git_repo, monkeypatch):
     """`git_repo` with STORE_DIR redirected to a sibling temp dir (mirrors
     test_guard_engine.py's repo fixture)."""
-    monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
+    redirect_store_dir(monkeypatch, git_repo.parent / ".contexer")
     return git_repo
 
 
@@ -665,7 +666,7 @@ class TestFailSoft:
     def test_non_repo_fails_soft(self, tmp_path, monkeypatch):
         not_a_repo = tmp_path / "not_a_repo"
         not_a_repo.mkdir()
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         _seed_entry(not_a_repo, "Decision about a.py", source_files=["a.py"])
         result = anchors.verify_anchors(str(not_a_repo), force=True)
         assert isinstance(result, dict)

@@ -4,13 +4,14 @@ import json
 import pytest
 
 from contexer import scope_audit, store
+from tests.seams import redirect_store_dir
 
 
 @pytest.fixture
 def store_dir(tmp_path, monkeypatch):
     d = tmp_path / ".contexer"
     d.mkdir()
-    monkeypatch.setattr(store, "STORE_DIR", d)
+    redirect_store_dir(monkeypatch, d)
     return d
 
 
@@ -258,7 +259,7 @@ class TestAuditSessions:
         scope_audit.format_audit(scope_audit.audit_sessions())
 
     def test_missing_store_dir_is_empty_not_an_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / "does-not-exist")
+        redirect_store_dir(monkeypatch, tmp_path / "does-not-exist")
         assert scope_audit.audit_sessions() == []
 
 

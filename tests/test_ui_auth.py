@@ -11,7 +11,8 @@ import time
 
 import pytest
 
-from contexer import config, store
+from contexer import config
+from tests.seams import redirect_store_dir
 from contexer.ui import daemon, server
 
 TOKEN = "console-token-for-tests"
@@ -22,7 +23,7 @@ def home(tmp_path, monkeypatch):
     """An isolated ~/.contexer: store, config, statefile and log. Never the real one."""
     path = tmp_path / ".contexer"
     path.mkdir()
-    monkeypatch.setattr(store, "STORE_DIR", path)
+    redirect_store_dir(monkeypatch, path)
     monkeypatch.setattr(config, "CONFIG_PATH", path / "config.toml")
     monkeypatch.setattr(daemon, "STATE_PATH", path / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", path / "ui.log")
