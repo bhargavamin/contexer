@@ -538,6 +538,31 @@ def test_future_only_activation_persists_baseline_without_queueing_existing(
     assert share_policy.read_outbox() == []
 
 
+def test_future_only_activation_queues_first_later_human_approval_without_prompt(
+        tmp_repo, monkeypatch):
+    existing = _entry("existing", "existing-revision")
+    (preview, outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, entries=[existing])
+    assert outcome == share_policy.OperationOutcome("success", "none")
+    assert preview is not None
+    assert share_policy.activate_policy(preview).result == "success"
+
+    approved_later = _entry(
+        "approved-later", "approved-later-revision", source="human", approved_by="reviewer")
+    monkeypatch.setattr(
+        store, "load", lambda _repo: {"entries": [existing, approved_later]})
+
+    scanned = share_policy.scan_and_enqueue(tmp_repo, start_worker=False)
+
+    assert scanned == share_policy.ScanOutcome("queued", "none", 2, 1, 1)
+    assert [row["revision_id"] for row in share_policy.read_outbox()] == [
+        "approved-later-revision",
+    ]
+    assert [row["state"] for row in share_policy.read_receipts()] == [
+        "baseline", "queued",
+    ]
+
+
 def test_activation_refuses_before_replacing_policy_when_global_sidecar_is_corrupt(
         tmp_repo, monkeypatch):
     monkeypatch.setattr(store, "run_git", lambda *_args: "git@github.com:org/repo.git")
@@ -1246,6 +1271,43 @@ def test_drainer_transient_failure_keeps_stable_intent_and_closed_error(
     assert "SENTINEL" not in json.dumps(queued)
 
 
+def test_offline_intent_reconnects_and_submits_exactly_once(tmp_repo, monkeypatch):
+    offline = _ProposalRemote()
+    intent, _policy_row, profile, _secret = _ready_drain(tmp_repo, monkeypatch, offline)
+    monkeypatch.setattr(
+        offline,
+        "get_capabilities",
+        lambda: (_ for _ in ()).throw(remote.RemoteUnavailableError("offline")),
+    )
+
+    first = share_policy.drain_once(profile)
+
+    assert len(first) == 1
+    assert first[0].result == "retry"
+    assert first[0].reason_code == "transport_error"
+    assert first[0].diagnostic_id is not None
+    assert share_policy.read_outbox()[0]["idempotency_key"] == intent["idempotency_key"]
+
+    recovered = _ProposalRemote()
+    monkeypatch.setattr(
+        share_policy.remote.RemoteStore,
+        "from_profile",
+        staticmethod(lambda _profile, **kwargs: (
+            recovered if kwargs == {"reactive_refresh": False}
+            else pytest.fail("automatic drainer must pin the validated credential")
+        )),
+    )
+
+    second = share_policy.drain_once(profile)
+    third = share_policy.drain_once(profile)
+
+    assert second == [share_policy.OperationOutcome("submitted", "none")]
+    assert third == []
+    assert share_policy.read_outbox() == []
+    assert len(recovered.submit_calls) == 1
+    assert recovered.submit_calls[0][3]["idempotency_key"] == intent["idempotency_key"]
+
+
 def test_transport_401_after_fingerprint_check_never_submits_as_refreshed_account(
         tmp_repo, monkeypatch):
     remote_store = _ProposalRemote()
@@ -1402,6 +1464,48 @@ def test_drainer_lease_refuses_second_worker_without_network(tmp_repo, monkeypat
         outcomes = share_policy.drain_once(profile)
     assert outcomes == [share_policy.OperationOutcome("no_op", "lock_busy")]
     assert not remote_store.preview_calls and not remote_store.submit_calls
+
+
+def test_two_concurrent_drainers_create_one_candidate(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    entered_network = threading.Event()
+    release_network = threading.Event()
+    original_capabilities = remote_store.get_capabilities
+
+    def blocked_capabilities():
+        entered_network.set()
+        assert release_network.wait(timeout=2)
+        return original_capabilities()
+
+    monkeypatch.setattr(remote_store, "get_capabilities", blocked_capabilities)
+    outcomes = {}
+
+    def run(name):
+        outcomes[name] = share_policy.drain_once(profile)
+
+    first = threading.Thread(target=run, args=("first",))
+    second = threading.Thread(target=run, args=("second",))
+    first.start()
+    try:
+        assert entered_network.wait(timeout=1)
+        second.start()
+        second.join(timeout=1)
+        assert not second.is_alive()
+    finally:
+        release_network.set()
+        first.join(timeout=2)
+        if second.ident is not None:
+            second.join(timeout=2)
+    assert not first.is_alive()
+
+    assert sorted(outcomes.values(), key=lambda rows: rows[0].result) == [
+        [share_policy.OperationOutcome("no_op", "lock_busy")],
+        [share_policy.OperationOutcome("submitted", "none")],
+    ]
+    assert len(remote_store.submit_calls) == 1
+    assert share_policy.read_outbox() == []
 
 
 def test_malformed_drainer_claim_expires_by_file_age(tmp_repo, monkeypatch):
