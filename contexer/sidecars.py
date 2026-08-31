@@ -92,26 +92,6 @@ KINDS: tuple[Kind, ...] = (
     # design constraint is not being noisy. Re-fetching the version costs one request.
     Kind("update_check",     ".update_check.json",         DURABLE,   "latest release seen, declared floor, and "
                                                                       "which of each the developer was told about"),
-    Kind("share_policy",     ".team_share_policy_{slug}.json", DURABLE,
-         "explicit human-approved automatic proposal policy for one repository"),
-    Kind("proposal_outbox",  ".team-proposal-outbox.json", DURABLE,
-         "global queue of stable automatic proposal intents awaiting delivery"),
-    Kind("proposal_receipts", ".team-proposal-receipts.jsonl", DURABLE,
-         "append-only proposal outcomes and activation baselines"),
-    Kind("proposal_attention", ".team-proposal-attention.json", DURABLE,
-         "proposal intents requiring explicit developer attention"),
-    Kind("proposal_diagnostics", ".team-proposal-diagnostics.jsonl", DURABLE,
-         "private size-bounded stderr sink for detached proposal uploader telemetry"),
-    Kind("share_policy_lock", ".team_share_policy_{slug}.lock", DURABLE,
-         "independent flock target for one repository proposal policy"),
-    Kind("proposal_outbox_lock", ".team-proposal-outbox.lock", DURABLE,
-         "independent flock target for proposal queue read-modify-write"),
-    Kind("proposal_drainer_lock", ".team-proposal-drainer.lock", DURABLE,
-         "non-blocking flock target ensuring at most one proposal uploader"),
-    Kind("proposal_receipts_lock", ".team-proposal-receipts.lock", DURABLE,
-         "independent flock target for receipt append and compaction"),
-    Kind("proposal_attention_lock", ".team-proposal-attention.lock", DURABLE,
-         "independent flock target for attention queue read-modify-write"),
 
 
     # ── session bookkeeping: the session it belonged to is over ────────────────────────

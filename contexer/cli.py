@@ -35,8 +35,6 @@ Commands:
                 (default: latest). --global pushes the cross-repo rules in _global.json.
   reconcile     Submit a corrected local decision for team review:
                 reconcile <id> [--team NAME_OR_ID] [--yes].
-  share-policy  Control automatic proposals of approved decisions to one team:
-                share-policy show|enable|disable|flush|attention|retry.
   reconcile-session
                 Turn recorded session evidence into decisions pending your review:
                 reconcile-session [--session ID] [--dry-run]. Retirements are only
@@ -442,7 +440,7 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
 
 def review() -> None:
     """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
-    from contexer import conflicts, lifecycle, review_impact, revisions, share_policy, store
+    from contexer import conflicts, lifecycle, review_impact, revisions, store
 
     repo_path = store.git_root(os.getcwd())
     if not repo_path:
@@ -568,7 +566,6 @@ def review() -> None:
                 dismissed += 1
             else:
                 restored += 1
-                share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
             print(msg)
         elif life:
             # Its own branch, not a key bolted onto the content flow: [D] here dismisses the
@@ -597,7 +594,6 @@ def review() -> None:
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
-                share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
                 print("Approved.")
             else:
                 # Print the store's reason instead of dropping it. `pending` was read before
@@ -633,7 +629,6 @@ def review() -> None:
                 ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content)
                 if ok:
                     edited += 1
-                    share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
                     print("Approved with edits.")
                 else:
                     skipped += 1
@@ -1255,173 +1250,6 @@ def share_cmd(rest: list | None = None) -> None:
                   "they apply to every repo. Push them with `contexer share --global`.")
     else:
         print(share_status.describe(share.share(repo, ids[0] if ids else "")))
-
-
-def _share_policy_usage() -> str:
-    return (
-        "Usage:\n"
-        "  contexer share-policy show\n"
-        "  contexer share-policy enable --team NAME_OR_ID [--include-existing]\n"
-        "  contexer share-policy disable\n"
-        "  contexer share-policy flush\n"
-        "  contexer share-policy attention\n"
-        "  contexer share-policy retry <intent-id>"
-    )
-
-
-def _share_policy_fail(message: str) -> None:
-    print(f"{message}\n{_share_policy_usage()}", file=sys.stderr)
-    sys.exit(1)
-
-
-def _print_share_policy_outcome(prefix: str, outcome) -> None:
-    detail = f" ({outcome.reason_code})" if outcome.reason_code != "none" else ""
-    diagnostic = f" Diagnostic: {outcome.diagnostic_id}." if outcome.diagnostic_id else ""
-    print(f"{prefix}{detail}.{diagnostic}")
-
-
-def share_policy_cmd(rest: list | None = None) -> None:
-    """Manage one repository's standing authorization to propose approved decisions."""
-    from contexer import share_policy, store
-
-    rest = rest or []
-    if not rest or rest[0] in ("--help", "-h", "help"):
-        print(_share_policy_usage())
-        print(
-            "\nEnable always prints the exact destination and asks for confirmation. "
-            "The general skip_confirm setting does not bypass this policy confirmation.\n"
-            "Future-only is the default; --include-existing also queues currently eligible "
-            "approved revisions. Team approval always remains manual."
-        )
-        return
-
-    action, args = rest[0], rest[1:]
-    if action not in {"show", "enable", "disable", "flush", "attention", "retry"}:
-        _share_policy_fail(f"contexer share-policy: unknown action: {action}")
-    repo = store.git_root(os.getcwd()) or store.resolve_repo("")
-    if not repo:
-        _share_policy_fail(
-            "contexer share-policy: no git repo detected; run this inside a repository.")
-
-    try:
-        if action == "show":
-            if args:
-                _share_policy_fail("contexer share-policy show: no arguments are accepted")
-            print(share_policy.format_policy_status(share_policy.policy_status(repo)))
-            return
-
-        if action == "enable":
-            team = ""
-            include_existing = False
-            index = 0
-            while index < len(args):
-                arg = args[index]
-                if arg == "--team":
-                    if index + 1 >= len(args) or args[index + 1].startswith("-"):
-                        _share_policy_fail(
-                            "contexer share-policy enable: --team requires a name or id")
-                    team = args[index + 1]
-                    index += 1
-                elif arg == "--include-existing":
-                    include_existing = True
-                else:
-                    _share_policy_fail(
-                        f"contexer share-policy enable: unknown argument: {arg}")
-                index += 1
-            if not team:
-                _share_policy_fail("contexer share-policy enable: --team is required")
-
-            preview, outcome = share_policy.prepare_policy_activation(
-                repo, team, include_existing=include_existing)
-            if preview is None:
-                _print_share_policy_outcome("Policy preview refused", outcome)
-                sys.exit(1)
-            print(share_policy.format_policy_activation_preview(preview))
-            try:
-                answer = input("Enable this automatic proposal policy? [y/N] ").strip().lower()
-            except EOFError:
-                answer = ""
-            if answer not in ("y", "yes"):
-                print("Cancelled - the policy was not changed.")
-                return
-
-            # Resolve credentials, capabilities, repository identity, and membership again after
-            # the gesture. If anything the developer saw changed, require a new confirmation.
-            fresh, outcome = share_policy.prepare_policy_activation(
-                repo, team, include_existing=include_existing)
-            if fresh is None:
-                _print_share_policy_outcome("Policy activation refused", outcome)
-                sys.exit(1)
-            if (share_policy.policy_activation_identity(fresh)
-                    != share_policy.policy_activation_identity(preview)):
-                print("The policy destination or eligible revisions changed during confirmation.")
-                print(share_policy.format_policy_activation_preview(fresh))
-                print("Run the enable command again to confirm this updated preview.")
-                sys.exit(1)
-            scan = share_policy.activate_policy(fresh)
-            if scan.reason_code != "none":
-                print(
-                    "Automatic proposal policy enabled with its authoritative baseline saved. "
-                    "The optional receipt mirror could not be updated "
-                    f"({scan.reason_code}); inspect local proposal state before relying on scans."
-                )
-            else:
-                print(
-                    "Automatic proposal policy enabled. Team approval remains manual. "
-                    f"Initial queue result: {scan.result} ({scan.queued} queued)."
-                )
-            try:
-                print(share_policy.format_policy_status(share_policy.policy_status(repo)))
-            except share_policy.SidecarDataError as exc:
-                print(
-                    "Policy status is unavailable because local proposal state is malformed. "
-                    f"Diagnostic: {exc.diagnostic_id}."
-                )
-            return
-
-        if action == "disable":
-            if args:
-                _share_policy_fail("contexer share-policy disable: no arguments are accepted")
-            removed = share_policy.disable_policy(repo)
-            print("Automatic proposal policy disabled." if removed else
-                  "Automatic proposal policy was already disabled.")
-            print("Queued and attention items were preserved for inspection.")
-            return
-
-        if action == "flush":
-            if args:
-                _share_policy_fail("contexer share-policy flush: no arguments are accepted")
-            print(share_policy.format_drain_outcomes(share_policy.drain_once()))
-            print(share_policy.format_policy_status(share_policy.policy_status(repo)))
-            return
-
-        if action == "attention":
-            if args:
-                _share_policy_fail("contexer share-policy attention: no arguments are accepted")
-            print(share_policy.format_attention(share_policy.attention_for_repo(repo)))
-            return
-
-        if len(args) != 1 or args[0].startswith("-"):
-            _share_policy_fail("contexer share-policy retry: pass exactly one intent id")
-        outcome = share_policy.retry_attention(repo, args[0])
-        _print_share_policy_outcome("Retry queued" if outcome.result == "queued" else
-                                    "Retry refused", outcome)
-        if outcome.result != "queued":
-            sys.exit(1)
-    except share_policy.SidecarDataError as exc:
-        print(
-            f"contexer share-policy: local proposal state is malformed; no change was made. "
-            f"Diagnostic: {exc.diagnostic_id}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    except (OSError, ValueError, TypeError):
-        print(
-            "contexer share-policy: the operation could not be completed or fully inspected. "
-            "Run `contexer share-policy show` before retrying; no repair was attempted.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
 
 def reconcile_cmd(rest: list | None = None) -> None:
@@ -2185,7 +2013,7 @@ def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    from contexer import lifecycle, share_policy
+    from contexer import lifecycle
     repo = _cli_repo()
     if not repo:
         print("No repo detected - run this inside a project directory.", file=sys.stderr)
@@ -2195,8 +2023,6 @@ def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
     if not ok:
         print(message, file=sys.stderr)
         sys.exit(1)
-    if not retiring:
-        share_policy.enqueue_after_local_mutation(repo, args[0])
     _safe_print(message)
 
 
@@ -2909,8 +2735,6 @@ def main() -> None:
         _run_guarded(lambda: pull(rest))
     elif cmd == "share":
         _run_guarded(lambda: share_cmd(rest))
-    elif cmd == "share-policy":
-        _run_guarded(lambda: share_policy_cmd(rest))
     elif cmd == "reconcile":
         _run_guarded(lambda: reconcile_cmd(rest))
     elif cmd == "login":
