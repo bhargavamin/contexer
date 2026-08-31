@@ -84,6 +84,11 @@ def _transient_outcomes(exc: BaseException) -> tuple[str, str] | None:
             return outcomes
     return None
 
+
+def is_transient_reconciliation_refusal(exc: BaseException) -> bool:
+    """Public structural query shared by the manual and automatic reconciliation queues."""
+    return _transient_outcomes(exc) is not None
+
 # Outbox cap: push_decision is idempotent on decision_id server-side, so a queued entry is
 # never dropped for age or attempt count in v1 - retrying is always safe. This count is the
 # only bound, so a long-offline stretch can't grow ~/.contexer/.outbox.json without limit.
@@ -1353,8 +1358,8 @@ def _select_team(teams: list[RemoteTeam],
         share_status.TEAM_CHOICE_REQUIRED, teams=_team_rows(teams))
 
 
-def _atomic_decision_kwargs(dec: dict, key: str | None, *,
-                            redact_on: bool | None = None) -> dict:
+def atomic_decision_kwargs(dec: dict, key: str | None, *,
+                           redact_on: bool | None = None) -> dict:
     """Nested reconciliation payload, serialized before preview/submission/outbox persistence.
 
     This deliberately uses the remote wire serializer up front, not just inside RemoteStore, so a
@@ -1366,6 +1371,11 @@ def _atomic_decision_kwargs(dec: dict, key: str | None, *,
         confidence=dec["confidence"], evidence=dec["evidence"],
         source=_wire_source(dec["source"]), title=dec.get("title"),
         source_files=dec.get("source_files"), redact_on=redact_on)
+
+
+# Compatibility name for the manual reconciliation implementation below.  Automatic proposal
+# draining imports the public owner above rather than reaching across modules for a private name.
+_atomic_decision_kwargs = atomic_decision_kwargs
 
 
 def _unsupported_capability_error(exc: RemoteStoreError) -> bool:
@@ -1460,32 +1470,52 @@ def format_reconciliation_preview(plan: ReconciliationPlan) -> str:
     return "\n".join(lines)
 
 
-def _reconciliation_operation(plan: ReconciliationPlan) -> dict:
-    assert plan.preview is not None
+def atomic_reconciliation_operation(
+        decision: dict, repo_key: str | None, target: RemoteTeam,
+        preview: DecisionReconciliationPreview, idempotency_key: str, *,
+        redact_on: bool | None = None) -> dict:
+    """Build the shared atomic-submit operation from a fresh server preview.
+
+    Manual confirmed reconciliation and automatic proposal draining intentionally meet at this
+    helper: both submit the same redacted/bounded nested payload and the same optimistic heads.
+    Queue ownership and retry policy remain separate in their respective callers.
+    """
     return {
         "operation": "submit_team_decision",
-        "idempotency_key": plan.idempotency_key,
-        "decision_id": plan.decision["id"],
-        "revision_id": plan.decision["revision_id"],
-        "team_id": plan.target.id,
-        "team_name": plan.target.name,
-        "expected_personal_head": plan.preview.personal_head,
-        "expected_team_head": plan.preview.team_head,
-        "payload": _atomic_decision_kwargs(
-            plan.decision, plan.repo_key, redact_on=plan.redact_on),
+        "idempotency_key": idempotency_key,
+        "decision_id": decision["id"],
+        "revision_id": decision["revision_id"],
+        "team_id": target.id,
+        "team_name": target.name,
+        "expected_personal_head": preview.personal_head,
+        "expected_team_head": preview.team_head,
+        "payload": atomic_decision_kwargs(
+            decision, repo_key, redact_on=redact_on),
         "queued_at": time.time(),
         "attempts": 0,
         "stage": "confirmed",
     }
 
 
-def _call_atomic_submission(remote: RemoteStore, operation: dict) -> TeamSubmissionResult:
+def _reconciliation_operation(plan: ReconciliationPlan) -> dict:
+    assert plan.preview is not None
+    return atomic_reconciliation_operation(
+        plan.decision, plan.repo_key, plan.target, plan.preview, plan.idempotency_key,
+        redact_on=plan.redact_on,
+    )
+
+
+def call_atomic_submission(remote: RemoteStore, operation: dict) -> TeamSubmissionResult:
+    """Submit an operation built by :func:`atomic_reconciliation_operation`."""
     payload = operation.get("payload") or operation.get("decision") or {}
     return remote.submit_team_decision(
         operation["decision_id"], operation["revision_id"], operation["team_id"],
         expected_personal_head=operation.get("expected_personal_head"),
         expected_team_head=operation.get("expected_team_head"),
         idempotency_key=operation["idempotency_key"], **payload)
+
+
+_call_atomic_submission = call_atomic_submission
 
 
 # Statuses the service returns for a refusal it will not reconsider. Named here rather than
