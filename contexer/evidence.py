@@ -474,12 +474,6 @@ def capture_directive(repo_path: str, prompt: str, session_id: str, source: str,
         raise
     repeated = meta.get("recurrence") or {}
     if entry_id is not None:
-        # This is the trusted prompt-hook boundary: adapters extracted `prompt` from the host
-        # payload before calling here. Keep the model-callable MCP compatibility wrapper out of
-        # this path so arbitrary tool arguments cannot mint automatically shareable provenance.
-        # Function-level import preserves evidence.py's leaf/load-order contract.
-        from contexer import share_policy
-        share_policy.enqueue_after_local_mutation(repo_path, entry_id)
         emit_hook_event(repo_path, "user_directive", session_id=session_id,
                         source=source, summary=content)
     elif repeated.get("content"):

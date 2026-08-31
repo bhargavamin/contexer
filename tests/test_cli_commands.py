@@ -911,61 +911,6 @@ class TestReviewTitleHeadline:
         assert head_idx < body_idx
 
 
-class TestReviewAutomaticProposalSeams:
-    def test_successful_approval_enqueues_after_review_mutation(
-            self, tmp_repo, monkeypatch, capsys):
-        from contexer import share_policy, store
-
-        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
-        stored, entry_id = store.update_decision(
-            tmp_repo, "Never log secrets", "session", "constraint")
-        assert stored
-        calls = []
-        monkeypatch.setattr(
-            share_policy, "enqueue_after_local_mutation",
-            lambda repo, decision_id: calls.append((repo, decision_id)),
-        )
-        monkeypatch.setattr("builtins.input", lambda *_args: "Y")
-
-        cli.review()
-
-        assert calls == [(tmp_repo, entry_id)]
-        assert "Approved." in capsys.readouterr().out
-
-    def test_skip_never_enqueues(self, tmp_repo, monkeypatch):
-        from contexer import share_policy, store
-
-        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
-        stored, _entry_id = store.update_decision(
-            tmp_repo, "Never log secrets", "session", "constraint")
-        assert stored
-        monkeypatch.setattr(
-            share_policy, "enqueue_after_local_mutation",
-            lambda *_args: pytest.fail("skip must not enqueue"),
-        )
-        monkeypatch.setattr("builtins.input", lambda *_args: "S")
-        cli.review()
-
-    def test_restore_command_enqueues_after_success(self, monkeypatch, capsys):
-        from contexer import lifecycle, share_policy
-
-        calls = []
-        monkeypatch.setattr(cli, "_cli_repo", lambda: "/repo")
-        monkeypatch.setattr(
-            lifecycle, "restore_decision",
-            lambda *_args: calls.append("restore") or (True, "Restored"),
-        )
-        monkeypatch.setattr(
-            share_policy, "enqueue_after_local_mutation",
-            lambda repo, decision_id: calls.append((repo, decision_id)),
-        )
-
-        cli._lifecycle_cmd(["12345678"], retiring=False)
-
-        assert calls == ["restore", ("/repo", "12345678")]
-        assert "Restored" in capsys.readouterr().out
-
-
 class TestReviewAnchorCandidates:
     def test_pending_decision_with_recent_edit_candidates_shows_possible_line(
             self, tmp_repo, monkeypatch, capsys):

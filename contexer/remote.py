@@ -15,12 +15,11 @@ import asyncio
 import inspect
 import re
 import sys
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from contexer import decision_observability, redact
+from contexer import redact
 from contexer.config import Profile
 
 T = TypeVar("T")
@@ -40,7 +39,6 @@ def _redaction_enabled() -> bool:
 
 # push_decision returns a text message "Saved decision <id> to your personal context."
 _SAVED_ID_RE = re.compile(r"Saved decision (\S+)")
-_ACCOUNT_FINGERPRINT_RE = re.compile(r"acctfp_v1_[A-Za-z0-9_-]{12,64}\Z")
 _DEFAULT_TIMEOUT = 10.0
 
 # GATE (issue #174 Task 5, developer-ruled): the contexer-teams `push_decision`/`push_decisions`
@@ -412,21 +410,6 @@ def _caps_version(raw: dict) -> int:
         return 0
 
 
-def _strict_caps_version(raw: dict) -> int | None:
-    """A positive integer capability version, rejecting bools and string coercion."""
-    version = raw.get("version")
-    if type(version) is not int or not 1 <= version <= 2_147_483_647:
-        return None
-    return version
-
-
-def _account_fingerprint(raw: object) -> str | None:
-    """Return a recognized V1 pseudonymous account binding, otherwise fail closed."""
-    if not isinstance(raw, str) or _ACCOUNT_FINGERPRINT_RE.fullmatch(raw) is None:
-        return None
-    return raw
-
-
 class RemoteStoreError(Exception):
     """Base for any RemoteStore failure. Callers catch this to degrade to local-only."""
 
@@ -542,20 +525,11 @@ class DecisionLifecycleCapabilities:
 
 
 @dataclass(frozen=True)
-class AutomaticDecisionProposalCapabilities:
-    """Versioned server support for account-bound automatic proposal submission."""
-
-    version: int
-
-
-@dataclass(frozen=True)
 class ServerCapabilities:
     decision_reconciliation: DecisionReconciliationCapabilities | None
     # Defaulted so every existing construction site (tests, share.py's fallbacks) keeps working
     # and lands on "not advertised" - which is the same place discovery failure lands.
     decision_lifecycle: DecisionLifecycleCapabilities | None = None
-    automatic_decision_proposal: AutomaticDecisionProposalCapabilities | None = None
-    account_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -596,18 +570,13 @@ class RemoteStore:
     """MCP client to the Teams sync endpoint. Construct directly or via ``from_profile``."""
 
     def __init__(self, endpoint: str, token: str, *, timeout: float = _DEFAULT_TIMEOUT,
-                 profile: "Profile | None" = None, reactive_refresh: bool = True) -> None:
+                 profile: "Profile | None" = None) -> None:
         self._endpoint = endpoint
         self._token = token
         self._timeout = timeout
         # Carried only when built via from_profile - the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
-        # Automatic account-bound proposal attempts pin the token they validated. A transport
-        # 401 must end that attempt so the next one reconstructs the client and re-checks the
-        # server's account fingerprint; swapping to whatever same-endpoint account is currently
-        # logged in after the fingerprint check would violate destination binding.
-        self._reactive_refresh = reactive_refresh
         # _UNDISCOVERED, or a DecisionLifecycleCapabilities, or None - and None is a REAL answer
         # here ("this server does not do lifecycle"), which is why the sentinel exists at all:
         # without it a not-advertising server would be re-probed on every push.
@@ -618,25 +587,19 @@ class RemoteStore:
         self.lifecycle_blocked: list[dict] = []
 
     @classmethod
-    def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT,
-                     reactive_refresh: bool = True) -> "RemoteStore | None":
+    def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
         """Build a RemoteStore for a team profile, or None when sync is not configured
         (local mode, or a missing endpoint/token). None = the caller stays local-only.
 
         `timeout` (seconds) overrides the default transport timeout - callers on a tighter
-        latency budget (e.g. the SessionStart pull) pass a shorter one. Account-bound automatic
-        proposal attempts pass ``reactive_refresh=False`` so a 401 ends the attempt and forces
-        fresh capability/account validation instead of swapping credentials mid-operation."""
+        latency budget (e.g. the SessionStart pull) pass a shorter one."""
         if profile.mode != "team" or not profile.endpoint:
             return None
         from contexer import auth
         token = auth.resolve_token(profile)  # OAuth (login) token, refreshed; else static config token
         if not token:
             return None
-        return cls(
-            profile.endpoint, token, timeout=timeout, profile=profile,
-            reactive_refresh=reactive_refresh,
-        )
+        return cls(profile.endpoint, token, timeout=timeout, profile=profile)
 
     # ── async-native core (#108) ─────────────────────────────────────────────────
     # The network path is async at its heart so an in-loop caller (server.share_decision)
@@ -874,39 +837,9 @@ class RemoteStore:
         Each block is parsed independently: a server advertising one and not the other must not
         lose the one it does advertise. An absent or non-dict block is None - never a
         default-True shape, since an unknown server is an old server."""
-        started_ns = time.monotonic_ns()
-        try:
-            result = await self._ainvoke("get_capabilities", {})
-        except RemoteAuthError:
-            decision_observability.emit_decision_operation(
-                "capabilityRead", result="refused", reason_code="not_authorized",
-                error_class="authorization", started_ns=started_ns)
-            raise
-        except RemoteRateLimitError:
-            decision_observability.emit_decision_operation(
-                "capabilityRead", result="failure", reason_code="rate_limited",
-                error_class="rate_limit", started_ns=started_ns)
-            raise
-        except RemoteUnavailableError:
-            decision_observability.emit_decision_operation(
-                "capabilityRead", result="failure", reason_code="transport_error",
-                error_class="transport", started_ns=started_ns)
-            raise
-        except RemoteStoreError:
-            decision_observability.emit_decision_operation(
-                "capabilityRead", result="failure", reason_code="validation_error",
-                error_class="validation", started_ns=started_ns)
-            raise
-
-        malformed = False
+        result = await self._ainvoke("get_capabilities", {})
         structured = getattr(result, "structuredContent", None) or {}
-        if not isinstance(structured, dict):
-            structured = {}
-            malformed = True
         advertised = structured.get("capabilities") or {}
-        if not isinstance(advertised, dict):
-            advertised = {}
-            malformed = True
         raw = advertised.get("decisionReconciliation")
         reconciliation = None
         if isinstance(raw, dict):
@@ -925,37 +858,8 @@ class RemoteStore:
                 tombstones=raw.get("tombstones") is True,
                 retirement_reasons=raw.get("retirementReasons") is True,
             )
-        raw = advertised.get("automaticDecisionProposal")
-        automatic = None
-        if raw is not None:
-            if isinstance(raw, dict):
-                version = _strict_caps_version(raw)
-                if version is not None:
-                    automatic = AutomaticDecisionProposalCapabilities(version=version)
-                else:
-                    malformed = True
-            else:
-                malformed = True
-
-        raw_fingerprint = structured.get("accountFingerprint")
-        fingerprint = None
-        if raw_fingerprint is not None:
-            fingerprint = _account_fingerprint(raw_fingerprint)
-            malformed = malformed or fingerprint is None
-
-        decision_observability.emit_decision_operation(
-            "capabilityRead",
-            result="failure" if malformed else "success",
-            reason_code="validation_error" if malformed else "none",
-            error_class="validation" if malformed else "none",
-            started_ns=started_ns,
-        )
-        return ServerCapabilities(
-            decision_reconciliation=reconciliation,
-            decision_lifecycle=lifecycle,
-            automatic_decision_proposal=automatic,
-            account_fingerprint=fingerprint,
-        )
+        return ServerCapabilities(decision_reconciliation=reconciliation,
+                                  decision_lifecycle=lifecycle)
 
     async def _alifecycle_caps(self, rows: list[dict]) -> DecisionLifecycleCapabilities | None:
         """The lifecycle capability governing THIS push, discovered lazily and memoized.
@@ -1144,8 +1048,7 @@ class RemoteStore:
         try:
             return run()
         except RemoteAuthError as exc:
-            if (not self._reactive_refresh or not getattr(exc, "_transport_auth", False)
-                    or not self._refresh_token()):
+            if not getattr(exc, "_transport_auth", False) or not self._refresh_token():
                 raise
         return run()  # one retry with the refreshed token; a second 401 here propagates
 

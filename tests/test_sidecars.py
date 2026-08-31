@@ -27,12 +27,6 @@ class TestClassification:
         ".pending_review_x",              # only a NEW pending decision re-arms it
         ".outbox.lock", ".shared.lock", ".team_auth.lock",   # dotted lock slugs
         ".reconcile_x.lock",              # evidence consumer lock
-        ".team_share_policy_repo-1.json",
-        ".team-proposal-outbox.json", ".team-proposal-receipts.jsonl",
-        ".team-proposal-attention.json", ".team-proposal-diagnostics.jsonl",
-        ".team_share_policy_repo-1.lock", ".team-proposal-outbox.lock",
-        ".team-proposal-drainer.lock", ".team-proposal-receipts.lock",
-        ".team-proposal-attention.lock",
         "ui.json", "ui.log",             # console daemon owns these
     ])
     def test_durable_names_are_never_sweepable(self, name):
@@ -117,16 +111,6 @@ class TestClassification:
         "guard_dismissed":  ("guard_engine._guard_dismissed_path", {"slug": None}),
         "reconcile_lock":   (None, {"slug": None}),       # reconcile builds through filename
         "update_check":     ("updates.state_path", {}),
-        "share_policy":     ("share_policy.policy_path", {"slug": None}),
-        "proposal_outbox":  ("share_policy.proposal_outbox_path", {}),
-        "proposal_receipts": ("share_policy.proposal_receipts_path", {}),
-        "proposal_attention": ("share_policy.proposal_attention_path", {}),
-        "proposal_diagnostics": ("share_policy.proposal_diagnostics_path", {}),
-        "share_policy_lock": ("share_policy.policy_lock_path", {"slug": None}),
-        "proposal_outbox_lock": ("share_policy.proposal_outbox_lock_path", {}),
-        "proposal_drainer_lock": ("share_policy.proposal_drainer_lock_path", {}),
-        "proposal_receipts_lock": ("share_policy.proposal_receipts_lock_path", {}),
-        "proposal_attention_lock": ("share_policy.proposal_attention_lock_path", {}),
         "console_state":    (None, {}),                      # ui/daemon.py keeps its own literal
         "console_log":      (None, {}),                      # (import allowlist; see sidecars.py)
         "working_set":      (None, {"slug": None, "session": "abc"}),   # _ws_path hashes the id
@@ -167,10 +151,10 @@ class TestClassification:
     def test_the_declared_name_matches_what_the_code_actually_writes(self, tmp_repo):
         """Direction two: for every kind with a builder, the builder's name equals the
         template's. This is what catches a declaration that has drifted from the code."""
-        from contexer import anchors, auth, guard_engine, share, share_policy, team_context, updates
+        from contexer import anchors, auth, guard_engine, share, team_context, updates
         mods = {"store": store, "share": share, "auth": auth, "anchors": anchors,
                 "guard_engine": guard_engine, "team_context": team_context,
-                "share_policy": share_policy, "updates": updates}
+                "updates": updates}
         slug = store.repo_slug(tmp_repo)
         checked = 0
         for kind, (producer, fields) in self.PRODUCERS.items():

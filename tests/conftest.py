@@ -71,13 +71,6 @@ def tmp_repo(tmp_path, monkeypatch):
     return str(tmp_path / "repo")
 
 
-@pytest.fixture(autouse=True)
-def no_detached_proposal_uploader(monkeypatch):
-    """Unit tests opt into the real daemon seam explicitly; none may outlive temp path patches."""
-    from contexer import share_policy
-    monkeypatch.setattr(share_policy, "start_detached_drainer", lambda *_args, **_kwargs: True)
-
-
 # Artefacts a test must never create in the developer's real ~/.contexer. Redirecting
 # store.STORE_DIR is not sufficient on its own: contexer/ui/daemon.py resolves its paths
 # from Path.home() at import time, so a test that patches the port (or only STORE_DIR)

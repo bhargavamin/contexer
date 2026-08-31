@@ -18,10 +18,6 @@ This module also holds the shared config-file helpers (_load/_save, hook-group
 markers, the /bootstrap command text) used by both cli.py and the adapters.
 """
 import json
-import os
-import stat
-import subprocess
-import sys
 from importlib import resources
 from pathlib import Path
 
@@ -30,114 +26,6 @@ from contexer import store as _store   # module object, not a `from`-import: a v
                                        # CALL time (CLAUDE.md, module boundaries).
 
 _BOOTSTRAP_CMD_MARKER = "managed by contexer"
-_DRAINER_DIAGNOSTICS_MAX_BYTES = 1_048_576
-
-
-def _open_detached_drainer_diagnostics():
-    """Open the detached worker's private, bounded stderr sink without following symlinks."""
-    from contexer import share_policy
-    path = share_policy.proposal_diagnostics_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        details = os.fstat(descriptor)
-        if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
-                or (hasattr(os, "getuid") and details.st_uid != os.getuid())):
-            raise OSError("unsafe proposal diagnostics sink")
-        os.fchmod(descriptor, 0o600)
-        # Best-effort tail cap. O_APPEND keeps complete JSONL writes from separate child
-        # processes from sharing offsets; a later checkpoint trims only after the prior cap.
-        if details.st_size > _DRAINER_DIAGNOSTICS_MAX_BYTES:
-            os.ftruncate(descriptor, 0)
-        return os.fdopen(descriptor, "ab", buffering=0)
-    except Exception:
-        os.close(descriptor)
-        raise
-
-
-def _start_detached_proposal_drainer() -> bool:
-    """Launch the one-shot uploader in a process that survives this hook process.
-
-    Hook entrypoints are short-lived Python processes, so a daemon *thread* is not detached from
-    the lifecycle that matters: the interpreter can terminate it at any point.  This child has no
-    inherited hook pipes, file descriptors, or controlling session and runs only fixed package
-    code. Its stderr is an owner-only, size-bounded JSONL file so terminal drain telemetry remains
-    observable after detachment. ``-P`` keeps the untrusted repository working directory off its
-    import path. Start failures emit the same closed-vocabulary, secret-free local diagnostics as
-    other drainer failures.
-    """
-    diagnostics = None
-    try:
-        diagnostics = _open_detached_drainer_diagnostics()
-        subprocess.Popen(
-            [
-                sys.executable,
-                "-P",
-                "-c",
-                "try:\n"
-                " from contexer import share_policy as _s\n"
-                " _s.run_detached_drainer()\n"
-                "except BaseException:\n"
-                " pass",
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=diagnostics,
-            close_fds=True,
-            start_new_session=True,
-        )
-    except Exception:
-        try:
-            from contexer import decision_observability
-            decision_observability.emit_decision_operation(
-                "drain",
-                result="failure",
-                reason_code="validation_error",
-                error_class="validation",
-            )
-        except Exception:
-            pass
-        return False
-    finally:
-        if diagnostics is not None:
-            diagnostics.close()
-    return True
-
-
-def _scan_automatic_proposals(repo_path: str):
-    """Run the bounded local proposal fallback only when this repo has a policy sidecar.
-
-    Hook processes are short-lived, so importing the proposal/remote stack on every prompt would
-    impose avoidable latency on the default-disabled path.  The owner-only policy sidecar is a
-    safe, local presence gate; once present, ``scan_and_enqueue`` performs strict validation,
-    bounds the store scan, takes only non-blocking dedicated locks, emits closed telemetry, and
-    leaves network work to a genuinely detached process after durable queueing.  Every failure is
-    swallowed because a lifecycle passenger must never break the host event that carries it.
-    """
-    try:
-        repo = _store.hook_cwd_repo(repo_path)
-        if not repo:
-            return None
-        from contexer import sidecars
-        policy = _store.STORE_DIR / sidecars.filename(
-            "share_policy", slug=_store.repo_slug(repo))
-        if not policy.is_file():
-            return None
-        from contexer import share_policy
-        # Suppress the scanner's in-process daemon thread: this adapter is itself running in a
-        # short-lived hook subprocess, whose shutdown can kill that thread while it owns the
-        # durable uploader lease. The process below survives the hook and releases the lease.
-        outcome = share_policy.scan_and_enqueue(repo, start_worker=False)
-        # A prior hook may already have durably queued the revision. In that case the scanner
-        # reports a duplicate and does not start a worker itself, so explicitly nudge the detached
-        # drainer on every configured lifecycle checkpoint. It reads an empty queue locally and
-        # exits when there is nothing to do; no network call is awaited by the hook.
-        _start_detached_proposal_drainer()
-        return outcome
-    except Exception:
-        return None
 
 
 def _bootstrap_command_text() -> str:
