@@ -81,3 +81,69 @@ def test_diagnostic_enqueue_failure_is_swallowed(monkeypatch):
         reason_code="none",
         error_class="none",
     ) is None
+
+
+def test_enqueue_emits_only_canonical_opaque_correlation_and_bounded_counts(monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        decision_observability,
+        "_enqueue_records",
+        lambda emitted: records.extend(emitted),
+    )
+
+    decision_observability.emit_decision_operation(
+        "enqueue",
+        result="queued",
+        reason_code="none",
+        error_class="none",
+        team_id="40000000-0000-4000-8000-000000000001",
+        decision_id="20000000-0000-4000-8000-000000000001",
+        policy_generation="30000000-0000-4000-8000-000000000001",
+        idempotency_key="50000000-0000-4000-8000-000000000001",
+        candidate_id="SENTINEL_CANDIDATE_PROSE",
+        attempt=2,
+        queue_depth=7,
+    )
+
+    span, log = records
+    assert set(span["attributes"]) == {
+        "contexer.result", "contexer.reason_code", "contexer.error_class",
+        "contexer.team_id", "contexer.decision_id", "contexer.policy_generation",
+        "contexer.idempotency_key", "contexer.attempt", "contexer.queue_depth",
+    }
+    assert set(log["fields"]) == {
+        "action", "result", "reasonCode", "errorClass", "teamId", "decisionId",
+        "policyGeneration", "idempotencyKey", "attempt", "queueDepth",
+    }
+    assert span["attributes"]["contexer.decision_id"] == \
+        "20000000-0000-4000-8000-000000000001"
+    assert span["attributes"]["contexer.attempt"] == 2
+    assert log["fields"]["queueDepth"] == 7
+    assert "SENTINEL_CANDIDATE_PROSE" not in json.dumps(records)
+
+
+def test_untrusted_optional_telemetry_values_are_omitted(monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        decision_observability,
+        "_enqueue_records",
+        lambda emitted: records.extend(emitted),
+    )
+    sentinel = "SENTINEL_ACCOUNT_ENDPOINT_REPOSITORY_CONTENT"
+
+    decision_observability.emit_decision_operation(
+        "scan",
+        result="success",
+        reason_code="none",
+        error_class="none",
+        team_id=sentinel,
+        decision_id=sentinel,
+        policy_generation=sentinel,
+        idempotency_key=sentinel,
+        attempt=-1,
+        queue_depth=1_000_001,
+    )
+
+    assert sentinel not in json.dumps(records)
+    assert "contexer.team_id" not in records[0]["attributes"]
+    assert "queueDepth" not in records[1]["fields"]

@@ -461,7 +461,7 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
 
 def review() -> None:
     """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
-    from contexer import conflicts, lifecycle, review_impact, revisions, store
+    from contexer import conflicts, lifecycle, review_impact, revisions, share_policy, store
 
     repo_path = store.git_root(os.getcwd())
     if not repo_path:
@@ -587,6 +587,7 @@ def review() -> None:
                 dismissed += 1
             else:
                 restored += 1
+                share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
             print(msg)
         elif life:
             # Its own branch, not a key bolted onto the content flow: [D] here dismisses the
@@ -615,6 +616,7 @@ def review() -> None:
             ok, msg = store.approve_decision(repo_path, entry["id"], "approve")
             if ok:
                 approved += 1
+                share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
                 print("Approved.")
             else:
                 # Print the store's reason instead of dropping it. `pending` was read before
@@ -650,6 +652,7 @@ def review() -> None:
                 ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content)
                 if ok:
                     edited += 1
+                    share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
                     print("Approved with edits.")
                 else:
                     skipped += 1
@@ -1926,7 +1929,7 @@ def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    from contexer import lifecycle
+    from contexer import lifecycle, share_policy
     repo = _cli_repo()
     if not repo:
         print("No repo detected - run this inside a project directory.", file=sys.stderr)
@@ -1936,6 +1939,8 @@ def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
     if not ok:
         print(message, file=sys.stderr)
         sys.exit(1)
+    if not retiring:
+        share_policy.enqueue_after_local_mutation(repo, args[0])
     _safe_print(message)
 
 

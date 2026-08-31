@@ -185,7 +185,7 @@ def test_eligibility_requires_approved_repo_revision_after_baseline(tmp_repo):
     assert share_policy.eligibility(
         newer, policy, {}, repo_key="github.com/org/other", is_global=False).reason_code == \
         "repo_mismatch"
-    receipts = share_policy.fold_receipts([_receipt()])
+    receipts = share_policy.fold_receipts([_receipt(state="submitted")])
     assert share_policy.eligibility(
         newer, policy, receipts, repo_key=policy["repo_key"],
         is_global=False).reason_code == "duplicate_receipt"
@@ -395,6 +395,36 @@ def test_enqueue_telemetry_cannot_receive_sensitive_values(tmp_repo, monkeypatch
     assert calls[0][0] == "enqueue"
 
 
+def test_enqueue_telemetry_carries_only_opaque_runtime_correlation(tmp_repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        share_policy.decision_observability,
+        "emit_decision_operation",
+        lambda operation, **fields: calls.append((operation, fields)),
+    )
+    intent = {
+        **_intent(tmp_repo),
+        "decision_id": "20000000-0000-4000-8000-000000000001",
+        "revision_id": "21000000-0000-4000-8000-000000000001",
+        "policy_generation": "30000000-0000-4000-8000-000000000001",
+        "team_id": "40000000-0000-4000-8000-000000000001",
+        "idempotency_key": "50000000-0000-4000-8000-000000000001",
+        "attempts": 3,
+    }
+
+    assert share_policy.enqueue_intent(intent).result == "queued"
+
+    operation, fields = calls[0]
+    assert operation == "enqueue"
+    assert fields["decision_id"] == intent["decision_id"]
+    assert fields["policy_generation"] == intent["policy_generation"]
+    assert fields["idempotency_key"] == intent["idempotency_key"]
+    assert fields["team_id"] == intent["team_id"]
+    assert fields["attempt"] == 3
+    assert fields["queue_depth"] == 1
+    assert "endpoint" not in fields and "account_fingerprint" not in fields
+
+
 def test_status_distinguishes_local_queue_from_remote_states(tmp_repo):
     snapshot = share_policy.status_snapshot(
         _policy(tmp_repo), [_intent(tmp_repo)],
@@ -435,3 +465,165 @@ def test_current_revision_helper_remains_the_single_revision_resolver(tmp_repo, 
     monkeypatch.setattr(revisions, "current_revision", lambda entry: seen.append(entry) or real(entry))
     share_policy.activation_baseline([_entry()], include_existing=False)
     assert len(seen) == 1
+
+
+def _activate_scanner(tmp_repo, monkeypatch, entries):
+    share_policy.save_policy(tmp_repo, _policy(tmp_repo, include_existing=True))
+    monkeypatch.setattr(store, "run_git", lambda *_args: "git@github.com:org/repo.git")
+    monkeypatch.setattr(store, "load", lambda _repo: {"entries": entries})
+
+
+def test_scanner_queues_human_approved_revision_and_receipt_without_prose(
+        tmp_repo, monkeypatch):
+    entry = _entry(decision_id="12345678-decision", revision_id="revision-human")
+    entry["content"] = "SENTINEL_DECISION_PROSE"
+    entry["evidence"] = [{"content": "SENTINEL_EVIDENCE"}]
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+
+    outcome = share_policy.enqueue_after_local_mutation(tmp_repo, "12345678")
+
+    assert outcome == share_policy.ScanOutcome("queued", "none", 1, 1, 0)
+    intents = share_policy.read_outbox()
+    assert len(intents) == 1
+    assert intents[0]["decision_id"] == entry["id"]
+    receipts = share_policy.read_receipts()
+    assert len(receipts) == 1
+    assert receipts[0]["state"] == "queued"
+    encoded = json.dumps({"intents": intents, "receipts": receipts})
+    assert "SENTINEL_DECISION_PROSE" not in encoded
+    assert "SENTINEL_EVIDENCE" not in encoded
+
+
+def test_scanner_is_idempotent_and_heals_missing_queued_receipt(tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    intent = share_policy.build_intent(
+        _policy(tmp_repo, include_existing=True), tmp_repo, entry,
+        now=NOW, idempotency_key="stable-intent",
+    )
+    assert share_policy.enqueue_intent(intent).result == "queued"
+
+    healed = share_policy.scan_and_enqueue(tmp_repo)
+    repeated = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert healed == share_policy.ScanOutcome("success", "none", 1, 0, 1)
+    assert repeated == share_policy.ScanOutcome("no_op", "duplicate_receipt", 1, 0, 1)
+    assert share_policy.read_outbox() == [intent]
+    assert len(share_policy.read_receipts()) == 1
+
+
+def test_scanner_rebuilds_outbox_when_only_nonterminal_queued_receipt_remains(
+        tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    policy = _policy(tmp_repo, include_existing=True)
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    orphaned_receipt = share_policy.queued_receipt(
+        share_policy.build_intent(policy, tmp_repo, entry, now=NOW))
+    share_policy.append_receipt(orphaned_receipt)
+
+    rebuilt = share_policy.scan_and_enqueue(tmp_repo)
+    repeated = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert rebuilt == share_policy.ScanOutcome("queued", "none", 1, 1, 0)
+    assert repeated == share_policy.ScanOutcome("no_op", "duplicate_receipt", 1, 0, 1)
+    assert len(share_policy.read_outbox()) == 1
+
+
+def test_new_policy_generation_is_not_suppressed_by_old_queued_receipt(
+        tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    old_policy = _policy(tmp_repo, include_existing=True)
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    old_intent = share_policy.build_intent(
+        old_policy, tmp_repo, entry, now=NOW, idempotency_key="old-intent")
+    assert share_policy.enqueue_intent(old_intent).result == "queued"
+    share_policy.append_receipt(share_policy.queued_receipt(old_intent))
+    new_policy = {**old_policy, "policy_generation": "policy-2"}
+    share_policy.save_policy(tmp_repo, new_policy)
+
+    outcome = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert outcome == share_policy.ScanOutcome("queued", "none", 1, 1, 0)
+    assert [row["policy_generation"] for row in share_policy.read_outbox()] == [
+        "policy-1", "policy-2",
+    ]
+    folded = share_policy.fold_receipts(share_policy.read_receipts())
+    assert next(iter(folded.values()))["policy_generation"] == "policy-2"
+
+
+def test_scanner_disabled_policy_is_local_no_op_before_git_or_store(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "run_git", lambda *_args: pytest.fail("git must not run"))
+    monkeypatch.setattr(store, "load", lambda _repo: pytest.fail("store must not load"))
+
+    assert share_policy.scan_and_enqueue(tmp_repo) == \
+        share_policy.ScanOutcome("skipped", "policy_disabled")
+    assert not share_policy.proposal_outbox_path().exists()
+
+
+def test_scanner_excludes_global_baseline_and_nonhuman_revisions(tmp_repo, monkeypatch):
+    baseline = _entry("baseline", "baseline-revision")
+    nonhuman = _entry("nonhuman", "nonhuman-revision", source="scan", approved_by=None)
+    policy = _policy(tmp_repo, [baseline])
+    share_policy.save_policy(tmp_repo, policy)
+    monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/repo.git")
+    monkeypatch.setattr(store, "load", lambda _repo: {"entries": [baseline, nonhuman]})
+
+    outcome = share_policy.scan_and_enqueue(tmp_repo)
+    global_outcome = share_policy.scan_and_enqueue(tmp_repo, is_global=True)
+
+    assert outcome == share_policy.ScanOutcome("success", "none", 2, 0, 2)
+    assert global_outcome == share_policy.ScanOutcome("skipped", "global_decision")
+    assert not share_policy.proposal_outbox_path().exists()
+
+
+def test_scanner_uses_strict_eligibility_not_manual_shareability(tmp_repo, monkeypatch):
+    entry = _entry(source="memory", approved_by=None)
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    monkeypatch.setattr(
+        store, "get_shareable_all", lambda *_args: pytest.fail("manual list must not be read"))
+
+    outcome = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert outcome == share_policy.ScanOutcome(
+        "skipped", "ineligible_revision", 1, 0, 1)
+
+
+def test_scanner_is_bounded_by_store_decision_cap(tmp_repo, monkeypatch):
+    entries = [
+        _entry(f"decision-{index}", f"revision-{index}", source="scan", approved_by=None)
+        for index in range(store.MAX_ENTRIES + 1)
+    ]
+    _activate_scanner(tmp_repo, monkeypatch, entries)
+
+    outcome = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert outcome.scanned == store.MAX_ENTRIES
+    assert outcome.skipped == store.MAX_ENTRIES
+    assert outcome.queued == 0
+
+
+def test_scanner_fails_soft_on_repo_mismatch_corruption_and_busy_locks(tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/other.git")
+    assert share_policy.scan_and_enqueue(tmp_repo).reason_code == "validation_error"
+
+    monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/repo.git")
+    receipts = share_policy.proposal_receipts_path()
+    receipts.parent.mkdir(parents=True, exist_ok=True)
+    receipts.write_text("not-json", encoding="utf-8")
+    assert share_policy.scan_and_enqueue(tmp_repo).reason_code == "corrupt_queue"
+
+    receipts.unlink()
+    with share_policy._sidecar_lock(share_policy.proposal_outbox_lock_path()):
+        busy = share_policy.scan_and_enqueue(tmp_repo)
+    assert busy == share_policy.ScanOutcome("no_op", "lock_busy", 1, 0, 1)
+
+
+def test_scanner_never_acquires_decision_store_lock(tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    monkeypatch.setattr(
+        store, "store_lock", lambda *_args, **_kwargs: pytest.fail("store lock must not run"))
+
+    assert share_policy.scan_and_enqueue(tmp_repo).result == "queued"

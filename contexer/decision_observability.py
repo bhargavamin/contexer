@@ -15,6 +15,7 @@ import secrets
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Iterable
 
 _FIXED_MESSAGE = "decision operation completed"
@@ -123,6 +124,13 @@ def emit_decision_operation(
     error_class: str,
     started_ns: int | None = None,
     diagnostic_id: str | None = None,
+    team_id: str | None = None,
+    decision_id: str | None = None,
+    candidate_id: str | None = None,
+    policy_generation: str | None = None,
+    idempotency_key: str | None = None,
+    attempt: int | None = None,
+    queue_depth: int | None = None,
 ) -> None:
     """Best-effort enqueue of one correlated span and terminal structured-log event.
 
@@ -164,6 +172,35 @@ def emit_decision_operation(
         if diagnostic_id is not None:
             span_attributes["contexer.diagnostic_id"] = diagnostic_id
             log_fields["diagnosticId"] = diagnostic_id
+
+        # Correlation values are emitted only when they are canonical opaque UUIDs. The
+        # persisted schema is intentionally more permissive for compatibility, so copying an
+        # arbitrary identifier here could turn attacker-controlled prose into telemetry.
+        correlations = (
+            ("team_id", "teamId", team_id),
+            ("decision_id", "decisionId", decision_id),
+            ("candidate_id", "candidateId", candidate_id),
+            ("policy_generation", "policyGeneration", policy_generation),
+            ("idempotency_key", "idempotencyKey", idempotency_key),
+        )
+        for span_field, log_field, value in correlations:
+            if not isinstance(value, str):
+                continue
+            try:
+                canonical = str(uuid.UUID(value))
+            except (ValueError, AttributeError):
+                continue
+            if value.lower() != canonical:
+                continue
+            span_attributes[f"contexer.{span_field}"] = canonical
+            log_fields[log_field] = canonical
+        for span_field, log_field, value in (
+            ("attempt", "attempt", attempt),
+            ("queue_depth", "queueDepth", queue_depth),
+        ):
+            if type(value) is int and 0 <= value <= 1_000_000:
+                span_attributes[f"contexer.{span_field}"] = value
+                log_fields[log_field] = value
 
         _enqueue_records((
             {

@@ -2,9 +2,10 @@ import json
 import os
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import conflicts, evidence, lifecycle, policy_api, reconcile, store
+from contexer import conflicts, evidence, lifecycle, policy_api, reconcile, share_policy, store
 
 SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or str(uuid.uuid4())
+_UPDATE_CONTEXT_SOURCES = frozenset({"ai", "plan", "bootstrap", "scan"})
 
 # Bulk approval is refused rather than supported. Every approve stamps approved_by="human",
 # which makes even an ai-sourced decision guard-trusted at commit time - so one blanket
@@ -98,6 +99,13 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     the decision's one proposal slot - do not retry the call; relay both versions to the developer
     that turn so they can review with full context.
     """
+    # This is a model-facing tool. Human provenance belongs only to host paths that directly
+    # observe a developer gesture (`capture_user_constraint` and the review actions below); a
+    # caller-supplied `created_by="human"` would otherwise mint the exact approval stamp that
+    # automatic proposal eligibility trusts.
+    if created_by not in _UPDATE_CONTEXT_SOURCES:
+        return ("Invalid created_by. Use one of: ai, plan, bootstrap, scan. "
+                "Human approval must use the review tools.")
     # Verbose resolve on the WRITE path only: the branch that chose this store is stamped
     # onto the new entry, so a decision that lands in the wrong repo is diagnosable after
     # the fact instead of indistinguishable. Read tools keep the plain resolve_repo.
@@ -118,6 +126,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     prompt = store.get_pending_approval_prompt(resolved, entry_id)
     if prompt:
         return prompt
+    share_policy.enqueue_after_local_mutation(resolved, entry_id)
     return f"Stored. id={entry_id}"
 
 
@@ -156,8 +165,11 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
         return _BULK_REFUSAL
     if not target:
         return "No decision id given."
-    return store.approve_decision(resolved, target, action, content,
-                                  source_files=source_files)[1]
+    ok, message = store.approve_decision(
+        resolved, target, action, content, source_files=source_files)
+    if ok and action in ("approve", "edit"):
+        share_policy.enqueue_after_local_mutation(resolved, target)
+    return message
 
 
 @mcp.tool()
@@ -244,7 +256,10 @@ def restore_decision(entry_id: str, repo_path: str = "", reason: str = "") -> st
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
-    return lifecycle.restore_decision(resolved, target, reason)[1]
+    ok, message = lifecycle.restore_decision(resolved, target, reason)
+    if ok:
+        share_policy.enqueue_after_local_mutation(resolved, target)
+    return message
 
 
 @mcp.tool()
@@ -292,7 +307,10 @@ def reconsider_decision(entry_id: str, action: str, repo_path: str = "",
     target, refusal = _single_id(entry_id)
     if refusal:
         return refusal
-    return lifecycle.reconsider_decision(resolved, target, action, content)[1]
+    ok, message = lifecycle.reconsider_decision(resolved, target, action, content)
+    if ok and action in ("restore", "restore_edit"):
+        share_policy.enqueue_after_local_mutation(resolved, target)
+    return message
 
 
 @mcp.tool()
@@ -521,17 +539,14 @@ def bootstrap_context(repo_path: str = "", insight: str = "", apply: bool = True
 
 @mcp.tool()
 def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
-    """Called on every UserPromptSubmit. Detects prescriptive directives ('always X', 'never Y',
-    'from now on Z') and stores them as constraint or convention decisions automatically."""
-    resolved, repo_source = store.resolve_repo_verbose(repo_path)
-    if not resolved:
-        return ""
-    near: list = []
-    entry_id, content, status = store.capture_user_constraint(
-        resolved, prompt, SESSION_ID, near, repo_source=repo_source)
-    if entry_id is None:
-        return ""
-    return store.constraint_ack(content, status, entry_id, near)
+    """Deprecated no-op; host adapters capture directives from actual prompt-hook payloads.
+
+    This model-callable surface cannot attest that ``prompt`` was a developer gesture. Accepting
+    it as human provenance would let an agent mint an approved decision that the automatic scanner
+    later shares. It remains present only so older callers receive a clear, harmless response.
+    """
+    return ("Skipped - direct constraint capture is disabled. Contexer host hooks capture "
+            "developer directives from the actual prompt payload.")
 
 
 @mcp.tool()

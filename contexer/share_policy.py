@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from contexer import decision_observability, revisions, sidecars, store
+from contexer import decision_observability, repo_key, revisions, sidecars, store
 
 
 SCHEMA_VERSION = 1
@@ -105,6 +105,15 @@ class OperationOutcome:
     diagnostic_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ScanOutcome:
+    result: str
+    reason_code: str
+    scanned: int = 0
+    queued: int = 0
+    skipped: int = 0
+
+
 def _diagnostic_id() -> str:
     return "diag_" + "".join(secrets.choice(_DIAGNOSTIC_ALPHABET) for _ in range(16))
 
@@ -113,7 +122,8 @@ def _data_error(kind: str) -> SidecarDataError:
     return SidecarDataError(kind, _diagnostic_id())
 
 
-def _emit(operation: str, outcome: OperationOutcome, started_ns: int) -> None:
+def _emit(operation: str, outcome: OperationOutcome, started_ns: int, *,
+          intent: dict | None = None, queue_depth: int | None = None) -> None:
     error_class = {
         "lock_busy": "lock",
         "corrupt_queue": "validation",
@@ -129,6 +139,12 @@ def _emit(operation: str, outcome: OperationOutcome, started_ns: int) -> None:
         error_class=error_class,
         started_ns=started_ns,
         diagnostic_id=outcome.diagnostic_id,
+        team_id=(intent or {}).get("team_id"),
+        decision_id=(intent or {}).get("decision_id"),
+        policy_generation=(intent or {}).get("policy_generation"),
+        idempotency_key=(intent or {}).get("idempotency_key"),
+        attempt=(intent or {}).get("attempts"),
+        queue_depth=queue_depth,
     )
 
 
@@ -512,7 +528,8 @@ def eligibility(entry: object, policy: dict, receipts: dict[tuple[str, ...], dic
         return Eligibility(False, "baseline_revision", decision_id, revision_id)
     index = fold_receipts(receipts) if isinstance(receipts, list) else receipts
     probe = {**policy, "decision_id": decision_id, "revision_id": revision_id}
-    if receipt_key(probe) in index:
+    receipt = index.get(receipt_key(probe))
+    if receipt is not None and receipt.get("state") in TERMINAL_RECEIPT_STATES:
         return Eligibility(False, "duplicate_receipt", decision_id, revision_id)
     return Eligibility(True, "none", decision_id, revision_id)
 
@@ -591,6 +608,8 @@ def _write_json_list(path: Path, records: list[dict]) -> None:
 def enqueue_intent(intent: dict, *, blocking: bool = False) -> OperationOutcome:
     """Append one intent locally, returning immediately when the dedicated lock is busy."""
     started = time.monotonic_ns()
+    normalized = None
+    queue_depth = None
     try:
         normalized = parse_intent(intent)
     except (ValueError, TypeError):
@@ -601,6 +620,7 @@ def enqueue_intent(intent: dict, *, blocking: bool = False) -> OperationOutcome:
         with _sidecar_lock(proposal_outbox_lock_path(), blocking=blocking):
             loaded = read_outbox()
             folded = fold_intents(loaded)
+            queue_depth = len(folded)
             if any(intent_key(row) == intent_key(normalized) for row in folded):
                 outcome = OperationOutcome("no_op", "duplicate_receipt")
             elif len(folded) >= OUTBOX_CAP:
@@ -608,6 +628,7 @@ def enqueue_intent(intent: dict, *, blocking: bool = False) -> OperationOutcome:
             else:
                 folded.append(normalized)
                 _write_json_list(proposal_outbox_path(), folded)
+                queue_depth = len(folded)
                 outcome = OperationOutcome("queued", "none")
     except BlockingIOError:
         outcome = OperationOutcome("no_op", "lock_busy")
@@ -615,7 +636,7 @@ def enqueue_intent(intent: dict, *, blocking: bool = False) -> OperationOutcome:
         outcome = OperationOutcome("failure", "corrupt_queue", exc.diagnostic_id)
     except OSError:
         outcome = OperationOutcome("failure", "validation_error", _diagnostic_id())
-    _emit("enqueue", outcome, started)
+    _emit("enqueue", outcome, started, intent=normalized, queue_depth=queue_depth)
     return outcome
 
 
@@ -654,10 +675,10 @@ def read_receipts() -> list[dict]:
     return records
 
 
-def append_receipt(receipt: dict) -> None:
+def append_receipt(receipt: dict, *, blocking: bool = True) -> None:
     """Append and compact under one receipt lock so a racing record cannot be lost."""
     normalized = parse_receipt(receipt)
-    with _sidecar_lock(proposal_receipts_lock_path()):
+    with _sidecar_lock(proposal_receipts_lock_path(), blocking=blocking):
         records = read_receipts()
         records.append(normalized)
         path = proposal_receipts_path()
@@ -676,6 +697,188 @@ def append_receipt(receipt: dict) -> None:
             needs_newline = handle.read(1) != b"\n"
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(("\n" if needs_newline else "") + encoded)
+
+
+def build_intent(policy: dict, repo_path: str, entry: dict, *,
+                 now: str | None = None, idempotency_key: str | None = None) -> dict:
+    """Build the stable local intent shape; decision prose never enters this sidecar."""
+    policy = parse_policy(policy)
+    revision = revisions.current_revision(entry)
+    return parse_intent({
+        "schema_version": SCHEMA_VERSION,
+        "idempotency_key": idempotency_key or str(uuid.uuid4()),
+        "policy_generation": policy["policy_generation"],
+        "decision_id": entry.get("id"),
+        "revision_id": (revision or {}).get("revision_id"),
+        "repo_path": store.canonical_store_key(repo_path),
+        "repo_key": policy["repo_key"],
+        "endpoint": policy["endpoint"],
+        "account_fingerprint": policy["account_fingerprint"],
+        "team_id": policy["team_id"],
+        "queued_at": now or datetime.now(timezone.utc).isoformat(),
+        "attempts": 0,
+        "last_error_code": None,
+        "last_error_class": None,
+        "diagnostic_id": None,
+    })
+
+
+def queued_receipt(intent: dict) -> dict:
+    """The local receipt paired with a durable queued intent."""
+    intent = parse_intent(intent)
+    return parse_receipt({
+        "schema_version": SCHEMA_VERSION,
+        "policy_generation": intent["policy_generation"],
+        "endpoint": intent["endpoint"],
+        "account_fingerprint": intent["account_fingerprint"],
+        "repo_key": intent["repo_key"],
+        "team_id": intent["team_id"],
+        "decision_id": intent["decision_id"],
+        "revision_id": intent["revision_id"],
+        "state": "queued",
+        "candidate_id": None,
+        "reason": None,
+        "recorded_at": intent["queued_at"],
+    })
+
+
+def _emit_scan(outcome: ScanOutcome, started_ns: int) -> None:
+    _emit(
+        "scan",
+        OperationOutcome(outcome.result, outcome.reason_code),
+        started_ns,
+    )
+
+
+def _finish_scan(outcome: ScanOutcome, started_ns: int) -> ScanOutcome:
+    _emit_scan(outcome, started_ns)
+    return outcome
+
+
+def scan_and_enqueue(repo_path: str, *, decision_ids: set[str] | None = None,
+                     is_global: bool = False) -> ScanOutcome:
+    """Bounded, local-only backstop that durably queues every newly eligible revision.
+
+    Every sidecar lock is non-blocking on this path.  Editor/MCP mutations are already
+    committed when this runs, so a busy or unavailable proposal lock loses promptness only;
+    a later lifecycle scan sees the same revision and retries.  No network primitive is
+    imported or called here, and no decision-store lock is acquired.
+    """
+    started = time.monotonic_ns()
+    try:
+        if is_global or not store.is_sane_repo(repo_path):
+            return _finish_scan(ScanOutcome("skipped", "global_decision"), started)
+        try:
+            with _sidecar_lock(policy_lock_path(repo_path), blocking=False):
+                policy = load_policy(repo_path)
+        except BlockingIOError:
+            return _finish_scan(ScanOutcome("no_op", "lock_busy"), started)
+        if policy is None or policy.get("paused_reason"):
+            return _finish_scan(ScanOutcome("skipped", "policy_disabled"), started)
+
+        origin = store.run_git(repo_path, "remote", "get-url", "origin")
+        current_repo_key = repo_key.canonical_repo_key(origin)
+        if not current_repo_key or current_repo_key != policy["repo_key"]:
+            return _finish_scan(ScanOutcome("failure", "validation_error"), started)
+        try:
+            with _sidecar_lock(proposal_receipts_lock_path(), blocking=False):
+                receipts = fold_receipts(read_receipts())
+        except BlockingIOError:
+            return _finish_scan(ScanOutcome("no_op", "lock_busy"), started)
+
+        entries = store.load(repo_path).get("entries", [])[:store.MAX_ENTRIES]
+        selected = None
+        if decision_ids is not None:
+            selected = set()
+            decision_entries = [
+                entry for entry in entries
+                if isinstance(entry, dict) and entry.get("type") == "decision"
+            ]
+            for decision_id in decision_ids:
+                matched = store.entry_by_id(decision_entries, decision_id)
+                if matched is not None:
+                    selected.add(matched["id"])
+        scanned = queued = skipped = 0
+        only_reason = None
+        saw_lock_busy = False
+        saw_failure = None
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "decision":
+                continue
+            if selected is not None and entry.get("id") not in selected:
+                continue
+            scanned += 1
+            candidate = eligibility(
+                entry, policy, receipts, repo_key=current_repo_key, is_global=False)
+            if not candidate.eligible:
+                skipped += 1
+                only_reason = (candidate.reason_code if only_reason in (None, candidate.reason_code)
+                               else "none")
+                continue
+
+            intent = build_intent(policy, repo_path, entry)
+            enqueue = enqueue_intent(intent, blocking=False)
+            if enqueue.result == "queued":
+                queued += 1
+            elif enqueue.reason_code == "duplicate_receipt":
+                skipped += 1
+                existing_receipt = receipts.get(receipt_key(intent))
+                if (existing_receipt is not None
+                        and existing_receipt.get("state") == "queued"):
+                    only_reason = ("duplicate_receipt" if only_reason in (
+                        None, "duplicate_receipt") else "none")
+                    continue
+            elif enqueue.reason_code == "lock_busy":
+                saw_lock_busy = True
+                skipped += 1
+                continue
+            else:
+                saw_failure = enqueue.reason_code
+                skipped += 1
+                continue
+
+            # A scanner that finds the queued row but not its receipt heals a crash between
+            # those writes. Duplicate queued receipts are harmless and fold to the latest row.
+            try:
+                receipt = queued_receipt(intent)
+                append_receipt(receipt, blocking=False)
+                receipts[receipt_key(intent)] = receipt
+            except BlockingIOError:
+                # The intent is durable already. A later scan/drain heals the receipt without
+                # making this committed mutation wait for another process.
+                saw_lock_busy = True
+            except SidecarDataError:
+                saw_failure = "corrupt_queue"
+            except (OSError, ValueError, TypeError):
+                saw_failure = "validation_error"
+
+        if saw_failure:
+            return _finish_scan(
+                ScanOutcome("failure", saw_failure, scanned, queued, skipped), started)
+        if queued:
+            return _finish_scan(
+                ScanOutcome("queued", "none", scanned, queued, skipped), started)
+        if saw_lock_busy:
+            return _finish_scan(
+                ScanOutcome("no_op", "lock_busy", scanned, queued, skipped), started)
+        if scanned == 1 and only_reason == "duplicate_receipt":
+            return _finish_scan(
+                ScanOutcome("no_op", only_reason, scanned, queued, skipped), started)
+        if scanned == 1 and only_reason not in (None, "none"):
+            return _finish_scan(
+                ScanOutcome("skipped", only_reason, scanned, queued, skipped), started)
+        return _finish_scan(ScanOutcome("success", "none", scanned, queued, skipped), started)
+    except SidecarDataError:
+        return _finish_scan(ScanOutcome("failure", "corrupt_queue"), started)
+    except Exception:
+        # This wrapper runs after the functional mutation committed. Any unexpected local
+        # filesystem/git/schema failure is diagnostic only and must never change that result.
+        return _finish_scan(ScanOutcome("failure", "validation_error"), started)
+
+
+def enqueue_after_local_mutation(repo_path: str, decision_id: str) -> ScanOutcome:
+    """Best-effort prompt path for one committed decision; the full scanner is the backstop."""
+    return scan_and_enqueue(repo_path, decision_ids={decision_id})
 
 
 def append_attention(item: dict) -> None:
