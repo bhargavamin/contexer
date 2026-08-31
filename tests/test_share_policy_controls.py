@@ -68,6 +68,32 @@ def test_cli_enable_requires_visible_confirmation_and_fresh_binding(
     assert activated == [preview]
 
 
+def test_cli_enable_reports_durable_intents_when_detached_launch_fails(
+        monkeypatch, capsys):
+    _patch_cli_repo(monkeypatch)
+    preview = _preview()
+    monkeypatch.setattr(
+        share_policy, "prepare_policy_activation",
+        lambda *_args, **_kwargs: (
+            preview, share_policy.OperationOutcome("success", "none")),
+    )
+    monkeypatch.setattr(
+        share_policy, "activate_policy",
+        lambda _preview: share_policy.ScanOutcome(
+            "queued", "validation_error", scanned=1, queued=1),
+    )
+    monkeypatch.setattr(share_policy, "policy_status", lambda _repo: {})
+    monkeypatch.setattr(share_policy, "format_policy_status", lambda _snapshot: "policy active")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "yes")
+
+    cli.share_policy_cmd(["enable", "--team", "Platform", "--include-existing"])
+
+    output = capsys.readouterr().out
+    assert "initial intents are durable" in output
+    assert "detached uploader process did not start" in output
+    assert "flush" in output
+
+
 def test_cli_enable_decline_changes_nothing(monkeypatch, capsys):
     _patch_cli_repo(monkeypatch)
     monkeypatch.setattr(
@@ -260,3 +286,20 @@ def test_mcp_policy_status_and_retry_preserve_lifecycle_wording(monkeypatch):
         action="retry", repo_path="/repo", intent_id="intent-1")
     assert "local proposal intent" in retried
     assert "shared" not in retried.lower()
+
+
+def test_mcp_retry_reports_durable_intent_when_detached_launch_fails(monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda _path: "/repo")
+    monkeypatch.setattr(
+        share_policy,
+        "retry_attention",
+        lambda *_args: share_policy.OperationOutcome(
+            "queued", "validation_error", "diag_4Z7K2N8Q5W1C9M6P"),
+    )
+
+    result = server.manage_share_policy(
+        action="retry", repo_path="/repo", intent_id="intent-1")
+
+    assert "Retry queued" in result
+    assert "detached uploader process did not start" in result
+    assert "durable intent" in result

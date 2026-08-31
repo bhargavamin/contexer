@@ -614,6 +614,14 @@ def manage_share_policy(action: str = "show", repo_path: str = "", team: str = "
                     f"confirm=true and confirmation_token={token}."
                 )
             scan = share_policy.activate_policy(preview)
+            if scan.result == "queued" and scan.reason_code == "validation_error":
+                message = (
+                    "Automatic proposal policy enabled and the initial intents are durable, "
+                    "but the detached uploader process did not start. A later lifecycle "
+                    "checkpoint or the flush action can retry. Team approval remains manual."
+                )
+                return message + "\n" + share_policy.format_policy_status(
+                    share_policy.policy_status(resolved))
             if scan.reason_code != "none":
                 message = (
                     "Automatic proposal policy enabled with its authoritative baseline saved. "
@@ -654,7 +662,16 @@ def manage_share_policy(action: str = "show", repo_path: str = "", team: str = "
         diagnostic = f" Diagnostic: {outcome.diagnostic_id}." \
             if outcome.diagnostic_id else ""
         if outcome.result == "queued":
-            return "Retry queued. The item remains a local proposal intent until submission."
+            suffix = ""
+            if outcome.reason_code == "validation_error":
+                suffix = (
+                    " The detached uploader process did not start; the durable intent can be "
+                    "retried by a later lifecycle checkpoint or the flush action."
+                )
+            return (
+                "Retry queued. The item remains a local proposal intent until submission."
+                + suffix
+            )
         return f"Retry refused ({outcome.reason_code}).{diagnostic}"
     except share_policy.SidecarDataError as exc:
         return (

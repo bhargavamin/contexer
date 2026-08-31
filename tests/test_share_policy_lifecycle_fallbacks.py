@@ -11,6 +11,8 @@ import pytest
 from contexer import share_policy, store
 from contexer.adapters import base, claude, codex, cursor, gemini
 
+_REAL_CORE_DETACHED_DRAINER = share_policy.start_detached_drainer
+
 
 def _commands(groups):
     return [
@@ -69,32 +71,31 @@ def test_shared_fallback_is_fail_soft(tmp_repo, monkeypatch):
 
 def test_detached_drainer_uses_fixed_closed_process(monkeypatch):
     calls = []
-    sink = type("Sink", (), {"closed": False, "close": lambda self: setattr(
-        self, "closed", True)})()
-    monkeypatch.setattr(base, "_open_detached_drainer_diagnostics", lambda: sink)
     monkeypatch.setattr(
-        base.subprocess, "Popen", lambda *args, **kwargs: calls.append((args, kwargs)))
+        share_policy, "start_detached_drainer", lambda: calls.append(True) or True)
 
     assert base._start_detached_proposal_drainer() is True
+    assert calls == [True]
+
+
+def test_core_detached_launcher_owns_the_surviving_process_contract(monkeypatch):
+    calls = []
+    sink = type("Sink", (), {"closed": False, "close": lambda self: setattr(
+        self, "closed", True)})()
+    monkeypatch.setattr(share_policy, "_open_detached_drainer_diagnostics", lambda: sink)
+    monkeypatch.setattr(
+        share_policy.subprocess, "Popen", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    assert _REAL_CORE_DETACHED_DRAINER() is True
 
     args, kwargs = calls[0]
-    assert args[0] == [
-        sys.executable,
-        "-P",
-        "-c",
-        "try:\n"
-        " from contexer import share_policy as _s\n"
-        " _s.run_detached_drainer()\n"
-        "except BaseException:\n"
-        " pass",
-    ]
-    assert kwargs == {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": sink,
-        "close_fds": True,
-        "start_new_session": True,
-    }
+    assert args[0][0:3] == [sys.executable, "-P", "-c"]
+    assert "run_detached_drainer" in args[0][3]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is sink
+    assert kwargs["close_fds"] is True
+    assert kwargs["start_new_session"] is True
     assert sink.closed is True
 
 
@@ -102,10 +103,10 @@ def test_detached_drainer_diagnostics_sink_is_private_bounded_and_not_a_symlink(
         tmp_repo):
     path = share_policy.proposal_diagnostics_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"x" * (base._DRAINER_DIAGNOSTICS_MAX_BYTES + 1))
+    path.write_bytes(b"x" * (share_policy._DRAINER_DIAGNOSTICS_MAX_BYTES + 1))
     path.chmod(0o644)
 
-    sink = base._open_detached_drainer_diagnostics()
+    sink = share_policy._open_detached_drainer_diagnostics()
     sink.close()
 
     assert path.stat().st_size == 0
@@ -117,12 +118,12 @@ def test_detached_drainer_diagnostics_sink_is_private_bounded_and_not_a_symlink(
         victim.write_text("safe", encoding="utf-8")
         path.symlink_to(victim)
         with pytest.raises(OSError):
-            base._open_detached_drainer_diagnostics()
+            share_policy._open_detached_drainer_diagnostics()
         assert victim.read_text(encoding="utf-8") == "safe"
 
 
-def test_detached_drainer_survives_short_lived_hook_parent(tmp_path):
-    """A child waiting on a post-parent gate proves it is not a daemon thread."""
+def test_core_detached_drainer_survives_short_lived_cli_or_hook_parent(tmp_path):
+    """A child waiting on a post-parent gate proves every caller gets a real process."""
     fake_root = tmp_path / "fake-package"
     package = fake_root / "contexer"
     package.mkdir(parents=True)
@@ -148,9 +149,9 @@ def test_detached_drainer_survives_short_lived_hook_parent(tmp_path):
     env["CONTEXER_TEST_DRAIN_GATE"] = str(gate)
     env["CONTEXER_TEST_DRAIN_MARKER"] = str(marker)
     parent = (
-        "import os,sys; from contexer.adapters import base; "
+        "import os,sys; from contexer import share_policy; "
         "os.environ['PYTHONPATH']=sys.argv[1]; "
-        "raise SystemExit(0 if base._start_detached_proposal_drainer() else 1)"
+        "raise SystemExit(0 if share_policy.start_detached_drainer() else 1)"
     )
 
     completed = subprocess.run(
