@@ -15,7 +15,10 @@ import json
 import os
 import re
 import secrets
+import stat
 import string
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -61,6 +64,7 @@ _MAX_ENDPOINT = 2_048
 _MAX_REPO_PATH = 4_096
 _MAX_RECORD_BYTES = 16_384
 _MAX_POLICY_BYTES = 262_144
+_DRAINER_DIAGNOSTICS_MAX_BYTES = 1_048_576
 
 _POLICY_FIELDS = frozenset({
     "schema_version", "mode", "policy_generation", "repo_key", "repo_slug", "endpoint",
@@ -216,6 +220,27 @@ def proposal_receipts_lock_path() -> Path:
 
 def proposal_attention_lock_path() -> Path:
     return store.STORE_DIR / sidecars.filename("proposal_attention_lock")
+
+
+def _open_detached_drainer_diagnostics():
+    """Open the detached worker's private, bounded stderr sink without following symlinks."""
+    path = proposal_diagnostics_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
+                or (hasattr(os, "getuid") and details.st_uid != os.getuid())):
+            raise OSError("unsafe proposal diagnostics sink")
+        os.fchmod(descriptor, 0o600)
+        if details.st_size > _DRAINER_DIAGNOSTICS_MAX_BYTES:
+            os.ftruncate(descriptor, 0)
+        return os.fdopen(descriptor, "ab", buffering=0)
+    except Exception:
+        os.close(descriptor)
+        raise
 
 
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
@@ -939,11 +964,15 @@ def _emit_scan(outcome: ScanOutcome, started_ns: int) -> None:
 
 
 def _finish_scan(outcome: ScanOutcome, started_ns: int, *, start_worker: bool = True) -> ScanOutcome:
-    _emit_scan(outcome, started_ns)
     if start_worker and outcome.result == "queued" and outcome.queued:
-        # Thread creation is the only prompt-path work here. Capability discovery, preview, and
-        # submission happen in the daemon after this committed local append has returned.
-        start_detached_drainer()
+        # The durable append has already committed. A child-launch failure changes only the
+        # diagnostic result; the queue remains recoverable by a later lifecycle checkpoint.
+        if not start_detached_drainer():
+            outcome = ScanOutcome(
+                outcome.result, "validation_error", outcome.scanned, outcome.queued,
+                outcome.skipped,
+            )
+    _emit_scan(outcome, started_ns)
     return outcome
 
 
@@ -1086,7 +1115,7 @@ def append_attention(item: dict) -> None:
 
 
 _PAUSING_DRAIN_REASONS = frozenset({
-    "account_mismatch", "policy_mismatch", "repo_mismatch", "team_mismatch",
+    "unsupported_protocol", "account_mismatch", "policy_mismatch", "repo_mismatch", "team_mismatch",
     "not_member", "not_authorized", "trial_expired",
 })
 _SUCCESSFUL_DRAIN_STATES = frozenset({"submitted", "already_pending", "unchanged"})
@@ -1362,10 +1391,9 @@ def _drain_intent(intent: dict, profile: Profile, owner: str, *,
         protocol = capabilities.decision_reconciliation
         if (automatic is None or automatic.version != 1 or protocol is None
                 or protocol.version < 1 or not protocol.atomic_submit or not protocol.preview):
-            return _finish_drain(
-                OperationOutcome("refused", "unsupported_protocol"), started, intent,
-                queue_depth=queue_depth,
-            )
+            outcome = _move_intent_to_attention(
+                intent, "unsupported_protocol", "capability", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
         if capabilities.account_fingerprint != intent["account_fingerprint"]:
             outcome = _move_intent_to_attention(
                 intent, "account_mismatch", "capability", owner=owner)
@@ -1440,7 +1468,8 @@ def _drain_intent(intent: dict, profile: Profile, owner: str, *,
             outcome = _keep_intent_for_retry(
                 intent, "rate_limited", "rate_limit", owner=owner)
         elif status == "unsupported_protocol":
-            outcome = OperationOutcome("refused", "unsupported_protocol")
+            outcome = _move_intent_to_attention(
+                intent, "unsupported_protocol", "capability", owner=owner)
         else:
             outcome = _move_intent_to_attention(
                 intent, "validation_error", "validation", result="failure", owner=owner)
@@ -1528,8 +1557,8 @@ def run_detached_drainer() -> None:
             pass
 
 
-def start_detached_drainer(profile: Profile | None = None) -> bool:
-    """Start a daemon one-shot worker without performing network I/O on the caller's path."""
+def start_in_process_drainer(profile: Profile | None = None) -> bool:
+    """Start a daemon thread for an explicitly long-lived caller."""
     global _DETACHED_DRAINER_RUNNING
     with _DETACHED_DRAINER_GUARD:
         if _DETACHED_DRAINER_RUNNING:
@@ -1554,6 +1583,49 @@ def start_detached_drainer(profile: Profile | None = None) -> bool:
         with _DETACHED_DRAINER_GUARD:
             _DETACHED_DRAINER_RUNNING = False
         return False
+    return True
+
+
+def start_detached_drainer() -> bool:
+    """Launch a one-shot process that survives a short-lived CLI or hook parent.
+
+    All standard streams are detached from the caller. The only child output is the bounded,
+    owner-only structured diagnostics sink, and the fixed child program suppresses raw failures.
+    """
+    diagnostics = None
+    try:
+        diagnostics = _open_detached_drainer_diagnostics()
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-P",
+                "-c",
+                "try:\n"
+                " from contexer import share_policy as _s\n"
+                " _s.run_detached_drainer()\n"
+                "except BaseException:\n"
+                " pass",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=diagnostics,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception:
+        try:
+            decision_observability.emit_decision_operation(
+                "drain",
+                result="failure",
+                reason_code="validation_error",
+                error_class="validation",
+            )
+        except Exception:
+            pass
+        return False
+    finally:
+        if diagnostics is not None:
+            diagnostics.close()
     return True
 
 
@@ -1648,6 +1720,19 @@ def prepare_policy_activation(
         except SidecarDataError as exc:
             outcome = OperationOutcome("refused", "validation_error", exc.diagnostic_id)
             return None, _policy_change_outcome(outcome, started)
+        # An unsupported-protocol pause is intentionally recoverable only through a fresh,
+        # capability-checked enable confirmation. Preserve the generation when that confirmation
+        # selects the exact same destination so its stranded attention rows remain explicitly
+        # retryable. Any destination/account/repository change still receives a new generation and
+        # cannot inherit old intents.
+        if (existing is not None
+                and existing.get("paused_reason") == "unsupported_protocol"
+                and all(existing.get(key) == policy.get(key) for key in (
+                    "repo_key", "endpoint", "account_fingerprint", "team_id"))):
+            policy = parse_policy({
+                **policy,
+                "policy_generation": existing["policy_generation"],
+            })
         return PolicyActivationPreview(
             repo_path=store.canonical_store_key(repo_path),
             policy=policy,
@@ -1902,12 +1987,18 @@ def retry_attention(repo_path: str, intent_id: str) -> OperationOutcome:
                 _remove_attention(selected)
             except (SidecarDataError, OSError, ValueError, TypeError):
                 pass
-            start_detached_drainer()
-            return OperationOutcome("queued", "none")
+            launched = start_detached_drainer()
+            return OperationOutcome(
+                "queued", "none" if launched else "validation_error",
+                None if launched else _diagnostic_id(),
+            )
         return queued
     _remove_attention(selected)
-    start_detached_drainer()
-    return OperationOutcome("queued", "none")
+    launched = start_detached_drainer()
+    return OperationOutcome(
+        "queued", "none" if launched else "validation_error",
+        None if launched else _diagnostic_id(),
+    )
 
 
 def format_drain_outcomes(outcomes: list[OperationOutcome]) -> str:

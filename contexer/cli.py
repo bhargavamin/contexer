@@ -1359,7 +1359,14 @@ def share_policy_cmd(rest: list | None = None) -> None:
                 print("Run the enable command again to confirm this updated preview.")
                 sys.exit(1)
             scan = share_policy.activate_policy(fresh)
-            if scan.reason_code != "none":
+            if scan.result == "queued" and scan.reason_code == "validation_error":
+                print(
+                    "Automatic proposal policy enabled and the initial intents are durable, "
+                    "but the detached uploader process did not start. Run `contexer "
+                    "share-policy flush` or wait for a later lifecycle checkpoint to retry. "
+                    "Team approval remains manual."
+                )
+            elif scan.reason_code != "none":
                 print(
                     "Automatic proposal policy enabled with its authoritative baseline saved. "
                     "The optional receipt mirror could not be updated "
@@ -1406,6 +1413,11 @@ def share_policy_cmd(rest: list | None = None) -> None:
         outcome = share_policy.retry_attention(repo, args[0])
         _print_share_policy_outcome("Retry queued" if outcome.result == "queued" else
                                     "Retry refused", outcome)
+        if outcome.result == "queued" and outcome.reason_code == "validation_error":
+            print(
+                "The intent is durable, but the detached uploader process did not start. "
+                "Run `contexer share-policy flush` or wait for a later lifecycle checkpoint."
+            )
         if outcome.result != "queued":
             sys.exit(1)
     except share_policy.SidecarDataError as exc:
