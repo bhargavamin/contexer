@@ -10,7 +10,7 @@ import uuid
 import pytest
 
 from contexer import remote, revisions, share_policy, store
-from contexer.config import Profile
+from contexer.config import ConfigError, Profile
 
 
 NOW = "2026-08-30T12:00:00Z"
@@ -452,6 +452,309 @@ def test_status_distinguishes_local_queue_from_remote_states(tmp_repo):
     rendered = share_policy.render_status(snapshot)
     assert "queued" in rendered and "pending lead review" in rendered
     assert "shared" not in rendered
+
+
+def _prepare_activation(tmp_repo, monkeypatch, *, entries=(), include_existing=False,
+                        teams=None, automatic=True, skip_confirm=True):
+    remote_store = _ProposalRemote(automatic=automatic)
+    if teams is not None:
+        remote_store.teams = teams
+    monkeypatch.setattr(
+        share_policy.remote.RemoteStore,
+        "from_profile",
+        staticmethod(lambda _profile, **kwargs: (
+            remote_store if kwargs == {"reactive_refresh": False}
+            else pytest.fail("policy activation must pin the inspected credential")
+        )),
+    )
+    monkeypatch.setattr(store, "run_git", lambda *_args: "git@github.com:org/repo.git")
+    monkeypatch.setattr(store, "load", lambda _repo: {"entries": list(entries)})
+    profile = Profile(
+        mode="team", endpoint="https://mcp.contexer.ai/mcp", token="opaque-token",
+        skip_confirm=skip_confirm, redact_secrets=True,
+    )
+    return share_policy.prepare_policy_activation(
+        tmp_repo, "Platform", include_existing=include_existing, profile=profile), remote_store
+
+
+def test_policy_activation_preview_contains_exact_safe_confirmation_fields(
+        tmp_repo, monkeypatch):
+    entries = [_entry("existing", "existing-revision")]
+    (preview, outcome), remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, entries=entries)
+
+    assert outcome == share_policy.OperationOutcome("success", "none")
+    assert preview is not None
+    rendered = share_policy.format_policy_activation_preview(preview)
+    assert "https://mcp.contexer.ai/mcp" in rendered
+    assert "…X9C6N8" in rendered
+    assert FINGERPRINT not in rendered
+    assert "github.com/org/repo" in rendered
+    assert "Platform (team-1)" in rendered
+    assert "future-only" in rendered
+    assert "Secret redaction: on" in rendered
+    assert "No policy has been changed yet" in rendered
+    assert not share_policy.policy_path(tmp_repo).exists()
+    assert remote_store.list_calls == 1
+
+
+def test_policy_output_strips_endpoint_userinfo_query_and_fragment(tmp_repo):
+    policy = {
+        **_policy(tmp_repo),
+        "endpoint": "https://user:secret@example.test/mcp?token=SENTINEL#private",
+    }
+    preview = share_policy.PolicyActivationPreview(
+        repo_path=tmp_repo, policy=policy, entries=[], include_existing=False,
+        initial_proposal_count=0, baseline_count=0, redaction_enabled=True,
+        replacing_policy=False,
+    )
+    rendered_preview = share_policy.format_policy_activation_preview(preview)
+    rendered_status = share_policy.format_policy_status({
+        "policy": "active", "paused_reason": None, "queued": 0, "uploading": False,
+        "pending_lead_review": 0, "already_current": 0, "attention": 0,
+        "repo_key": policy["repo_key"], "team_name": "Platform", "team_id": "team-1",
+        "endpoint": policy["endpoint"], "account_fingerprint_suffix": "X9C6N8",
+        "scope": "future-only",
+    })
+
+    assert "https://example.test/mcp" in rendered_preview
+    assert "https://example.test/mcp" in rendered_status
+    for secret in ("user", "secret", "token", "SENTINEL", "private"):
+        assert secret not in rendered_preview
+        assert secret not in rendered_status
+
+
+def test_future_only_activation_persists_baseline_without_queueing_existing(
+        tmp_repo, monkeypatch):
+    entry = _entry("existing", "existing-revision")
+    (preview, _outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, entries=[entry])
+
+    result = share_policy.activate_policy(preview)
+
+    assert result == share_policy.ScanOutcome("success", "none", 0, 0, 0)
+    assert share_policy.load_policy(tmp_repo)["baseline_revision_ids"] == ["existing-revision"]
+    assert [row["state"] for row in share_policy.read_receipts()] == ["baseline"]
+    assert share_policy.read_outbox() == []
+
+
+def test_activation_refuses_before_replacing_policy_when_global_sidecar_is_corrupt(
+        tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "run_git", lambda *_args: "git@github.com:org/repo.git")
+    existing = _policy(tmp_repo, include_existing=True)
+    share_policy.save_policy(tmp_repo, existing)
+    receipts = share_policy.proposal_receipts_path()
+    receipts.parent.mkdir(parents=True, exist_ok=True)
+    receipts.write_text("not-json", encoding="utf-8")
+    replacement = share_policy.PolicyActivationPreview(
+        repo_path=tmp_repo,
+        policy={**existing, "policy_generation": "policy-2"},
+        entries=[],
+        include_existing=True,
+        initial_proposal_count=0,
+        baseline_count=0,
+        redaction_enabled=True,
+        replacing_policy=True,
+    )
+
+    with pytest.raises(share_policy.SidecarDataError):
+        share_policy.activate_policy(replacement)
+
+    assert share_policy.load_policy(tmp_repo)["policy_generation"] == "policy-1"
+
+
+@pytest.mark.parametrize("failure,reason", [
+    (OSError("disk unavailable"), "validation_error"),
+    (share_policy.SidecarDataError(
+        "proposal receipts", "diag_4Z7K2N8Q5W1C9M6P"), "corrupt_queue"),
+])
+def test_activation_reports_committed_policy_when_baseline_mirror_fails(
+        tmp_repo, monkeypatch, failure, reason):
+    monkeypatch.setattr(store, "run_git", lambda *_args: "git@github.com:org/repo.git")
+    entry = _entry("existing", "existing-revision")
+    policy = _policy(tmp_repo, [entry])
+    preview = share_policy.PolicyActivationPreview(
+        repo_path=tmp_repo, policy=policy, entries=[entry], include_existing=False,
+        initial_proposal_count=0, baseline_count=1, redaction_enabled=True,
+        replacing_policy=False,
+    )
+    monkeypatch.setattr(
+        share_policy, "append_receipts", lambda _rows: (_ for _ in ()).throw(failure))
+
+    outcome = share_policy.activate_policy(preview)
+
+    assert outcome == share_policy.ScanOutcome("success", reason)
+    stored = share_policy.load_policy(tmp_repo)
+    assert stored is not None
+    assert stored["paused_reason"] is None
+    assert stored["baseline_revision_ids"] == ["existing-revision"]
+
+
+def test_include_existing_activation_queues_only_eligible_human_approved_revisions(
+        tmp_repo, monkeypatch):
+    eligible = _entry("eligible", "eligible-revision")
+    nonhuman = _entry("nonhuman", "nonhuman-revision", source="ai", approved_by=None)
+    entries = [eligible, nonhuman]
+    (preview, _outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, entries=entries, include_existing=True)
+
+    result = share_policy.activate_policy(preview)
+
+    assert result == share_policy.ScanOutcome("queued", "none", 2, 1, 1)
+    assert share_policy.load_policy(tmp_repo)["baseline_revision_ids"] == []
+    assert [row["decision_id"] for row in share_policy.read_outbox()] == ["eligible"]
+
+
+def test_include_existing_preview_count_honors_terminal_receipts(tmp_repo, monkeypatch):
+    entry = _entry("decision-1", "revision-2")
+    share_policy.append_receipt(_receipt(state="submitted"))
+
+    (preview, outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, entries=[entry], include_existing=True)
+
+    assert outcome == share_policy.OperationOutcome("success", "none")
+    assert preview is not None
+    assert preview.initial_proposal_count == 0
+
+
+def test_policy_activation_requires_capability_and_unique_exact_team(
+        tmp_repo, monkeypatch):
+    (preview, outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, automatic=False)
+    assert preview is None and outcome.reason_code == "unsupported_protocol"
+    assert not share_policy.policy_path(tmp_repo).exists()
+    duplicate_name = [
+        remote.RemoteTeam("team-1", "Platform", "member"),
+        remote.RemoteTeam("team-2", "Platform", "member"),
+    ]
+    (preview, outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, teams=duplicate_name)
+    assert preview is None and outcome.reason_code == "team_mismatch"
+    assert not share_policy.policy_path(tmp_repo).exists()
+
+
+def test_policy_activation_fails_closed_on_malformed_profile(tmp_repo, monkeypatch):
+    monkeypatch.setattr(
+        share_policy, "load_profile",
+        lambda: (_ for _ in ()).throw(ConfigError("SENTINEL_CONFIG_CONTENT")),
+    )
+
+    preview, outcome = share_policy.prepare_policy_activation(tmp_repo, "Platform")
+
+    assert preview is None
+    assert outcome.result == "refused" and outcome.reason_code == "validation_error"
+    assert outcome.diagnostic_id is not None
+
+
+def test_disabling_policy_preserves_global_queue_receipts_and_attention(tmp_repo):
+    share_policy.save_policy(tmp_repo, _policy(tmp_repo, include_existing=True))
+    intent = _intent(tmp_repo)
+    assert share_policy.enqueue_intent(intent).result == "queued"
+    share_policy.append_receipt(share_policy.queued_receipt(intent))
+    share_policy.append_attention(_attention(tmp_repo))
+
+    assert share_policy.disable_policy(tmp_repo) is True
+
+    assert share_policy.load_policy(tmp_repo) is None
+    assert share_policy.read_outbox() == [intent]
+    assert len(share_policy.read_receipts()) == 1
+    assert len(share_policy.read_attention()) == 1
+
+
+def test_policy_status_uses_authoritative_baseline_and_never_says_shared(
+        tmp_repo, monkeypatch):
+    policy = _policy(tmp_repo, [_entry("existing", "existing-revision")])
+    share_policy.save_policy(tmp_repo, policy)
+    monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/repo.git")
+
+    snapshot = share_policy.policy_status(tmp_repo)
+    rendered = share_policy.format_policy_status(snapshot)
+
+    assert snapshot["baseline"] == 1
+    assert "policy active" in rendered
+    assert "future-only" in rendered
+    assert "shared" not in rendered.lower()
+
+
+def test_retry_attention_reopens_receipt_then_queues_stable_idempotency_key(
+        tmp_repo, monkeypatch):
+    share_policy.save_policy(tmp_repo, _policy(tmp_repo, include_existing=True))
+    attention = _attention(tmp_repo)
+    share_policy.append_attention(attention)
+    share_policy.append_receipt(_receipt(state="attention"))
+    starts = []
+    monkeypatch.setattr(
+        share_policy, "start_detached_drainer", lambda *_args: starts.append(True) or True)
+
+    outcome = share_policy.retry_attention(tmp_repo, "intent-1")
+
+    assert outcome == share_policy.OperationOutcome("queued", "none")
+    assert share_policy.read_attention() == []
+    assert share_policy.read_outbox()[0]["idempotency_key"] == "intent-1"
+    assert share_policy.fold_receipts(share_policy.read_receipts())[
+        share_policy.receipt_key(attention)]["state"] == "queued"
+    assert starts == [True]
+
+
+def test_retry_attention_keeps_item_when_queue_lock_is_busy(tmp_repo, monkeypatch):
+    share_policy.save_policy(tmp_repo, _policy(tmp_repo, include_existing=True))
+    share_policy.append_attention(_attention(tmp_repo))
+    monkeypatch.setattr(
+        share_policy, "enqueue_intent",
+        lambda *_args, **_kwargs: share_policy.OperationOutcome("no_op", "lock_busy"),
+    )
+
+    outcome = share_policy.retry_attention(tmp_repo, "intent-1")
+
+    assert outcome == share_policy.OperationOutcome("no_op", "lock_busy")
+    assert len(share_policy.read_attention()) == 1
+    assert share_policy.fold_receipts(share_policy.read_receipts())[
+        share_policy.receipt_key(_attention(tmp_repo))]["state"] == "attention"
+
+
+@pytest.mark.parametrize("failure_kind", ["full", "corrupt"])
+def test_retry_attention_failure_restores_terminal_receipt(
+        tmp_repo, monkeypatch, failure_kind):
+    share_policy.save_policy(tmp_repo, _policy(tmp_repo, include_existing=True))
+    attention = _attention(tmp_repo)
+    share_policy.append_attention(attention)
+    share_policy.append_receipt(_receipt(state="attention"))
+    if failure_kind == "full":
+        monkeypatch.setattr(share_policy, "OUTBOX_CAP", 0)
+    else:
+        path = share_policy.proposal_outbox_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not-json", encoding="utf-8")
+
+    outcome = share_policy.retry_attention(tmp_repo, "intent-1")
+
+    expected = "validation_error" if failure_kind == "full" else "corrupt_queue"
+    assert outcome.reason_code == expected
+    assert len(share_policy.read_attention()) == 1
+    assert share_policy.fold_receipts(share_policy.read_receipts())[
+        share_policy.receipt_key(attention)]["state"] == "attention"
+
+
+def test_policy_control_telemetry_never_contains_destination_or_user_input(
+        tmp_repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        share_policy.decision_observability,
+        "emit_decision_operation",
+        lambda operation, **fields: calls.append((operation, fields)),
+    )
+    sentinel = "SENTINEL_PRIVATE_TEAM_NAME"
+    (preview, outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch,
+        teams=[remote.RemoteTeam("team-1", sentinel, "member")],
+    )
+
+    assert preview is None and outcome.result == "refused"
+    encoded = json.dumps(calls)
+    assert sentinel not in encoded
+    assert FINGERPRINT not in encoded
+    assert "https://mcp.contexer.ai/mcp" not in encoded
+    assert calls[0][0] == "policyChange"
 
 
 def test_atomic_sidecar_writes_are_owner_only(tmp_repo):

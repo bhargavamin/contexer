@@ -22,10 +22,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from contexer import decision_observability, remote, repo_key, revisions, share, sidecars, store
-from contexer.config import Profile, load_profile
+from contexer.config import ConfigError, Profile, load_profile
 
 
 SCHEMA_VERSION = 1
@@ -115,6 +115,18 @@ class ScanOutcome:
     scanned: int = 0
     queued: int = 0
     skipped: int = 0
+
+
+@dataclass(frozen=True)
+class PolicyActivationPreview:
+    repo_path: str
+    policy: dict
+    entries: list[dict]
+    include_existing: bool
+    initial_proposal_count: int
+    baseline_count: int
+    redaction_enabled: bool
+    replacing_policy: bool
 
 
 def _diagnostic_id() -> str:
@@ -380,6 +392,15 @@ def _endpoint(value: object) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("invalid endpoint")
     return endpoint
+
+
+def display_endpoint(value: str) -> str:
+    """Endpoint identity for human output, with credential/query/fragment data removed."""
+    parsed = urlsplit(_endpoint(value))
+    # Userinfo is never needed to identify the destination and may contain a password. Keep the
+    # original host spelling/port without touching the exact endpoint stored in policy bindings.
+    safe_netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
 
 
 def _repo_key(value: object) -> str:
@@ -846,6 +867,20 @@ def append_receipt(receipt: dict, *, blocking: bool = True) -> None:
             needs_newline = handle.read(1) != b"\n"
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(("\n" if needs_newline else "") + encoded)
+
+
+def append_receipts(receipts: list[dict]) -> None:
+    """Atomically append a bounded activation baseline as one receipt-lock transaction."""
+    normalized = [parse_receipt(receipt) for receipt in receipts]
+    if not normalized:
+        return
+    with _sidecar_lock(proposal_receipts_lock_path()):
+        records = [*read_receipts(), *normalized]
+        if len(records) > RECEIPT_LOG_CAP:
+            records = list(fold_receipts(records).values())[-RECEIPT_LOG_CAP:]
+        text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records)
+        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.atomic_write(proposal_receipts_path(), text)
 
 
 def build_intent(policy: dict, repo_path: str, entry: dict, *,
@@ -1489,6 +1524,382 @@ def start_detached_drainer(profile: Profile | None = None) -> bool:
             _DETACHED_DRAINER_RUNNING = False
         return False
     return True
+
+
+def _policy_change_outcome(outcome: OperationOutcome, started_ns: int) -> OperationOutcome:
+    _emit("policyChange", outcome, started_ns)
+    return outcome
+
+
+def _policy_remote_failure(exc: remote.RemoteStoreError) -> OperationOutcome:
+    if isinstance(exc, remote.RemoteRateLimitError):
+        return OperationOutcome("failure", "rate_limited", _diagnostic_id())
+    if isinstance(exc, remote.RemoteUnavailableError):
+        return OperationOutcome("failure", "transport_error", _diagnostic_id())
+    if isinstance(exc, remote.RemoteAuthError):
+        return OperationOutcome("refused", "not_authorized", _diagnostic_id())
+    return OperationOutcome("refused", "validation_error", _diagnostic_id())
+
+
+def prepare_policy_activation(
+        repo_path: str, team: str, *, include_existing: bool = False,
+        profile: Profile | None = None) -> tuple[PolicyActivationPreview | None, OperationOutcome]:
+    """Fetch a fresh account/team binding and build a read-only activation preview."""
+    started = time.monotonic_ns()
+    try:
+        if not store.is_sane_repo(repo_path) or not isinstance(team, str) or not team.strip():
+            outcome = OperationOutcome("refused", "validation_error", _diagnostic_id())
+            return None, _policy_change_outcome(outcome, started)
+        current_profile = profile or load_profile()
+        remote_store = remote.RemoteStore.from_profile(
+            current_profile, reactive_refresh=False)
+        if remote_store is None:
+            outcome = OperationOutcome("refused", "not_authorized", _diagnostic_id())
+            return None, _policy_change_outcome(outcome, started)
+        try:
+            capabilities = remote_store.get_capabilities()
+        except remote.RemoteStoreError as exc:
+            outcome = _policy_remote_failure(exc)
+            return None, _policy_change_outcome(outcome, started)
+        automatic = capabilities.automatic_decision_proposal
+        protocol = capabilities.decision_reconciliation
+        if (automatic is None or automatic.version != 1 or protocol is None
+                or protocol.version < 1 or not protocol.atomic_submit or not protocol.preview):
+            outcome = OperationOutcome("refused", "unsupported_protocol")
+            return None, _policy_change_outcome(outcome, started)
+        if not capabilities.account_fingerprint:
+            outcome = OperationOutcome("refused", "account_mismatch", _diagnostic_id())
+            return None, _policy_change_outcome(outcome, started)
+
+        origin = store.run_git(repo_path, "remote", "get-url", "origin")
+        current_repo_key = repo_key.canonical_repo_key(origin)
+        if not current_repo_key:
+            outcome = OperationOutcome("refused", "repo_mismatch", _diagnostic_id())
+            return None, _policy_change_outcome(outcome, started)
+        try:
+            teams = remote_store.list_teams()
+        except remote.RemoteStoreError as exc:
+            outcome = _policy_remote_failure(exc)
+            return None, _policy_change_outcome(outcome, started)
+        requested = team.strip()
+        by_id = [item for item in teams if item.id == requested]
+        matches = by_id or [item for item in teams if item.name == requested]
+        if len(matches) != 1:
+            reason = "not_member" if not teams else "team_mismatch"
+            outcome = OperationOutcome("refused", reason, _diagnostic_id())
+            return None, _policy_change_outcome(outcome, started)
+        target = matches[0]
+        entries = store.load(repo_path).get("entries", [])[:store.MAX_ENTRIES]
+        policy = build_policy(
+            repo_path=repo_path,
+            repo_key=current_repo_key,
+            endpoint=current_profile.endpoint or "",
+            account_fingerprint=capabilities.account_fingerprint,
+            team_id=target.id,
+            team_name=target.name,
+            entries=entries,
+            include_existing=include_existing,
+        )
+        try:
+            with _sidecar_lock(proposal_receipts_lock_path()):
+                receipt_index = fold_receipts(read_receipts())
+        except SidecarDataError as exc:
+            outcome = OperationOutcome("refused", "corrupt_queue", exc.diagnostic_id)
+            return None, _policy_change_outcome(outcome, started)
+        initial_count = sum(
+            1 for entry in entries
+            if eligibility(
+                entry, policy, receipt_index,
+                repo_key=current_repo_key, is_global=False).eligible
+        )
+        try:
+            existing = load_policy(repo_path)
+        except SidecarDataError as exc:
+            outcome = OperationOutcome("refused", "validation_error", exc.diagnostic_id)
+            return None, _policy_change_outcome(outcome, started)
+        return PolicyActivationPreview(
+            repo_path=store.canonical_store_key(repo_path),
+            policy=policy,
+            entries=entries,
+            include_existing=include_existing,
+            initial_proposal_count=initial_count,
+            baseline_count=len(policy["baseline_revision_ids"]),
+            redaction_enabled=current_profile.redact_secrets,
+            replacing_policy=existing is not None,
+        ), OperationOutcome("success", "none")
+    except (ConfigError, OSError, ValueError, TypeError):
+        outcome = OperationOutcome("refused", "validation_error", _diagnostic_id())
+        return None, _policy_change_outcome(outcome, started)
+
+
+def format_policy_activation_preview(preview: PolicyActivationPreview) -> str:
+    policy = preview.policy
+    suffix = policy["account_fingerprint"][-6:]
+    scope = "include existing approved revisions" if preview.include_existing else "future-only"
+    replacing = "yes (a new policy generation will replace it)" \
+        if preview.replacing_policy else "no"
+    return "\n".join((
+        "Automatic decision proposal policy preview",
+        f"Endpoint: {display_endpoint(policy['endpoint'])}",
+        f"Account fingerprint suffix: …{suffix}",
+        f"Repository: {policy['repo_key']}",
+        f"Team: {policy['team_name_at_confirmation']} ({policy['team_id']})",
+        f"Scope: {scope}",
+        f"Initial proposals queued after confirmation: {preview.initial_proposal_count}",
+        f"Current revisions recorded as future-only baseline: {preview.baseline_count}",
+        f"Secret redaction: {'on' if preview.redaction_enabled else 'off'}",
+        f"Replacing an existing policy: {replacing}",
+        "Team approval remains manual. No policy has been changed yet.",
+    ))
+
+
+def policy_activation_identity(preview: PolicyActivationPreview) -> tuple:
+    """Exact non-prose state a confirmation authorizes, excluding the fresh generation UUID."""
+    policy = preview.policy
+    current_revisions = []
+    for entry in preview.entries:
+        if not isinstance(entry, dict) or entry.get("type") != "decision":
+            continue
+        revision = revisions.current_revision(entry)
+        current_revisions.append((
+            str(entry.get("id") or ""),
+            str((revision or {}).get("revision_id") or ""),
+        ))
+    return (
+        preview.repo_path,
+        policy["endpoint"],
+        policy["account_fingerprint"],
+        policy["repo_key"],
+        policy["team_id"],
+        policy["team_name_at_confirmation"],
+        preview.include_existing,
+        preview.initial_proposal_count,
+        tuple(policy["baseline_revision_ids"]),
+        tuple(current_revisions),
+        preview.redaction_enabled,
+        preview.replacing_policy,
+    )
+
+
+def activate_policy(preview: PolicyActivationPreview) -> ScanOutcome:
+    """Commit a freshly confirmed preview, then queue explicitly included current revisions."""
+    policy = parse_policy(preview.policy)
+    origin = store.run_git(preview.repo_path, "remote", "get-url", "origin")
+    if repo_key.canonical_repo_key(origin) != policy["repo_key"]:
+        raise ValueError("repository identity changed after policy preview")
+    # Refuse before changing the policy when an existing global sidecar cannot be trusted.
+    # These are preflights rather than repairs: concurrent readers remain independent, and each
+    # write path still re-reads under its own lock before committing.
+    read_receipts()
+    if preview.include_existing:
+        read_outbox()
+    save_policy(preview.repo_path, policy)
+    try:
+        append_receipts(baseline_receipts(policy, preview.entries))
+    except SidecarDataError:
+        # The embedded baseline is authoritative, so activation is complete even when its
+        # independently foldable receipt mirror is unavailable. Report the degradation without
+        # claiming refusal; future scans will continue to fail closed on the damaged sidecar.
+        return ScanOutcome("success", "corrupt_queue")
+    except (OSError, ValueError, TypeError):
+        return ScanOutcome("success", "validation_error")
+    if preview.include_existing:
+        return scan_and_enqueue(preview.repo_path)
+    return ScanOutcome("success", "none", 0, 0, 0)
+
+
+def disable_policy(repo_path: str) -> bool:
+    """Remove only the repo policy; queued intents, receipts, and attention remain inspectable."""
+    started = time.monotonic_ns()
+    try:
+        with _sidecar_lock(policy_lock_path(repo_path)):
+            path = policy_path(repo_path)
+            if not path.exists():
+                _policy_change_outcome(OperationOutcome("success", "none"), started)
+                return False
+            load_policy(repo_path)
+            path.unlink()
+    except SidecarDataError as exc:
+        _policy_change_outcome(
+            OperationOutcome("refused", "validation_error", exc.diagnostic_id), started)
+        raise
+    except OSError:
+        _policy_change_outcome(
+            OperationOutcome("refused", "validation_error", _diagnostic_id()), started)
+        raise
+    _policy_change_outcome(OperationOutcome("success", "none"), started)
+    return True
+
+
+def drainer_active() -> bool:
+    """Read-only best effort: an unreadable or contended claim reports busy, never idle."""
+    path = proposal_drainer_lock_path()
+    try:
+        with _sidecar_lock(path, blocking=False):
+            return _active_drainer_claim(_read_drainer_claim(path), time.time())
+    except (BlockingIOError, OSError):
+        return True
+
+
+def _repo_records(repo_path: str) -> tuple[dict | None, list[dict], list[dict], list[dict]]:
+    canonical_path = store.canonical_store_key(repo_path)
+    policy = load_policy(repo_path)
+    origin = store.run_git(repo_path, "remote", "get-url", "origin")
+    current_repo_key = repo_key.canonical_repo_key(origin)
+    intents = [row for row in read_outbox() if row["repo_path"] == canonical_path]
+    attention = [row for row in read_attention() if row["repo_path"] == canonical_path]
+    receipts = [row for row in read_receipts()
+                if current_repo_key and row["repo_key"] == current_repo_key]
+    return policy, intents, receipts, attention
+
+
+def policy_status(repo_path: str) -> dict:
+    policy, intents, receipts, attention = _repo_records(repo_path)
+    snapshot = status_snapshot(
+        policy, intents, receipts, attention, uploading=drainer_active())
+    if policy is not None:
+        # The policy itself is the authoritative future-only boundary.  Receipt rows make
+        # that boundary independently foldable, but a status command must not under-report it
+        # if activation committed the policy and then lost power before appending the mirrors.
+        snapshot["baseline"] = max(
+            snapshot["baseline"], len(policy["baseline_revision_ids"]))
+    snapshot.update({
+        "repo_key": (policy or {}).get("repo_key"),
+        "endpoint": (policy or {}).get("endpoint"),
+        "account_fingerprint_suffix": (
+            (policy or {}).get("account_fingerprint", "")[-6:] or None),
+        "team_id": (policy or {}).get("team_id"),
+        "team_name": (policy or {}).get("team_name_at_confirmation"),
+        "scope": (
+            "include-existing" if (policy or {}).get("include_existing") else "future-only"
+        ) if policy else None,
+    })
+    return snapshot
+
+
+def format_policy_status(snapshot: dict) -> str:
+    lines = [render_status(snapshot)]
+    if snapshot.get("repo_key"):
+        lines.extend((
+            f"repository: {snapshot['repo_key']}",
+            f"team: {snapshot['team_name']} ({snapshot['team_id']})",
+            f"endpoint: {display_endpoint(snapshot['endpoint'])}",
+            f"account fingerprint suffix: …{snapshot['account_fingerprint_suffix']}",
+            f"scope: {snapshot['scope']}",
+        ))
+    if snapshot.get("paused_reason"):
+        lines.append(f"paused reason: {snapshot['paused_reason']}")
+    return "\n".join(lines)
+
+
+def attention_for_repo(repo_path: str) -> list[dict]:
+    canonical_path = store.canonical_store_key(repo_path)
+    return [row for row in read_attention() if row["repo_path"] == canonical_path]
+
+
+def format_attention(records: list[dict]) -> str:
+    if not records:
+        return "No automatic proposal intents need attention."
+    lines = [f"{len(records)} automatic proposal intent(s) need attention:"]
+    for row in records:
+        lines.append(
+            f"- {row['idempotency_key'][:8]}  decision {row['decision_id'][:8]}  "
+            f"revision {row['revision_id'][:8]}  reason {row['reason']}"
+        )
+    return "\n".join(lines)
+
+
+def _remove_attention(record: dict) -> None:
+    key = (intent_key(record), record["idempotency_key"])
+    with _sidecar_lock(proposal_attention_lock_path()):
+        current = read_attention()
+        kept = [row for row in current
+                if (intent_key(row), row["idempotency_key"]) != key]
+        if len(kept) != len(current):
+            _write_json_list(proposal_attention_path(), kept)
+
+
+def retry_attention(repo_path: str, intent_id: str) -> OperationOutcome:
+    """Explicitly return one attention row to the queue under the current exact policy."""
+    if not isinstance(intent_id, str) or not intent_id.strip():
+        return OperationOutcome("refused", "validation_error", _diagnostic_id())
+    policy = load_policy(repo_path)
+    if policy is None or policy.get("paused_reason"):
+        return OperationOutcome("refused", "policy_mismatch", _diagnostic_id())
+    rows = [row for row in attention_for_repo(repo_path)
+            if row["idempotency_key"].startswith(intent_id.strip())]
+    if len(rows) != 1:
+        return OperationOutcome("refused", "stale_intent", _diagnostic_id())
+    selected = rows[0]
+    if not destination_matches(policy, selected):
+        return OperationOutcome("refused", "policy_mismatch", _diagnostic_id())
+    intent = parse_intent({
+        "schema_version": SCHEMA_VERSION,
+        "idempotency_key": selected["idempotency_key"],
+        "policy_generation": selected["policy_generation"],
+        "decision_id": selected["decision_id"],
+        "revision_id": selected["revision_id"],
+        "repo_path": selected["repo_path"],
+        "repo_key": selected["repo_key"],
+        "endpoint": selected["endpoint"],
+        "account_fingerprint": selected["account_fingerprint"],
+        "team_id": selected["team_id"],
+        "queued_at": _recorded_at(),
+        "attempts": 0,
+        "last_error_code": None,
+        "last_error_class": None,
+        "diagnostic_id": None,
+    })
+    # Make the receipt non-terminal first. A crash before queue append is recoverable by the
+    # scanner; the opposite order could let a leftover terminal attention receipt delete the
+    # retried intent as an idempotent duplicate.
+    append_receipt(queued_receipt(intent))
+    queued = enqueue_intent(intent, blocking=True)
+    if not (queued.result == "queued" or (
+            queued.result == "no_op" and queued.reason_code == "duplicate_receipt")):
+        # Restore the terminal fold before reporting refusal. Without this compensating row, a
+        # later scanner would treat the queued receipt as a durable retry request and reconstruct
+        # the outbox after the explicit command said it had failed.
+        try:
+            append_receipt(_receipt_for_intent(
+                intent, "attention", reason=selected["reason"]))
+        except (SidecarDataError, OSError, ValueError, TypeError):
+            # The nonterminal queued receipt is already durable. Report that fact honestly: the
+            # scanner may reconstruct it later, so this is a successful durable retry request even
+            # though the immediate outbox append could not complete.
+            try:
+                _remove_attention(selected)
+            except (SidecarDataError, OSError, ValueError, TypeError):
+                pass
+            start_detached_drainer()
+            return OperationOutcome("queued", "none")
+        return queued
+    _remove_attention(selected)
+    start_detached_drainer()
+    return OperationOutcome("queued", "none")
+
+
+def format_drain_outcomes(outcomes: list[OperationOutcome]) -> str:
+    if not outcomes:
+        return "No automatic proposal intents were queued."
+    counts: dict[tuple[str, str], int] = {}
+    for outcome in outcomes:
+        key = (outcome.result, outcome.reason_code)
+        counts[key] = counts.get(key, 0) + 1
+    labels = {
+        ("submitted", "none"): "submitted for lead review",
+        ("already_pending", "none"): "already pending lead review",
+        ("unchanged", "none"): "already current",
+        ("retry", "rate_limited"): "kept queued (rate limited)",
+        ("retry", "transport_error"): "kept queued (transport unavailable)",
+        ("retry", "transient_error"): "kept queued (authentication retry needed)",
+        ("no_op", "lock_busy"): "uploader already running",
+        ("no_op", "duplicate_receipt"): "already recorded",
+    }
+    return "\n".join(
+        f"{count} {labels.get(key, f'{key[0]} ({key[1]})')}"
+        for key, count in counts.items()
+    )
 
 
 def status_snapshot(policy: dict | None, intents: list[dict], receipts: list[dict],

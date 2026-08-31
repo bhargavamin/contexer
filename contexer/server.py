@@ -1,5 +1,8 @@
 import json
 import os
+import secrets
+import threading
+import time
 import uuid
 from mcp.server.fastmcp import FastMCP
 from contexer import conflicts, evidence, lifecycle, policy_api, reconcile, share_policy, store
@@ -480,6 +483,41 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
 # the healthy worst case so a legitimately slow (but working) push never false-trips; a false
 # trip is harmless anyway - share is local-first and idempotent, so the outbox retries it.
 _SHARE_TIMEOUT = 30.0
+_POLICY_CONFIRMATION_TTL = 10 * 60
+_POLICY_CONFIRMATION_CAP = 128
+_POLICY_CONFIRMATIONS: dict[str, tuple] = {}
+_POLICY_CONFIRMATIONS_LOCK = threading.Lock()
+
+
+def _remember_policy_preview(repo: str, team: str, include_existing: bool,
+                             preview: share_policy.PolicyActivationPreview) -> str:
+    now = time.monotonic()
+    token = secrets.token_urlsafe(24)
+    record = (
+        now + _POLICY_CONFIRMATION_TTL,
+        repo,
+        team.strip(),
+        include_existing,
+        share_policy.policy_activation_identity(preview),
+    )
+    with _POLICY_CONFIRMATIONS_LOCK:
+        expired = [key for key, value in _POLICY_CONFIRMATIONS.items() if value[0] <= now]
+        for key in expired:
+            _POLICY_CONFIRMATIONS.pop(key, None)
+        while len(_POLICY_CONFIRMATIONS) >= _POLICY_CONFIRMATION_CAP:
+            _POLICY_CONFIRMATIONS.pop(next(iter(_POLICY_CONFIRMATIONS)))
+        _POLICY_CONFIRMATIONS[token] = record
+    return token
+
+
+def _consume_policy_preview(token: str) -> tuple | None:
+    if not isinstance(token, str) or not token or len(token) > 128:
+        return None
+    with _POLICY_CONFIRMATIONS_LOCK:
+        record = _POLICY_CONFIRMATIONS.pop(token, None)
+    if record is None or record[0] <= time.monotonic():
+        return None
+    return record
 
 
 @mcp.tool()
@@ -501,6 +539,133 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
 
     return await _share.share_decision_flow(
         resolved, decision_id, confirm=confirm, timeout=_SHARE_TIMEOUT)
+
+
+@mcp.tool()
+def manage_share_policy(action: str = "show", repo_path: str = "", team: str = "",
+                        include_existing: bool = False, confirm: bool = False,
+                        confirmation_token: str = "", intent_id: str = "") -> str:
+    """Inspect or control automatic proposals of approved local decisions to one team.
+
+    action: show | enable | disable | flush | attention | retry.
+    team: exact immutable team id or exact team name; required for enable.
+    include_existing: false is future-only; true also queues currently eligible revisions.
+    confirm: enable is a two-call operation. The default false returns an exact destination
+             preview and changes nothing. Call again with true only after the developer explicitly
+             approves that preview. The profile's skip_confirm setting is deliberately ignored.
+    confirmation_token: single-use token returned by the enable preview; required with confirm=true.
+    intent_id: exact id or unique displayed prefix for the attention item selected by retry.
+
+    This policy authorizes proposing approved decisions; it never approves team candidates. A
+    queued local intent is not a completed submission, and status keeps those states distinct.
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Refused - repo path not detected. No policy was changed."
+    if action not in {"show", "enable", "disable", "flush", "attention", "retry"}:
+        return "Refused - action must be show, enable, disable, flush, attention, or retry."
+
+    try:
+        if action == "show":
+            return share_policy.format_policy_status(share_policy.policy_status(resolved))
+        if action == "enable":
+            if not team.strip():
+                return "Refused - enable requires an exact team id or name. No policy was changed."
+            confirmed = None
+            if confirm:
+                confirmed = _consume_policy_preview(confirmation_token)
+                if confirmed is None:
+                    return (
+                        "Refused - enable confirmation requires a current single-use preview "
+                        "token. Call with confirm=false first. No policy was changed."
+                    )
+                _expires, confirmed_repo, confirmed_team, confirmed_include, _identity = confirmed
+                if (confirmed_repo != resolved or confirmed_team != team.strip()
+                        or confirmed_include is not include_existing):
+                    return (
+                        "Refused - the confirmation arguments do not match the preview. "
+                        "Call with confirm=false again. No policy was changed."
+                    )
+            preview, outcome = share_policy.prepare_policy_activation(
+                resolved, team, include_existing=include_existing)
+            if preview is None:
+                diagnostic = f" Diagnostic: {outcome.diagnostic_id}." \
+                    if outcome.diagnostic_id else ""
+                return f"Policy preview refused ({outcome.reason_code}).{diagnostic}"
+            rendered = share_policy.format_policy_activation_preview(preview)
+            if not confirm:
+                token = _remember_policy_preview(
+                    resolved, team, include_existing, preview)
+                return (
+                    rendered
+                    + "\nExplicit developer approval is required. If they approve this exact "
+                    "destination, call manage_share_policy again with the same arguments and "
+                    f"confirm=true and confirmation_token={token}."
+                )
+            assert confirmed is not None
+            if share_policy.policy_activation_identity(preview) != confirmed[4]:
+                token = _remember_policy_preview(
+                    resolved, team, include_existing, preview)
+                return (
+                    "Refused - the policy destination or eligible revisions changed since the "
+                    "developer's confirmation. No policy was changed.\n"
+                    + rendered
+                    + "\nObtain explicit approval for this updated preview, then call again with "
+                    f"confirm=true and confirmation_token={token}."
+                )
+            scan = share_policy.activate_policy(preview)
+            if scan.reason_code != "none":
+                message = (
+                    "Automatic proposal policy enabled with its authoritative baseline saved. "
+                    "The optional receipt mirror could not be updated "
+                    f"({scan.reason_code}); inspect local proposal state before relying on scans. "
+                    "Team approval remains manual."
+                )
+                try:
+                    status = share_policy.format_policy_status(
+                        share_policy.policy_status(resolved))
+                except share_policy.SidecarDataError as exc:
+                    status = (
+                        "Policy status is unavailable because local proposal state is malformed. "
+                        f"Diagnostic: {exc.diagnostic_id}."
+                    )
+                return message + "\n" + status
+            return (
+                "Automatic proposal policy enabled. Team approval remains manual. "
+                f"Initial queue result: {scan.result} ({scan.queued} queued).\n"
+                + share_policy.format_policy_status(share_policy.policy_status(resolved))
+            )
+        if action == "disable":
+            removed = share_policy.disable_policy(resolved)
+            prefix = "Automatic proposal policy disabled." if removed else \
+                "Automatic proposal policy was already disabled."
+            return prefix + " Queued and attention items were preserved for inspection."
+        if action == "flush":
+            return (
+                share_policy.format_drain_outcomes(share_policy.drain_once())
+                + "\n" + share_policy.format_policy_status(
+                    share_policy.policy_status(resolved))
+            )
+        if action == "attention":
+            return share_policy.format_attention(share_policy.attention_for_repo(resolved))
+        if not intent_id.strip():
+            return "Refused - retry requires an intent id."
+        outcome = share_policy.retry_attention(resolved, intent_id)
+        diagnostic = f" Diagnostic: {outcome.diagnostic_id}." \
+            if outcome.diagnostic_id else ""
+        if outcome.result == "queued":
+            return "Retry queued. The item remains a local proposal intent until submission."
+        return f"Retry refused ({outcome.reason_code}).{diagnostic}"
+    except share_policy.SidecarDataError as exc:
+        return (
+            "Refused - local proposal state is malformed and no repair was attempted. "
+            f"Diagnostic: {exc.diagnostic_id}."
+        )
+    except (OSError, ValueError, TypeError):
+        return (
+            "The operation could not be completed or fully inspected. Run the show action before "
+            "retrying; no repair was attempted."
+        )
 
 
 @mcp.tool()
