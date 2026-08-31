@@ -122,6 +122,32 @@ def test_enqueue_emits_only_canonical_opaque_correlation_and_bounded_counts(monk
     assert "SENTINEL_CANDIDATE_PROSE" not in json.dumps(records)
 
 
+def test_drain_emits_terminal_span_log_and_replay_flag(monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        decision_observability,
+        "_enqueue_records",
+        lambda emitted: records.extend(emitted),
+    )
+
+    decision_observability.emit_decision_operation(
+        "drain",
+        result="already_pending",
+        reason_code="none",
+        error_class="none",
+        candidate_id="10000000-0000-4000-8000-000000000002",
+        replayed=True,
+    )
+
+    span, log = records
+    assert span["name"] == "decision_proposal.drain"
+    assert span["attributes"]["contexer.result"] == "already_pending"
+    assert span["attributes"]["contexer.replayed"] is True
+    assert log["fields"]["action"] == "decisionProposalDrain"
+    assert log["fields"]["candidateId"] == "10000000-0000-4000-8000-000000000002"
+    assert log["fields"]["replayed"] is True
+
+
 def test_untrusted_optional_telemetry_values_are_omitted(monkeypatch):
     records = []
     monkeypatch.setattr(

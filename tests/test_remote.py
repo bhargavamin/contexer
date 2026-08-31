@@ -539,6 +539,26 @@ def test_401_triggers_one_refresh_and_retry(monkeypatch):
     assert fake.calls[1][1] == "new-tok"     # retry used the refreshed token
 
 
+def test_account_bound_attempt_pins_token_and_never_reactively_switches(monkeypatch):
+    """A proposal attempt must rediscover the account after auth expiry, not retry as whoever
+    happens to be logged into the same endpoint when the 401 arrives."""
+    fake = _seq_call(_http_error(401))
+    monkeypatch.setattr(remote, "_acall_tool", fake)
+    monkeypatch.setattr(
+        "contexer.auth.refresh_now",
+        lambda _profile: pytest.fail("pinned account-bound attempt must not swap credentials"),
+    )
+    profile = Profile(mode="team", endpoint="https://t/mcp", token="account-a-token")
+    store = RemoteStore(
+        "https://t/mcp", "account-a-token", profile=profile, reactive_refresh=False)
+
+    with pytest.raises(RemoteAuthError):
+        store.get_context()
+
+    assert store._token == "account-a-token"
+    assert len(fake.calls) == 1
+
+
 def test_401_without_profile_does_not_retry(monkeypatch):
     """Direct construction (no Profile) keeps the old behavior: 401 → RemoteAuthError, no refresh."""
     fake = _seq_call(_http_error(401))

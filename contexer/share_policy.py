@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import secrets
 import string
@@ -23,7 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from contexer import decision_observability, repo_key, revisions, sidecars, store
+from contexer import decision_observability, remote, repo_key, revisions, share, sidecars, store
+from contexer.config import Profile, load_profile
 
 
 SCHEMA_VERSION = 1
@@ -31,6 +33,7 @@ POLICY_MODE = "propose_approved"
 OUTBOX_CAP = store.MAX_ENTRIES
 ATTENTION_CAP = store.MAX_ENTRIES
 RECEIPT_LOG_CAP = 2_000
+_DRAINER_LEASE_SECONDS = 15 * 60
 
 RECEIPT_STATES = frozenset({
     "queued", "submitted", "already_pending", "unchanged", "attention", "baseline",
@@ -123,14 +126,26 @@ def _data_error(kind: str) -> SidecarDataError:
 
 
 def _emit(operation: str, outcome: OperationOutcome, started_ns: int, *,
-          intent: dict | None = None, queue_depth: int | None = None) -> None:
+          intent: dict | None = None, queue_depth: int | None = None,
+          candidate_id: str | None = None, replayed: bool | None = None) -> None:
     error_class = {
         "lock_busy": "lock",
         "corrupt_queue": "validation",
         "validation_error": "validation",
         "account_mismatch": "capability",
+        "unsupported_protocol": "capability",
+        "policy_mismatch": "validation",
         "repo_mismatch": "validation",
         "team_mismatch": "authorization",
+        "not_member": "authorization",
+        "not_authorized": "authorization",
+        "stale_head": "conflict",
+        "stale_intent": "conflict",
+        "rate_limited": "rate_limit",
+        "quota_exceeded": "rate_limit",
+        "trial_expired": "authorization",
+        "transient_error": "transport",
+        "transport_error": "transport",
     }.get(outcome.reason_code, "none")
     decision_observability.emit_decision_operation(
         operation,
@@ -143,8 +158,10 @@ def _emit(operation: str, outcome: OperationOutcome, started_ns: int, *,
         decision_id=(intent or {}).get("decision_id"),
         policy_generation=(intent or {}).get("policy_generation"),
         idempotency_key=(intent or {}).get("idempotency_key"),
+        candidate_id=candidate_id,
         attempt=(intent or {}).get("attempts"),
         queue_depth=queue_depth,
+        replayed=replayed,
     )
 
 
@@ -187,6 +204,8 @@ def proposal_attention_lock_path() -> Path:
 
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
+_DETACHED_DRAINER_GUARD = threading.Lock()
+_DETACHED_DRAINER_RUNNING = False
 
 
 def _local_lock(path: Path) -> threading.Lock:
@@ -225,9 +244,100 @@ def _sidecar_lock(path: Path, *, blocking: bool = True):
         local.release()
 
 
+def _read_drainer_claim(path: Path) -> dict | None:
+    try:
+        if path.stat().st_size > 1_024:
+            return {"invalid": True, "renewed_at": path.stat().st_mtime}
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        return {"invalid": True, "renewed_at": path.stat().st_mtime}
+    if not raw.strip():
+        return None
+    try:
+        claim = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"invalid": True, "renewed_at": path.stat().st_mtime}
+    if (not isinstance(claim, dict) or set(claim) != {"owner", "renewed_at"}
+            or not isinstance(claim.get("owner"), str)
+            or not isinstance(claim.get("renewed_at"), (int, float))
+            or isinstance(claim.get("renewed_at"), bool)):
+        return {"invalid": True, "renewed_at": path.stat().st_mtime}
+    try:
+        canonical_owner = str(uuid.UUID(claim["owner"]))
+    except (ValueError, AttributeError):
+        return {"invalid": True, "renewed_at": path.stat().st_mtime}
+    if claim["owner"].lower() != canonical_owner:
+        return {"invalid": True, "renewed_at": path.stat().st_mtime}
+    if float(claim["renewed_at"]) > time.time() + 60:
+        return {"invalid": True, "renewed_at": path.stat().st_mtime}
+    return claim
+
+
+def _write_drainer_claim(path: Path, claim: dict | None) -> None:
+    """Rewrite the lease inode while its short coordination flock is held."""
+    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
+    with open(path, "r+", encoding="utf-8") as handle:
+        handle.seek(0)
+        handle.truncate()
+        if claim is not None:
+            handle.write(json.dumps(claim, separators=(",", ":")))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _active_drainer_claim(claim: dict | None, now: float) -> bool:
+    if not claim:
+        return False
+    renewed = claim.get("renewed_at")
+    if not isinstance(renewed, (int, float)) or isinstance(renewed, bool):
+        return False
+    return now - float(renewed) < _DRAINER_LEASE_SECONDS
+
+
+@contextlib.contextmanager
 def proposal_drainer_lock(*, blocking: bool = False):
-    """Return the dedicated uploader lock; automatic callers use it non-blocking."""
-    return _sidecar_lock(proposal_drainer_lock_path(), blocking=blocking)
+    """Claim uploader ownership without holding a file lock across network work.
+
+    The durable lease is written while a short non-blocking flock is held, then the flock is
+    released before yielding.  Other processes observe the unexpired opaque claim and refuse to
+    upload.  A crashed worker self-heals after the bounded lease window.  This is deliberately a
+    lease context rather than a held sidecar lock: preview and submission must run with no store or
+    sidecar lock held.
+    """
+    path = proposal_drainer_lock_path()
+    owner = str(uuid.uuid4())
+    now = time.time()
+    with _sidecar_lock(path, blocking=blocking):
+        if _active_drainer_claim(_read_drainer_claim(path), now):
+            raise BlockingIOError("proposal drainer already claimed")
+        _write_drainer_claim(path, {"owner": owner, "renewed_at": now})
+    try:
+        yield owner
+    finally:
+        try:
+            with _sidecar_lock(path, blocking=True):
+                claim = _read_drainer_claim(path)
+                if isinstance(claim, dict) and claim.get("owner") == owner:
+                    _write_drainer_claim(path, None)
+        except (OSError, BlockingIOError):
+            pass
+
+
+def _renew_drainer_claim(owner: str) -> bool:
+    path = proposal_drainer_lock_path()
+    try:
+        with _sidecar_lock(path, blocking=False):
+            claim = _read_drainer_claim(path)
+            if not isinstance(claim, dict) or claim.get("owner") != owner:
+                return False
+            _write_drainer_claim(path, {"owner": owner, "renewed_at": time.time()})
+            return True
+    except (OSError, BlockingIOError):
+        return False
 
 
 def _text(value: object, field: str, *, maximum: int = _MAX_TOKEN) -> str:
@@ -652,6 +762,45 @@ def remove_intents(completed: list[dict]) -> int:
         return len(current) - len(kept)
 
 
+def _record_intent_retry(intent: dict, reason: str, error_class: str,
+                         diagnostic_id: str) -> None:
+    """Persist one closed retry reason without copying transport or SDK error text."""
+    if reason not in ERROR_CODES or error_class not in ERROR_CLASSES:
+        raise ValueError("invalid persisted retry")
+    key = (intent_key(intent), intent["idempotency_key"])
+    with _sidecar_lock(proposal_outbox_lock_path()):
+        current = read_outbox()
+        updated = []
+        for row in current:
+            if (intent_key(row), row["idempotency_key"]) != key:
+                updated.append(row)
+                continue
+            updated.append(parse_intent({
+                **row,
+                "attempts": row["attempts"] + 1,
+                "last_error_code": reason,
+                "last_error_class": error_class,
+                "diagnostic_id": diagnostic_id,
+            }))
+        if updated != current:
+            _write_json_list(proposal_outbox_path(), updated)
+
+
+def _pause_policy(repo_path: str, generation: str, reason: str) -> bool:
+    """CAS-like pause of the policy generation that produced an unsafe destination intent."""
+    if reason not in ERROR_CODES:
+        raise ValueError("invalid pause reason")
+    with _sidecar_lock(policy_lock_path(repo_path)):
+        policy = load_policy(repo_path)
+        if policy is None or policy["policy_generation"] != generation:
+            return False
+        if policy.get("paused_reason") == reason:
+            return True
+        normalized = parse_policy({**policy, "paused_reason": reason})
+        store.atomic_write(policy_path(repo_path), json.dumps(normalized, indent=2))
+        return True
+
+
 def read_receipts() -> list[dict]:
     path = proposal_receipts_path()
     try:
@@ -752,6 +901,10 @@ def _emit_scan(outcome: ScanOutcome, started_ns: int) -> None:
 
 def _finish_scan(outcome: ScanOutcome, started_ns: int) -> ScanOutcome:
     _emit_scan(outcome, started_ns)
+    if outcome.result == "queued" and outcome.queued:
+        # Thread creation is the only prompt-path work here. Capability discovery, preview, and
+        # submission happen in the daemon after this committed local append has returned.
+        start_detached_drainer()
     return outcome
 
 
@@ -892,6 +1045,450 @@ def append_attention(item: dict) -> None:
             raise RuntimeError("proposal attention queue is full")
         records.append(normalized)
         _write_json_list(proposal_attention_path(), records)
+
+
+_PAUSING_DRAIN_REASONS = frozenset({
+    "account_mismatch", "policy_mismatch", "repo_mismatch", "team_mismatch",
+    "not_member", "not_authorized", "trial_expired",
+})
+_SUCCESSFUL_DRAIN_STATES = frozenset({"submitted", "already_pending", "unchanged"})
+_CONFLICT_SUBMISSION_STATES = frozenset({"heads_changed", "needs_rebase", "stale_head"})
+
+
+def _recorded_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _finish_drain(outcome: OperationOutcome, started_ns: int, intent: dict | None, *,
+                  queue_depth: int | None = None, candidate_id: str | None = None,
+                  replayed: bool | None = None) -> OperationOutcome:
+    _emit(
+        "drain", outcome, started_ns, intent=intent, queue_depth=queue_depth,
+        candidate_id=candidate_id, replayed=replayed,
+    )
+    return outcome
+
+
+def _receipt_for_intent(intent: dict, state: str, *, candidate_id: str | None = None,
+                        reason: str | None = None) -> dict:
+    return parse_receipt({
+        "schema_version": SCHEMA_VERSION,
+        "policy_generation": intent["policy_generation"],
+        "endpoint": intent["endpoint"],
+        "account_fingerprint": intent["account_fingerprint"],
+        "repo_key": intent["repo_key"],
+        "team_id": intent["team_id"],
+        "decision_id": intent["decision_id"],
+        "revision_id": intent["revision_id"],
+        "state": state,
+        "candidate_id": candidate_id,
+        "reason": reason,
+        "recorded_at": _recorded_at(),
+    })
+
+
+def _attention_for_intent(intent: dict, reason: str, error_class: str,
+                          diagnostic_id: str) -> dict:
+    return parse_attention({
+        "schema_version": SCHEMA_VERSION,
+        "idempotency_key": intent["idempotency_key"],
+        "policy_generation": intent["policy_generation"],
+        "decision_id": intent["decision_id"],
+        "revision_id": intent["revision_id"],
+        "repo_path": intent["repo_path"],
+        "repo_key": intent["repo_key"],
+        "endpoint": intent["endpoint"],
+        "account_fingerprint": intent["account_fingerprint"],
+        "team_id": intent["team_id"],
+        "reason": reason,
+        "moved_at": _recorded_at(),
+        "last_error_code": reason,
+        "last_error_class": error_class,
+        "diagnostic_id": diagnostic_id,
+    })
+
+
+def _move_intent_to_attention(intent: dict, reason: str, error_class: str, *,
+                              result: str = "attention",
+                              owner: str | None = None) -> OperationOutcome:
+    """Durably strand a terminal intent; its receipt always precedes queue removal."""
+    if owner is not None and not _renew_drainer_claim(owner):
+        return OperationOutcome("no_op", "lock_busy")
+    diagnostic_id = _diagnostic_id()
+    try:
+        append_attention(_attention_for_intent(intent, reason, error_class, diagnostic_id))
+        if reason in _PAUSING_DRAIN_REASONS:
+            _pause_policy(intent["repo_path"], intent["policy_generation"], reason)
+        append_receipt(_receipt_for_intent(intent, "attention", reason=reason))
+        remove_intents([intent])
+    except SidecarDataError as exc:
+        return OperationOutcome("failure", "corrupt_queue", exc.diagnostic_id)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return OperationOutcome("failure", "validation_error", diagnostic_id)
+    return OperationOutcome(result, reason, diagnostic_id)
+
+
+def _keep_intent_for_retry(intent: dict, reason: str, error_class: str, *,
+                           owner: str | None = None) -> OperationOutcome:
+    if owner is not None and not _renew_drainer_claim(owner):
+        return OperationOutcome("no_op", "lock_busy")
+    diagnostic_id = _diagnostic_id()
+    try:
+        _record_intent_retry(intent, reason, error_class, diagnostic_id)
+    except SidecarDataError as exc:
+        return OperationOutcome("failure", "corrupt_queue", exc.diagnostic_id)
+    except (OSError, ValueError, TypeError):
+        return OperationOutcome("failure", "validation_error", diagnostic_id)
+    return OperationOutcome("retry", reason, diagnostic_id)
+
+
+def _current_terminal_receipt(intent: dict) -> dict | None:
+    with _sidecar_lock(proposal_receipts_lock_path()):
+        receipt = fold_receipts(read_receipts()).get(receipt_key(intent))
+    if receipt is not None and receipt.get("state") in TERMINAL_RECEIPT_STATES:
+        return receipt
+    return None
+
+
+def _load_bound_policy(intent: dict) -> dict | None:
+    with _sidecar_lock(policy_lock_path(intent["repo_path"])):
+        policy = load_policy(intent["repo_path"])
+    if policy is None or not destination_matches(policy, intent) or policy.get("paused_reason"):
+        return None
+    return policy
+
+
+def _fresh_local_projection(intent: dict, policy: dict, redact_on: bool) -> tuple[dict | None, str]:
+    """Re-read and strictly bind the current approved revision before any network call."""
+    origin = store.run_git(intent["repo_path"], "remote", "get-url", "origin")
+    current_repo_key = repo_key.canonical_repo_key(origin)
+    if current_repo_key != intent["repo_key"] or current_repo_key != policy["repo_key"]:
+        return None, "repo_mismatch"
+    entries = store.load(intent["repo_path"]).get("entries", [])[:store.MAX_ENTRIES]
+    entry = next((row for row in entries if isinstance(row, dict)
+                  and row.get("id") == intent["decision_id"]), None)
+    if entry is None:
+        return None, "stale_intent"
+    eligible = eligibility(
+        entry, policy, {}, repo_key=current_repo_key, is_global=False)
+    if (not eligible.eligible or eligible.decision_id != intent["decision_id"]
+            or eligible.revision_id != intent["revision_id"]):
+        return None, "stale_intent"
+    decision = store.get_shareable(
+        intent["repo_path"], intent["decision_id"], redact_on=redact_on)
+    if (decision is None or decision.get("id") != intent["decision_id"]
+            or decision.get("revision_id") != intent["revision_id"]
+            or decision.get("status") != "approved"):
+        return None, "stale_intent"
+    return decision, "none"
+
+
+def _remote_error_outcome(intent: dict, exc: remote.RemoteStoreError, *,
+                          owner: str) -> OperationOutcome:
+    if not share.is_transient_reconciliation_refusal(exc):
+        return _move_intent_to_attention(
+            intent, "validation_error", "validation", result="failure", owner=owner)
+    if isinstance(exc, remote.RemoteRateLimitError):
+        return _keep_intent_for_retry(
+            intent, "rate_limited", "rate_limit", owner=owner)
+    if isinstance(exc, remote.RemoteUnavailableError):
+        return _keep_intent_for_retry(
+            intent, "transport_error", "transport", owner=owner)
+    return _keep_intent_for_retry(
+        intent, "transient_error", "transport", owner=owner)
+
+
+def _submit_with_fresh_preview(
+        intent: dict, decision: dict, remote_store: remote.RemoteStore,
+        target: remote.RemoteTeam, *, redact_on: bool,
+        owner: str) -> tuple[remote.TeamSubmissionResult | None, OperationOutcome | None]:
+    for attempt in range(2):
+        proposed = share.atomic_decision_kwargs(
+            decision, intent["repo_key"], redact_on=redact_on)
+        if not _renew_drainer_claim(owner):
+            return None, OperationOutcome("no_op", "lock_busy")
+        try:
+            preview = remote_store.preview_decision_reconciliation(
+                intent["decision_id"], intent["team_id"],
+                **proposed,
+            )
+        except remote.RemoteStoreError as exc:
+            return None, _remote_error_outcome(intent, exc, owner=owner)
+        if not _renew_drainer_claim(owner):
+            return None, OperationOutcome("no_op", "lock_busy")
+        if preview.team.id != intent["team_id"]:
+            return None, _move_intent_to_attention(
+                intent, "team_mismatch", "authorization", owner=owner)
+        # Preview is a network boundary during which a local review action can supersede or
+        # withdraw this revision. Re-read before sending; if projection metadata changed without
+        # a revision change, obtain a new preview for that exact body rather than submitting a
+        # payload the server never previewed.
+        current_policy = _load_bound_policy(intent)
+        if current_policy is None:
+            return None, _move_intent_to_attention(
+                intent, "policy_mismatch", "validation", owner=owner)
+        current, local_reason = _fresh_local_projection(
+            intent, current_policy, redact_on)
+        if current is None:
+            return None, _move_intent_to_attention(
+                intent, local_reason,
+                "validation" if local_reason == "repo_mismatch" else "conflict",
+                owner=owner)
+        current_proposed = share.atomic_decision_kwargs(
+            current, intent["repo_key"], redact_on=redact_on)
+        if current_proposed != proposed:
+            if attempt == 1:
+                return None, _move_intent_to_attention(
+                    intent, "stale_intent", "conflict", owner=owner)
+            decision = current
+            continue
+        operation = share.atomic_reconciliation_operation(
+            current, intent["repo_key"], target, preview, intent["idempotency_key"],
+            redact_on=redact_on,
+        )
+        if not _renew_drainer_claim(owner):
+            return None, OperationOutcome("no_op", "lock_busy")
+        if _load_bound_policy(intent) is None:
+            return None, _move_intent_to_attention(
+                intent, "policy_mismatch", "validation", owner=owner)
+        try:
+            result = share.call_atomic_submission(remote_store, operation)
+        except remote.RemoteStoreError as exc:
+            return None, _remote_error_outcome(intent, exc, owner=owner)
+        if not _renew_drainer_claim(owner):
+            return None, OperationOutcome("no_op", "lock_busy")
+        if result.team.id != intent["team_id"]:
+            return None, _move_intent_to_attention(
+                intent, "team_mismatch", "authorization", owner=owner)
+        if result.status not in _CONFLICT_SUBMISSION_STATES:
+            return result, None
+        if attempt == 1:
+            return None, _move_intent_to_attention(
+                intent, "stale_head", "conflict", result="conflict", owner=owner)
+    raise AssertionError("bounded reconciliation retry exhausted")
+
+
+def _drain_intent(intent: dict, profile: Profile, owner: str, *,
+                  queue_depth: int) -> OperationOutcome:
+    started = time.monotonic_ns()
+    try:
+        terminal = _current_terminal_receipt(intent)
+        if terminal is not None:
+            remove_intents([intent])
+            return _finish_drain(
+                OperationOutcome("no_op", "duplicate_receipt"), started, intent,
+                queue_depth=queue_depth,
+            )
+        policy = _load_bound_policy(intent)
+        if policy is None:
+            outcome = _move_intent_to_attention(
+                intent, "policy_mismatch", "validation", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+        if profile.endpoint != intent["endpoint"]:
+            outcome = _move_intent_to_attention(
+                intent, "policy_mismatch", "validation", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+        decision, local_reason = _fresh_local_projection(
+            intent, policy, profile.redact_secrets)
+        if decision is None:
+            outcome = _move_intent_to_attention(
+                intent, local_reason,
+                "validation" if local_reason == "repo_mismatch" else "conflict",
+                owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+        # Pin the credential that will be account-fingerprint checked below. On a transport 401,
+        # keep the intent and reconstruct on the next drain; never refresh mid-attempt to a
+        # concurrently selected same-endpoint account after validation.
+        remote_store = remote.RemoteStore.from_profile(profile, reactive_refresh=False)
+        if remote_store is None:
+            outcome = _keep_intent_for_retry(
+                intent, "transient_error", "transport", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+
+        if not _renew_drainer_claim(owner):
+            return _finish_drain(
+                OperationOutcome("no_op", "lock_busy"), started, intent,
+                queue_depth=queue_depth,
+            )
+        try:
+            capabilities = remote_store.get_capabilities()
+        except remote.RemoteStoreError as exc:
+            outcome = _remote_error_outcome(intent, exc, owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+        if not _renew_drainer_claim(owner):
+            return _finish_drain(
+                OperationOutcome("no_op", "lock_busy"), started, intent,
+                queue_depth=queue_depth,
+            )
+        automatic = capabilities.automatic_decision_proposal
+        protocol = capabilities.decision_reconciliation
+        if (automatic is None or automatic.version != 1 or protocol is None
+                or protocol.version < 1 or not protocol.atomic_submit or not protocol.preview):
+            return _finish_drain(
+                OperationOutcome("refused", "unsupported_protocol"), started, intent,
+                queue_depth=queue_depth,
+            )
+        if capabilities.account_fingerprint != intent["account_fingerprint"]:
+            outcome = _move_intent_to_attention(
+                intent, "account_mismatch", "capability", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+
+        if not _renew_drainer_claim(owner):
+            return _finish_drain(
+                OperationOutcome("no_op", "lock_busy"), started, intent,
+                queue_depth=queue_depth,
+            )
+        try:
+            teams = remote_store.list_teams()
+        except remote.RemoteStoreError as exc:
+            outcome = _remote_error_outcome(intent, exc, owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+        if not _renew_drainer_claim(owner):
+            return _finish_drain(
+                OperationOutcome("no_op", "lock_busy"), started, intent,
+                queue_depth=queue_depth,
+            )
+        target = next((team for team in teams if team.id == intent["team_id"]), None)
+        if target is None:
+            outcome = _move_intent_to_attention(
+                intent, "not_member", "authorization", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+
+        result, outcome = _submit_with_fresh_preview(
+            intent, decision, remote_store, target,
+            redact_on=profile.redact_secrets, owner=owner)
+        if outcome is not None:
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+        assert result is not None
+        status = result.status or ""
+        if status in _SUCCESSFUL_DRAIN_STATES:
+            candidate_id = result.candidate_id if status != "unchanged" else None
+            try:
+                if not _renew_drainer_claim(owner):
+                    return _finish_drain(
+                        OperationOutcome("no_op", "lock_busy"), started, intent,
+                        queue_depth=queue_depth,
+                    )
+                append_receipt(_receipt_for_intent(
+                    intent, status, candidate_id=candidate_id))
+                remove_intents([intent])
+            except SidecarDataError as exc:
+                outcome = OperationOutcome("failure", "corrupt_queue", exc.diagnostic_id)
+            except (OSError, ValueError, TypeError):
+                outcome = OperationOutcome("failure", "validation_error", _diagnostic_id())
+            else:
+                outcome = OperationOutcome(status, "none")
+            return _finish_drain(
+                outcome, started, intent, queue_depth=queue_depth,
+                candidate_id=candidate_id, replayed=result.replayed,
+            )
+        status_reason = {
+            "account_mismatch": ("account_mismatch", "capability", "attention"),
+            "policy_mismatch": ("policy_mismatch", "validation", "attention"),
+            "repo_mismatch": ("repo_mismatch", "validation", "attention"),
+            "team_mismatch": ("team_mismatch", "authorization", "attention"),
+            "not_member": ("not_member", "authorization", "attention"),
+            "not_authorized": ("not_authorized", "authorization", "attention"),
+            "not_authored_by_caller": ("not_authorized", "authorization", "attention"),
+            "invalid_team": ("team_mismatch", "authorization", "attention"),
+            "quota_exceeded": ("quota_exceeded", "rate_limit", "attention"),
+            "trial_expired": ("trial_expired", "authorization", "attention"),
+        }.get(status)
+        if status_reason is not None:
+            reason, error_class, result_name = status_reason
+            outcome = _move_intent_to_attention(
+                intent, reason, error_class, result=result_name, owner=owner)
+        elif status == "rate_limited":
+            outcome = _keep_intent_for_retry(
+                intent, "rate_limited", "rate_limit", owner=owner)
+        elif status == "unsupported_protocol":
+            outcome = OperationOutcome("refused", "unsupported_protocol")
+        else:
+            outcome = _move_intent_to_attention(
+                intent, "validation_error", "validation", result="failure", owner=owner)
+        return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
+    except SidecarDataError as exc:
+        return _finish_drain(
+            OperationOutcome("failure", "corrupt_queue", exc.diagnostic_id),
+            started, intent, queue_depth=queue_depth,
+        )
+    except Exception:
+        return _finish_drain(
+            OperationOutcome("failure", "validation_error", _diagnostic_id()),
+            started, intent, queue_depth=queue_depth,
+        )
+
+
+def drain_once(profile: Profile | None = None) -> list[OperationOutcome]:
+    """Drain one stable queue snapshot under a non-blocking durable uploader lease."""
+    started = time.monotonic_ns()
+    try:
+        with proposal_drainer_lock(blocking=False) as owner:
+            try:
+                with _sidecar_lock(proposal_outbox_lock_path()):
+                    intents = fold_intents(read_outbox())
+            except SidecarDataError as exc:
+                outcome = OperationOutcome("failure", "corrupt_queue", exc.diagnostic_id)
+                _finish_drain(outcome, started, None)
+                return [outcome]
+            if not intents:
+                return []
+            try:
+                current_profile = profile or load_profile()
+            except Exception:
+                outcome = OperationOutcome("failure", "validation_error", _diagnostic_id())
+                _finish_drain(outcome, started, intents[0], queue_depth=len(intents))
+                return [outcome]
+            outcomes = []
+            for intent in intents:
+                outcome = _drain_intent(
+                    intent, current_profile, owner, queue_depth=len(intents))
+                outcomes.append(outcome)
+                if (outcome.result in {"retry", "refused"}
+                        or outcome.reason_code in _PAUSING_DRAIN_REASONS | {"lock_busy"}):
+                    break
+            return outcomes
+    except BlockingIOError:
+        outcome = OperationOutcome("no_op", "lock_busy")
+        _finish_drain(outcome, started, None)
+        return [outcome]
+    except (OSError, SidecarDataError) as exc:
+        diagnostic = exc.diagnostic_id if isinstance(exc, SidecarDataError) else _diagnostic_id()
+        outcome = OperationOutcome(
+            "failure", "corrupt_queue" if isinstance(exc, SidecarDataError) else "validation_error",
+            diagnostic,
+        )
+        _finish_drain(outcome, started, None)
+        return [outcome]
+
+
+def start_detached_drainer(profile: Profile | None = None) -> bool:
+    """Start a daemon one-shot worker without performing network I/O on the caller's path."""
+    global _DETACHED_DRAINER_RUNNING
+    with _DETACHED_DRAINER_GUARD:
+        if _DETACHED_DRAINER_RUNNING:
+            return False
+        _DETACHED_DRAINER_RUNNING = True
+
+    def run() -> None:
+        global _DETACHED_DRAINER_RUNNING
+        try:
+            drain_once(profile)
+        finally:
+            with _DETACHED_DRAINER_GUARD:
+                _DETACHED_DRAINER_RUNNING = False
+
+    try:
+        threading.Thread(
+            target=run,
+            name="contexer-proposal-drainer",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _DETACHED_DRAINER_GUARD:
+            _DETACHED_DRAINER_RUNNING = False
+        return False
+    return True
 
 
 def status_snapshot(policy: dict | None, intents: list[dict], receipts: list[dict],

@@ -39,8 +39,15 @@ _OPERATIONS = {
         "decision_proposal.enqueue",
         "decisionProposalEnqueue",
     ),
+    "drain": (
+        "decision_proposal.drain",
+        "decisionProposalDrain",
+    ),
 }
-_RESULTS = {"success", "queued", "skipped", "no_op", "refused", "failure"}
+_RESULTS = {
+    "success", "queued", "skipped", "no_op", "refused", "failure",
+    "submitted", "already_pending", "unchanged", "attention", "conflict", "retry",
+}
 _REASON_CODES = {
     "none",
     "unsupported_protocol",
@@ -59,6 +66,11 @@ _REASON_CODES = {
     "policy_disabled",
     "cancelled",
     "rate_limited",
+    "quota_exceeded",
+    "trial_expired",
+    "stale_head",
+    "stale_intent",
+    "transient_error",
     "transport_error",
     "validation_error",
 }
@@ -71,6 +83,7 @@ _ERROR_CLASSES = {
     "rate_limit",
     "transport",
     "validation",
+    "telemetry",
 }
 
 _PENDING: queue.Queue[str] = queue.Queue(maxsize=_MAX_PENDING_RECORD_SETS)
@@ -131,6 +144,7 @@ def emit_decision_operation(
     idempotency_key: str | None = None,
     attempt: int | None = None,
     queue_depth: int | None = None,
+    replayed: bool | None = None,
 ) -> None:
     """Best-effort enqueue of one correlated span and terminal structured-log event.
 
@@ -201,6 +215,9 @@ def emit_decision_operation(
             if type(value) is int and 0 <= value <= 1_000_000:
                 span_attributes[f"contexer.{span_field}"] = value
                 log_fields[log_field] = value
+        if type(replayed) is bool:
+            span_attributes["contexer.replayed"] = replayed
+            log_fields["replayed"] = replayed
 
         _enqueue_records((
             {

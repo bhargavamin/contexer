@@ -1,15 +1,21 @@
 """Schema, security, and concurrency contracts for remembered proposal sidecars."""
+import contextlib
 import json
+import os
 import re
 import threading
+import time
+import uuid
 
 import pytest
 
-from contexer import revisions, share_policy, store
+from contexer import remote, revisions, share_policy, store
+from contexer.config import Profile
 
 
 NOW = "2026-08-30T12:00:00Z"
 FINGERPRINT = "acctfp_v1_7M4Q2PX9C6N8"
+_REAL_START_DETACHED_DRAINER = share_policy.start_detached_drainer
 
 
 @pytest.fixture(autouse=True)
@@ -494,6 +500,26 @@ def test_scanner_queues_human_approved_revision_and_receipt_without_prose(
     assert "SENTINEL_EVIDENCE" not in encoded
 
 
+def test_scanner_starts_detached_only_after_intent_and_receipt_are_durable(
+        tmp_repo, monkeypatch):
+    entry = _entry(revision_id="revision-human")
+    _activate_scanner(tmp_repo, monkeypatch, [entry])
+    observed = []
+
+    def start(_profile=None):
+        observed.append((share_policy.read_outbox(), share_policy.read_receipts()))
+        return True
+
+    monkeypatch.setattr(share_policy, "start_detached_drainer", start)
+
+    outcome = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert outcome.result == "queued"
+    assert len(observed) == 1
+    assert len(observed[0][0]) == 1
+    assert observed[0][1][-1]["state"] == "queued"
+
+
 def test_scanner_is_idempotent_and_heals_missing_queued_receipt(tmp_repo, monkeypatch):
     entry = _entry(revision_id="revision-human")
     _activate_scanner(tmp_repo, monkeypatch, [entry])
@@ -627,3 +653,437 @@ def test_scanner_never_acquires_decision_store_lock(tmp_repo, monkeypatch):
         store, "store_lock", lambda *_args, **_kwargs: pytest.fail("store lock must not run"))
 
     assert share_policy.scan_and_enqueue(tmp_repo).result == "queued"
+
+
+class _ProposalRemote:
+    def __init__(self, *, automatic=True, fingerprint=FINGERPRINT,
+                 atomic=True, statuses=("submitted",), member=True):
+        self.capabilities = remote.ServerCapabilities(
+            decision_reconciliation=remote.DecisionReconciliationCapabilities(
+                version=1, atomic_submit=atomic, preview=atomic, three_way_merge=True),
+            automatic_decision_proposal=(
+                remote.AutomaticDecisionProposalCapabilities(version=1)
+                if automatic else None
+            ),
+            account_fingerprint=fingerprint,
+        )
+        self.statuses = list(statuses)
+        self.teams = [remote.RemoteTeam("team-1", "Platform", "member")] if member else []
+        self.list_calls = 0
+        self.preview_calls = []
+        self.submit_calls = []
+
+    def get_capabilities(self):
+        return self.capabilities
+
+    def list_teams(self):
+        self.list_calls += 1
+        return self.teams
+
+    def preview_decision_reconciliation(self, decision_id, team_id, **decision):
+        self.preview_calls.append((decision_id, team_id, decision))
+        attempt = len(self.preview_calls)
+        return remote.DecisionReconciliationPreview(
+            personal_head=f"personal-{attempt}",
+            team_head=f"team-{attempt}",
+            pending_candidate_id=None,
+            state="ready",
+            operation="submit",
+            fields=[],
+            available_actions=["submit"],
+            team=remote.RemoteTeam(team_id, "Platform", "member"),
+        )
+
+    def submit_team_decision(self, decision_id, revision_id, team_id, **kwargs):
+        self.submit_calls.append((decision_id, revision_id, team_id, kwargs))
+        status = self.statuses.pop(0)
+        return remote.TeamSubmissionResult(
+            status=status,
+            kind="update",
+            personal_head="personal-result",
+            team_head="team-result",
+            candidate_id=("candidate-1" if status in {"submitted", "already_pending"} else None),
+            revision_id=revision_id,
+            replayed=status == "already_pending",
+            team=remote.RemoteTeam(team_id, "Platform", "member"),
+        )
+
+
+def _ready_drain(tmp_repo, monkeypatch, remote_store):
+    policy = _policy(tmp_repo, include_existing=True)
+    share_policy.save_policy(tmp_repo, policy)
+    intent = _intent(tmp_repo)
+    assert share_policy.enqueue_intent(intent).result == "queued"
+    share_policy.append_receipt(share_policy.queued_receipt(intent))
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    decision = {
+        "id": intent["decision_id"],
+        "revision_id": intent["revision_id"],
+        "type": "decision",
+        "content": f"Never expose {secret}",
+        "confidence": 100,
+        "evidence": [f"Observed {secret}"],
+        "source": "human",
+        "title": f"Protect {secret}",
+        "source_files": ["config.py"],
+        "status": "approved",
+    }
+    monkeypatch.setattr(
+        share_policy, "_fresh_local_projection",
+        lambda *_args, **_kwargs: (decision, "none"),
+    )
+    monkeypatch.setattr(
+        share_policy.remote.RemoteStore,
+        "from_profile",
+        staticmethod(lambda _profile, **kwargs: (
+            remote_store if kwargs == {"reactive_refresh": False}
+            else pytest.fail("automatic drainer must pin the validated credential")
+        )),
+    )
+    profile = Profile(
+        mode="team", endpoint=policy["endpoint"], token="test-token", redact_secrets=True)
+    return intent, policy, profile, secret
+
+
+def test_drainer_uses_fresh_preview_redacts_and_receipts_before_removal(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    intent, _policy_row, profile, secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    events = []
+    real_append = share_policy.append_receipt
+    real_remove = share_policy.remove_intents
+    monkeypatch.setattr(
+        share_policy, "append_receipt",
+        lambda receipt, **kwargs: events.append(("receipt", receipt["state"]))
+        or real_append(receipt, **kwargs),
+    )
+    monkeypatch.setattr(
+        share_policy, "remove_intents",
+        lambda rows: events.append(("remove", rows[0]["idempotency_key"]))
+        or real_remove(rows),
+    )
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes == [share_policy.OperationOutcome("submitted", "none")]
+    assert events[-2:] == [("receipt", "submitted"), ("remove", intent["idempotency_key"])]
+    assert share_policy.read_outbox() == []
+    assert share_policy.read_receipts()[-1]["state"] == "submitted"
+    assert len(remote_store.preview_calls) == len(remote_store.submit_calls) == 1
+    encoded = json.dumps({
+        "preview": remote_store.preview_calls,
+        "submit": remote_store.submit_calls,
+    })
+    assert secret not in encoded
+    assert "[REDACTED:aws_key]" in encoded
+
+
+def test_drainer_telemetry_never_receives_destination_or_decision_prose(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    intent, policy, profile, secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    calls = []
+    monkeypatch.setattr(
+        share_policy.decision_observability,
+        "emit_decision_operation",
+        lambda operation, **fields: calls.append((operation, fields)),
+    )
+
+    assert share_policy.drain_once(profile)[0].result == "submitted"
+
+    drain_calls = [fields for operation, fields in calls if operation == "drain"]
+    assert len(drain_calls) == 1
+    encoded = json.dumps(drain_calls)
+    for sensitive in (
+        secret, policy["endpoint"], policy["account_fingerprint"], policy["repo_key"],
+        intent["repo_path"], "Platform",
+    ):
+        assert sensitive not in encoded
+
+
+def test_drainer_recovers_receipt_before_removal_crash_without_resubmitting(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    intent, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    share_policy.append_receipt(share_policy._receipt_for_intent(
+        intent, "submitted", candidate_id="candidate-crash"))
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes == [share_policy.OperationOutcome("no_op", "duplicate_receipt")]
+    assert share_policy.read_outbox() == []
+    assert not remote_store.preview_calls and not remote_store.submit_calls
+
+
+def test_drainer_refreshes_preview_once_after_head_conflict(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote(statuses=("heads_changed", "already_pending"))
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes == [share_policy.OperationOutcome("already_pending", "none")]
+    assert len(remote_store.preview_calls) == len(remote_store.submit_calls) == 2
+    assert remote_store.submit_calls[0][3]["expected_personal_head"] == "personal-1"
+    assert remote_store.submit_calls[1][3]["expected_personal_head"] == "personal-2"
+    assert remote_store.submit_calls[0][3]["idempotency_key"] == \
+        remote_store.submit_calls[1][3]["idempotency_key"]
+
+
+@pytest.mark.parametrize("automatic,atomic", [(False, True), (True, False)])
+def test_drainer_refuses_legacy_capabilities_without_wire_submission(
+        tmp_repo, monkeypatch, automatic, atomic):
+    remote_store = _ProposalRemote(automatic=automatic, atomic=atomic)
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes == [share_policy.OperationOutcome("refused", "unsupported_protocol")]
+    assert not remote_store.preview_calls and not remote_store.submit_calls
+    assert len(share_policy.read_outbox()) == 1
+
+
+def test_drainer_account_mismatch_moves_attention_and_pauses(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote(fingerprint="acctfp_v1_9Z8Y7X6W5V4U")
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "account_mismatch"
+    assert not remote_store.preview_calls and not remote_store.submit_calls
+    assert share_policy.read_outbox() == []
+    assert share_policy.read_attention()[0]["reason"] == "account_mismatch"
+    assert share_policy.read_receipts()[-1]["state"] == "attention"
+    assert share_policy.load_policy(tmp_repo)["paused_reason"] == "account_mismatch"
+
+
+def test_drainer_refreshes_membership_and_refuses_removed_target(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote(member=False)
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert remote_store.list_calls == 1
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "not_member"
+    assert not remote_store.preview_calls and not remote_store.submit_calls
+    assert share_policy.load_policy(tmp_repo)["paused_reason"] == "not_member"
+
+
+def test_drainer_transient_failure_keeps_stable_intent_and_closed_error(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    intent, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    monkeypatch.setattr(
+        remote_store,
+        "get_capabilities",
+        lambda: (_ for _ in ()).throw(remote.RemoteUnavailableError("SENTINEL_SECRET_ERROR")),
+    )
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "retry"
+    assert outcomes[0].reason_code == "transport_error"
+    queued = share_policy.read_outbox()
+    assert queued[0]["idempotency_key"] == intent["idempotency_key"]
+    assert queued[0]["attempts"] == 1
+    assert queued[0]["last_error_code"] == "transport_error"
+    assert queued[0]["last_error_class"] == "transport"
+    assert "SENTINEL" not in json.dumps(queued)
+
+
+def test_transport_401_after_fingerprint_check_never_submits_as_refreshed_account(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    intent, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    expired = remote.RemoteAuthError("transport 401")
+    expired._transport_auth = True
+    monkeypatch.setattr(
+        remote_store, "list_teams", lambda: (_ for _ in ()).throw(expired))
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "retry"
+    assert outcomes[0].reason_code == "transient_error"
+    assert not remote_store.preview_calls and not remote_store.submit_calls
+    queued = share_policy.read_outbox()
+    assert queued[0]["idempotency_key"] == intent["idempotency_key"]
+    assert queued[0]["attempts"] == 1
+
+
+def test_drainer_marks_superseded_revision_stale_before_remote_creation(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    monkeypatch.setattr(
+        share_policy, "_fresh_local_projection", lambda *_args, **_kwargs: (None, "stale_intent"))
+    monkeypatch.setattr(
+        share_policy.remote.RemoteStore,
+        "from_profile",
+        staticmethod(lambda _profile: pytest.fail("remote must not be created")),
+    )
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "stale_intent"
+    assert share_policy.read_outbox() == []
+
+
+def test_drainer_rechecks_revision_after_preview_before_submit(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    stable_projection = share_policy._fresh_local_projection
+    reads = 0
+
+    def superseded_during_preview(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return stable_projection(*args, **kwargs)
+        return None, "stale_intent"
+
+    monkeypatch.setattr(share_policy, "_fresh_local_projection", superseded_during_preview)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "stale_intent"
+    assert len(remote_store.preview_calls) == 1
+    assert not remote_store.submit_calls
+
+
+def test_drainer_rechecks_policy_after_preview_before_submit(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    intent, policy, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    original_preview = remote_store.preview_decision_reconciliation
+
+    def rebind_during_preview(*args, **kwargs):
+        preview = original_preview(*args, **kwargs)
+        share_policy.save_policy(intent["repo_path"], {
+            **policy,
+            "policy_generation": "policy-rebound",
+            "team_id": "team-rebound",
+        })
+        return preview
+
+    monkeypatch.setattr(remote_store, "preview_decision_reconciliation", rebind_during_preview)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "policy_mismatch"
+    assert not remote_store.submit_calls
+    assert share_policy.load_policy(tmp_repo)["policy_generation"] == "policy-rebound"
+
+
+def test_expired_worker_abstains_after_submit_lease_takeover(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    original_submit = remote_store.submit_team_decision
+
+    def take_over_during_submit(*args, **kwargs):
+        result = original_submit(*args, **kwargs)
+        path = share_policy.proposal_drainer_lock_path()
+        with share_policy._sidecar_lock(path):
+            share_policy._write_drainer_claim(path, {
+                "owner": str(uuid.uuid4()),
+                "renewed_at": time.time(),
+            })
+        return result
+
+    monkeypatch.setattr(remote_store, "submit_team_decision", take_over_during_submit)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes == [share_policy.OperationOutcome("no_op", "lock_busy")]
+    assert len(share_policy.read_outbox()) == 1
+    assert [row["state"] for row in share_policy.read_receipts()] == ["queued"]
+    assert share_policy.read_attention() == []
+
+
+def test_drainer_network_runs_outside_every_sidecar_lock(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    real_lock = share_policy._sidecar_lock
+    depth = 0
+
+    @contextlib.contextmanager
+    def tracked_lock(*args, **kwargs):
+        nonlocal depth
+        with real_lock(*args, **kwargs):
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    monkeypatch.setattr(share_policy, "_sidecar_lock", tracked_lock)
+    for name in (
+        "get_capabilities", "list_teams", "preview_decision_reconciliation",
+        "submit_team_decision",
+    ):
+        original = getattr(remote_store, name)
+
+        def checked(*args, _original=original, **kwargs):
+            assert depth == 0
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(remote_store, name, checked)
+
+    assert share_policy.drain_once(profile)[0].result == "submitted"
+
+
+def test_drainer_lease_refuses_second_worker_without_network(tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote()
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+    with share_policy.proposal_drainer_lock(blocking=False):
+        outcomes = share_policy.drain_once(profile)
+    assert outcomes == [share_policy.OperationOutcome("no_op", "lock_busy")]
+    assert not remote_store.preview_calls and not remote_store.submit_calls
+
+
+def test_malformed_drainer_claim_expires_by_file_age(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share_policy, "_DRAINER_LEASE_SECONDS", 1)
+    path = share_policy.proposal_drainer_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"owner":"partial"}', encoding="utf-8")
+    stale = time.time() - 2
+    os.utime(path, (stale, stale))
+
+    with share_policy.proposal_drainer_lock(blocking=False) as owner:
+        assert str(uuid.UUID(owner)) == owner
+
+
+def test_detached_start_returns_before_worker_finishes(tmp_repo, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked_drain(_profile=None):
+        entered.set()
+        release.wait(timeout=2)
+        finished.set()
+        return []
+
+    monkeypatch.setattr(share_policy, "drain_once", blocked_drain)
+    assert _REAL_START_DETACHED_DRAINER() is True
+    assert entered.wait(timeout=1)
+    assert _REAL_START_DETACHED_DRAINER() is False
+    release.set()
+    assert finished.wait(timeout=1)

@@ -596,13 +596,18 @@ class RemoteStore:
     """MCP client to the Teams sync endpoint. Construct directly or via ``from_profile``."""
 
     def __init__(self, endpoint: str, token: str, *, timeout: float = _DEFAULT_TIMEOUT,
-                 profile: "Profile | None" = None) -> None:
+                 profile: "Profile | None" = None, reactive_refresh: bool = True) -> None:
         self._endpoint = endpoint
         self._token = token
         self._timeout = timeout
         # Carried only when built via from_profile - the reactive 401 refresh needs it to
         # re-resolve a fresh token. Direct construction (tests) leaves it None → no reactive path.
         self._profile = profile
+        # Automatic account-bound proposal attempts pin the token they validated. A transport
+        # 401 must end that attempt so the next one reconstructs the client and re-checks the
+        # server's account fingerprint; swapping to whatever same-endpoint account is currently
+        # logged in after the fingerprint check would violate destination binding.
+        self._reactive_refresh = reactive_refresh
         # _UNDISCOVERED, or a DecisionLifecycleCapabilities, or None - and None is a REAL answer
         # here ("this server does not do lifecycle"), which is why the sentinel exists at all:
         # without it a not-advertising server would be re-probed on every push.
@@ -613,19 +618,25 @@ class RemoteStore:
         self.lifecycle_blocked: list[dict] = []
 
     @classmethod
-    def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT) -> "RemoteStore | None":
+    def from_profile(cls, profile: Profile, *, timeout: float = _DEFAULT_TIMEOUT,
+                     reactive_refresh: bool = True) -> "RemoteStore | None":
         """Build a RemoteStore for a team profile, or None when sync is not configured
         (local mode, or a missing endpoint/token). None = the caller stays local-only.
 
         `timeout` (seconds) overrides the default transport timeout - callers on a tighter
-        latency budget (e.g. the SessionStart pull) pass a shorter one."""
+        latency budget (e.g. the SessionStart pull) pass a shorter one. Account-bound automatic
+        proposal attempts pass ``reactive_refresh=False`` so a 401 ends the attempt and forces
+        fresh capability/account validation instead of swapping credentials mid-operation."""
         if profile.mode != "team" or not profile.endpoint:
             return None
         from contexer import auth
         token = auth.resolve_token(profile)  # OAuth (login) token, refreshed; else static config token
         if not token:
             return None
-        return cls(profile.endpoint, token, timeout=timeout, profile=profile)
+        return cls(
+            profile.endpoint, token, timeout=timeout, profile=profile,
+            reactive_refresh=reactive_refresh,
+        )
 
     # ── async-native core (#108) ─────────────────────────────────────────────────
     # The network path is async at its heart so an in-loop caller (server.share_decision)
@@ -1133,7 +1144,8 @@ class RemoteStore:
         try:
             return run()
         except RemoteAuthError as exc:
-            if not getattr(exc, "_transport_auth", False) or not self._refresh_token():
+            if (not self._reactive_refresh or not getattr(exc, "_transport_auth", False)
+                    or not self._refresh_token()):
                 raise
         return run()  # one retry with the refreshed token; a second 401 here propagates
 
